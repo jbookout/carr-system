@@ -146,9 +146,27 @@ def seed_fixture(cur, prefix: str) -> dict:
             "current_key":current_key,"prior_key":prior_key}
 
 
+def seed_staging_candidate(cur, fixture: dict) -> tuple[str, uuid.UUID]:
+    key = f"p6-staging-{uuid.uuid4()}"
+    cur.execute("""insert into ops.release(
+      correlation_id,release_key,service_id,environment,state,git_sha,provider,provider_version_id,
+      performance_budget_ref,performance_budget_ms,recovery_strategy,artifact_digest,
+      dependency_lock_digest,maker_actor,maker_verification_ref,test_evidence_ref,
+      security_evidence_ref,rollback_ready,rollback_plan_ref,plan_hash,migration_set,
+      schema_highest_migration,schema_applied_count,schema_ledger_sha256,source_kind,source_ref,
+      observed_at,expires_at)
+      values(%s,%s,%s,'staging','candidate',%s,'cloudflare-workers',%s,
+      'budget:staging',250,'rollback',%s,%s,'maker','maker-proof','tests','security',true,%s,%s,
+      %s,%s,%s,%s,'wrapper','gate',now(),now()+interval '2 days') returning id""",
+      (uuid.uuid4(),key,fixture["service_id"],CURRENT_SHA,uuid.uuid4(),"sha256:"+"4"*64,
+       "sha256:"+"5"*64,ROLLBACK_PLAN,PLAN_HASH,["0219_staging_release_approval_receipt.sql"],
+       "0219_staging_release_approval_receipt.sql",SCHEMA_APPLIED_COUNT,SCHEMA_LEDGER_SHA256))
+    return key,cur.fetchone()[0]
+
+
 def record_sql() -> str:
     return """select ops.record_staging_release_readback(
-      %s::uuid,%s::uuid,%s,%s,%s,%s,%s)"""
+      %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s)"""
 
 
 def prepare_sql() -> str:
@@ -161,14 +179,18 @@ def claim_sql() -> str:
 
 
 def record_params(fixture: dict, attempt: uuid.UUID, step: str, idem: uuid.UUID,
-                  version: uuid.UUID, *, verb_count: int = 211) -> tuple:
+                  version: uuid.UUID, *, verb_count: int = 211,
+                  program6_actions_enabled: bool = False) -> tuple:
     return (idem,version,f"carr-staging-{idem.hex}",verb_count,
-            "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170)
+            "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170,
+            program6_actions_enabled)
 
 
 def prepare_params(fixture: dict, attempt: uuid.UUID, step: str,
                    idem: uuid.UUID) -> tuple:
     sha = PRIOR_SHA if step == "prior" else CURRENT_SHA
+    if step == "standalone":
+        return (idem,attempt,fixture["current_key"],None,None,step,sha)
     return (idem,attempt,fixture["current_key"],fixture["prior_key"],attempt,step,sha)
 
 
@@ -234,7 +256,56 @@ def main() -> int:
         check("observed attempt can never authorize a redeploy",one(cur)[0]["deploy_allowed"] is False)
         check("mutated replay is refused", refuses(cur,record_sql(),
               record_params(fixture,attempt,"current_after",ids[-1],versions[-1],verb_count=212)))
+        check("Program 6 posture change on an exact replay is refused", refuses(cur,record_sql(),
+              record_params(fixture,attempt,"current_after",ids[-1],versions[-1],
+                            program6_actions_enabled=True)))
         owner(cur)
+
+        # An enabled receipt is a different immutable fact from an otherwise
+        # identical disabled one.  The column remains nullable solely for
+        # receipts written before 0218, whose hashes cannot be retrofitted.
+        enabled_attempt=uuid.uuid4(); enabled_idem=uuid.uuid4(); enabled_version=uuid.uuid4()
+        authority(cur,"carr_jobs")
+        prepare_and_claim(cur,fixture,enabled_attempt,"standalone",enabled_idem)
+        cur.execute(record_sql(),record_params(fixture,enabled_attempt,"standalone",enabled_idem,
+                                               enabled_version,program6_actions_enabled=True))
+        enabled=one(cur)[0]
+        cur.execute("select program6_actions_enabled,projection_sha256 from ops.staging_release_readback_receipt where id=%s",
+                    (enabled["receipt_id"],))
+        enabled_posture,enabled_hash=one(cur)
+        cur.execute("select projection_sha256 from ops.staging_release_readback_receipt where id=%s",(results[-1]["receipt_id"],))
+        disabled_hash=one(cur)[0]
+        check("enabled readback stores posture and binds a distinct receipt hash",
+              enabled_posture is True and enabled_hash != disabled_hash)
+        cur.execute(record_sql(),record_params(fixture,enabled_attempt,"standalone",enabled_idem,
+                                               enabled_version,program6_actions_enabled=True))
+        check("enabled readback exact replay is idempotent",one(cur)[0]["replayed"] is True)
+        check("enabled receipt refuses a changed disabled replay",refuses(cur,record_sql(),
+              record_params(fixture,enabled_attempt,"standalone",enabled_idem,enabled_version,
+                            program6_actions_enabled=False)))
+        # Simulate a receipt that predated this column.  Its existing hash and
+        # append-only fact survive; an upgraded caller may resume its common
+        # typed input but cannot claim the historical hash bound the new field.
+        owner(cur)
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("update ops.staging_release_readback_receipt set program6_actions_enabled=null where id=%s",
+                    (enabled["receipt_id"],))
+        cur.execute("set local session_replication_role=origin")
+        authority(cur,"carr_jobs")
+        cur.execute(record_sql(),record_params(fixture,enabled_attempt,"standalone",enabled_idem,
+                                               enabled_version,program6_actions_enabled=False))
+        check("legacy nullable receipt replays by its immutable common fields",one(cur)[0]["replayed"] is True)
+        owner(cur)
+        cur.execute("""select is_nullable='YES' from information_schema.columns
+                       where table_schema='ops' and table_name='staging_release_readback_receipt'
+                         and column_name='program6_actions_enabled'""")
+        check("legacy receipts remain structurally representable with NULL posture",one(cur)[0] is True)
+        cur.execute("""select to_regprocedure('ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint)') is null,
+                              has_function_privilege('carr_jobs','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute'),
+                              has_function_privilege('carr_reader','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute'),
+                              has_function_privilege('carr_writer','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute'),
+                              has_function_privilege('carr_authority','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute')""")
+        check("only carr_jobs retains the new eight-argument recorder",one(cur)==(True,True,False,False,False))
 
         crash_attempt=uuid.uuid4(); crash_id=uuid.uuid4(); crash_version=uuid.uuid4()
         authority(cur,"carr_jobs")
@@ -509,6 +580,95 @@ def main() -> int:
               "ops.approve_program5_release(text,text,uuid,integer)"))
         check("routine writer cannot call six-argument Joe approval",not _has_function(cur,"carr_jobs",
               "ops.approve_program5_release(text,text,uuid,integer,text,text)"))
+
+        staging_key,staging_id=seed_staging_candidate(cur,fixture)
+        staging_idem=uuid.uuid4()
+        check("candidate cannot become staging-approved without a typed receipt",refuses(cur,
+              "update ops.release set state='approved',approved_by_actor='joe',approved_at=now(),approval_expires_at=now()+interval '1 hour' where id=%s",
+              (staging_id,)))
+        authority(cur,"carr_authority_dell")
+        check("Dell cannot approve a staging candidate",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+              (staging_key,PLAN_HASH,staging_idem,"verifier","staging:proof")))
+        owner(cur)
+        authority(cur,"carr_authority_joe")
+        check("staging approval refuses maker as verifier",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+              (staging_key,PLAN_HASH,staging_idem,"maker","staging:proof")))
+        cur.execute("select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+                    (staging_key,PLAN_HASH,staging_idem,"verifier","staging:proof"))
+        staging_approval=one(cur)[0]
+        owner(cur)
+        cur.execute("select environment,state,approved_by_actor,plan_hash,staging_approval_receipt_id from ops.release where id=%s",(staging_id,))
+        staging_row=one(cur)
+        check("Joe approves the exact rollback-ready staging candidate through its receipt",
+              staging_row[:4]==("staging","approved","joe",PLAN_HASH)
+              and str(staging_row[4])==staging_approval["approval_receipt_id"]
+              and staging_approval["replayed"] is False)
+        authority(cur,"carr_authority_joe")
+        cur.execute("select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+                    (staging_key,PLAN_HASH,staging_idem,"verifier","staging:proof"))
+        check("staging approval exact replay is idempotent",one(cur)[0]["replayed"] is True)
+        check("staging approval key refuses a changed verifier",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+              (staging_key,PLAN_HASH,staging_idem,"other","staging:proof")))
+        check("staging approval key refuses a changed plan",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+              (staging_key,"sha256:"+"8"*64,staging_idem,"verifier","staging:proof")))
+        check("staging approval key refuses changed expiry",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,11,%s,%s)",
+              (staging_key,PLAN_HASH,staging_idem,"verifier","staging:proof")))
+        check("staging approval key refuses changed verifier evidence",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+              (staging_key,PLAN_HASH,staging_idem,"verifier","other:proof")))
+        check("staging approval refuses partial verifier pair",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+              (staging_key,PLAN_HASH,uuid.uuid4(),"verifier",None)))
+        check("staging approval refuses whitespace verifier",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+              (staging_key,PLAN_HASH,uuid.uuid4(),"   ","   ")))
+        owner(cur)
+        cur.execute("set local role carr_authority")
+        check("generic authority SET ROLE is not Joe authority",refuses(cur,
+              "select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+              (staging_key,PLAN_HASH,uuid.uuid4(),"verifier","staging:proof")))
+        cur.execute("reset role")
+        check("routine writer cannot call staging approval",not _has_function(cur,"carr_jobs",
+              "ops.approve_staging_release(text,text,uuid,integer,text,text)"))
+        cur.execute("select has_table_privilege('carr_authority','ops.staging_release_approval_receipt','insert,update,delete')")
+        check("staging approval receipt has no direct runtime DML",one(cur)[0] is False)
+        check("staging approved projection rejects direct rewrite",refuses(cur,
+              "update ops.release set verifier_actor='other' where id=%s",(staging_id,)))
+        check("staging approval receipt is append-only",refuses(cur,
+              "update ops.staging_release_approval_receipt set verifier_actor='other' where id=%s",
+              (staging_approval["approval_receipt_id"],)))
+        check("promoted staging release cannot retarget to Production",refuses(cur,
+              "update ops.release set environment='production' where id=%s",(staging_id,)))
+        cur.execute("update ops.release set plan_hash=%s where id=%s",("sha256:"+"9"*64,staging_id))
+        cur.execute("select state,staging_approval_receipt_id from ops.release where id=%s",(staging_id,))
+        check("staging plan revision clears typed approval pointer",one(cur)==("candidate",None))
+        revised_plan="sha256:"+"9"*64; revised_idem=uuid.uuid4()
+        authority(cur,"carr_authority_joe")
+        cur.execute("select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+                    (staging_key,revised_plan,revised_idem,"verifier","revised:proof"))
+        revised_approval=one(cur)[0]
+        owner(cur)
+        cur.execute("select count(*),staging_approval_receipt_id::text from ops.staging_release_approval_receipt a join ops.release r on r.id=a.release_id where r.id=%s group by r.staging_approval_receipt_id",(staging_id,))
+        check("revised staging plan reapproves with a new pointer and retains old receipt",
+              one(cur)==(2,revised_approval["approval_receipt_id"]))
+        # A completed staging release is terminal.  Build that otherwise-valid
+        # typed projection under replica mode because this DB gate does not
+        # manufacture a real staging deployment completion.
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("update ops.release set state='complete',ended_at=clock_timestamp() where id=%s",
+                    (staging_id,))
+        cur.execute("set local session_replication_role=origin")
+        cur.execute("select state,plan_hash,staging_approval_receipt_id::text from ops.release where id=%s",(staging_id,))
+        complete_before=one(cur)
+        check("complete staging release rejects a plan revision",refuses(cur,
+              "update ops.release set plan_hash=%s where id=%s",("sha256:"+"a"*64,staging_id)))
+        cur.execute("select state,plan_hash,staging_approval_receipt_id::text from ops.release where id=%s",(staging_id,))
+        check("complete staging release retains terminal state, plan, and approval pointer",one(cur)==complete_before)
         conn.rollback()
 
     concurrency_check(dsn)
@@ -531,6 +691,14 @@ def concurrency_check(dsn: str) -> None:
         ensure_authority_roles(cur)
         fixture=seed_fixture(cur,"race")
         mutation_fixture=seed_fixture(cur,"prepare-mutation")
+        setup.commit()
+
+    # This is deliberately a second race seam: staging approval uses Joe's
+    # authenticated session rather than the routine-writer session used above.
+    approval_fixture: dict
+    with psycopg.connect(dsn,autocommit=False) as setup, setup.cursor() as cur:
+        approval_fixture=seed_fixture(cur,"staging-approval-race")
+        approval_key,approval_release_id=seed_staging_candidate(cur,approval_fixture)
         setup.commit()
     def race(statement: str, params: list[tuple]) -> tuple[list[dict[str,Any]],list[str]]:
         barrier=threading.Barrier(2); results: list[dict[str,Any]]=[]; errors: list[str]=[]
@@ -595,6 +763,55 @@ def concurrency_check(dsn: str) -> None:
         cur.execute("select count(*) from ops.staging_release_readback_receipt where idempotency_key=%s",
                     (mutation_idem,))
         check("concurrent changed-input replay leaves one durable receipt",one(cur)[0]==1)
+
+    approval_idem=uuid.uuid4()
+    approval_barrier=threading.Barrier(2); approval_results: list[dict[str,Any]]=[]; approval_errors: list[str]=[]
+    def approve_worker() -> None:
+        try:
+            with psycopg.connect(dsn,autocommit=False) as conn, conn.cursor() as cur:
+                authority(cur,"carr_authority_joe")
+                approval_barrier.wait(timeout=10)
+                cur.execute("select ops.approve_staging_release(%s,%s,%s::uuid,12,%s,%s)",
+                            (approval_key,PLAN_HASH,approval_idem,"verifier","race:proof"))
+                approval_results.append(one(cur)[0]); conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            approval_errors.append(str(exc))
+    threads=[threading.Thread(target=approve_worker) for _ in range(2)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join(timeout=20)
+    check("concurrent same-key staging approval yields one receipt and one replay",
+          not approval_errors and len(approval_results)==2
+          and sorted(x["replayed"] for x in approval_results)==[False,True],"; ".join(approval_errors))
+    with psycopg.connect(dsn,autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("""select count(*), exists(select 1 from ops.release r
+                         join ops.staging_release_approval_receipt a on a.id=r.staging_approval_receipt_id
+                         where r.id=%s and a.release_id=r.id)
+                       from ops.staging_release_approval_receipt a where a.release_id=%s""",
+                    (approval_release_id,approval_release_id))
+        check("concurrent staging approval leaves one receipt bound by the release pointer",one(cur)==(1,True))
+
+        # This is the exact non-Production require predicate.  A historical row
+        # marked approved before 0219 has no typed pointer and must not unlock a
+        # new staging deployment.
+    with psycopg.connect(dsn,autocommit=False) as conn, conn.cursor() as cur:
+        legacy_fixture=seed_fixture(cur,"legacy-staging")
+        legacy_key,legacy_id=seed_staging_candidate(cur,legacy_fixture)
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("""update ops.release set state='approved',approved_by_actor='joe',
+          approved_at=now(),approval_expires_at=now()+interval '1 hour',
+          verifier_actor='legacy-verifier',verifier_evidence_ref='legacy:proof',
+          staging_approval_receipt_id=null where id=%s""",(legacy_id,))
+        cur.execute("set local session_replication_role=origin")
+        cur.execute("select state,staging_approval_receipt_id from ops.release where id=%s",(legacy_id,))
+        check("synthetic legacy staging fixture is approved with a null pointer",one(cur)==("approved",None))
+        cur.execute("""select count(*) from ops.release r where r.release_key=%s and r.environment='staging'
+          and r.state in ('approved','deploying','verifying') and r.approval_expires_at>now()
+          and exists(select 1 from ops.staging_release_approval_receipt a
+            where a.id=r.staging_approval_receipt_id and a.release_id=r.id and a.plan_hash=r.plan_hash
+              and a.approved_by_actor='joe' and a.approved_at=r.approved_at
+              and a.approval_expires_at=r.approval_expires_at)""",(legacy_key,))
+        check("legacy approved staging row without pointer cannot satisfy require predicate",one(cur)[0]==0)
+        conn.rollback()
 
 
 if __name__ == "__main__":

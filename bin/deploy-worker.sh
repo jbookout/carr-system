@@ -112,6 +112,8 @@ RECOVERY_ATTEMPT_ID=""
 RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
 STAGING_RECEIPT_KEY=""
+# Filled only from the exact immutable release manifest after preflight.
+EXPECTED_PROGRAM6_ACTIONS=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check)         CHECK_ONLY=1 ;;
@@ -560,6 +562,10 @@ elif [ "$RECOVERY_STEP" != "standalone" ]; then
   echo "  candidate release: $RELEASE_KEY"
   echo "  prior release: $RECOVERY_PRIOR_RELEASE_KEY"
   echo "  recovery attempt/step: $RECOVERY_ATTEMPT_ID / $RECOVERY_STEP"
+  RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-recovery-release-manifest.XXXXXX")"
+  "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
+    --environment staging > "$RELEASE_MANIFEST" \
+    || fail "recovery release evidence cannot be rebuilt from git SHA $HEAD_SHA."
 elif [ -f "$REPO/tools/release-manifest.py" ]; then
   echo ""
   echo "== preflight: release truth =="
@@ -598,6 +604,20 @@ release or it does not happen."
     [ -n "$RELEASE_KEY" ] && echo "  approved release: $RELEASE_KEY"
   fi
 fi
+
+# Read the expected Program 6 posture from the manifest reconstructed from the
+# exact release SHA, never from this checkout or a hard-coded activation bit.
+# Its source config fingerprint is in the approval preimage; this turns the
+# serving readback into a comparison against the reviewed immutable plan.
+[ -n "${RELEASE_MANIFEST:-}" ] && [ -s "$RELEASE_MANIFEST" ] \
+  || fail "release manifest is required to bind the Program 6 serving posture."
+EXPECTED_PROGRAM6_ACTIONS="$("$PY" "$REPO/tools/release-manifest.py" \
+  program6-posture --manifest "$RELEASE_MANIFEST")" \
+  || fail "release manifest has no valid Program 6 posture."
+case "$EXPECTED_PROGRAM6_ACTIONS" in
+  enabled|disabled) ;;
+  *) fail "release manifest returned an invalid Program 6 posture." ;;
+esac
 
 if [ "$CHECK_ONLY" = "1" ]; then
   echo ""
@@ -712,7 +732,8 @@ else
       receipt_file="$1"
       live_provider_version="$("$PY" "$REPO/tools/ops-record.py" \
         staging-readback-verify --file "$receipt_file" --git-sha "$HEAD_SHA" \
-        --provider-tag "$DEPLOY_TAG" --field provider_version_id)" || return 1
+        --provider-tag "$DEPLOY_TAG" --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+        --field provider_version_id)" || return 1
       provider_versions="$(mktemp "${TMPDIR:-/tmp}/carr-staging-versions.XXXXXX")" \
         || return 1
       chmod 600 "$provider_versions"
@@ -739,6 +760,7 @@ else
           --source-ref bin/deploy-worker.sh --read-back-at now \
           --release-key "$RELEASE_KEY" --idempotency-key "$STAGING_RECEIPT_KEY" \
           --expected-provider-tag "$DEPLOY_TAG" --recovery-step standalone \
+          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
           --staging-readback-file "$receipt_file"
       else
         "$PY" "$REPO/tools/ops-record.py" deployment --service carr-mcp \
@@ -747,6 +769,7 @@ else
           --source-ref bin/deploy-worker.sh --read-back-at now \
           --release-key "$RELEASE_KEY" --idempotency-key "$STAGING_RECEIPT_KEY" \
           --expected-provider-tag "$DEPLOY_TAG" --recovery-step "$RECOVERY_STEP" \
+          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
           --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
           --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
           --staging-readback-file "$receipt_file"
@@ -838,7 +861,8 @@ if [ "$TARGET_ENV" = "production" ]; then
       printf '%s' "$LIVE_RELEASE_JSON" | \
         "$PY" "$REPO/ops/verify-worker-release.py" \
           --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
-          --provider-version-id "$PROVIDER_VERSION_ID" >/dev/null 2>&1
+          --provider-version-id "$PROVIDER_VERSION_ID" \
+          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" >/dev/null 2>&1
       LIVE_VERIFY_RC=$?
       set -e
       if [ "$LIVE_VERIFY_RC" -eq 0 ]; then
@@ -871,7 +895,8 @@ if [ "$TARGET_ENV" = "production" ]; then
     printf '%s' "$LIVE_RELEASE_JSON" | \
       "$PY" "$REPO/ops/verify-worker-release.py" \
         --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
-        --provider-version-id "$PROVIDER_VERSION_ID" || true
+        --provider-version-id "$PROVIDER_VERSION_ID" \
+        --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" || true
     echo "  Production /release is malformed or does not match the approved identity," \
          "still, after $LIVE_RELEASE_ATTEMPT attempt(s) over" \
          "$((LIVE_RELEASE_ATTEMPT * LIVE_READBACK_SLEEP))s. This is a settled" \

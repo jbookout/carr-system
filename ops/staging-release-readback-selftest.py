@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import types
 import uuid
@@ -17,9 +18,11 @@ mod = importlib.util.module_from_spec(spec)
 assert spec.loader
 spec.loader.exec_module(mod)
 ops_source = (ROOT / "tools" / "ops-record.py").read_text()
-assert 'connection_kind = "authority" if args.action == "approve" else "write"' in ops_source
+assert 'args.action in ("approve", "staging-approve")' in ops_source
 assert "approved_by_actor = %s" not in ops_source
 assert "ops.approve_program5_release" in ops_source
+assert "ops.approve_staging_release" in ops_source
+assert '"staging-approve"' in ops_source
 for marker in ("os.lstat", "os.open", "os.fstat", "O_NOFOLLOW",
                "MAX_RELEASE_BODY_BYTES + 1", "st_nlink != 1"):
     assert marker in ops_source, marker
@@ -33,6 +36,51 @@ def refuses(fn, contains: str) -> None:
         assert contains in str(exc), (contains, str(exc))
     else:
         raise AssertionError(f"expected refusal containing {contains!r}")
+
+
+def wrapper_receipt_path(step: str, expected: str, *, refuse: bool = False) -> tuple[int, list[list[str]]]:
+    """Execute the wrapper's staging receipt functions with local fakes only."""
+    deploy = (ROOT / "bin" / "deploy-worker.sh").read_text(encoding="utf-8")
+    start = deploy.index("    verify_staging_receipt_file()")
+    end = deploy.index("\n    # Resume before provider mutation.", start)
+    functions = "\n".join(line[4:] for line in deploy[start:end].splitlines())
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        log = tmp / "calls.jsonl"
+        fake_py = tmp / "python"
+        fake_py.write_text("""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args=sys.argv[1:]
+Path(os.environ['CALL_LOG']).open('a').write(json.dumps(args)+'\\n')
+if 'staging-readback-verify' in args:
+    if os.environ.get('REFUSE') == '1': raise SystemExit(2)
+    print('11111111-2222-4333-8444-555555555555')
+raise SystemExit(0)
+""", encoding="utf-8")
+        fake_py.chmod(0o755)
+        wrangler = tmp / "wrangler"
+        wrangler.write_text("#!/bin/sh\necho '[]'\n", encoding="utf-8")
+        wrangler.chmod(0o755)
+        (tmp / "tools").mkdir()
+        (tmp / "tools" / "ops-record.py").write_text("# fake\n", encoding="utf-8")
+        receipt = tmp / "release.json"
+        receipt.write_text("{}", encoding="utf-8")
+        recovery = ""
+        if step != "standalone":
+            recovery = "RECOVERY_ATTEMPT_ID=22222222-2222-4222-8222-222222222222\nRECOVERY_PRIOR_RELEASE_KEY=prior\n"
+        script = tmp / "run.sh"
+        script.write_text("#!/bin/sh\nset -eu\n" + functions + "\n"
+            + f"PY={fake_py}\nREPO={tmp}\nWRANGLER={wrangler}\nDEPLOY_TAG=carr-staging-test\n"
+            + f"EXPECTED_PROGRAM6_ACTIONS={expected}\nTARGET_ENV=staging\n"
+            + f"HEAD_SHA={'a' * 40}\nRELEASE_KEY=current\nSTAGING_RECEIPT_KEY=11111111-2222-4333-8444-555555555555\n"
+            + f"RECOVERY_STEP={step}\nCARR_CORRELATION_ID=33333333-3333-4333-8333-333333333333\n"
+            + recovery + f"record_staging_receipt_file {receipt}\n", encoding="utf-8")
+        script.chmod(0o755)
+        env = {**os.environ, "CALL_LOG": str(log), "REFUSE": "1" if refuse else "0", "TMPDIR": str(tmp)}
+        done = subprocess.run(["sh", str(script)], capture_output=True, text=True, env=env)
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return done.returncode, calls
 
 
 sha = "a" * 40
@@ -56,14 +104,14 @@ payload = {
         "note": "untrusted prose that must not survive",
     },
     "doctrine_generation": {"value": 170, "reason": None},
-    "program6_actions": {"enabled": False},
+    "program6_actions": {"enabled": True, "posture": "enabled", "reason": None},
     "secret": "must-not-survive",
 }
 
 with tempfile.TemporaryDirectory() as tmp:
     p = Path(tmp) / "release.json"
     p.write_text(json.dumps(payload), encoding="utf-8")
-    projection = mod.staging_readback_projection(str(p), sha, tag)
+    projection = mod.staging_readback_projection(str(p), sha, tag, "enabled")
     assert projection == {
         "git_sha": sha,
         "provider": "cloudflare-workers",
@@ -73,6 +121,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "schema_highest_migration": "0202_staging_release_readback_receipt.sql",
         "schema_applied_count": 202,
         "doctrine_generation": 170,
+        "program6_actions_enabled": True,
     }
     assert "secret" not in json.dumps(projection)
     assert "timestamp" not in json.dumps(projection)
@@ -89,10 +138,29 @@ with tempfile.TemporaryDirectory() as tmp:
         bad = json.loads(json.dumps(payload))
         bad[field] = value
         p.write_text(json.dumps(bad), encoding="utf-8")
-        refuses(lambda p=p: mod.staging_readback_projection(str(p), sha, tag), message)
+        refuses(lambda p=p: mod.staging_readback_projection(str(p), sha, tag, "enabled"), message)
+
+    disabled = json.loads(json.dumps(payload))
+    disabled["program6_actions"] = {"enabled": False, "posture": "disabled", "reason": None}
+    p.write_text(json.dumps(disabled), encoding="utf-8")
+    assert mod.staging_readback_projection(str(p), sha, tag, "disabled")["git_sha"] == sha
+
+    posture_refusals: tuple[tuple[object, str], ...] = (
+        ({"enabled": False, "posture": "disabled", "reason": None}, "Program 6 posture"),
+        ({"enabled": False, "posture": "misconfigured", "reason": "bad"}, "Program 6 posture"),
+        (None, "Program 6 posture"),
+    )
+    for posture_value, message in posture_refusals:
+        bad = json.loads(json.dumps(payload))
+        if posture_value is None:
+            bad.pop("program6_actions")
+        else:
+            bad["program6_actions"] = posture_value
+        p.write_text(json.dumps(bad), encoding="utf-8")
+        refuses(lambda p=p: mod.staging_readback_projection(str(p), sha, tag, "enabled"), message)
 
     p.write_bytes(b"{" + b"x" * (mod.MAX_RELEASE_BODY_BYTES + 1))
-    refuses(lambda: mod.staging_readback_projection(str(p), sha, tag), "too large")
+    refuses(lambda: mod.staging_readback_projection(str(p), sha, tag, "enabled"), "too large")
 
     versions = Path(tmp) / "versions.json"
     versions.write_text(json.dumps([
@@ -114,15 +182,32 @@ with tempfile.TemporaryDirectory() as tmp:
     regular.write_text(json.dumps(payload), encoding="utf-8")
     symlink = Path(tmp) / "symlink.json"
     symlink.symlink_to(regular)
-    refuses(lambda: mod.staging_readback_projection(str(symlink), sha, tag), "regular single-link")
+    refuses(lambda: mod.staging_readback_projection(str(symlink), sha, tag, "enabled"), "regular single-link")
 
     hardlink = Path(tmp) / "hardlink.json"
     os.link(regular, hardlink)
-    refuses(lambda: mod.staging_readback_projection(str(regular), sha, tag), "regular single-link")
+    refuses(lambda: mod.staging_readback_projection(str(regular), sha, tag, "enabled"), "regular single-link")
 
     fifo = Path(tmp) / "release.fifo"
     os.mkfifo(fifo)
-    refuses(lambda: mod.staging_readback_projection(str(fifo), sha, tag), "regular single-link")
+    refuses(lambda: mod.staging_readback_projection(str(fifo), sha, tag, "enabled"), "regular single-link")
+
+
+for step in ("standalone", "current_before"):
+    rc, calls = wrapper_receipt_path(step, "enabled")
+    verify_calls = [call for call in calls if "staging-readback-verify" in call]
+    deployment_calls = [call for call in calls if "deployment" in call]
+    assert rc == 0 and len(verify_calls) == 1 and len(deployment_calls) == 1, (step, rc, calls)
+    assert verify_calls[0][verify_calls[0].index("--expected-program6-actions") + 1] == "enabled"
+    assert deployment_calls[0][deployment_calls[0].index("--expected-program6-actions") + 1] == "enabled"
+    if step == "standalone":
+        assert "--recovery-attempt-id" not in deployment_calls[0]
+    else:
+        assert deployment_calls[0][deployment_calls[0].index("--recovery-step") + 1] == step
+        assert "--recovery-attempt-id" in deployment_calls[0]
+
+rc, calls = wrapper_receipt_path("standalone", "enabled", refuse=True)
+assert rc != 0 and len([call for call in calls if "deployment" in call]) == 0
 
 
 target = mod.staging_worker_target()
