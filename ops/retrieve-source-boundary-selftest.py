@@ -283,13 +283,14 @@ if [ \"$1\" = \"brief-pack\" ]; then
   print 'claim' > \"$HOME/carr-system/out/brief-pack/claim-card.md\"
   print 'renewal' > \"$HOME/carr-system/out/brief-pack/renewal-shortlist.md\"
 fi
+[ \"$1\" = \"review-queue\" ] && [ \"${FAKE_REVIEW_FAIL:-0}\" = \"1\" ] && exit 69
 exit 0
 """)
         fake_run.chmod(0o755)
         vault = home / "Google Drive/CARR AI"
         (vault / "00_Context").mkdir(parents=True)
         base_env = {**os.environ, "HOME": str(home), "CARR_VAULT": str(vault)}
-        failed = subprocess.run(["/bin/zsh", str(script)], env={**base_env, "FAKE_BRIEF_FAIL": "1"},
+        failed = subprocess.run(["/bin/zsh", str(script)], env={**base_env, "FAKE_REVIEW_FAIL": "1"},
                                 text=True, capture_output=True)
         check("scheduled path fails before producing a degraded brief", failed.returncode == 1)
         check("failed scheduled path writes no repo or Drive today document",
@@ -298,18 +299,15 @@ exit 0
 
         normal = subprocess.run(["/bin/zsh", str(script)], env=base_env,
                                 text=True, capture_output=True)
-        check("legacy scheduled success leaves explicitly noncanonical local projections", normal.returncode == 0
-              and all((repo / "out/brief-pack" / name).exists() for name in (
-                  "one-thing.md", "claim-card.md", "renewal-shortlist.md")))
+        check("normal scheduled success does not produce legacy brief projections", normal.returncode == 0
+              and not (repo / "out/brief-pack").exists())
         check("normal scheduled success never recreates retired today surfaces",
               not (repo / "out/brief-pack/today.md").exists()
               and not (vault / "00_Context/today.md").exists())
         normal_calls = (repo / "out/fake-run-calls.log").read_text()
-        check("legacy scheduler requests local projections but no canonical morning-delivery verb",
-              all(f"brief-pack --quiet --section {section}" in normal_calls
-                  for section in ("one-thing", "claim-card", "renewal-shortlist"))
-              and "brief-pack --quiet\n" not in normal_calls
-              and "--section prebriefs" not in normal_calls
+        check("normal scheduler maintains review queue without rendering a brief lookalike",
+              "review-queue" in normal_calls
+              and "brief-pack" not in normal_calls
               and "--recovery" not in normal_calls
               and "morning-brief" not in normal_calls)
 
@@ -317,6 +315,16 @@ exit 0
         check("legacy local projection names its noncanonical status and the record-native reader",
               "not a delivery surface" in source and "morning-brief" in source
               and "canonical-safe sections" not in source)
+
+        registry = json.loads((ROOT / "ops/config/drive-dependencies.v1.json").read_text())
+        registry_rows = {row["id"]: row for row in registry["entries"]}
+        check("Drive registry names the record-native morning reader replacement",
+              registry_rows["scheduled-brief-render"]["replacement"]["status"]
+              == "normal_path_repointed_to_record_mcp_reader")
+        health_source = (ROOT / "tools/health-check.py").read_text()
+        check("health does not require retired local brief mtimes",
+              "brief-pack-latest.md" not in health_source
+              and "monday-agenda.md" not in health_source)
 
         recovery = subprocess.run(
             ["/bin/zsh", str(script), "--recovery"],

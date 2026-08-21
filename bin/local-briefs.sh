@@ -26,11 +26,10 @@
 #
 # SKIP-not-FAIL on missing env, per house convention.
 #
-# NORMAL MODE refreshes legacy repo-local diagnostic projections only. They are
-# not a delivery surface and are not canonical-safe: the record-native
-# `morning-brief` verb is the reader. This launchd job remains in place only
-# until its runtime owner unloads it; it passes neither recovery control, so it
-# can never silently write Drive.
+# NORMAL MODE maintains only the canonical review queue. The legacy brief-pack
+# files are recovery diagnostics, not a delivery surface: `morning-brief` is the
+# record-native reader. Keeping the review-queue launchd cadence does not grant
+# normal mode permission to recreate those retired files or write Drive.
 REPO="$HOME/carr-system"
 LOG="$REPO/out/local-briefs.log"
 [ -f "$HOME/.config/carr/db.env" ] || { echo "$(date -u +%FT%TZ) SKIP no db.env" >> "$LOG"; exit 0; }
@@ -59,23 +58,11 @@ if [ "$RECOVERY" -eq 1 ]; then
     echo "$(date -u +%FT%TZ) FAIL brief-pack recovery rc=$?" >> "$LOG"; rc=1
   fi
 else
-  # Legacy local projections remain observable while the launchd schedule is
-  # still installed. They must not be described as the morning brief or as a
-  # canonical reader; `morning-brief` is the record-native delivery surface.
-  # Canonical prebrief reads are implemented, but their two sponsor-scoped
-  # producers remain disabled until the authority allowlists, scoped credentials,
-  # installed EventKit bridge and accepted end-to-end receipts exist. Scheduling
-  # the reader before that activation would turn missing data into a daily failure.
+  # The live composite is read on demand through `morning-brief`. Do not create
+  # local lookalikes in normal mode: an unavailable source must stay visibly
+  # unavailable, never become a plausible stale file.
   brief_ok=1
-  for section in one-thing claim-card renewal-shortlist; do
-    if ./run.sh brief-pack --quiet --section "$section" >> "$LOG" 2>&1; then
-      echo "$(date -u +%FT%TZ) OK brief-pack section=$section" >> "$LOG"
-    else
-      echo "$(date -u +%FT%TZ) FAIL brief-pack section=$section rc=$?" >> "$LOG"
-      brief_ok=0
-      rc=1
-    fi
-  done
+  echo "$(date -u +%FT%TZ) SKIP legacy brief-pack; canonical reader=morning-brief" >> "$LOG"
 fi
 
 if ./run.sh review-queue >> "$LOG" 2>&1; then
@@ -104,9 +91,9 @@ fi
 # deleted: claim-card returned the same 9,778 claimable and 388 needs-contact
 # totals this block used to print.
 #
-# The brief-pack sections still build into out/brief-pack/ above; what ends here
-# is the copy into the vault. health-check.py watches those files' mtime, so the
-# freshness signal is unaffected.
+# Normal mode no longer builds the brief-pack sections at all. health-check.py
+# therefore does not use their mtimes; `morning-brief` reports each canonical
+# input as ready, empty, or unavailable at read time.
 
 # Known defect, tracked as loop #182: review-queue's touches lane reports 0 while
 # ingest_inbox holds real rows, because the read fails and the handler discards

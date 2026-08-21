@@ -103,7 +103,7 @@ def main() -> int:
         dashboard = subprocess.run([str(dashboard_python), str(ROOT / "generators" / "build-open-items-dashboard.py")],
                                    env={"PATH": "/usr/bin:/bin", "CARR_VAULT": POISON},
                                    text=True, capture_output=True, check=False)
-        check("dashboard normal mode refuses its missing canonical document seam",
+        check("legacy dashboard generator remains recovery-only",
               dashboard.returncode != 0 and "MISSING_CANONICAL_SEAM" in dashboard.stderr and POISON not in dashboard.stderr,
               dashboard.stdout + dashboard.stderr)
 
@@ -128,8 +128,16 @@ def main() -> int:
         check("nightly normal route clears ambient Drive before its first child",
               "unset CARR_VAULT CARR_EXPORT_LIVE" in normal)
         check("nightly Drive projections are routed through the recovery envelope",
-              nightly.count("drive_projection ") >= 12 and "RECOVERY NONCANONICAL" in nightly
+              nightly.count("drive_projection ") >= 11 and "RECOVERY NONCANONICAL" in nightly
               and "routine-canonical-seam-refusal.sh" in nightly)
+        check("nightly recognizes the record-native dashboard replacement",
+              "open-items dashboard replaced by record-native Front Door" in nightly
+              and 'drive_projection "open-items dashboard' not in nightly)
+        registry = json.loads((ROOT / "ops/config/drive-dependencies.v1.json").read_text())
+        registry_rows = {row["id"]: row for row in registry["entries"]}
+        check("Drive registry names the record-native dashboard replacement",
+              registry_rows["normal-dashboard-render"]["replacement"]["status"]
+              == "normal_path_repointed_to_record_native_front_door")
 
     print(f"scheduled Drive writer selftest — {len(FAILED)} failure(s)")
     return 1 if FAILED else 0

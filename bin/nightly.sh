@@ -624,14 +624,16 @@ step "type-check tripwire (mypy)"                    ./bin/type-check.sh
 # first and each parameter returned to its own field, per row.
 step "tool-call markup sweep (records)"              ./.venv/bin/python ops/store-markup-scan.py
 
-# Added 2026-08-07 (Joe's pick: "build the one-page view first"): the combined
-# open-items dashboard — every open loop, team row, idea, and action-required
-# item on one filterable page, derived read-only from v_export_loops. Runs after
-# the exports so it reflects the same night's truth. Output:
-# 00_Context/open-items.html (GENERATED — never hand-edited).
-drive_projection "open-items dashboard (one-page view)" \
-  "open-items dashboard document destination" \
-  ./.venv/bin/python generators/build-open-items-dashboard.py --recovery --reason "$RECOVERY_REASON"
+# The legacy one-page file is recovery-only. Normal dashboard delivery is the
+# record-native Front Door composition (today-triage, deal-room-board, and
+# loop-board), so the nightly chain must not call a missing-seam refusal for a
+# replacement that already exists.
+if [ "$RECOVERY" -eq 1 ]; then
+  step "RECOVERY NONCANONICAL open-items dashboard (one-page view)" \
+    ./.venv/bin/python generators/build-open-items-dashboard.py --recovery --reason "$RECOVERY_REASON"
+else
+  step "open-items dashboard replaced by record-native Front Door" true
+fi
 
 # Added 2026-08-02 (cold-session audit): the smoke canary runs IN the chain and records
 # its own heartbeat. Before this it sat in the dead-man freshness list with NOTHING
