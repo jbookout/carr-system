@@ -73,6 +73,8 @@
 # Usage:
 #   bin/schema-snapshot.sh            # regenerate db/schema.sql from production
 #   bin/schema-snapshot.sh --check    # non-zero if the checked-in file is stale
+#   bin/schema-snapshot.sh --from-disposable-local postgres://carr_ci@127.0.0.1:<port>/carr_ci
+#       # generate only from the loopback disposable PG17 full-build target
 #
 # Needs production access, so it runs on Joe's Mac and never in CI — CI consumes
 # the committed file and cannot reach production by construction.
@@ -94,14 +96,32 @@ for c in /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql psql; do
   if command -v "$c" >/dev/null 2>&1; then PSQL="$c"; break; fi
 done
 [ -n "$PSQL" ] || { echo "schema-snapshot: no psql found (needed for the grants section)" >&2; exit 69; }
-[ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
-
 CHECK=0
-[ "${1:-}" = "--check" ] && CHECK=1
+URL=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) CHECK=1 ;;
+    --from-disposable-local)
+      [ "$#" -ge 2 ] || { echo "schema-snapshot: --from-disposable-local needs a DSN" >&2; exit 64; }
+      URL="$2"; shift ;;
+    *) echo "schema-snapshot: unknown argument $1" >&2; exit 64 ;;
+  esac
+  shift
+done
 
-URL="$("$NEONCTL" connection-string production \
-        --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
-[ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
+if [ -n "$URL" ]; then
+  printf '%s\n' "$URL" | grep -Eq '^postgres://carr_ci@127\.0\.0\.1:[0-9]{4,5}/carr_ci$' \
+    || { echo "schema-snapshot: disposable source must be passwordless carr_ci on 127.0.0.1/carr_ci" >&2; exit 64; }
+else
+  [ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
+  URL="$("$NEONCTL" connection-string production \
+          --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
+  [ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
+fi
+
+# pg_dump renders timestamptz in the server session timezone; pin it so the
+# Production and disposable-local paths serialize identical instants alike.
+export PGOPTIONS='-c timezone=UTC'
 
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT

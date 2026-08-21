@@ -78,6 +78,8 @@ PLAN_FIELDS = (
     "dependency_lock_digest",
     "config_fingerprint",
     "schema_highest_migration",
+    "schema_applied_count",
+    "schema_ledger_sha256",
     "migration_set",
     "environment",
     "service",
@@ -97,6 +99,11 @@ RECOVERY_STRATEGIES = (
     "forward_fix",
 )
 REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{2,200}$")
+MIGRATION_FILENAME_RE = re.compile(r"^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$")
+MIGRATION_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SCHEMA_LEDGER_COPY = (
+    "COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;"
+)
 
 
 def git(*args: str) -> str:
@@ -200,6 +207,47 @@ def migration_set(sha: str, since: str | None = None) -> tuple[list[str], str]:
     return [m for m in here if m not in before], f"added-since {resolve_sha(since)[:12]}"
 
 
+def applied_schema_ledger(sha: str) -> tuple[int, str, str]:
+    """Read the candidate's immutable applied-ledger snapshot.
+
+    ``db/schema.sql`` is generated from the canonical ``schema_migrations``
+    ledger and committed with a release candidate.  This is deliberately not
+    derived from the migration directory: that directory says what source is
+    available, while this COPY block says the exact full ledger the candidate
+    expects to observe after rollout.  Applied timestamps are excluded from
+    the digest because they are not schema identity.
+    """
+    snapshot = git("show", f"{sha}:db/schema.sql")
+    if snapshot.count(SCHEMA_LEDGER_COPY) != 1:
+        sys.exit("release-manifest: db/schema.sql must contain exactly one "
+                 "schema_migrations COPY block")
+    _, ledger_and_tail = snapshot.split(SCHEMA_LEDGER_COPY, 1)
+    rows_text, separator, _ = ledger_and_tail.lstrip("\r\n").partition("\n\\.\n")
+    if not separator:
+        sys.exit("release-manifest: schema_migrations COPY block is unterminated")
+
+    rows: list[tuple[str, str]] = []
+    for line in rows_text.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3:
+            sys.exit("release-manifest: malformed schema_migrations COPY row")
+        filename, file_sha256, applied_at = fields
+        if (not MIGRATION_FILENAME_RE.fullmatch(filename)
+                or not MIGRATION_SHA256_RE.fullmatch(file_sha256)
+                or not applied_at.strip()):
+            sys.exit("release-manifest: invalid schema_migrations COPY row")
+        rows.append((filename, file_sha256))
+    if not rows:
+        sys.exit("release-manifest: applied schema ledger is empty")
+    if len({filename for filename, _ in rows}) != len(rows):
+        sys.exit("release-manifest: applied schema ledger filenames must be unique")
+    rows.sort()
+
+    material = "".join(f"{filename}\0{file_sha256}\n" for filename, file_sha256 in rows)
+    digest = "sha256:" + hashlib.sha256(material.encode()).hexdigest()
+    return len(rows), rows[-1][0], digest
+
+
 def performance_contract(budget_ref: object, budget_ms: object,
                          recovery_strategy: object,
                          rollback_plan_ref: object = None
@@ -248,7 +296,9 @@ def build(sha_ref: str, service: str, environment: str,
         sys.exit(f"release-manifest: no files under {DEPLOYED_PATHS} at {sha} — "
                  "refusing to digest an empty artifact")
     migrations, basis = migration_set(sha, since)
-    all_migrations, _ = migration_set(sha)
+    schema_applied_count, schema_highest_migration, schema_ledger_sha256 = (
+        applied_schema_ledger(sha)
+    )
     config_paths = expand_config_paths(sha)
 
     manifest = {
@@ -278,7 +328,9 @@ def build(sha_ref: str, service: str, environment: str,
         # manifest built with --since would fail its own rebuild, which would be
         # the check reporting a defect it created itself.
         "migration_set_since": resolve_sha(since) if since else None,
-        "schema_highest_migration": all_migrations[-1] if all_migrations else None,
+        "schema_highest_migration": schema_highest_migration,
+        "schema_applied_count": schema_applied_count,
+        "schema_ledger_sha256": schema_ledger_sha256,
 
         "commit_subject": git("log", "-1", "--format=%s", sha).strip(),
         "commit_authored_at": git("log", "-1", "--format=%aI", sha).strip(),
@@ -365,8 +417,8 @@ def verify(manifest: dict) -> int:
                     manifest.get("recovery_strategy"),
                     manifest.get("rollback_plan_ref"))
     compared = ("artifact_digest", "dependency_lock_digest", "config_fingerprint",
-                "schema_highest_migration", "migration_set", "artifact_file_count",
-                )
+                "schema_highest_migration", "schema_applied_count",
+                "schema_ledger_sha256", "migration_set", "artifact_file_count")
 
     failures = []
     for field in compared:

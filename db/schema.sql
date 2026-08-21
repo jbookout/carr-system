@@ -659,6 +659,127 @@ end $_$;
 
 
 --
+-- Name: approve_program5_release(text, text, uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+  select ops.approve_program5_release($1,$2,$3,$4,null,null)
+$_$;
+
+
+--
+-- Name: approve_program5_release(text, text, uuid, integer, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare actor_slug text; rel ops.release%rowtype; existing ops.release_approval_receipt%rowtype;
+  rehearsal_run ops.run%rowtype; approval_uuid uuid; approved_time timestamptz;
+  expiry_time timestamptz; projection jsonb; approval_hash text; approval_ref text;
+  supplied_verifier_actor text; supplied_verifier_evidence text;
+  candidate_verifier_actor text; candidate_verifier_evidence text;
+  verifier_actor_value text; verifier_evidence_value text;
+begin
+  actor_slug:=ops.authority_actor_slug();
+  if actor_slug<>'joe' then raise exception 'Program 5 Production approval requires Joe authority'; end if;
+  if p_idempotency_key is null or coalesce(p_release_key,'')='' or coalesce(p_plan_hash,'')=''
+     or coalesce(p_expires_hours,0) not between 1 and 24 then
+    raise exception 'invalid Program 5 approval input';
+  end if;
+  if (p_verifier_actor is null) <> (p_verifier_evidence_ref is null)
+     or (p_verifier_actor is not null
+         and (btrim(p_verifier_actor)='' or btrim(p_verifier_evidence_ref)='')) then
+    raise exception 'supplied verifier actor and evidence must be an atomic nonblank pair';
+  end if;
+  supplied_verifier_actor:=case when p_verifier_actor is null then null else lower(btrim(p_verifier_actor)) end;
+  supplied_verifier_evidence:=case when p_verifier_evidence_ref is null then null else btrim(p_verifier_evidence_ref) end;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  select * into existing from ops.release_approval_receipt where idempotency_key=p_idempotency_key;
+  if found then
+    if existing.plan_hash<>p_plan_hash
+       or existing.approval_expires_at-existing.approved_at
+          <> make_interval(hours=>p_expires_hours)
+       or not exists (
+      select 1 from ops.release where id=existing.release_id and release_key=p_release_key
+        and plan_hash=existing.plan_hash and approval_receipt_id=existing.id
+        and state in ('approved','deploying','verifying','complete')
+        and approved_at=existing.approved_at
+        and approval_expires_at=existing.approval_expires_at
+        and (supplied_verifier_actor is null or existing.verifier_actor=supplied_verifier_actor)
+        and (supplied_verifier_evidence is null or existing.verifier_evidence_ref=supplied_verifier_evidence)) then
+      raise exception 'Program 5 approval idempotency key was reused with changed input';
+    end if;
+    return jsonb_build_object('approval_receipt_id',existing.id,
+      'approval_ref',existing.evidence_ref,'approval_expires_at',existing.approval_expires_at,
+      'replayed',true);
+  end if;
+  select * into rel from ops.release where release_key=p_release_key for update;
+  if not found or rel.environment<>'production' or rel.state<>'candidate'
+     or rel.plan_hash is distinct from p_plan_hash then
+    raise exception 'release is not the exact Production candidate plan requested';
+  end if;
+  if (rel.verifier_actor is null) <> (rel.verifier_evidence_ref is null)
+     or (rel.verifier_actor is not null
+         and (btrim(rel.verifier_actor)='' or btrim(rel.verifier_evidence_ref)='')) then
+    raise exception 'candidate verifier actor and evidence must be an atomic nonblank pair';
+  end if;
+  candidate_verifier_actor:=case when rel.verifier_actor is null then null else lower(btrim(rel.verifier_actor)) end;
+  candidate_verifier_evidence:=case when rel.verifier_evidence_ref is null then null else btrim(rel.verifier_evidence_ref) end;
+  verifier_actor_value:=coalesce(supplied_verifier_actor,candidate_verifier_actor);
+  verifier_evidence_value:=coalesce(supplied_verifier_evidence,candidate_verifier_evidence);
+  if verifier_actor_value is null or verifier_evidence_value is null then
+    raise exception 'release cannot be approved without an INDEPENDENT VERIFIER and verification evidence';
+  end if;
+  if rel.maker_actor is not null
+     and verifier_actor_value=lower(btrim(rel.maker_actor)) then
+    raise exception 'maker cannot independently verify their own release';
+  end if;
+  select r.* into rehearsal_run from ops.run r
+   join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
+   where r.release_id=rel.id and r.service_id=rel.service_id
+     and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
+     and r.state='succeeded' and r.evidence_ref=b.evidence_ref
+     and b.current_release_id=rel.id and b.service_id=rel.service_id
+     and b.recovery_strategy=rel.recovery_strategy
+     and b.recovery_plan_ref=rel.rollback_plan_ref and b.plan_hash=rel.plan_hash
+     and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(rel.migration_set)
+     and b.declared_migration_count=cardinality(rel.migration_set)
+     and b.declared_schema_highest_migration=rel.schema_highest_migration
+     and b.declared_schema_applied_count=rel.schema_applied_count
+     and b.declared_schema_ledger_sha256=rel.schema_ledger_sha256
+     and b.completed_at between clock_timestamp()-interval '24 hours' and clock_timestamp()
+   order by r.ended_at desc limit 1;
+  if not found then raise exception 'release has no exact typed recovery rehearsal'; end if;
+  approved_time:=clock_timestamp(); expiry_time:=approved_time+make_interval(hours=>p_expires_hours);
+  projection:=jsonb_build_object('release_id',rel.id,'plan_hash',rel.plan_hash,
+    'recovery_run_id',rehearsal_run.id,'recovery_bundle_id',rehearsal_run.recovery_rehearsal_bundle_id,
+    'approved_by_actor',actor_slug,'approved_at',approved_time,'approval_expires_at',expiry_time,
+    'verifier_actor',verifier_actor_value,'verifier_evidence_ref',verifier_evidence_value);
+  approval_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
+  approval_ref:='ops.program5-release-approval:'||approval_hash;
+  insert into ops.release_approval_receipt(idempotency_key,release_id,recovery_run_id,
+    recovery_bundle_id,plan_hash,approved_by_actor,approved_at,approval_expires_at,
+    verifier_actor,verifier_evidence_ref,
+    approval_sha256,evidence_ref)
+  values(p_idempotency_key,rel.id,rehearsal_run.id,rehearsal_run.recovery_rehearsal_bundle_id,
+    rel.plan_hash,actor_slug,approved_time,expiry_time,verifier_actor_value,verifier_evidence_value,
+    approval_hash,approval_ref)
+  returning id into approval_uuid;
+  update ops.release set verifier_actor=verifier_actor_value,
+    verifier_evidence_ref=verifier_evidence_value,state='approved',approved_by_actor=actor_slug,
+    approved_at=approved_time,approval_expires_at=expiry_time,
+    approval_receipt_id=approval_uuid where id=rel.id;
+  return jsonb_build_object('approval_receipt_id',approval_uuid,'approval_ref',approval_ref,
+    'approval_expires_at',expiry_time,'replayed',false);
+end $$;
+
+
+--
 -- Name: approve_rule(uuid, text, text[], text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -864,15 +985,17 @@ begin
     raise exception 'unknown guidance import batch %',p_batch_id;
   end if;
   if exists (
-    (select id from rule where status='active')
+    (select id from rule
+      where status='active' and coalesce(scope->>'kind','') <> 'intro_politics')
     except
     (select distinct source_rule_id from ops.guidance_import_entry where batch_id=p_batch_id)
   ) or exists (
     (select distinct source_rule_id from ops.guidance_import_entry where batch_id=p_batch_id)
     except
-    (select id from rule where status='active')
+    (select id from rule
+      where status='active' and coalesce(scope->>'kind','') <> 'intro_politics')
   ) then
-    raise exception 'guidance import batch source inventory no longer exactly matches active rules';
+    raise exception 'guidance import batch source inventory no longer exactly matches standing-context active rules';
   end if;
 end $$;
 
@@ -954,7 +1077,8 @@ CREATE FUNCTION ops.assert_guidance_registry_coverage() RETURNS TABLE(source_rul
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
   with active_rules as (
-    select id from rule where status='active'
+    select id from rule
+     where status='active' and coalesce(scope->>'kind','') <> 'intro_politics'
   ), primary_counts as (
     select ar.id,
            count(g.*) filter (where g.is_primary) as primary_count
@@ -1373,6 +1497,37 @@ begin
     from claimed c
     join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version
     join attempts a on a.claimed_job_id=c.id;
+end $$;
+
+
+--
+-- Name: claim_staging_deployment_attempt(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.claim_staging_deployment_attempt(p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare attempt ops.staging_deployment_attempt%rowtype; inserted_count integer;
+begin
+  if session_user<>'carr_jobs' then
+    raise exception 'staging attempt claim requires the carr_jobs session';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  select * into attempt from ops.staging_deployment_attempt
+    where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'staging attempt must be prepared before claim'; end if;
+  if exists(select 1 from ops.staging_release_readback_receipt
+            where deployment_attempt_id=attempt.id) then
+    return jsonb_build_object('attempt_id',attempt.id,'deploy_allowed',false,
+      'replayed',true,'state','observed');
+  end if;
+  insert into ops.staging_deployment_claim(deployment_attempt_id,writer_session_user)
+    values(attempt.id,session_user) on conflict do nothing;
+  get diagnostics inserted_count=row_count;
+  return jsonb_build_object('attempt_id',attempt.id,
+    'deploy_allowed',inserted_count=1,'replayed',inserted_count=0,
+    'state',case when inserted_count=1 then 'claimed' else 'claimed_pending_readback' end);
 end $$;
 
 
@@ -1827,8 +1982,8 @@ SET default_table_access_method = heap;
 
 CREATE TABLE ops.job (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    definition_key text CONSTRAINT job_definition_key_not_null1 NOT NULL,
-    definition_version integer CONSTRAINT job_definition_version_not_null1 NOT NULL,
+    definition_key text NOT NULL,
+    definition_version integer NOT NULL,
     correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
     idempotency_key text NOT NULL,
     scheduled_for timestamp with time zone NOT NULL,
@@ -2313,6 +2468,198 @@ COMMENT ON FUNCTION ops.performance_receipt_requires_read_back() IS 'Program 5: 
 
 
 --
+-- Name: prepare_staging_deployment_attempt(uuid, uuid, text, text, uuid, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare
+  existing ops.staging_deployment_attempt%rowtype;
+  current_release ops.release%rowtype;
+  prior_release ops.release%rowtype;
+  observed_release ops.release%rowtype;
+  attempt_uuid uuid;
+  expected_tag text;
+  migration_hash text;
+  migration_count integer;
+  receipt ops.staging_release_readback_receipt%rowtype;
+begin
+  if session_user<>'carr_jobs' then
+    raise exception 'staging attempt writer requires the carr_jobs session';
+  end if;
+  if p_idempotency_key is null or p_correlation_id is null
+     or coalesce(p_release_key,'')='' or coalesce(p_git_sha,'') !~ '^[0-9a-f]{40}$'
+     or p_recovery_step not in ('standalone','current_before','prior','current_after') then
+    raise exception 'invalid typed staging attempt input';
+  end if;
+  if (p_recovery_step='standalone' and (p_recovery_attempt_id is not null or p_prior_release_key is not null))
+     or (p_recovery_step<>'standalone' and
+         (p_recovery_attempt_id is null or p_prior_release_key is null
+          or p_correlation_id<>p_recovery_attempt_id)) then
+    raise exception 'recovery fields do not match the requested staging step';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  if p_recovery_attempt_id is not null then
+    perform pg_advisory_xact_lock(hashtextextended(p_recovery_attempt_id::text,202));
+  end if;
+  select * into current_release from ops.release where release_key=p_release_key;
+  if not found or current_release.service_id is null then
+    raise exception 'staging attempt release does not exist';
+  end if;
+  if coalesce(cardinality(current_release.migration_set),0)<=0
+     or coalesce(current_release.schema_highest_migration,'') !~ '^[0-9]{4}_[a-z0-9_.-]+\.sql$'
+     or coalesce(current_release.schema_applied_count,0)<=0
+     or coalesce(current_release.schema_ledger_sha256,'') !~ '^sha256:[0-9a-f]{64}$' then
+    raise exception 'release does not declare an exact migration/schema set';
+  end if;
+  migration_hash:=ops.program5_migration_set_sha256(current_release.migration_set);
+  migration_count:=cardinality(current_release.migration_set);
+  if p_recovery_step='standalone' then
+    if current_release.environment not in ('staging','production')
+       or current_release.state not in ('candidate','approved','deploying','verifying') then
+      raise exception 'standalone staging attempt release is not deployable';
+    end if;
+    observed_release:=current_release;
+  else
+    if current_release.environment<>'production' or current_release.state<>'candidate'
+       or current_release.recovery_strategy is distinct from 'rollback'
+       or coalesce(current_release.rollback_plan_ref,'')=''
+       or coalesce(current_release.plan_hash,'')='' then
+      raise exception 'current release is not a rollback-ready Production candidate';
+    end if;
+    select * into prior_release from ops.release where release_key=p_prior_release_key;
+    if not found or prior_release.id=current_release.id
+       or prior_release.environment<>'production' or prior_release.state<>'complete'
+       or prior_release.service_id<>current_release.service_id then
+      raise exception 'prior release is not a distinct completed Production release';
+    end if;
+    if not exists (
+      select 1 from ops.deployment d where d.release_id=prior_release.id
+       and d.service_id=current_release.service_id and d.environment='production'
+       and d.state='complete' and d.read_back_at is not null
+       and d.git_sha=prior_release.git_sha and d.provider=prior_release.provider
+       and d.provider_version_id=prior_release.provider_version_id) then
+      raise exception 'prior release has no exact completed Production readback';
+    end if;
+    observed_release:=case when p_recovery_step='prior' then prior_release else current_release end;
+  end if;
+  if p_git_sha<>observed_release.git_sha then
+    raise exception 'staging attempt SHA does not match the release required for this step';
+  end if;
+  expected_tag:='carr-staging-'||replace(p_idempotency_key::text,'-','');
+  select * into existing from ops.staging_deployment_attempt where idempotency_key=p_idempotency_key;
+  if found then
+    if (existing.correlation_id,existing.recovery_attempt_id,existing.recovery_step,
+        existing.rehearsal_release_id,existing.observed_release_id,existing.prior_release_id,
+        existing.service_id,existing.git_sha,existing.expected_provider_tag,
+        existing.declared_migration_set_sha256,existing.declared_migration_count,
+        existing.declared_schema_highest_migration,
+        existing.declared_schema_applied_count,existing.declared_schema_ledger_sha256) is distinct from
+       (p_correlation_id,p_recovery_attempt_id,p_recovery_step,current_release.id,
+        observed_release.id,case when p_recovery_step='standalone' then null else prior_release.id end,
+        current_release.service_id,p_git_sha,expected_tag,migration_hash,migration_count,
+        current_release.schema_highest_migration,current_release.schema_applied_count,
+        current_release.schema_ledger_sha256) then
+      raise exception 'staging attempt idempotency key was reused with changed input';
+    end if;
+    select * into receipt from ops.staging_release_readback_receipt
+      where deployment_attempt_id=existing.id;
+    return jsonb_build_object('attempt_id',existing.id,
+      'expected_provider_tag',existing.expected_provider_tag,
+      'state',case when receipt.id is null then 'prepared' else 'observed' end,
+      'deploy_claimed',exists(select 1 from ops.staging_deployment_claim where deployment_attempt_id=existing.id),
+      'provider_version_id',receipt.provider_version_id,'receipt_ref',receipt.evidence_ref,
+      'replayed',true);
+  end if;
+  insert into ops.staging_deployment_attempt(
+    idempotency_key,recovery_attempt_id,recovery_step,correlation_id,
+    rehearsal_release_id,observed_release_id,prior_release_id,service_id,
+    environment,git_sha,provider,expected_provider_tag,
+    declared_migration_set_sha256,declared_migration_count,
+    declared_schema_highest_migration,declared_schema_applied_count,
+    declared_schema_ledger_sha256,writer_session_user)
+  values(p_idempotency_key,p_recovery_attempt_id,p_recovery_step,p_correlation_id,
+    current_release.id,observed_release.id,
+    case when p_recovery_step='standalone' then null else prior_release.id end,
+    current_release.service_id,'staging',p_git_sha,'cloudflare-workers',expected_tag,
+    migration_hash,migration_count,current_release.schema_highest_migration,
+    current_release.schema_applied_count,current_release.schema_ledger_sha256,session_user)
+  returning id into attempt_uuid;
+  return jsonb_build_object('attempt_id',attempt_uuid,'expected_provider_tag',expected_tag,
+    'state','prepared','deploy_claimed',false,'provider_version_id',null,
+    'receipt_ref',null,'replayed',false);
+end $_$;
+
+
+--
+-- Name: program5_migration_set_sha256(text[]); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.program5_migration_set_sha256(p_migration_set text[]) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+  select 'sha256:'||encode(public.digest(to_jsonb(p_migration_set)::text,'sha256'),'hex')
+$$;
+
+
+--
+-- Name: program5_release_approval_is_joe_owned(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.program5_release_approval_is_joe_owned() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if new.environment='production'
+     and new.state in ('approved','deploying','verifying','complete')
+     and (tg_op='INSERT' or old.state not in ('approved','deploying','verifying','complete')) then
+    if new.state<>'approved' or session_user<>'carr_authority_joe'
+       or new.approved_by_actor<>'joe'
+       or new.approval_receipt_id is null or not exists (
+         select 1 from ops.release_approval_receipt a
+          where a.id=new.approval_receipt_id and a.release_id=new.id
+            and a.plan_hash=new.plan_hash and a.approved_by_actor='joe'
+            and a.approved_at=new.approved_at
+            and a.approval_expires_at=new.approval_expires_at) then
+      raise exception 'Program 5 Production approval requires Joe authority and its typed receipt';
+    end if;
+  end if;
+  if tg_op='UPDATE'
+     and old.environment='production'
+     and old.state in ('approved','deploying','verifying','complete')
+     and new.state in ('approved','deploying','verifying','complete')
+     and (new.approved_by_actor,new.approved_at,new.approval_expires_at,new.approval_receipt_id)
+         is distinct from
+         (old.approved_by_actor,old.approved_at,old.approval_expires_at,old.approval_receipt_id) then
+    raise exception 'Program 5 approval projection is immutable across promoted states';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: program5_release_verifier_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.program5_release_verifier_is_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if (new.verifier_actor,new.verifier_evidence_ref)
+       is distinct from (old.verifier_actor,old.verifier_evidence_ref)
+     and (old.approval_receipt_id is not null
+          or old.state in ('approved','deploying','verifying','complete'))
+     and new.plan_hash is not distinct from old.plan_hash then
+    raise exception 'Program 5 verifier evidence is immutable after approval; revise the plan to invalidate approval first';
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: program6_browser_action_challenge_redemptions_immutable(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -2631,6 +2978,21 @@ begin
     'sha256:' || p.runbook_content_hash, p.scope_summary, false;
 end;
 $_$;
+
+
+--
+-- Name: protect_staging_readback_deployment(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.protect_staging_readback_deployment() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if exists (select 1 from ops.staging_release_readback_receipt where deployment_id=old.id) then
+    raise exception 'Program 5 evidence deployment is append-only';
+  end if;
+  return case when tg_op='DELETE' then old else new end;
+end $$;
 
 
 --
@@ -3160,6 +3522,227 @@ end $$;
 
 
 --
+-- Name: record_staging_release_readback(uuid, uuid, text, integer, text, integer, bigint); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare
+  existing ops.staging_release_readback_receipt%rowtype;
+  attempt ops.staging_deployment_attempt%rowtype;
+  current_release ops.release%rowtype;
+  prior_release ops.release%rowtype;
+  observed_release ops.release%rowtype;
+  service_uuid uuid;
+  deployment_uuid uuid;
+  receipt_uuid uuid;
+  before_receipt ops.staging_release_readback_receipt%rowtype;
+  prior_receipt ops.staging_release_readback_receipt%rowtype;
+  after_receipt ops.staging_release_readback_receipt%rowtype;
+  bundle_uuid uuid;
+  run_uuid uuid;
+  projection jsonb;
+  projection_hash text;
+  receipt_ref text;
+  bundle_projection jsonb;
+  bundle_hash text;
+  bundle_ref text;
+  observed_time timestamptz := clock_timestamp();
+begin
+  if session_user <> 'carr_jobs' then
+    raise exception 'staging readback writer requires the carr_jobs session';
+  end if;
+  if p_idempotency_key is null or p_provider_version_id is null
+     or coalesce(p_provider_tag,'') !~ '^carr-staging-[a-z0-9-]{8,50}$'
+     or coalesce(p_verb_count,0)<=0
+     or coalesce(p_schema_highest_migration,'') !~ '^[0-9]{4}_[a-z0-9_.-]+\.sql$'
+     or coalesce(p_schema_applied_count,0)<=0 or coalesce(p_doctrine_generation,-1)<0 then
+    raise exception 'invalid typed staging readback input';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  select * into attempt from ops.staging_deployment_attempt
+    where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'staging readback has no prepared deployment attempt'; end if;
+  if not exists(select 1 from ops.staging_deployment_claim
+                where deployment_attempt_id=attempt.id) then
+    raise exception 'staging readback deployment attempt was never claimed';
+  end if;
+  if attempt.recovery_attempt_id is not null then
+    perform pg_advisory_xact_lock(hashtextextended(attempt.recovery_attempt_id::text,202));
+  end if;
+  select * into existing from ops.staging_release_readback_receipt
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if existing.deployment_attempt_id<>attempt.id
+       or (existing.git_sha,existing.provider_version_id,existing.provider_tag,
+        existing.verb_count,existing.schema_highest_migration,
+        existing.schema_applied_count,existing.doctrine_generation) is distinct from
+       (attempt.git_sha,p_provider_version_id,p_provider_tag,p_verb_count,
+        p_schema_highest_migration,p_schema_applied_count,p_doctrine_generation) then
+      raise exception 'staging readback idempotency key was reused with changed input';
+    end if;
+    return jsonb_build_object('receipt_id',existing.id,'receipt_ref',existing.evidence_ref,
+      'replayed',true,'bundle_id',(select id from ops.staging_recovery_rehearsal_bundle
+       where recovery_attempt_id=attempt.recovery_attempt_id),'recovery_run_id',(
+       select r.id from ops.run r join ops.staging_recovery_rehearsal_bundle b
+         on b.id=r.recovery_rehearsal_bundle_id
+        where b.recovery_attempt_id=attempt.recovery_attempt_id));
+  end if;
+
+  select * into strict current_release from ops.release where id=attempt.rehearsal_release_id;
+  if attempt.declared_migration_set_sha256<>ops.program5_migration_set_sha256(current_release.migration_set)
+     or attempt.declared_migration_count<>cardinality(current_release.migration_set)
+     or attempt.declared_schema_highest_migration<>current_release.schema_highest_migration
+     or attempt.declared_schema_applied_count<>current_release.schema_applied_count
+     or attempt.declared_schema_ledger_sha256<>current_release.schema_ledger_sha256
+     or p_schema_highest_migration<>attempt.declared_schema_highest_migration
+     or p_schema_applied_count<>attempt.declared_schema_applied_count then
+    raise exception 'staging readback schema does not match the exact declared candidate migration set';
+  end if;
+  if p_provider_tag<>attempt.expected_provider_tag then
+    raise exception 'staging readback provider tag does not match its prepared attempt';
+  end if;
+  service_uuid := current_release.service_id;
+  select * into strict observed_release from ops.release where id=attempt.observed_release_id;
+  if attempt.prior_release_id is not null then
+    select * into strict prior_release from ops.release where id=attempt.prior_release_id;
+  end if;
+
+  projection := jsonb_build_object(
+    'deployment_attempt_id',attempt.id,'correlation_id',attempt.correlation_id,
+    'recovery_attempt_id',attempt.recovery_attempt_id,
+    'recovery_step',attempt.recovery_step,'rehearsal_release_id',current_release.id,
+    'observed_release_id',observed_release.id,'prior_release_id',
+    attempt.prior_release_id,'service_id',service_uuid,'environment','staging','git_sha',attempt.git_sha,
+    'provider','cloudflare-workers','provider_version_id',p_provider_version_id,
+    'provider_tag',p_provider_tag,'verb_count',p_verb_count,
+    'schema_highest_migration',p_schema_highest_migration,
+    'schema_applied_count',p_schema_applied_count,
+    'declared_migration_set_sha256',attempt.declared_migration_set_sha256,
+    'declared_migration_count',attempt.declared_migration_count,
+    'declared_schema_applied_count',attempt.declared_schema_applied_count,
+    'declared_schema_ledger_sha256',attempt.declared_schema_ledger_sha256,
+    'doctrine_generation',p_doctrine_generation);
+  projection_hash := 'sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
+  receipt_ref := 'ops.staging-release-readback:'||projection_hash;
+
+  insert into ops.deployment(
+    correlation_id,service_id,environment,state,git_sha,provider,provider_version_id,
+    release_id,deployed_by_actor,verb_count,schema_highest_migration,
+    doctrine_generation,started_at,ended_at,read_back_at,
+    verification_evidence_ref,source_kind,source_ref,observed_at)
+  values(attempt.correlation_id,service_uuid,'staging','complete',attempt.git_sha,
+    'cloudflare-workers',p_provider_version_id::text,observed_release.id,
+    session_user,p_verb_count,p_schema_highest_migration,p_doctrine_generation,
+    observed_time,observed_time,observed_time,receipt_ref,'wrapper',
+    'bin/deploy-worker.sh',observed_time)
+  returning id into deployment_uuid;
+
+  insert into ops.staging_release_readback_receipt(
+    idempotency_key,deployment_attempt_id,recovery_attempt_id,recovery_step,correlation_id,deployment_id,
+    rehearsal_release_id,observed_release_id,prior_release_id,service_id,environment,
+    git_sha,provider,provider_version_id,provider_tag,verb_count,
+    schema_highest_migration,schema_applied_count,declared_migration_set_sha256,
+    declared_migration_count,declared_schema_applied_count,
+    declared_schema_ledger_sha256,doctrine_generation,
+    projection_sha256,evidence_ref,observed_at,writer_session_user)
+  values(p_idempotency_key,attempt.id,attempt.recovery_attempt_id,attempt.recovery_step,attempt.correlation_id,
+    deployment_uuid,current_release.id,observed_release.id,
+    attempt.prior_release_id,service_uuid,'staging',attempt.git_sha,'cloudflare-workers',p_provider_version_id,
+    p_provider_tag,p_verb_count,p_schema_highest_migration,p_schema_applied_count,
+    attempt.declared_migration_set_sha256,attempt.declared_migration_count,
+    attempt.declared_schema_applied_count,attempt.declared_schema_ledger_sha256,
+    p_doctrine_generation,projection_hash,receipt_ref,observed_time,session_user)
+  returning id into receipt_uuid;
+
+  if attempt.recovery_step='current_after' then
+    select * into before_receipt from ops.staging_release_readback_receipt
+     where recovery_attempt_id=attempt.recovery_attempt_id and recovery_step='current_before';
+    if not found then raise exception 'current_after requires current_before receipt'; end if;
+    select * into prior_receipt from ops.staging_release_readback_receipt
+     where recovery_attempt_id=attempt.recovery_attempt_id and recovery_step='prior';
+    if not found then raise exception 'current_after requires prior receipt'; end if;
+    select * into strict after_receipt from ops.staging_release_readback_receipt where id=receipt_uuid;
+    if before_receipt.rehearsal_release_id<>current_release.id
+       or prior_receipt.rehearsal_release_id<>current_release.id
+       or before_receipt.prior_release_id<>prior_release.id
+       or prior_receipt.prior_release_id<>prior_release.id
+       or before_receipt.observed_release_id<>current_release.id
+       or prior_receipt.observed_release_id<>prior_release.id
+       or after_receipt.observed_release_id<>current_release.id
+       or before_receipt.service_id<>service_uuid or prior_receipt.service_id<>service_uuid
+       or before_receipt.declared_migration_set_sha256<>attempt.declared_migration_set_sha256
+       or prior_receipt.declared_migration_set_sha256<>attempt.declared_migration_set_sha256
+       or after_receipt.declared_migration_set_sha256<>attempt.declared_migration_set_sha256
+       or before_receipt.declared_migration_count<>attempt.declared_migration_count
+       or prior_receipt.declared_migration_count<>attempt.declared_migration_count
+       or after_receipt.declared_migration_count<>attempt.declared_migration_count
+       or before_receipt.schema_highest_migration<>attempt.declared_schema_highest_migration
+       or prior_receipt.schema_highest_migration<>attempt.declared_schema_highest_migration
+       or after_receipt.schema_highest_migration<>attempt.declared_schema_highest_migration
+       or before_receipt.schema_applied_count<>attempt.declared_schema_applied_count
+       or prior_receipt.schema_applied_count<>attempt.declared_schema_applied_count
+       or after_receipt.schema_applied_count<>attempt.declared_schema_applied_count
+       or before_receipt.declared_schema_ledger_sha256<>attempt.declared_schema_ledger_sha256
+       or prior_receipt.declared_schema_ledger_sha256<>attempt.declared_schema_ledger_sha256
+       or after_receipt.declared_schema_ledger_sha256<>attempt.declared_schema_ledger_sha256
+       or not (before_receipt.observed_at < prior_receipt.observed_at
+               and prior_receipt.observed_at < after_receipt.observed_at)
+       or after_receipt.observed_at-before_receipt.observed_at > interval '1 hour' then
+      raise exception 'recovery receipts do not form an ordered current-prior-current chain';
+    end if;
+    bundle_projection := jsonb_build_object(
+      'recovery_attempt_id',attempt.recovery_attempt_id,'current_release_id',current_release.id,
+      'prior_release_id',prior_release.id,'service_id',service_uuid,
+      'current_before_receipt_id',before_receipt.id,
+      'prior_after_rollback_receipt_id',prior_receipt.id,
+      'current_after_restore_receipt_id',after_receipt.id,
+      'recovery_strategy',current_release.recovery_strategy,
+      'recovery_plan_ref',current_release.rollback_plan_ref,
+      'plan_hash',current_release.plan_hash,
+      'declared_migration_set_sha256',attempt.declared_migration_set_sha256,
+      'declared_migration_count',attempt.declared_migration_count,
+      'declared_schema_highest_migration',attempt.declared_schema_highest_migration,
+      'declared_schema_applied_count',attempt.declared_schema_applied_count,
+      'declared_schema_ledger_sha256',attempt.declared_schema_ledger_sha256);
+    bundle_hash := 'sha256:'||encode(public.digest(bundle_projection::text,'sha256'),'hex');
+    bundle_ref := 'ops.staging-recovery-bundle:'||bundle_hash;
+    insert into ops.staging_recovery_rehearsal_bundle(
+      recovery_attempt_id,correlation_id,current_release_id,prior_release_id,
+      service_id,environment,current_before_receipt_id,
+      prior_after_rollback_receipt_id,current_after_restore_receipt_id,
+      recovery_strategy,recovery_plan_ref,plan_hash,bundle_sha256,evidence_ref,
+      declared_migration_set_sha256,declared_migration_count,
+      declared_schema_highest_migration,declared_schema_applied_count,
+      declared_schema_ledger_sha256,completed_at,writer_session_user)
+    values(attempt.recovery_attempt_id,attempt.correlation_id,current_release.id,prior_release.id,
+      service_uuid,'staging',before_receipt.id,prior_receipt.id,after_receipt.id,
+      'rollback',current_release.rollback_plan_ref,current_release.plan_hash,
+      bundle_hash,bundle_ref,attempt.declared_migration_set_sha256,
+      attempt.declared_migration_count,attempt.declared_schema_highest_migration,
+      attempt.declared_schema_applied_count,attempt.declared_schema_ledger_sha256,
+      after_receipt.observed_at,session_user)
+    returning id into bundle_uuid;
+
+    insert into ops.run(correlation_id,kind,service_id,environment,run_key,state,
+      started_at,ended_at,source_kind,source_ref,observed_at,evidence_ref,
+      release_id,recovery_strategy,recovery_plan_ref,recovery_rehearsal_bundle_id)
+    values(attempt.correlation_id,'check',service_uuid,'staging','recovery.rehearsal.worker',
+      'succeeded',before_receipt.observed_at,after_receipt.observed_at,'wrapper',
+      'bin/deploy-worker.sh',after_receipt.observed_at,bundle_ref,current_release.id,
+      'rollback',current_release.rollback_plan_ref,bundle_uuid)
+    returning id into run_uuid;
+  end if;
+
+  return jsonb_build_object('receipt_id',receipt_uuid,'receipt_ref',receipt_ref,
+    'replayed',false,'bundle_id',bundle_uuid,'recovery_run_id',run_uuid);
+end $_$;
+
+
+--
 -- Name: record_workflow_acceptance(text, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3332,6 +3915,18 @@ end $$;
 
 
 --
+-- Name: refuse_program5_evidence_mutation(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_program5_evidence_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'Program 5 evidence is append-only';
+end $$;
+
+
+--
 -- Name: refuse_rule_approval_receipt_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3351,25 +3946,25 @@ CREATE FUNCTION ops.release_approval_requires_recovery_rehearsal() RETURNS trigg
     LANGUAGE plpgsql
     AS $$
 begin
-  if new.environment = 'production'
-     and new.state = 'approved'
-     and (tg_op = 'INSERT'
-          or old.environment is distinct from 'production'
+  if new.environment='production' and new.state='approved'
+     and (tg_op='INSERT' or old.environment is distinct from 'production'
           or old.state is distinct from 'approved')
      and not exists (
-       select 1
-         from ops.run r
-        where r.release_id = new.id
-          and r.service_id = new.service_id
-          and r.environment in ('staging', 'rehearsal')
-          and r.run_key like 'recovery.rehearsal.%'
-          and r.state = 'succeeded'
-          and r.evidence_ref is not null
-          and r.recovery_strategy = new.recovery_strategy
-          and r.recovery_plan_ref = new.rollback_plan_ref
-     ) then
-    raise exception 'Production release % cannot be approved: no successful recovery rehearsal receipt',
-      new.release_key;
+       select 1 from ops.run r
+       join ops.staging_recovery_rehearsal_bundle b
+         on b.id=r.recovery_rehearsal_bundle_id
+       where r.release_id=new.id and r.service_id=new.service_id
+        and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
+        and r.state='succeeded' and r.evidence_ref=b.evidence_ref
+        and b.current_release_id=new.id and b.service_id=new.service_id
+        and b.recovery_strategy=new.recovery_strategy
+        and b.recovery_plan_ref=new.rollback_plan_ref and b.plan_hash=new.plan_hash
+        and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(new.migration_set)
+        and b.declared_migration_count=cardinality(new.migration_set)
+        and b.declared_schema_highest_migration=new.schema_highest_migration
+        and b.declared_schema_applied_count=new.schema_applied_count
+        and b.declared_schema_ledger_sha256=new.schema_ledger_sha256) then
+    raise exception 'Production release % cannot be approved: no exact typed recovery bundle',new.release_key;
   end if;
   return new;
 end $$;
@@ -3390,35 +3985,21 @@ CREATE FUNCTION ops.release_assurance_is_immutable() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 begin
-  if old.state in ('approved', 'deploying', 'verifying', 'complete')
+  if old.state in ('approved','deploying','verifying','complete')
      and new.state <> 'candidate'
      and new.plan_hash is not distinct from old.plan_hash
-     and (new.performance_budget_ref,
-          new.performance_budget_ms,
-          new.recovery_strategy,
-          new.rollback_ready,
-          new.rollback_plan_ref,
-          new.service_id,
-          new.environment,
-          new.git_sha,
-          new.artifact_digest,
-          new.dependency_lock_digest,
-          new.config_fingerprint,
-          new.schema_highest_migration,
-          new.migration_set) is distinct from
-         (old.performance_budget_ref,
-          old.performance_budget_ms,
-          old.recovery_strategy,
-          old.rollback_ready,
-          old.rollback_plan_ref,
-          old.service_id,
-          old.environment,
-          old.git_sha,
-          old.artifact_digest,
-          old.dependency_lock_digest,
-          old.config_fingerprint,
-          old.schema_highest_migration,
-          old.migration_set) then
+     and (new.performance_budget_ref,new.performance_budget_ms,
+          new.recovery_strategy,new.rollback_ready,new.rollback_plan_ref,
+          new.service_id,new.environment,new.git_sha,new.artifact_digest,
+          new.dependency_lock_digest,new.config_fingerprint,
+          new.schema_highest_migration,new.schema_applied_count,
+          new.schema_ledger_sha256,new.migration_set) is distinct from
+         (old.performance_budget_ref,old.performance_budget_ms,
+          old.recovery_strategy,old.rollback_ready,old.rollback_plan_ref,
+          old.service_id,old.environment,old.git_sha,old.artifact_digest,
+          old.dependency_lock_digest,old.config_fingerprint,
+          old.schema_highest_migration,old.schema_applied_count,
+          old.schema_ledger_sha256,old.migration_set) then
     raise exception 'Promoted release material is immutable until approval is invalidated';
   end if;
   return new;
@@ -3440,68 +4021,41 @@ CREATE FUNCTION ops.release_completion_requires_a_read_back() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 begin
-  if new.state = 'complete'
-     and (tg_op = 'INSERT' or old.state is distinct from 'complete') then
-    if not exists (
-      select 1
-        from ops.deployment d
-       where d.release_id = new.id
-         and d.service_id = new.service_id
-         and d.environment = 'production'
-         and d.state = 'complete'
-         and d.read_back_at is not null
-         and d.git_sha = new.git_sha
-         and d.provider = new.provider
-         and d.provider_version_id = new.provider_version_id
-    ) then
-      raise exception 'release % cannot be complete: no exact Production read-back',
-        new.release_key;
+  if new.state='complete' and (tg_op='INSERT' or old.state is distinct from 'complete') then
+    if not exists (select 1 from ops.deployment d where d.release_id=new.id
+      and d.service_id=new.service_id and d.environment='production'
+      and d.state='complete' and d.read_back_at is not null and d.git_sha=new.git_sha
+      and d.provider=new.provider and d.provider_version_id=new.provider_version_id) then
+      raise exception 'release % cannot be complete: no exact Production read-back',new.release_key;
     end if;
-
-    if not exists (
-      select 1
-        from ops.run r
-       where r.release_id = new.id
-         and r.service_id = new.service_id
-         and r.environment = 'production'
-         and r.run_key like 'performance.%'
-         and r.state = 'succeeded'
-         and r.evidence_ref is not null
-         and r.budget_ms = new.performance_budget_ms
-         and r.duration_ms > 0
-         and r.duration_ms <= r.budget_ms
-         and exists (
-           select 1
-             from ops.deployment d
-            where d.release_id = new.id
-              and d.service_id = new.service_id
-              and d.environment = 'production'
-              and d.state = 'complete'
-              and d.read_back_at is not null
-              and d.git_sha = new.git_sha
-              and d.provider = new.provider
-              and d.provider_version_id = new.provider_version_id
-              and d.correlation_id = r.correlation_id
-         )
-    ) then
-      raise exception 'release % cannot be complete: no successful Production performance receipt within budget',
-        new.release_key;
+    if not exists (select 1 from ops.run r join ops.deployment d
+      on d.release_id=r.release_id and d.service_id=r.service_id
+      and d.correlation_id=r.correlation_id
+      where r.release_id=new.id and r.service_id=new.service_id
+      and r.environment='production' and r.run_key like 'performance.%'
+      and r.state='succeeded' and r.evidence_ref is not null
+      and r.budget_ms=new.performance_budget_ms and r.duration_ms>0
+      and r.duration_ms<=r.budget_ms and d.environment='production'
+      and d.state='complete' and d.read_back_at is not null
+      and d.git_sha=new.git_sha and d.provider=new.provider
+      and d.provider_version_id=new.provider_version_id) then
+      raise exception 'release % cannot be complete: no within-budget Production performance receipt',new.release_key;
     end if;
-
-    if not exists (
-      select 1
-        from ops.run r
-       where r.release_id = new.id
-         and r.service_id = new.service_id
-         and r.environment in ('staging', 'rehearsal')
-         and r.run_key like 'recovery.rehearsal.%'
-         and r.state = 'succeeded'
-         and r.evidence_ref is not null
-         and r.recovery_strategy = new.recovery_strategy
-         and r.recovery_plan_ref = new.rollback_plan_ref
-    ) then
-      raise exception 'release % cannot be complete: no successful staging or rehearsal recovery receipt',
-        new.release_key;
+    if not exists (select 1 from ops.run r
+      join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
+      where r.release_id=new.id and r.service_id=new.service_id
+      and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
+      and r.state='succeeded' and r.evidence_ref=b.evidence_ref
+      and b.current_release_id=new.id and b.service_id=new.service_id
+      and b.recovery_strategy=new.recovery_strategy
+      and b.recovery_plan_ref=new.rollback_plan_ref and b.plan_hash=new.plan_hash
+      and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(new.migration_set)
+      and b.declared_migration_count=cardinality(new.migration_set)
+      and b.declared_schema_highest_migration=new.schema_highest_migration
+      and b.declared_schema_applied_count=new.schema_applied_count
+      and b.declared_schema_ledger_sha256=new.schema_ledger_sha256
+      and b.completed_at between new.approved_at-interval '24 hours' and new.approved_at) then
+      raise exception 'release % cannot be complete: no exact typed recovery bundle',new.release_key;
     end if;
   end if;
   return new;
@@ -3546,14 +4100,14 @@ CREATE FUNCTION ops.release_plan_revision_invalidates_approval() RETURNS trigger
 begin
   if new.plan_hash is distinct from old.plan_hash
      and old.state in ('approved','deploying','verifying') then
-    new.state               := 'candidate';
-    new.approved_by_actor   := null;
-    new.approved_at         := null;
-    new.approval_expires_at := null;
-    raise notice 'release %: the plan changed, so the approval is gone. Re-approve '
-                 'against the new plan hash.', old.release_key;
+    new.state:= 'candidate';
+    new.approved_by_actor:=null;
+    new.approved_at:=null;
+    new.approval_expires_at:=null;
+    new.approval_receipt_id:=null;
+    raise notice 'release %: the plan changed, so the approval and typed receipt pointer are gone. Re-approve against the new plan hash.',old.release_key;
   end if;
-  new.updated_at := now();
+  new.updated_at:=now();
   return new;
 end $$;
 
@@ -4572,6 +5126,34 @@ begin
        or revision_type <> 'doctrine' then
       raise exception 'active situation mapping requires approved human authority for the exact doctrine revision';
     end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: validate_recovery_rehearsal_run(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.validate_recovery_rehearsal_run() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare b ops.staging_recovery_rehearsal_bundle%rowtype;
+begin
+  if new.recovery_rehearsal_bundle_id is null then return new; end if;
+  select * into strict b from ops.staging_recovery_rehearsal_bundle
+   where id=new.recovery_rehearsal_bundle_id;
+  if new.kind <> 'check' or new.run_key <> 'recovery.rehearsal.worker'
+     or new.state <> 'succeeded' or new.environment <> 'staging'
+     or new.release_id <> b.current_release_id or new.service_id <> b.service_id
+     or new.correlation_id <> b.correlation_id
+     or new.recovery_strategy <> b.recovery_strategy
+     or new.recovery_plan_ref <> b.recovery_plan_ref
+     or new.evidence_ref <> b.evidence_ref
+     or new.started_at is distinct from (
+       select observed_at from ops.staging_release_readback_receipt where id=b.current_before_receipt_id)
+     or new.ended_at is distinct from b.completed_at then
+    raise exception 'recovery rehearsal run does not exactly match its typed bundle';
   end if;
   return new;
 end $$;
@@ -6616,13 +7198,13 @@ CREATE TABLE ops.npi_device_evidence_receipt (
 
 CREATE TABLE ops.program6_browser_action_challenge_redemption (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token_digest text CONSTRAINT program6_browser_action_challenge_redempt_token_digest_not_null NOT NULL,
-    session_digest text CONSTRAINT program6_browser_action_challenge_redem_session_digest_not_null NOT NULL,
+    token_digest text NOT NULL,
+    session_digest text NOT NULL,
     action text NOT NULL,
-    material_digest text CONSTRAINT program6_browser_action_challenge_rede_material_digest_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT program6_browser_action_challenge_rede_idempotency_key_not_null NOT NULL,
-    redeemed_by_actor_id uuid CONSTRAINT program6_browser_action_challenge_redeemed_by_actor_id_not_null NOT NULL,
-    redeemed_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT program6_browser_action_challenge_redempti_redeemed_at_not_null NOT NULL,
+    material_digest text NOT NULL,
+    idempotency_key uuid NOT NULL,
+    redeemed_by_actor_id uuid NOT NULL,
+    redeemed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT program6_browser_action_challenge_redempt_material_digest_check CHECK ((material_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redempti_session_digest_check CHECK ((session_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redemption_action_check CHECK ((action = ANY (ARRAY['accept-ready-plan'::text, 'accept-outcome-feedback'::text]))),
@@ -6724,6 +7306,9 @@ CREATE TABLE ops.release (
     performance_budget_ref text,
     performance_budget_ms integer,
     recovery_strategy text,
+    schema_applied_count integer,
+    schema_ledger_sha256 text,
+    approval_receipt_id uuid,
     CONSTRAINT a_failed_release_names_its_class CHECK (((state <> 'failed'::text) OR (failure_class IS NOT NULL))),
     CONSTRAINT a_superseded_release_names_its_successor CHECK (((state <> 'superseded'::text) OR (superseded_by IS NOT NULL))),
     CONSTRAINT a_terminal_release_has_ended CHECK (((state <> ALL (ARRAY['complete'::text, 'failed'::text, 'abandoned'::text, 'superseded'::text])) OR (ended_at IS NOT NULL))),
@@ -6735,6 +7320,8 @@ CREATE TABLE ops.release (
     CONSTRAINT independent_verification_is_not_the_maker CHECK (((verifier_actor IS NULL) OR (verifier_actor <> maker_actor))),
     CONSTRAINT release_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
     CONSTRAINT release_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT release_schema_applied_count_check CHECK ((schema_applied_count > 0)),
+    CONSTRAINT release_schema_ledger_sha256_check CHECK ((schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT release_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
     CONSTRAINT release_state_check CHECK ((state = ANY (ARRAY['draft'::text, 'candidate'::text, 'approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text, 'failed'::text, 'superseded'::text, 'abandoned'::text]))),
     CONSTRAINT verification_evidence_names_its_verifier CHECK (((verifier_actor IS NULL) = (verifier_evidence_ref IS NULL)))
@@ -6781,6 +7368,35 @@ COMMENT ON COLUMN ops.release.provider IS 'Program 5 provider identity. Producti
 --
 
 COMMENT ON COLUMN ops.release.provider_version_id IS 'Program 5 immutable Cloudflare Workers version identifier approved for a Production release.';
+
+
+--
+-- Name: release_approval_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.release_approval_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    release_id uuid NOT NULL,
+    recovery_run_id uuid NOT NULL,
+    recovery_bundle_id uuid NOT NULL,
+    plan_hash text NOT NULL,
+    approved_by_actor text NOT NULL,
+    approved_at timestamp with time zone NOT NULL,
+    approval_expires_at timestamp with time zone NOT NULL,
+    approval_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    verifier_actor text NOT NULL,
+    verifier_evidence_ref text NOT NULL,
+    CONSTRAINT approval_expiry_after_approval CHECK ((approval_expires_at > approved_at)),
+    CONSTRAINT release_approval_receipt_approval_sha256_check CHECK ((approval_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT release_approval_receipt_approved_by_actor_check CHECK ((approved_by_actor = 'joe'::text)),
+    CONSTRAINT release_approval_receipt_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.program5-release-approval:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT release_approval_receipt_verifier_actor_canonical CHECK ((verifier_actor = lower(btrim(verifier_actor)))),
+    CONSTRAINT release_approval_receipt_verifier_actor_nonblank CHECK ((btrim(verifier_actor) <> ''::text)),
+    CONSTRAINT release_approval_receipt_verifier_evidence_canonical CHECK ((verifier_evidence_ref = btrim(verifier_evidence_ref))),
+    CONSTRAINT release_approval_receipt_verifier_evidence_nonblank CHECK ((btrim(verifier_evidence_ref) <> ''::text))
+);
 
 
 --
@@ -6927,6 +7543,7 @@ END) STORED,
     budget_ms integer,
     recovery_strategy text,
     recovery_plan_ref text,
+    recovery_rehearsal_bundle_id uuid,
     CONSTRAINT a_failure_names_its_class CHECK (((state <> ALL (ARRAY['failed'::text, 'timed_out'::text])) OR (failure_class IS NOT NULL))),
     CONSTRAINT a_run_that_ended_also_started CHECK (((ended_at IS NULL) OR (started_at IS NOT NULL))),
     CONSTRAINT a_terminal_run_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text])) OR (ended_at IS NOT NULL))),
@@ -7064,19 +7681,19 @@ CREATE TABLE ops.sourced_work_request_outcome_feedback (
     work_request_id uuid NOT NULL,
     feedback_version integer NOT NULL,
     idempotency_key uuid NOT NULL,
-    work_request_version integer CONSTRAINT sourced_work_request_outcome_feed_work_request_version_not_null NOT NULL,
+    work_request_version integer NOT NULL,
     plan_id uuid NOT NULL,
-    plan_acceptance_receipt_id uuid CONSTRAINT sourced_work_request_outcom_plan_acceptance_receipt_id_not_null NOT NULL,
+    plan_acceptance_receipt_id uuid NOT NULL,
     preimage jsonb NOT NULL,
-    criterion_results jsonb CONSTRAINT sourced_work_request_outcome_feedbac_criterion_results_not_null NOT NULL,
+    criterion_results jsonb NOT NULL,
     evidence_refs jsonb NOT NULL,
     outcome text NOT NULL,
     blocker_code text NOT NULL,
     result_summary text NOT NULL,
     observed_minutes integer NOT NULL,
-    interaction_surface text CONSTRAINT sourced_work_request_outcome_feedb_interaction_surface_not_null NOT NULL,
-    heavy_session_used boolean CONSTRAINT sourced_work_request_outcome_feedba_heavy_session_used_not_null NOT NULL,
-    manual_context_transfers integer CONSTRAINT sourced_work_request_outcome__manual_context_transfers_not_null NOT NULL,
+    interaction_surface text NOT NULL,
+    heavy_session_used boolean NOT NULL,
+    manual_context_transfers integer NOT NULL,
     feedback_hash text NOT NULL,
     feedback_ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -7108,15 +7725,15 @@ COMMENT ON TABLE ops.sourced_work_request_outcome_feedback IS 'Append-only bound
 --
 
 CREATE TABLE ops.sourced_work_request_outcome_feedback_acceptance_receipt (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT sourced_work_request_outcome_feedback_acceptance_re_id_not_null NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_outcome_feedback__work_request_id_not_null NOT NULL,
-    feedback_id uuid CONSTRAINT sourced_work_request_outcome_feedback_acce_feedback_id_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_outcome_feedback__idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_outcome_feedback_acc_base_version_not_null NOT NULL,
-    feedback_hash text CONSTRAINT sourced_work_request_outcome_feedback_ac_feedback_hash_not_null NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_outcome_feed_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT sourced_work_request_outcome_feedback_acce_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_outcome_feedback_a_result_version_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    feedback_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
+    feedback_hash text NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    result_version integer NOT NULL,
     CONSTRAINT sourced_work_request_outcome_feedback_acce_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_outcome_feedback_accep_feedback_hash_check CHECK ((feedback_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT sourced_work_request_outcome_feedback_accept_base_version_check CHECK ((base_version > 0))
@@ -7181,16 +7798,16 @@ COMMENT ON TABLE ops.sourced_work_request_plan IS 'Append-only Program 6 plan pr
 
 CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_plan_acceptance_r_work_request_id_not_null NOT NULL,
+    work_request_id uuid NOT NULL,
     plan_id uuid NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_plan_acceptance_r_idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_plan_acceptance_rece_base_version_not_null NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
     plan_hash text NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_plan_accepta_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_plan_acceptance_recei_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_plan_acceptance_re_result_version_not_null NOT NULL,
-    shape_fixed_surface_ref text CONSTRAINT sourced_work_request_plan_acce_shape_fixed_surface_ref_not_null NOT NULL,
-    shape_rationale text CONSTRAINT sourced_work_request_plan_acceptance_r_shape_rationale_not_null NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT now() NOT NULL,
+    result_version integer NOT NULL,
+    shape_fixed_surface_ref text NOT NULL,
+    shape_rationale text NOT NULL,
     CONSTRAINT sourced_work_request_plan_acceptance_recei_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_base_version_check CHECK ((base_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_plan_hash_check CHECK ((plan_hash ~ '^sha256:[0-9a-f]{64}$'::text))
@@ -7202,6 +7819,154 @@ CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
 --
 
 COMMENT ON TABLE ops.sourced_work_request_plan_acceptance_receipt IS 'Private human-authority receipt for the sole Program 6 triaged-to-ready transition. It grants no dispatch or execution authority.';
+
+
+--
+-- Name: staging_deployment_attempt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_deployment_attempt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    recovery_attempt_id uuid,
+    recovery_step text NOT NULL,
+    correlation_id uuid NOT NULL,
+    rehearsal_release_id uuid NOT NULL,
+    observed_release_id uuid NOT NULL,
+    prior_release_id uuid,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    git_sha text NOT NULL,
+    provider text NOT NULL,
+    expected_provider_tag text NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_count integer NOT NULL,
+    declared_schema_highest_migration text NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
+    prepared_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    writer_session_user text NOT NULL,
+    CONSTRAINT staging_attempt_recovery_shape CHECK ((((recovery_step = 'standalone'::text) AND (recovery_attempt_id IS NULL) AND (prior_release_id IS NULL)) OR ((recovery_step <> 'standalone'::text) AND (recovery_attempt_id IS NOT NULL) AND (prior_release_id IS NOT NULL) AND (correlation_id = recovery_attempt_id)))),
+    CONSTRAINT staging_deployment_attempt_declared_migration_count_check CHECK ((declared_migration_count > 0)),
+    CONSTRAINT staging_deployment_attempt_declared_migration_set_sha256_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_deployment_attempt_declared_schema_applied_count_check CHECK ((declared_schema_applied_count > 0)),
+    CONSTRAINT staging_deployment_attempt_declared_schema_highest_migrat_check CHECK ((declared_schema_highest_migration ~ '^[0-9]{4}_[a-z0-9_.-]+\.sql$'::text)),
+    CONSTRAINT staging_deployment_attempt_declared_schema_ledger_sha256_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_deployment_attempt_environment_check CHECK ((environment = 'staging'::text)),
+    CONSTRAINT staging_deployment_attempt_expected_provider_tag_check CHECK ((expected_provider_tag ~ '^carr-staging-[0-9a-f]{32}$'::text)),
+    CONSTRAINT staging_deployment_attempt_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_deployment_attempt_provider_check CHECK ((provider = 'cloudflare-workers'::text)),
+    CONSTRAINT staging_deployment_attempt_recovery_step_check CHECK ((recovery_step = ANY (ARRAY['standalone'::text, 'current_before'::text, 'prior'::text, 'current_after'::text]))),
+    CONSTRAINT staging_deployment_attempt_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_deployment_claim; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_deployment_claim (
+    deployment_attempt_id uuid NOT NULL,
+    claimed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    writer_session_user text NOT NULL,
+    CONSTRAINT staging_deployment_claim_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_recovery_rehearsal_bundle (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    recovery_attempt_id uuid NOT NULL,
+    correlation_id uuid NOT NULL,
+    current_release_id uuid NOT NULL,
+    prior_release_id uuid NOT NULL,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    current_before_receipt_id uuid NOT NULL,
+    prior_after_rollback_receipt_id uuid NOT NULL,
+    current_after_restore_receipt_id uuid NOT NULL,
+    recovery_strategy text NOT NULL,
+    recovery_plan_ref text NOT NULL,
+    plan_hash text NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_count integer NOT NULL,
+    declared_schema_highest_migration text NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
+    bundle_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    completed_at timestamp with time zone NOT NULL,
+    recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    writer_session_user text NOT NULL,
+    CONSTRAINT recovery_bundle_distinct_receipts CHECK (((current_before_receipt_id <> prior_after_rollback_receipt_id) AND (current_before_receipt_id <> current_after_restore_receipt_id) AND (prior_after_rollback_receipt_id <> current_after_restore_receipt_id))),
+    CONSTRAINT recovery_bundle_distinct_releases CHECK ((current_release_id <> prior_release_id)),
+    CONSTRAINT staging_recovery_rehearsal_b_declared_migration_set_sha25_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_recovery_rehearsal_b_declared_schema_applied_coun_check CHECK ((declared_schema_applied_count > 0)),
+    CONSTRAINT staging_recovery_rehearsal_b_declared_schema_ledger_sha25_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_recovery_rehearsal_bundl_declared_migration_count_check CHECK ((declared_migration_count > 0)),
+    CONSTRAINT staging_recovery_rehearsal_bundle_bundle_sha256_check CHECK ((bundle_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_recovery_rehearsal_bundle_environment_check CHECK ((environment = 'staging'::text)),
+    CONSTRAINT staging_recovery_rehearsal_bundle_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-recovery-bundle:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_recovery_rehearsal_bundle_recovery_strategy_check CHECK ((recovery_strategy = 'rollback'::text)),
+    CONSTRAINT staging_recovery_rehearsal_bundle_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_release_readback_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_release_readback_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    deployment_attempt_id uuid NOT NULL,
+    recovery_attempt_id uuid,
+    recovery_step text NOT NULL,
+    correlation_id uuid NOT NULL,
+    deployment_id uuid NOT NULL,
+    rehearsal_release_id uuid NOT NULL,
+    observed_release_id uuid NOT NULL,
+    prior_release_id uuid,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    git_sha text NOT NULL,
+    provider text NOT NULL,
+    provider_version_id uuid NOT NULL,
+    provider_tag text NOT NULL,
+    verb_count integer NOT NULL,
+    schema_highest_migration text NOT NULL,
+    schema_applied_count integer NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_count integer NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
+    doctrine_generation bigint NOT NULL,
+    projection_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    observed_at timestamp with time zone NOT NULL,
+    recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    writer_session_user text NOT NULL,
+    CONSTRAINT staging_readback_recovery_shape CHECK ((((recovery_step = 'standalone'::text) AND (recovery_attempt_id IS NULL) AND (prior_release_id IS NULL)) OR ((recovery_step <> 'standalone'::text) AND (recovery_attempt_id IS NOT NULL) AND (prior_release_id IS NOT NULL) AND (correlation_id = recovery_attempt_id)))),
+    CONSTRAINT staging_release_readback_rec_declared_migration_set_sha25_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_release_readback_rec_declared_schema_applied_coun_check CHECK ((declared_schema_applied_count > 0)),
+    CONSTRAINT staging_release_readback_rec_declared_schema_ledger_sha25_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_release_readback_receipt_declared_migration_count_check CHECK ((declared_migration_count > 0)),
+    CONSTRAINT staging_release_readback_receipt_doctrine_generation_check CHECK ((doctrine_generation >= 0)),
+    CONSTRAINT staging_release_readback_receipt_environment_check CHECK ((environment = 'staging'::text)),
+    CONSTRAINT staging_release_readback_receipt_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-release-readback:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_release_readback_receipt_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_release_readback_receipt_projection_sha256_check CHECK ((projection_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_release_readback_receipt_provider_check CHECK ((provider = 'cloudflare-workers'::text)),
+    CONSTRAINT staging_release_readback_receipt_provider_tag_check CHECK ((provider_tag ~ '^carr-staging-[a-z0-9-]{8,50}$'::text)),
+    CONSTRAINT staging_release_readback_receipt_recovery_step_check CHECK ((recovery_step = ANY (ARRAY['standalone'::text, 'current_before'::text, 'prior'::text, 'current_after'::text]))),
+    CONSTRAINT staging_release_readback_receipt_schema_applied_count_check CHECK ((schema_applied_count > 0)),
+    CONSTRAINT staging_release_readback_receipt_schema_highest_migration_check CHECK ((schema_highest_migration ~ '^[0-9]{4}_[a-z0-9_.-]+\.sql$'::text)),
+    CONSTRAINT staging_release_readback_receipt_verb_count_check CHECK ((verb_count > 0)),
+    CONSTRAINT staging_release_readback_receipt_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
 
 
 --
@@ -9139,12 +9904,12 @@ COMMENT ON COLUMN public.campaign.coverage_at_scoring IS 'The measurement covera
 --
 
 CREATE TABLE public.candidate_pool (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT prospect_pool_id_not_null NOT NULL,
-    source text CONSTRAINT prospect_pool_source_not_null NOT NULL,
-    source_key text CONSTRAINT prospect_pool_source_key_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source text NOT NULL,
+    source_key text NOT NULL,
     source_seq integer,
-    source_row jsonb CONSTRAINT prospect_pool_source_row_not_null NOT NULL,
-    name text CONSTRAINT prospect_pool_name_not_null NOT NULL,
+    source_row jsonb NOT NULL,
+    name text NOT NULL,
     org_name text,
     vertical text,
     address text,
@@ -9159,19 +9924,19 @@ CREATE TABLE public.candidate_pool (
     score_basis text,
     est_lease_event date,
     est_basis text,
-    status text DEFAULT 'pool'::text CONSTRAINT prospect_pool_status_not_null NOT NULL,
+    status text DEFAULT 'pool'::text NOT NULL,
     promoted_lead_id uuid,
     dup_tier text,
     dup_subject_type text,
     dup_subject_id uuid,
     dup_ref text,
     dup_basis text,
-    dup_do_not_contact boolean DEFAULT false CONSTRAINT prospect_pool_dup_do_not_contact_not_null NOT NULL,
-    version integer DEFAULT 1 CONSTRAINT prospect_pool_version_not_null NOT NULL,
-    created_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_created_at_not_null NOT NULL,
-    created_by uuid CONSTRAINT prospect_pool_created_by_not_null NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_updated_at_not_null NOT NULL,
-    updated_by uuid CONSTRAINT prospect_pool_updated_by_not_null NOT NULL,
+    dup_do_not_contact boolean DEFAULT false NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by uuid NOT NULL,
     declined_at timestamp with time zone,
     declined_by uuid,
     decline_reason text,
@@ -12008,16 +12773,16 @@ CREATE VIEW public.v_capture_coverage AS
            FROM public.deal d
           WHERE ((d.outcome IS NULL) AND (d.phase <> 'closed'::text))
         UNION ALL
-         SELECT 'client'::text,
+         SELECT 'client'::text AS text,
             c.id
            FROM public.client c
           WHERE (c.merged_into IS NULL)
         UNION ALL
-         SELECT 'lead'::text,
+         SELECT 'lead'::text AS text,
             l.id
            FROM public.lead l
         UNION ALL
-         SELECT 'vendor'::text,
+         SELECT 'vendor'::text AS text,
             v.id
            FROM public.vendor v
         )
@@ -14276,7 +15041,7 @@ CREATE VIEW public.v_export_dossier_analysis AS
           WHERE (c.notes_path IS NOT NULL)
         UNION ALL
          SELECT l.id,
-            'lead'::text,
+            'lead'::text AS text,
             ('DNA/Clients/prospects/'::text || regexp_replace(l.notes_path, '^.*/'::text, ''::text))
            FROM public.lead l
           WHERE (l.notes_path IS NOT NULL)
@@ -16739,7 +17504,55 @@ ALTER TABLE ONLY ops.provider_route
 --
 
 ALTER TABLE ops.run
-    ADD CONSTRAINT recovery_rehearsal_assurance CHECK (((run_key !~~ 'recovery.rehearsal.%'::text) OR ((release_id IS NOT NULL) AND (environment = ANY (ARRAY['staging'::text, 'rehearsal'::text])) AND (evidence_ref IS NOT NULL) AND (recovery_strategy = ANY (ARRAY['rollback'::text, 'forward_fix'::text])) AND (recovery_plan_ref IS NOT NULL)))) NOT VALID;
+    ADD CONSTRAINT recovery_rehearsal_assurance CHECK (((run_key !~~ 'recovery.rehearsal.%'::text) OR ((release_id IS NOT NULL) AND (environment = 'staging'::text) AND (evidence_ref IS NOT NULL) AND (recovery_strategy = 'rollback'::text) AND (recovery_plan_ref IS NOT NULL) AND ((state <> 'succeeded'::text) OR (recovery_rehearsal_bundle_id IS NOT NULL))))) NOT VALID;
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_approval_sha256_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_approval_sha256_key UNIQUE (approval_sha256);
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_recovery_bundle_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_recovery_bundle_id_key UNIQUE (recovery_bundle_id);
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_recovery_run_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_recovery_run_id_key UNIQUE (recovery_run_id);
 
 
 --
@@ -17004,6 +17817,182 @@ ALTER TABLE ONLY ops.sourced_work_request_plan
 
 ALTER TABLE ONLY ops.sourced_work_request_plan
     ADD CONSTRAINT sourced_work_request_plan_work_request_id_plan_version_key UNIQUE (work_request_id, plan_version);
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_expected_provider_tag_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_attempt
+    ADD CONSTRAINT staging_deployment_attempt_expected_provider_tag_key UNIQUE (expected_provider_tag);
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_attempt
+    ADD CONSTRAINT staging_deployment_attempt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_attempt
+    ADD CONSTRAINT staging_deployment_attempt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_recovery_attempt_id_recovery_ste_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_attempt
+    ADD CONSTRAINT staging_deployment_attempt_recovery_attempt_id_recovery_ste_key UNIQUE (recovery_attempt_id, recovery_step);
+
+
+--
+-- Name: staging_deployment_claim staging_deployment_claim_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_claim
+    ADD CONSTRAINT staging_deployment_claim_pkey PRIMARY KEY (deployment_attempt_id);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bu_current_after_restore_receipt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bu_current_after_restore_receipt_key UNIQUE (current_after_restore_receipt_id);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bu_prior_after_rollback_receipt__key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bu_prior_after_rollback_receipt__key UNIQUE (prior_after_rollback_receipt_id);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_bundle_sha256_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_bundle_sha256_key UNIQUE (bundle_sha256);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_correlation_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_correlation_id_key UNIQUE (correlation_id);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_current_before_receipt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_current_before_receipt_id_key UNIQUE (current_before_receipt_id);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_recovery_attempt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_recovery_attempt_id_key UNIQUE (recovery_attempt_id);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_rece_recovery_attempt_id_recovery__key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_rece_recovery_attempt_id_recovery__key UNIQUE (recovery_attempt_id, recovery_step);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_deployment_attempt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_deployment_attempt_id_key UNIQUE (deployment_attempt_id);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_deployment_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_deployment_id_key UNIQUE (deployment_id);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_projection_sha256_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_projection_sha256_key UNIQUE (projection_sha256);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_provider_tag_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_provider_tag_key UNIQUE (provider_tag);
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_provider_version_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_provider_version_id_key UNIQUE (provider_version_id);
 
 
 --
@@ -18581,6 +19570,13 @@ CREATE INDEX provider_observation_latest_idx ON ops.provider_observation USING b
 
 
 --
+-- Name: release_approval_receipt_once; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX release_approval_receipt_once ON ops.release USING btree (approval_receipt_id) WHERE (approval_receipt_id IS NOT NULL);
+
+
+--
 -- Name: release_correlation_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -18620,6 +19616,13 @@ CREATE INDEX run_open_idx ON ops.run USING btree (state, observed_at DESC) WHERE
 --
 
 COMMENT ON INDEX ops.run_open_idx IS 'Partial on purpose: terminal runs accumulate forever and the common question is what is in flight or stuck.';
+
+
+--
+-- Name: run_recovery_rehearsal_bundle_once; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX run_recovery_rehearsal_bundle_once ON ops.run USING btree (recovery_rehearsal_bundle_id) WHERE (recovery_rehearsal_bundle_id IS NOT NULL);
 
 
 --
@@ -19668,6 +20671,20 @@ CREATE TRIGGER performance_receipt_requires_read_back BEFORE INSERT OR UPDATE OF
 
 
 --
+-- Name: release program5_release_approval_is_joe_owned; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER program5_release_approval_is_joe_owned BEFORE INSERT OR UPDATE OF state, approved_by_actor, approved_at, approval_expires_at, approval_receipt_id ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.program5_release_approval_is_joe_owned();
+
+
+--
+-- Name: release program5_release_verifier_is_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER program5_release_verifier_is_immutable BEFORE UPDATE OF verifier_actor, verifier_evidence_ref, state, approval_receipt_id, plan_hash ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.program5_release_verifier_is_immutable();
+
+
+--
 -- Name: program6_browser_action_challenge_redemption program6_browser_action_challenge_redemptions_immutable; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -19675,10 +20692,24 @@ CREATE TRIGGER program6_browser_action_challenge_redemptions_immutable BEFORE DE
 
 
 --
+-- Name: deployment protect_staging_readback_deployment; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER protect_staging_readback_deployment BEFORE DELETE OR UPDATE ON ops.deployment FOR EACH ROW EXECUTE FUNCTION ops.protect_staging_readback_deployment();
+
+
+--
 -- Name: provider_observation provider_observation_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
 CREATE TRIGGER provider_observation_append_only BEFORE DELETE OR UPDATE ON ops.provider_observation FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER release_approval_receipt_append_only BEFORE DELETE OR UPDATE ON ops.release_approval_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
 
 
 --
@@ -19692,7 +20723,7 @@ CREATE TRIGGER release_approval_requires_recovery_rehearsal BEFORE INSERT OR UPD
 -- Name: release release_assurance_immutable; Type: TRIGGER; Schema: ops; Owner: -
 --
 
-CREATE TRIGGER release_assurance_immutable BEFORE UPDATE OF performance_budget_ref, performance_budget_ms, recovery_strategy, rollback_ready, rollback_plan_ref, service_id, environment, git_sha, artifact_digest, dependency_lock_digest, config_fingerprint, schema_highest_migration, migration_set, plan_hash, state ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_assurance_is_immutable();
+CREATE TRIGGER release_assurance_immutable BEFORE UPDATE OF performance_budget_ref, performance_budget_ms, recovery_strategy, rollback_ready, rollback_plan_ref, service_id, environment, git_sha, artifact_digest, dependency_lock_digest, config_fingerprint, schema_highest_migration, schema_applied_count, schema_ledger_sha256, migration_set, plan_hash, state ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_assurance_is_immutable();
 
 
 --
@@ -19756,6 +20787,41 @@ CREATE TRIGGER sourced_work_request_plan_acceptance_immutable BEFORE DELETE OR U
 --
 
 CREATE TRIGGER sourced_work_request_plan_immutable BEFORE DELETE OR UPDATE ON ops.sourced_work_request_plan FOR EACH ROW EXECUTE FUNCTION ops.sourced_work_plan_rows_immutable();
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_deployment_attempt_append_only BEFORE DELETE OR UPDATE ON ops.staging_deployment_attempt FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_deployment_claim staging_deployment_claim_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_deployment_claim_append_only BEFORE DELETE OR UPDATE ON ops.staging_deployment_claim FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_bundle_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_recovery_bundle_append_only BEFORE DELETE OR UPDATE ON ops.staging_recovery_rehearsal_bundle FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_release_readback_append_only BEFORE DELETE OR UPDATE ON ops.staging_release_readback_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: run validate_recovery_rehearsal_run; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER validate_recovery_rehearsal_run BEFORE INSERT OR UPDATE OF recovery_rehearsal_bundle_id, release_id, service_id, environment, correlation_id, run_key, state, evidence_ref, recovery_strategy, recovery_plan_ref, started_at, ended_at ON ops.run FOR EACH ROW EXECUTE FUNCTION ops.validate_recovery_rehearsal_run();
 
 
 --
@@ -20615,6 +21681,38 @@ ALTER TABLE ONLY ops.provider_observation
 
 
 --
+-- Name: release release_approval_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT release_approval_receipt_id_fkey FOREIGN KEY (approval_receipt_id) REFERENCES ops.release_approval_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_recovery_bundle_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_recovery_bundle_id_fkey FOREIGN KEY (recovery_bundle_id) REFERENCES ops.staging_recovery_rehearsal_bundle(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_recovery_run_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_recovery_run_id_fkey FOREIGN KEY (recovery_run_id) REFERENCES ops.run(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: release_approval_receipt release_approval_receipt_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release_approval_receipt
+    ADD CONSTRAINT release_approval_receipt_release_id_fkey FOREIGN KEY (release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: release release_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -20692,6 +21790,14 @@ ALTER TABLE ONLY ops.rule_control_binding
 
 ALTER TABLE ONLY ops.rule_enforcement_point
     ADD CONSTRAINT rule_enforcement_point_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: run run_recovery_rehearsal_bundle_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.run
+    ADD CONSTRAINT run_recovery_rehearsal_bundle_id_fkey FOREIGN KEY (recovery_rehearsal_bundle_id) REFERENCES ops.staging_recovery_rehearsal_bundle(id) ON DELETE RESTRICT;
 
 
 --
@@ -20828,6 +21934,142 @@ ALTER TABLE ONLY ops.sourced_work_request_plan
 
 ALTER TABLE ONLY ops.sourced_work_request_plan
     ADD CONSTRAINT sourced_work_request_plan_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_observed_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_attempt
+    ADD CONSTRAINT staging_deployment_attempt_observed_release_id_fkey FOREIGN KEY (observed_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_prior_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_attempt
+    ADD CONSTRAINT staging_deployment_attempt_prior_release_id_fkey FOREIGN KEY (prior_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_rehearsal_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_attempt
+    ADD CONSTRAINT staging_deployment_attempt_rehearsal_release_id_fkey FOREIGN KEY (rehearsal_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_deployment_attempt staging_deployment_attempt_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_attempt
+    ADD CONSTRAINT staging_deployment_attempt_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_deployment_claim staging_deployment_claim_deployment_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_deployment_claim
+    ADD CONSTRAINT staging_deployment_claim_deployment_attempt_id_fkey FOREIGN KEY (deployment_attempt_id) REFERENCES ops.staging_deployment_attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bu_current_after_restore_receip_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bu_current_after_restore_receip_fkey FOREIGN KEY (current_after_restore_receipt_id) REFERENCES ops.staging_release_readback_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bu_prior_after_rollback_receipt_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bu_prior_after_rollback_receipt_fkey FOREIGN KEY (prior_after_rollback_receipt_id) REFERENCES ops.staging_release_readback_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundl_current_before_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundl_current_before_receipt_id_fkey FOREIGN KEY (current_before_receipt_id) REFERENCES ops.staging_release_readback_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_current_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_current_release_id_fkey FOREIGN KEY (current_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_prior_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_prior_release_id_fkey FOREIGN KEY (prior_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_deployment_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_deployment_attempt_id_fkey FOREIGN KEY (deployment_attempt_id) REFERENCES ops.staging_deployment_attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_deployment_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_deployment_id_fkey FOREIGN KEY (deployment_id) REFERENCES ops.deployment(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_observed_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_observed_release_id_fkey FOREIGN KEY (observed_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_prior_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_prior_release_id_fkey FOREIGN KEY (prior_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_rehearsal_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_rehearsal_release_id_fkey FOREIGN KEY (rehearsal_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_release_readback_receipt staging_release_readback_receipt_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_readback_receipt
+    ADD CONSTRAINT staging_release_readback_receipt_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
 
 
 --
@@ -22882,7 +24124,6 @@ ALTER TABLE ONLY public.vendor
 -- PostgreSQL database dump complete
 --
 
-
 --
 -- CARR GRANTS (bin/schema-snapshot.sh) — not produced by pg_dump.
 --
@@ -22900,6 +24141,8 @@ revoke all on function ops.activate_guidance_registry(p_registry_id uuid, p_mani
 revoke all on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) from public;
 revoke all on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
 revoke all on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
+revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) from public;
+revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) from public;
 revoke all on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.assert_guidance_import_inventory(p_batch_id uuid) from public;
 revoke all on function ops.assert_guidance_import_materialization(p_batch_id uuid) from public;
@@ -22908,6 +24151,7 @@ revoke all on function ops.authority_actor_slug() from public;
 revoke all on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
+revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
 revoke all on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) from public;
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
@@ -22925,6 +24169,8 @@ revoke all on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_le
 revoke all on function ops.invalidate_cognition_cache(p_dependency_ref text) from public;
 revoke all on function ops.invalidate_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_dependency_ref text) from public;
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
+revoke all on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) from public;
+revoke all on function ops.program5_migration_set_sha256(p_migration_set text[]) from public;
 revoke all on function ops.program6_browser_action_challenge_redemptions_immutable() from public;
 revoke all on function ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) from public;
 revoke all on function ops.propose_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_plan_hash text, p_criterion_results jsonb, p_evidence_refs jsonb, p_blocker_code text, p_result_summary text, p_observed_minutes integer, p_interaction_surface text, p_heavy_session_used boolean, p_manual_context_transfers integer, p_idempotency_key uuid) from public;
@@ -22938,6 +24184,7 @@ revoke all on function ops.record_guidance_decision(p_revision_id uuid, p_state 
 revoke all on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
 revoke all on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) from public;
+revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text, p_actor text) from public;
 revoke all on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) from public;
@@ -23081,6 +24328,10 @@ grant insert, select, update on table ops.provider_route to carr_writer;
 grant insert, select, update on table ops.release to carr_jobs;
 grant select on table ops.release to carr_reader;
 grant insert, select, update on table ops.release to carr_writer;
+grant select on table ops.release_approval_receipt to carr_authority;
+grant select on table ops.release_approval_receipt to carr_jobs;
+grant select on table ops.release_approval_receipt to carr_reader;
+grant select on table ops.release_approval_receipt to carr_writer;
 grant select on table ops.rule_admission to carr_jobs;
 grant select on table ops.rule_admission to carr_reader;
 grant insert, select, update on table ops.rule_admission to carr_writer;
@@ -23112,6 +24363,22 @@ grant insert, select, update on table ops.service_environment to carr_writer;
 grant insert, select on table ops.settings_change to carr_jobs;
 grant select on table ops.settings_change to carr_reader;
 grant insert, select on table ops.settings_change to carr_writer;
+grant select on table ops.staging_deployment_attempt to carr_authority;
+grant select on table ops.staging_deployment_attempt to carr_jobs;
+grant select on table ops.staging_deployment_attempt to carr_reader;
+grant select on table ops.staging_deployment_attempt to carr_writer;
+grant select on table ops.staging_deployment_claim to carr_authority;
+grant select on table ops.staging_deployment_claim to carr_jobs;
+grant select on table ops.staging_deployment_claim to carr_reader;
+grant select on table ops.staging_deployment_claim to carr_writer;
+grant select on table ops.staging_recovery_rehearsal_bundle to carr_authority;
+grant select on table ops.staging_recovery_rehearsal_bundle to carr_jobs;
+grant select on table ops.staging_recovery_rehearsal_bundle to carr_reader;
+grant select on table ops.staging_recovery_rehearsal_bundle to carr_writer;
+grant select on table ops.staging_release_readback_receipt to carr_authority;
+grant select on table ops.staging_release_readback_receipt to carr_jobs;
+grant select on table ops.staging_release_readback_receipt to carr_reader;
+grant select on table ops.staging_release_readback_receipt to carr_writer;
 grant select on table ops.v_capability_program_next to carr_jobs;
 grant select on table ops.v_capability_program_next to carr_reader;
 grant select on table ops.v_capability_program_next to carr_writer;
@@ -23557,11 +24824,14 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
 grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
+grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
 grant execute on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
@@ -23582,6 +24852,7 @@ grant execute on function ops.invalidate_cognition_cache(p_dependency_ref text) 
 grant execute on function ops.invalidate_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_dependency_ref text) to carr_jobs;
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_reader;
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_writer;
+grant execute on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) to carr_jobs;
 grant execute on function ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) to carr_writer;
 grant execute on function ops.propose_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_plan_hash text, p_criterion_results jsonb, p_evidence_refs jsonb, p_blocker_code text, p_result_summary text, p_observed_minutes integer, p_interaction_surface text, p_heavy_session_used boolean, p_manual_context_transfers integer, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.propose_sourced_work_request_plan(p_work_request text, p_base_version integer, p_scope_summary text, p_runbook_ref text, p_dependency_refs jsonb, p_recovery_ref text, p_observability_ref text, p_caps jsonb, p_idempotency_key uuid) to carr_writer;
@@ -23594,6 +24865,7 @@ grant execute on function ops.record_guidance_decision(p_revision_id uuid, p_sta
 grant execute on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
@@ -23623,12 +24895,9 @@ grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timest
 grant carr_authority to neondb_owner;
 grant carr_device_evidence to neondb_owner;
 grant carr_exporter to neondb_owner;
-grant carr_exporter to neondb_owner;
 grant carr_jobs to neondb_owner;
 grant carr_reader to carr_exporter;
 grant carr_reader to neondb_owner;
-grant carr_reader to neondb_owner;
-grant carr_writer to neondb_owner;
 grant carr_writer to neondb_owner;
 --
 -- PostgreSQL database dump
@@ -23842,6 +25111,9 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0193_session_work.sql	d2c4c868194cc5500bf9ee99ae749a505dac03bc607ed468b0e22f1c47c4e985	2026-08-20 15:09:00.711206+00
 0194_atomic_rule_approval.sql	14ab570195589b24baeb3706a21a93cabc523bc6e8e4dbb703b46d9dda3deeed	2026-08-20 15:09:02.331211+00
 0195_control_plane_cache_observations.sql	8a14afb37bc1f1d4d3cfb9f1e37f307e8db93452e85757e04da07c8dbd76c56f	2026-08-20 15:09:03.019187+00
+0199_guidance_standing_context_boundary.sql	76bb5327079abbdba667c22ac643a0ddadd0110dcdc46f1393c375304d59dff1	2026-08-21 02:00:42.190993+00
+0202_staging_release_readback_receipt.sql	526b9815897bdfb641329c506826afc230fb2bb76a8a67d59a347e2f7754fcb5	2026-08-21 02:00:42.212701+00
+0205_program5_approval_verifier.sql	02cb742f7be2c2d278704e9a58fa9626abc00323901adca9f2da5b539bfbd38a	2026-08-21 02:00:42.214891+00
 \.
 
 
@@ -24220,5 +25492,4 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
-
 
