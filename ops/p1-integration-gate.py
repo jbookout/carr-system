@@ -106,7 +106,13 @@ def neon(env: dict, *args: str) -> subprocess.CompletedProcess:
 
 
 def psql(conn_string: str, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["psql", conn_string, "-v", "ON_ERROR_STOP=1", *args],
+    # db_tap.psql_bin() rather than the bare name: it searches the Homebrew AND
+    # user-local prefixes and, when there is no client at all, refuses with a
+    # sentence naming the missing dependency. The bare name failed as
+    # FileNotFoundError from inside subprocess, which named neither. This is the
+    # lookup ops/p1-rebuild-gate.py already uses; the production-safety guards
+    # above stay a deliberate copy of that gate's, per this file's header.
+    return subprocess.run([db_tap.psql_bin(), conn_string, "-v", "ON_ERROR_STOP=1", *args],
                           capture_output=True, text=True, timeout=1800)
 
 
