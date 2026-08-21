@@ -57,9 +57,11 @@ if [ "$RECOVERY" -eq 1 ]; then
     echo "$(date -u +%FT%TZ) FAIL brief-pack recovery rc=$?" >> "$LOG"; rc=1
   fi
 else
-  # The weekday artifact consumes exactly these three canonical-safe sections.
-  # Do not ask for `all`: that includes prebriefs, whose only current source is
-  # the explicitly-recovery Drive ICS path and must keep refusing normal use.
+  # The weekday artifact consumes these three activated canonical-safe sections.
+  # Canonical prebrief reads are implemented, but their two sponsor-scoped
+  # producers remain disabled until the authority allowlists, scoped credentials,
+  # installed EventKit bridge and accepted end-to-end receipts exist. Scheduling
+  # the reader before that activation would turn missing data into a daily failure.
   brief_ok=1
   for section in one-thing claim-card renewal-shortlist; do
     if ./run.sh brief-pack --quiet --section "$section" >> "$LOG" 2>&1; then

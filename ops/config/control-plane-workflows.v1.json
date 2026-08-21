@@ -127,6 +127,28 @@
       "legacy_schedule": {"provider": "launchd", "status": "enabled", "disable_requires": "accepted shadow and isolated canary receipts plus native enabled-to-disabled readback"}
     },
     {
+      "key": "calendar-prebrief-projection-joe-daily", "version": 1, "enabled": false, "risk": "yellow",
+      "recurrence": {"cron": "30 6 * * 1-5", "timezone": "America/Chicago", "source": "disabled pending authority allowlist, installed EventKit permission, and sponsor-bound bridge; target before 06:45"},
+      "execution": {"kind": "deterministic", "entrypoint": "tools/calendar-prebrief-ingest.py", "args": ["--sponsor", "joe"], "shadow_args": [], "canary": {"enabled": false, "args": [], "reason": "no isolated destination is installed; definition remains disabled"}},
+      "state": {"owner": "ops.job", "initial": "queued"},
+      "inventory": {"trigger": "disabled; ops.job dispatcher is the future adapter, not an activation authority", "owner": "joe", "inputs": ["bounded local EventKit pipe snapshot", "installed sponsor allowlist"], "canonical_reads": ["local EventKit only"], "canonical_writes": ["calendar prebrief projection and receipt"], "external_dependencies": ["macOS EventKit permission", "installed 0600 allowlist", "sponsor-bound DB login"], "authority": "disabled until Joe approves the allowlist and installed bridge evidence", "current_completion_signal": "none while disabled", "replacement_program": "ops.job_definition:calendar-prebrief-projection-joe-daily:v1", "acceptance": "explicit authority approval plus installed EventKit permission and bridge readback", "retirement_approval": "not applicable"},
+      "routing": {"key": "facts.all_true", "spec": {"all_of": ["calendar.weekday", "calendar.eventkit_bundle_registered"]}, "description": "activation would require a weekday and registered EventKit access bundle"},
+      "filtering": {"key": "facts.all_true", "spec": {"all_of": ["command.registered_args_selected"]}, "description": "exact sponsor-bound adapter args only"}, "validation": {"key": "facts.all_true", "spec": {"all_of": ["command.exit_zero", "command.workflow_marker_valid"]}, "description": "adapter succeeds with its registered receipt marker"},
+      "retry": {"max_attempts": 2, "backoff": "exponential", "base_seconds": 60, "cap_seconds": 600, "timeout_seconds": 300}, "deduplication": {"key_template": "calendar-prebrief-projection-joe:{scheduled_for}"}, "completion": {"key": "facts.all_true", "spec": {"all_of": ["command.receipt_persisted"]}, "description": "receipt", "receipt_kind": "calendar_prebrief_projection"},
+      "legacy_schedule": {"provider": "none", "status": "disabled", "disable_requires": "no scheduler exists; explicit activation remains required"}
+    },
+    {
+      "key": "calendar-prebrief-projection-dell-daily", "version": 1, "enabled": false, "risk": "yellow",
+      "recurrence": {"cron": "30 6 * * 1-5", "timezone": "America/Chicago", "source": "disabled pending authority allowlist, installed EventKit permission, and sponsor-bound bridge; target before 06:45"},
+      "execution": {"kind": "deterministic", "entrypoint": "tools/calendar-prebrief-ingest.py", "args": ["--sponsor", "dell"], "shadow_args": [], "canary": {"enabled": false, "args": [], "reason": "no isolated destination is installed; definition remains disabled"}},
+      "state": {"owner": "ops.job", "initial": "queued"},
+      "inventory": {"trigger": "disabled; ops.job dispatcher is the future adapter, not an activation authority", "owner": "dell", "inputs": ["bounded local EventKit pipe snapshot", "installed sponsor allowlist"], "canonical_reads": ["local EventKit only"], "canonical_writes": ["calendar prebrief projection and receipt"], "external_dependencies": ["macOS EventKit permission", "installed 0600 allowlist", "sponsor-bound DB login"], "authority": "disabled until Joe approves the allowlist and installed bridge evidence", "current_completion_signal": "none while disabled", "replacement_program": "ops.job_definition:calendar-prebrief-projection-dell-daily:v1", "acceptance": "explicit authority approval plus installed EventKit permission and bridge readback", "retirement_approval": "not applicable"},
+      "routing": {"key": "facts.all_true", "spec": {"all_of": ["calendar.weekday", "calendar.eventkit_bundle_registered"]}, "description": "activation would require a weekday and registered EventKit access bundle"},
+      "filtering": {"key": "facts.all_true", "spec": {"all_of": ["command.registered_args_selected"]}, "description": "exact sponsor-bound adapter args only"}, "validation": {"key": "facts.all_true", "spec": {"all_of": ["command.exit_zero", "command.workflow_marker_valid"]}, "description": "adapter succeeds with its registered receipt marker"},
+      "retry": {"max_attempts": 2, "backoff": "exponential", "base_seconds": 60, "cap_seconds": 600, "timeout_seconds": 300}, "deduplication": {"key_template": "calendar-prebrief-projection-dell:{scheduled_for}"}, "completion": {"key": "facts.all_true", "spec": {"all_of": ["command.receipt_persisted"]}, "description": "receipt", "receipt_kind": "calendar_prebrief_projection"},
+      "legacy_schedule": {"provider": "none", "status": "disabled", "disable_requires": "no scheduler exists; explicit activation remains required"}
+    },
+    {
       "key": "cc-update-audit", "version": 1, "enabled": true, "risk": "green",
       "recurrence": {"cron": "45 9 * * 1", "timezone": "America/Chicago", "source": "services registry"},
       "execution": {"kind": "cognition", "cognition_job": "audit.proposal", "input_builder": "cc-release-diff"},
