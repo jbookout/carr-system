@@ -13,8 +13,9 @@ LOCAL_ACCEPTANCE = REPO / "ops" / "atomic-rule-approval-local-pg-acceptance.py"
 
 
 def main() -> int:
-    sql = (LEGACY_MIGRATION.read_text(encoding="utf-8")
-           + MIGRATION.read_text(encoding="utf-8")).lower()
+    forward_sql = MIGRATION.read_text(encoding="utf-8").lower()
+    catalog_seed = forward_sql.split("-- two joe-approved system rules", 1)[0]
+    sql = LEGACY_MIGRATION.read_text(encoding="utf-8").lower() + forward_sql
     tools = TOOLS.read_text(encoding="utf-8")
     gate = DB_GATE.read_text(encoding="utf-8")
     acceptance = LOCAL_ACCEPTANCE.read_text(encoding="utf-8")
@@ -74,6 +75,18 @@ def main() -> int:
     check("cost control is registered with implementation and tests",
           "platform_metering_pre_dispatch" in sql
           and "ops/platform-metering-gate-selftest.py" in sql)
+    check("forward catalog repair is additive and rejects drift before sync",
+          "insert into ops.enforcement_control_catalog" in catalog_seed
+          and "on conflict (control_key) do nothing" in catalog_seed
+          and "do update set" not in catalog_seed
+          and "migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js" in catalog_seed
+          and "lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py" in catalog_seed
+          and "0203 failed: control catalog does not match the two exact reviewed controls" in catalog_seed
+          and catalog_seed.index("on conflict (control_key) do nothing")
+              < catalog_seed.index("0203 failed: control catalog does not match the two exact reviewed controls")
+          and catalog_seed.index("0203 failed: control catalog does not match the two exact reviewed controls")
+              < forward_sql.index("create or replace function ops.sync_system_rule_control_bindings()")
+          and "forward control catalog restoration" in gate)
     check("Joe's existing governance and cost rules bind to distinct exact controls",
           "ae44e0c0-e773-456c-a85b-2dc4cf4dd49e" in sql
           and "9e02f7eee01220fd604ba97d605830ea903d3266f95b626a5ca5d9a73567c8f9" in sql
@@ -141,7 +154,7 @@ def main() -> int:
           and "mislabeled as unbreakable enforcement" in sql)
     check("migration invariants run before commit", sql.rfind("do $$") < sql.rfind("commit;"))
 
-    print(f"\natomic-rule-approval-selftest: {21-len(failures)}/21 passed")
+    print(f"\natomic-rule-approval-selftest: {22-len(failures)}/22 passed")
     return 1 if failures else 0
 
 

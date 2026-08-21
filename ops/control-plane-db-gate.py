@@ -348,6 +348,24 @@ def main() -> int:
             # A new rule cannot activate on prose alone.
             cur.execute("select id from actor where slug='joe'")
             actor = fetchone_required(cur.fetchone(), "Joe actor")[0]
+            # A snapshot carries 0194 in its migration ledger but historically
+            # omitted its mutable catalog seeds. 0203 must restore exactly the
+            # two reviewed global controls before attempting semantic binding.
+            cur.execute("""
+                select count(*) from ops.enforcement_control_catalog
+                 where (control_key='human_authority_runtime'
+                        and implementation_ref='migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js'
+                        and test_ref='mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py'
+                        and enforcement_class='transactional_schema'
+                        and installed and verified_at is not null)
+                    or (control_key='platform_metering_pre_dispatch'
+                        and implementation_ref='lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py'
+                        and test_ref='ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py'
+                        and enforcement_class='deny_gate'
+                        and installed and verified_at is not null)
+            """)
+            if fetchone_required(cur.fetchone(), "forward control catalog restoration")[0] != 2:
+                fail("0203 did not restore the two exact reviewed control catalog rows")
             # The exact spending rule and decision were captured before the
             # atomic approval architecture existed. Deployment must bind their
             # pinned preimages to the cost gate; a familiar UUID with different

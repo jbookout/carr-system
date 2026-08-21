@@ -4,6 +4,43 @@
 
 begin;
 
+-- db/schema deliberately records the deployed 0194 ledger entry but can omit
+-- mutable catalog seed rows. Reassert the reviewed control identities before
+-- the semantic binding sync; a stale/missing snapshot must not make 0203 fail
+-- merely because 0194 is correctly never replayed.
+insert into ops.enforcement_control_catalog
+  (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+values
+  ('human_authority_runtime',
+   'migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js',
+   'mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py',
+   'transactional_schema',true,now()),
+  ('platform_metering_pre_dispatch',
+   'lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py',
+   'ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py',
+   'deny_gate',true,now())
+on conflict (control_key) do nothing;
+
+-- The snapshot repair is additive only. A preexisting row is evidence, not
+-- migration-owned configuration: never overwrite or re-verify it. Instead
+-- stop before semantic sync unless both exact reviewed controls already match.
+do $$
+begin
+  if (select count(*) from ops.enforcement_control_catalog where
+        (control_key='human_authority_runtime'
+         and implementation_ref='migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js'
+         and test_ref='mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py'
+         and enforcement_class='transactional_schema'
+         and installed and verified_at is not null)
+     or (control_key='platform_metering_pre_dispatch'
+         and implementation_ref='lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py'
+         and test_ref='ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py'
+         and enforcement_class='deny_gate'
+         and installed and verified_at is not null)) <> 2 then
+    raise exception '0203 FAILED: control catalog does not match the two exact reviewed controls';
+  end if;
+end $$;
+
 -- Two Joe-approved system rules were captured before this enforcement
 -- architecture existed: sole system authority and permanent cost discipline.
 -- They are different rules backed by different decisions and controls. Pin
