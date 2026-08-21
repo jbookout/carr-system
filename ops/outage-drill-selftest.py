@@ -141,7 +141,7 @@ def tier1() -> None:
 
     # ── model-provider-unavailable: fully local, no network at all ──────────
     print("\n  drill: model-provider-unavailable (real fixture, no network)")
-    proc = run(["--only", "model-provider-unavailable"], timeout=60)
+    proc = run(["--only", "model-provider-unavailable"], timeout=DRILL_TIMEOUT)
     check("runs to completion", proc.returncode in (0, 1, 2), f"rc={proc.returncode}\n{proc.stdout[-800:]}")
     check("finds the system TRUTHFUL — no fabricated reply from a dead model",
           "TRUTHFUL:" in proc.stdout and "NOT TRUTHFUL" not in proc.stdout,
@@ -153,7 +153,7 @@ def tier1() -> None:
     # ── settings-change-db-outage: fully local, no staging credential needed
     #    for the drill's own mechanics (only the evidence write at the end) ──
     print("\n  drill: settings-change-db-outage (real fixture, genuinely unreachable DSN)")
-    proc = run(["--only", "settings-change-db-outage"], timeout=60)
+    proc = run(["--only", "settings-change-db-outage"], timeout=DRILL_TIMEOUT)
     check("runs to completion", proc.returncode in (0, 1, 2), f"rc={proc.returncode}\n{proc.stdout[-1000:]}")
     check("finds the system TRUTHFUL — never blocks, never hides the outage",
           "TRUTHFUL" in proc.stdout and "NOT TRUTHFUL" not in proc.stdout,
@@ -200,7 +200,7 @@ def tier1_recorder_contract() -> None:
         # durable deferral, and recorder_exit 0 is the honest report of it.
         proc = subprocess.run(
             [drill.RUN_SCHEDULED.__fspath__(), probe, run_key, "/bin/sh", "-c", "exit 0"],
-            capture_output=True, text=True, env=deferred_env, cwd=REPO, timeout=60)
+            capture_output=True, text=True, env=deferred_env, cwd=REPO, timeout=DRILL_TIMEOUT)
         line = drill._tail_provenance(run_key, probe)
         queued = drill._spool_rows(Path(deferred_env["CARR_RUN_SPOOL_DB"]), probe, run_key)
         check("state 1: the wrapped job's exit code is untouched",
@@ -220,7 +220,7 @@ def tier1_recorder_contract() -> None:
               broken_env["CARR_RUN_SPOOL_DB"])
         proc = subprocess.run(
             [drill.RUN_SCHEDULED.__fspath__(), probe, run_key, "/bin/sh", "-c", "exit 0"],
-            capture_output=True, text=True, env=broken_env, cwd=REPO, timeout=60)
+            capture_output=True, text=True, env=broken_env, cwd=REPO, timeout=DRILL_TIMEOUT)
         line = drill._tail_provenance(run_key, probe)
         check("state 2: the wrapped job's exit code is STILL untouched",
               proc.returncode == 0, f"rc={proc.returncode}")
@@ -252,7 +252,7 @@ def tier1_unreachable_staging_skips() -> None:
 
     print("\n  the unreachable-staging skip path")
     for name in ("record-layer-unreachable", "stale-observation"):
-        proc = run(["--only", name], timeout=60)
+        proc = run(["--only", name], timeout=DRILL_TIMEOUT)
         check(f"{name} exits 2 (skipped), never 0 and never a crash",
               proc.returncode == 2, f"rc={proc.returncode}\n{proc.stdout[-600:]}")
         check(f"{name} reports a skip rather than a verdict about the target",
@@ -279,19 +279,19 @@ def tier2() -> None:
               "drills below will SKIP rather than report a verdict.)")
 
     print("\n  drill: record-layer-unreachable")
-    proc = run(["--only", "record-layer-unreachable"], timeout=60)
+    proc = run(["--only", "record-layer-unreachable"], timeout=DRILL_TIMEOUT)
     check("runs to completion", proc.returncode in (0, 1, 2), f"rc={proc.returncode}\n{proc.stdout[-1500:]}")
     check("finds the system TRUTHFUL", "NOT TRUTHFUL" not in proc.stdout, proc.stdout[-1500:])
     check("restores and proves it: the probe is deregistered afterward",
           "probe service is fully deregistered afterward" in proc.stdout, proc.stdout[-1500:])
 
     print("\n  drill: stale-observation")
-    proc = run(["--only", "stale-observation"], timeout=60)
+    proc = run(["--only", "stale-observation"], timeout=DRILL_TIMEOUT)
     check("runs to completion", proc.returncode in (0, 1, 2), f"rc={proc.returncode}\n{proc.stdout[-1500:]}")
     check("finds the system TRUTHFUL", "NOT TRUTHFUL" not in proc.stdout, proc.stdout[-1500:])
 
     print("\n  drill: worker-unreachable (staging only, never production)")
-    proc = run(["--only", "worker-unreachable"], timeout=60)
+    proc = run(["--only", "worker-unreachable"], timeout=DRILL_TIMEOUT)
     check("runs to completion", proc.returncode in (0, 1, 2), f"rc={proc.returncode}\n{proc.stdout[-1500:]}")
     check("the local node --test fixture passes",
           "local fixture proves the committed correlation.js mechanism is correct" in proc.stdout,
@@ -300,6 +300,19 @@ def tier2() -> None:
           "fabricated" not in proc.stdout.lower() or "never a" in proc.stdout.lower(),
           proc.stdout[-1500:])
 
+
+# THE 60-SECOND BUDGET WAS TOO TIGHT, and it failed in the DEFAULT workflow.
+# Both drills below make REAL attempts against a genuinely unreachable database
+# and a dead model fixture, so their runtime is bounded by network and
+# subprocess timeouts rather than by compute. That total sits near 60s on the
+# canonical checkout and exceeds it from a git worktree, which is where sessions
+# are supposed to work. The symptom was ugly and non-obvious: a TimeoutExpired
+# traceback in the pre-push gates class, indistinguishable from a hang, blocking
+# the push of an unrelated one-line change. Measured 2026-08-21: same drill,
+# same machine, passes in ~70s canonical and exceeds 60s from a worktree.
+# 180s keeps the check meaningful (a real hang still fails) with margin for the
+# slower tree and for a machine running several sessions at once.
+DRILL_TIMEOUT = 180
 
 def main() -> int:
     print("outage-drill-selftest — bin/outage-drill.py must run every drill it "
