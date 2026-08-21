@@ -119,6 +119,37 @@ scoreboard, which the client already has.
 written at close because nothing has broken yet. **At pass 1, open the loop with `add-loop` so pass
 2 does not evaporate.**
 
+## Open the referral flywheel in the same pass
+
+Roughly seven in ten transactions here come from a referral, and until this was wired nothing asked
+for one on purpose — the ask happened when an agent remembered, which meant it happened after the
+good deals and not after the quiet ones. The full sequence, its wording and its reasoning live in
+the `client-care-drip` doctrine, section **"The referral and review flywheel (post-close), and what
+fires it."** Read it before opening the loops; what follows is only the trigger.
+
+At won, alongside the pass-2 loop above, open these with `add-loop`, each dated:
+
+1. **Testimonial ask** — dated one week after the benefit summary reaches the client. This is the
+   only NEW touch in the whole sequence; every other step rides a moment that already exists.
+2. **Google review ask** — dated two weeks after the testimonial. If the testimonial came back
+   empty, this one closes unstarted. It is never a fresh ask: it asks the client to put the words
+   they already wrote somewhere another doctor will find them.
+3. **Case-study capture** — dated to follow the 60-to-90-day check-in, and INTERNAL. Capture is not
+   publication: nothing from a closed deal reaches a newsletter, a post or a page without the
+   client's written yes, and whether there is a story at all is the marketing lane's call rather
+   than the closing agent's.
+
+**The referral ask itself gets no loop.** It lives at the end of the 60-to-90-day check-in call,
+after something on that call has been fixed or confirmed, and that call already has a loop.
+
+**Do NOT ask for a referral at the closing table**, and do not put a step here that does. That is
+the moment the client feels the most goodwill and has seen the least evidence — the lease is signed
+and nothing in it has been tested. An ask there buys a warm deflection and spends the introduction
+we would have earned ninety days later, once the allowance has actually paid.
+
+A client whose status goes cold or paused drops out of the sequence entirely, the same as every
+other cadence here. Nobody chases a testimonial.
+
 **The filled copy lives at** `DNA/Deal Management/post-mortems/<C-ID>-<LastName>-<yyyy-mm-dd>.md`,
 one file per deal, which is the collision-free shape under the DNA protocol. Cross-reference the
 C-ID; do not duplicate deal terms, since the record and the benefit summary already render them.
