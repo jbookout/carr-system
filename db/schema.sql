@@ -3592,10 +3592,122 @@ end $$;
 
 
 --
+-- Name: record_staging_release_readback(uuid, uuid, text, integer, text, integer, bigint); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare
+  existing ops.staging_release_readback_receipt%rowtype;
+  attempt ops.staging_deployment_attempt%rowtype;
+  current_release ops.release%rowtype;
+  prior_release ops.release%rowtype;
+  deployment_uuid uuid; receipt_uuid uuid; projection jsonb; projection_hash text;
+  receipt_ref text; observed_time timestamptz := clock_timestamp();
+begin
+  if session_user <> 'carr_jobs' then raise exception 'staging readback writer requires the carr_jobs session'; end if;
+  if p_idempotency_key is null or p_provider_version_id is null
+     or coalesce(p_provider_tag,'') !~ '^carr-staging-[a-z0-9-]{8,50}$'
+     or coalesce(p_verb_count,0)<=0
+     or coalesce(p_schema_highest_migration,'') !~ '^[0-9]{4}_[a-z0-9_.-]+\.sql$'
+     or coalesce(p_schema_applied_count,0)<=0 or coalesce(p_doctrine_generation,-1)<0 then
+    raise exception 'invalid typed staging readback input';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  select * into attempt from ops.staging_deployment_attempt where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'staging readback has no prepared deployment attempt'; end if;
+  if attempt.recovery_step <> 'prior' or attempt.recovery_attempt_id is null
+     or attempt.prior_release_id is null or attempt.observed_release_id is distinct from attempt.prior_release_id then
+    raise exception 'legacy staging readback is limited to the exact historical Production prior observation';
+  end if;
+  if not exists(select 1 from ops.legacy_prior_staging_readback_allowlist l
+                where l.idempotency_key=p_idempotency_key and l.deployment_attempt_id=attempt.id) then
+    raise exception 'legacy staging readback idempotency key was not captured at migration time';
+  end if;
+  if not exists(select 1 from ops.staging_deployment_claim where deployment_attempt_id=attempt.id) then
+    raise exception 'staging readback deployment attempt was never claimed'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(attempt.recovery_attempt_id::text,202));
+  select * into existing from ops.staging_release_readback_receipt where idempotency_key=p_idempotency_key;
+  if found then
+    if existing.deployment_attempt_id<>attempt.id
+       or (existing.git_sha,existing.provider_version_id,existing.provider_tag,existing.verb_count,
+           existing.schema_highest_migration,existing.schema_applied_count,existing.doctrine_generation,
+           existing.program6_actions_enabled) is distinct from
+          (attempt.git_sha,p_provider_version_id,p_provider_tag,p_verb_count,p_schema_highest_migration,
+           p_schema_applied_count,p_doctrine_generation,null::boolean) then
+      raise exception 'staging readback idempotency key was reused with changed input';
+    end if;
+    return jsonb_build_object('receipt_id',existing.id,'receipt_ref',existing.evidence_ref,'replayed',true,
+      'bundle_id',(select id from ops.staging_recovery_rehearsal_bundle where recovery_attempt_id=attempt.recovery_attempt_id),
+      'recovery_run_id',(select r.id from ops.run r join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id where b.recovery_attempt_id=attempt.recovery_attempt_id));
+  end if;
+  select * into strict current_release from ops.release where id=attempt.rehearsal_release_id;
+  select * into strict prior_release from ops.release where id=attempt.prior_release_id;
+  if prior_release.environment <> 'production' or prior_release.state <> 'complete' then
+    raise exception 'legacy staging readback requires a completed historical Production prior release'; end if;
+  if not exists(select 1 from ops.staging_release_readback_receipt before_receipt
+                where before_receipt.recovery_attempt_id=attempt.recovery_attempt_id
+                  and before_receipt.recovery_step='current_before'
+                  and before_receipt.rehearsal_release_id=current_release.id
+                  and before_receipt.observed_release_id=current_release.id
+                  and before_receipt.prior_release_id=prior_release.id) then
+    raise exception 'legacy staging readback prior requires its exact current_before receipt'; end if;
+  if attempt.declared_migration_set_sha256<>ops.program5_migration_set_sha256(current_release.migration_set)
+     or attempt.declared_migration_count<>cardinality(current_release.migration_set)
+     or attempt.declared_schema_highest_migration<>current_release.schema_highest_migration
+     or attempt.declared_schema_applied_count<>current_release.schema_applied_count
+     or attempt.declared_schema_ledger_sha256<>current_release.schema_ledger_sha256
+     or p_schema_highest_migration<>attempt.declared_schema_highest_migration
+     or p_schema_applied_count<>attempt.declared_schema_applied_count then
+    raise exception 'staging readback schema does not match the exact declared candidate migration set'; end if;
+  if p_provider_tag<>attempt.expected_provider_tag then raise exception 'staging readback provider tag does not match its prepared attempt'; end if;
+  projection:=jsonb_build_object(
+    'deployment_attempt_id',attempt.id,'correlation_id',attempt.correlation_id,'recovery_attempt_id',attempt.recovery_attempt_id,
+    'recovery_step',attempt.recovery_step,'rehearsal_release_id',current_release.id,'observed_release_id',prior_release.id,
+    'prior_release_id',attempt.prior_release_id,'service_id',current_release.service_id,'environment','staging','git_sha',attempt.git_sha,
+    'provider','cloudflare-workers','provider_version_id',p_provider_version_id,'provider_tag',p_provider_tag,
+    'verb_count',p_verb_count,'schema_highest_migration',p_schema_highest_migration,'schema_applied_count',p_schema_applied_count,
+    'declared_migration_set_sha256',attempt.declared_migration_set_sha256,'declared_migration_count',attempt.declared_migration_count,
+    'declared_schema_applied_count',attempt.declared_schema_applied_count,'declared_schema_ledger_sha256',attempt.declared_schema_ledger_sha256,
+    'doctrine_generation',p_doctrine_generation);
+  projection_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex'); receipt_ref:='ops.staging-release-readback:'||projection_hash;
+  insert into ops.deployment(correlation_id,service_id,environment,state,git_sha,provider,provider_version_id,release_id,deployed_by_actor,verb_count,schema_highest_migration,doctrine_generation,started_at,ended_at,read_back_at,verification_evidence_ref,source_kind,source_ref,observed_at)
+  values(attempt.correlation_id,current_release.service_id,'staging','complete',attempt.git_sha,'cloudflare-workers',p_provider_version_id::text,prior_release.id,session_user,p_verb_count,p_schema_highest_migration,p_doctrine_generation,observed_time,observed_time,observed_time,receipt_ref,'wrapper','bin/deploy-worker.sh',observed_time) returning id into deployment_uuid;
+  insert into ops.staging_release_readback_receipt(idempotency_key,deployment_attempt_id,recovery_attempt_id,recovery_step,correlation_id,deployment_id,rehearsal_release_id,observed_release_id,prior_release_id,service_id,environment,git_sha,provider,provider_version_id,provider_tag,verb_count,schema_highest_migration,schema_applied_count,declared_migration_set_sha256,declared_migration_count,declared_schema_applied_count,declared_schema_ledger_sha256,doctrine_generation,program6_actions_enabled,projection_sha256,evidence_ref,observed_at,writer_session_user)
+  values(p_idempotency_key,attempt.id,attempt.recovery_attempt_id,attempt.recovery_step,attempt.correlation_id,deployment_uuid,current_release.id,prior_release.id,attempt.prior_release_id,current_release.service_id,'staging',attempt.git_sha,'cloudflare-workers',p_provider_version_id,p_provider_tag,p_verb_count,p_schema_highest_migration,p_schema_applied_count,attempt.declared_migration_set_sha256,attempt.declared_migration_count,attempt.declared_schema_applied_count,attempt.declared_schema_ledger_sha256,p_doctrine_generation,null,projection_hash,receipt_ref,observed_time,session_user) returning id into receipt_uuid;
+  return jsonb_build_object('receipt_id',receipt_uuid,'receipt_ref',receipt_ref,'replayed',false,'bundle_id',null,'recovery_run_id',null);
+end $_$;
+
+
+--
 -- Name: record_staging_release_readback(uuid, uuid, text, integer, text, integer, bigint, boolean); Type: FUNCTION; Schema: ops; Owner: -
 --
 
 CREATE FUNCTION ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare legacy_posture boolean;
+begin
+  if session_user <> 'carr_jobs' then raise exception 'staging readback writer requires the carr_jobs session'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  select program6_actions_enabled into legacy_posture
+  from ops.staging_release_readback_receipt where idempotency_key=p_idempotency_key;
+  if found and legacy_posture is null then
+    raise exception 'Program 6 recorder cannot replay a legacy NULL-posture receipt';
+  end if;
+  return ops.record_staging_release_readback_program6(p_idempotency_key,p_provider_version_id,p_provider_tag,
+    p_verb_count,p_schema_highest_migration,p_schema_applied_count,p_doctrine_generation,p_program6_actions_enabled);
+end $$;
+
+
+--
+-- Name: record_staging_release_readback_program6(uuid, uuid, text, integer, text, integer, bigint, boolean); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_staging_release_readback_program6(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $_$
@@ -7061,6 +7173,17 @@ CREATE TABLE ops.job_receipt (
     evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT job_receipt_kind_check CHECK ((kind = ANY (ARRAY['completion'::text, 'failure'::text, 'timeout'::text, 'dead_letter'::text, 'approval'::text, 'override'::text])))
+);
+
+
+--
+-- Name: legacy_prior_staging_readback_allowlist; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.legacy_prior_staging_readback_allowlist (
+    idempotency_key uuid NOT NULL,
+    deployment_attempt_id uuid NOT NULL,
+    captured_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
 );
 
 
@@ -17302,6 +17425,22 @@ ALTER TABLE ONLY ops.job_receipt
 
 
 --
+-- Name: legacy_prior_staging_readback_allowlist legacy_prior_staging_readback_allowli_deployment_attempt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.legacy_prior_staging_readback_allowlist
+    ADD CONSTRAINT legacy_prior_staging_readback_allowli_deployment_attempt_id_key UNIQUE (deployment_attempt_id);
+
+
+--
+-- Name: legacy_prior_staging_readback_allowlist legacy_prior_staging_readback_allowlist_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.legacy_prior_staging_readback_allowlist
+    ADD CONSTRAINT legacy_prior_staging_readback_allowlist_pkey PRIMARY KEY (idempotency_key);
+
+
+--
 -- Name: legacy_schedule_disable_receipt legacy_schedule_disable_recei_workflow_key_workflow_version_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -21723,6 +21862,14 @@ ALTER TABLE ONLY ops.legacy_schedule_disable_receipt
 
 
 --
+-- Name: legacy_prior_staging_readback_allowlist legacy_prior_staging_readback_allowl_deployment_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.legacy_prior_staging_readback_allowlist
+    ADD CONSTRAINT legacy_prior_staging_readback_allowl_deployment_attempt_id_fkey FOREIGN KEY (deployment_attempt_id) REFERENCES ops.staging_deployment_attempt(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: legacy_schedule_disable_receipt legacy_schedule_disable_recei_workflow_key_workflow_versio_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -24316,7 +24463,9 @@ revoke all on function ops.record_guidance_decision(p_revision_id uuid, p_state 
 revoke all on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
 revoke all on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) from public;
+revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
+revoke all on function ops.record_staging_release_readback_program6(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text, p_actor text) from public;
 revoke all on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) from public;
@@ -25003,6 +25152,7 @@ grant execute on function ops.record_guidance_decision(p_revision_id uuid, p_sta
 grant execute on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -25256,6 +25406,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0215_program5_completion_hash_grant.sql	3fa71fc333056161670342c10d012216f1eab7fb83786afbbb8c131570c4344e	2026-08-21 10:27:38.693707+00
 0218_staging_readback_program6_posture.sql	28ee19228e1616a93a1287463cce2ac156c73bfc4a4040331fbd05be26e7ec3e	2026-08-21 11:14:51.880231+00
 0219_staging_release_approval_receipt.sql	5850057c0644d86a29353948367917021ef4eba54e011661857af7f549c6f5e8	2026-08-21 11:53:12.825284+00
+0222_legacy_prior_staging_readback.sql	cf953d7860aa08968052803e551e58c4ff9aa1d0318629335d4388ed5f0d468c	2026-08-21 12:39:44.592643+00
 \.
 
 

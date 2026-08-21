@@ -5,6 +5,7 @@
 // inspection; it never rewrites a query or generates answer text.
 
 import { personalScopeForActor } from "./identity.js";
+import { ToolError } from "./tool-error.js";
 
 const POLICIES = new Set(["lexical-dominant-v1", "coequal-normalized-v1"]);
 
@@ -113,7 +114,7 @@ async function insertProposal(c, actor, args, proposalType, payload) {
 export async function retrievalVisibilityActorId(c, actor) {
   const scope = personalScopeForActor(actor);
   if (scope.status === "error")
-    throw new Error(`retrieval_scope_refused:${scope.error}`);
+    throw new ToolError({ error: "retrieval_scope_refused", reason: scope.error });
   if (scope.status === "none") return null;
 
   // The runtime actor and the human whose personal brain it may read are
@@ -124,8 +125,15 @@ export async function retrievalVisibilityActorId(c, actor) {
     `select id from actor where slug=$1 and kind='human' and active=true`,
     [scope.sponsor],
   );
+  // Names the row count, because 0 and 2 are different production faults and a
+  // bare throw made both arrive as "internal error" with nothing to act on.
   if (found.rows.length !== 1)
-    throw new Error("retrieval_scope_refused:sponsor_not_active_human");
+    throw new ToolError({
+      error: "retrieval_scope_refused",
+      reason: "sponsor_not_active_human",
+      sponsor: scope.sponsor,
+      matching_rows: found.rows.length,
+    });
   return found.rows[0].id;
 }
 
