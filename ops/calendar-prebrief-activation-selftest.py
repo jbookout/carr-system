@@ -17,7 +17,7 @@ def refuses(fn):
 def dsn(user): return f"postgresql://{user}:fixture@db.example/carr?sslmode=verify-full&sslrootcert=/etc/ssl/carr-root.pem&channel_binding=require" # ci-secret-scan: allow
 with tempfile.TemporaryDirectory() as raw:
  root=Path(raw); env=root/"prebrief.env"
- values={"CARR_DB_AUTHORITY_JOE_URL":dsn("carr_authority_joe"),"CARR_DB_AUTHORITY_DELL_URL":dsn("carr_authority_dell"),"CARR_DB_CALENDAR_PREBRIEF_DEVICE_JOE_URL":dsn("carr_calendar_prebrief_device_joe"),"CARR_DB_CALENDAR_PREBRIEF_DEVICE_DELL_URL":dsn("carr_calendar_prebrief_device_dell"),"CARR_DB_CALENDAR_PREBRIEF_JOE_URL":dsn("carr_calendar_prebrief_joe"),"CARR_DB_CALENDAR_PREBRIEF_DELL_URL":dsn("carr_calendar_prebrief_dell"),"CARR_DB_JOBS_URL":dsn("carr_jobs")}
+ values={"CARR_DB_AUTHORITY_JOE_URL":dsn("carr_authority_joe"),"CARR_DB_AUTHORITY_DELL_URL":dsn("carr_authority_dell"),"CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_JOE_URL":dsn("carr_calendar_prebrief_attestor_joe"),"CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_DELL_URL":dsn("carr_calendar_prebrief_attestor_dell"),"CARR_DB_CALENDAR_PREBRIEF_RESOLVER_JOE_URL":dsn("carr_calendar_prebrief_resolver_joe"),"CARR_DB_CALENDAR_PREBRIEF_RESOLVER_DELL_URL":dsn("carr_calendar_prebrief_resolver_dell"),"CARR_DB_CALENDAR_PREBRIEF_JOE_URL":dsn("carr_calendar_prebrief_joe"),"CARR_DB_CALENDAR_PREBRIEF_DELL_URL":dsn("carr_calendar_prebrief_dell"),"CARR_DB_JOBS_URL":dsn("carr_jobs")}
  env.write_text("\n".join(f"{k}='{v}'" for k,v in values.items())+"\n"); env.chmod(0o600)
  parsed=mod.load_scoped_env(env,{})
  check("secure exact scoped env is admitted",set(parsed)==set(values))
@@ -32,6 +32,23 @@ with tempfile.TemporaryDirectory() as raw:
   def __enter__(self): return self
   def __exit__(self,*_): return False
  check("identity probe requires exact login and capability",mod.probe_scoped_identity("CARR_DB_CALENDAR_PREBRIEF_JOE_URL",values["CARR_DB_CALENDAR_PREBRIEF_JOE_URL"],lambda _:ProbeConn()))
+ class PreflightCur:
+  def __init__(self,user): self.user=user; self.query=""
+  def execute(self,q,*_): self.query=q
+  def fetchone(self): return (self.user,self.user) if "session_user,current_user" in self.query else (True,)
+  def __enter__(self): return self
+  def __exit__(self,*_): return False
+ class PreflightConn:
+  def __init__(self,user): self.user=user
+  def cursor(self): return PreflightCur(self.user)
+  def __enter__(self): return self
+  def __exit__(self,*_): return False
+ probes=[]
+ def connect_preflight(value):
+  probes.append(value)
+  user=value.split("://",1)[1].split(":",1)[0]
+  return PreflightConn(user)
+ check("preflight proves every identity before reporting ready",mod.preflight(parsed,connect_preflight)["ok"] and len(probes)==len(values))
  check("URI rejects host/query service override",not mod.strict_uri("postgresql://carr_jobs:x@db/carr?sslmode=verify-full&sslrootcert=/etc/root&host=evil", "carr_jobs")) # ci-secret-scan: allow
  check("URI requires verify-full and root trust",not mod.strict_uri("postgresql://carr_jobs:x@db/carr?sslmode=require&sslrootcert=/etc/root", "carr_jobs")) # ci-secret-scan: allow
  check("ambient broad credential refuses",refuses(lambda:mod.load_scoped_env(env,{"DATABASE_URL":"x"})))

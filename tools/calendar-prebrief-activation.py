@@ -13,14 +13,18 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 REPO=Path(__file__).resolve().parent.parent
 SPECS={
  "CARR_DB_AUTHORITY_JOE_URL":"carr_authority_joe", "CARR_DB_AUTHORITY_DELL_URL":"carr_authority_dell",
- "CARR_DB_CALENDAR_PREBRIEF_DEVICE_JOE_URL":"carr_calendar_prebrief_device_joe",
- "CARR_DB_CALENDAR_PREBRIEF_DEVICE_DELL_URL":"carr_calendar_prebrief_device_dell",
+ "CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_JOE_URL":"carr_calendar_prebrief_attestor_joe",
+ "CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_DELL_URL":"carr_calendar_prebrief_attestor_dell",
+ "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_JOE_URL":"carr_calendar_prebrief_resolver_joe",
+ "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_DELL_URL":"carr_calendar_prebrief_resolver_dell",
  "CARR_DB_CALENDAR_PREBRIEF_JOE_URL":"carr_calendar_prebrief_joe",
  "CARR_DB_CALENDAR_PREBRIEF_DELL_URL":"carr_calendar_prebrief_dell", "CARR_DB_JOBS_URL":"carr_jobs"}
 BROAD={"DATABASE_URL","CARR_DB_WRITER_URL","CARR_DB_OWNER_URL","CARR_DB_READER_URL","CARR_DB_EXPORTER_URL","CARR_DB_BACKUP_URL","CARR_DB_DEVICE_URL","CARR_DB_AUTHORITY_URL"}
 CAPABILITY={"CARR_DB_AUTHORITY_JOE_URL":"carr_authority","CARR_DB_AUTHORITY_DELL_URL":"carr_authority",
- "CARR_DB_CALENDAR_PREBRIEF_DEVICE_JOE_URL":"carr_calendar_prebrief_devices,carr_calendar_prebrief_email_resolver",
- "CARR_DB_CALENDAR_PREBRIEF_DEVICE_DELL_URL":"carr_calendar_prebrief_devices,carr_calendar_prebrief_email_resolver",
+ "CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_JOE_URL":"carr_calendar_prebrief_attestors",
+ "CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_DELL_URL":"carr_calendar_prebrief_attestors",
+ "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_JOE_URL":"carr_calendar_prebrief_email_resolver",
+ "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_DELL_URL":"carr_calendar_prebrief_email_resolver",
  "CARR_DB_CALENDAR_PREBRIEF_JOE_URL":"carr_calendar_prebrief_jobs","CARR_DB_CALENDAR_PREBRIEF_DELL_URL":"carr_calendar_prebrief_jobs",
  "CARR_DB_JOBS_URL":"carr_jobs"}
 class Refusal(RuntimeError): pass
@@ -56,14 +60,22 @@ def load_scoped_env(path:Path,environ:Mapping[str,str]|None=None)->dict[str,str]
 def probe_scoped_identity(key:str, dsn:str, connect:Callable[[str],Any])->bool:
  """Read-only exact login/current-role/capability proof; values never escape."""
  if key not in SPECS or not strict_uri(dsn,SPECS[key]): raise Refusal("scoped credential shape refused")
- with connect(dsn) as conn, conn.cursor() as cur:
-  cur.execute("begin transaction read only")
-  cur.execute("select session_user,current_user"); identity=cur.fetchone()
-  if tuple(identity or ()) != (SPECS[key],SPECS[key]): raise Refusal("scoped database identity mismatch")
-  for role in CAPABILITY[key].split(","):
-   cur.execute("select pg_has_role(current_user,%s,'member')",(role,)); row=cur.fetchone()
-   if tuple(row or ()) != (True,): raise Refusal("scoped database capability membership mismatch")
+ try:
+  with connect(dsn) as conn, conn.cursor() as cur:
+   cur.execute("begin transaction read only")
+   cur.execute("select session_user,current_user"); identity=cur.fetchone()
+   if tuple(identity or ()) != (SPECS[key],SPECS[key]): raise Refusal("scoped database identity mismatch")
+   for role in CAPABILITY[key].split(","):
+    cur.execute("select pg_has_role(current_user,%s,'member')",(role,)); row=cur.fetchone()
+    if tuple(row or ()) != (True,): raise Refusal("scoped database capability membership mismatch")
+ except Refusal: raise
+ except Exception as e: raise Refusal("scoped database identity probe failed") from e
  return True
+
+def preflight(env:Mapping[str,str],connect:Callable[[str],Any])->dict[str,Any]:
+ """Prove every supplied scoped credential before declaring activation ready."""
+ for key in sorted(SPECS): probe_scoped_identity(key,env[key],connect)
+ return {"ok":True,"identities":sorted(SPECS)}
 
 def _eventkit():
  spec=importlib.util.spec_from_file_location("calendar_prebrief_eventkit",REPO/"tools/calendar-prebrief-eventkit.py"); assert spec and spec.loader
@@ -94,7 +106,11 @@ def main()->int:
  p=argparse.ArgumentParser(description=__doc__); p.add_argument("--env-file",type=Path,required=True); sub=p.add_subparsers(dest="cmd",required=True); sub.add_parser("preflight"); r=sub.add_parser("register-allowlist"); r.add_argument("--sponsor",required=True,choices=["joe","dell"]); r.add_argument("--allowlist",required=True,type=Path); a=p.parse_args()
  try:
   env=load_scoped_env(a.env_file,{k:v for k,v in os.environ.items() if k in BROAD or k.startswith("PG")})
-  out={"ok":True,"identities":sorted(SPECS)} if a.cmd=="preflight" else register_allowlist(a.sponsor,a.allowlist,env)
+  if a.cmd=="preflight":
+   try: import psycopg
+   except ImportError as e: raise Refusal("psycopg is required") from e
+   out=preflight(env,psycopg.connect)
+  else: out=register_allowlist(a.sponsor,a.allowlist,env)
   print(json.dumps(out,sort_keys=True)); return 0
  except Refusal as e: print(f"calendar prebrief activation: REFUSE {e}",file=__import__('sys').stderr); return 78
 if __name__=="__main__": raise SystemExit(main())
