@@ -6,7 +6,7 @@ ROOT=Path(__file__).resolve().parents[1]; failed: list[str]=[]
 def check(label,ok):
  print(('  ok  ' if ok else '  FAIL ')+label)
  if not ok: failed.append(label)
-child=(ROOT/'tools/calendar-canary-result.py').read_text(); runner=(ROOT/'tools/control-plane.py').read_text(); capture=(ROOT/'bin/calendar-eventkit-capture.sh').read_text(); sql=(ROOT/'migrations/0220_calendar_canary_record_layer.sql').read_text()
+child=(ROOT/'tools/calendar-canary-result.py').read_text(); runner=(ROOT/'tools/control-plane.py').read_text(); capture=(ROOT/'bin/calendar-eventkit-capture.sh').read_text(); sql=(ROOT/'migrations/0223_calendar_canary_record_layer.sql').read_text()
 check('child emits only typed aggregate and has no database seam','psycopg' not in child and 'CARR_DB_' not in child and 'canary-result' in child)
 check('parent alone parses and mints exact receipt','_calendar_canary_aggregate' in runner and 'record_calendar_canary_receipt' in runner and 'resolve_calendar_canary_receipt' in runner)
 check('receipt binds exact job-definition lease, Calendar v5 deterministic canary and attempt','p_lease uuid' in sql and 'from ops.job_definition where key=j.definition_key and version=j.definition_version' in sql and "k<>'deterministic'" in sql and "j.mode<>'canary'" in sql and 'unique(job_id,attempt)' in sql)

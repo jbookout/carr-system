@@ -63,11 +63,11 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # and not the other makes its own grants report as strays.
 #
 # carr_calendar_prebrief_jobs, carr_calendar_prebrief_attestors, and
-# carr_calendar_prebrief_email_resolver are known here while 0223 remains pending. The
+# carr_calendar_prebrief_email_resolver are known here while 0226 remains pending. The
 # generator deliberately excludes it from its active catalog query and role
-# preamble so the current snapshot cannot leak a 0223 artifact.
+# preamble so the current snapshot cannot leak a 0226 artifact.
 # Move it into APP_ROLES and the generator together on the snapshot refresh
-# that records 0223 as applied.
+# that records 0226 as applied.
 PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
                         "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver"]
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",

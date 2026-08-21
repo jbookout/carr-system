@@ -1,4 +1,4 @@
--- 0224_renewal_decision_delivery.sql — safe, record-native renewal delivery.
+-- 0227_renewal_decision_delivery.sql — safe, record-native renewal delivery.
 --
 -- A mutable candidate_pool.updated_at is not evidence that the renewal source
 -- completed.  The queue therefore reads only rows bound to the latest immutable,
@@ -172,19 +172,19 @@ do $$
 declare forbidden text[] := array['id','pool_id','source_key','source_row','email','phone','address'];
 begin
   if exists (select 1 from information_schema.columns where table_schema='public' and table_name='v_renewal_decision_queue' and column_name=any(forbidden)) then
-    raise exception '0224 FAILED: renewal decision queue exposes a prohibited raw field';
+    raise exception '0227 FAILED: renewal decision queue exposes a prohibited raw field';
   end if;
   if not has_table_privilege('carr_reader','v_renewal_decision_queue','select')
      or not has_table_privilege('carr_reader','v_renewal_decision_queue_status','select')
      or has_table_privilege('carr_reader','candidate_pool','select')
      or has_table_privilege('carr_reader','v_export_pool','select') then
-    raise exception '0224 FAILED: renewal reader grant boundary is wrong';
+    raise exception '0227 FAILED: renewal reader grant boundary is wrong';
   end if;
   if has_table_privilege('carr_reader','ops.renewal_decision_source_run','select')
      or has_table_privilege('carr_reader','ops.renewal_decision_source_run_member','select')
      or has_table_privilege('carr_jobs','ops.renewal_decision_source_run','select')
      or has_table_privilege('carr_jobs','ops.renewal_decision_source_run_member','select') then
-    raise exception '0224 FAILED: renewal source-run base tables leaked';
+    raise exception '0227 FAILED: renewal source-run base tables leaked';
   end if;
 end $$;
 

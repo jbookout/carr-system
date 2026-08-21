@@ -1,4 +1,4 @@
--- 0221_nightly_availability_canary_record_layer.sql
+-- 0224_nightly_availability_canary_record_layer.sql
 -- The Nightly canary is deliberately one read-only availability-matcher
 -- subchain.  It receives a DB-minted snapshot through the parent, never a DB
 -- URL or caller-authored JSON, and records only a lease-bound aggregate.
