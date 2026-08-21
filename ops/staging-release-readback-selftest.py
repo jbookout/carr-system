@@ -18,9 +18,11 @@ mod = importlib.util.module_from_spec(spec)
 assert spec.loader
 spec.loader.exec_module(mod)
 ops_source = (ROOT / "tools" / "ops-record.py").read_text()
-assert 'connection_kind = "authority" if args.action == "approve" else "write"' in ops_source
+assert 'args.action in ("approve", "staging-approve")' in ops_source
 assert "approved_by_actor = %s" not in ops_source
 assert "ops.approve_program5_release" in ops_source
+assert "ops.approve_staging_release" in ops_source
+assert '"staging-approve"' in ops_source
 for marker in ("os.lstat", "os.open", "os.fstat", "O_NOFOLLOW",
                "MAX_RELEASE_BODY_BYTES + 1", "st_nlink != 1"):
     assert marker in ops_source, marker

@@ -973,6 +973,76 @@ end $$;
 
 
 --
+-- Name: approve_staging_release(text, text, uuid, integer, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  actor_slug text; rel ops.release%rowtype; existing ops.staging_release_approval_receipt%rowtype;
+  approved_time timestamptz; expiry_time timestamptz; projection jsonb; approval_hash text;
+  approval_ref text; approval_uuid uuid; verifier_actor_value text; verifier_evidence_value text;
+begin
+  actor_slug:=ops.authority_actor_slug();
+  if session_user<>'carr_authority_joe' or actor_slug<>'joe' then
+    raise exception 'staging approval requires Joe authority';
+  end if;
+  if p_idempotency_key is null or coalesce(p_release_key,'')='' or coalesce(p_plan_hash,'')=''
+     or coalesce(p_expires_hours,0) not between 1 and 24
+     or coalesce(btrim(p_verifier_actor),'')='' or coalesce(btrim(p_verifier_evidence_ref),'')='' then
+    raise exception 'invalid typed staging approval input';
+  end if;
+  verifier_actor_value:=lower(btrim(p_verifier_actor));
+  verifier_evidence_value:=btrim(p_verifier_evidence_ref);
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,219));
+  select * into existing from ops.staging_release_approval_receipt where idempotency_key=p_idempotency_key;
+  if found then
+    if existing.plan_hash<>p_plan_hash
+       or existing.approval_expires_at-existing.approved_at<>make_interval(hours=>p_expires_hours)
+       or existing.verifier_actor<>verifier_actor_value or existing.verifier_evidence_ref<>verifier_evidence_value
+       or not exists (select 1 from ops.release where id=existing.release_id and release_key=p_release_key
+                        and environment='staging' and plan_hash=existing.plan_hash
+                        and state in ('approved','deploying','verifying','complete')
+                        and approved_by_actor='joe' and approved_at=existing.approved_at
+                        and approval_expires_at=existing.approval_expires_at
+                        and staging_approval_receipt_id=existing.id
+                        and verifier_actor=existing.verifier_actor
+                        and verifier_evidence_ref=existing.verifier_evidence_ref) then
+      raise exception 'staging approval idempotency key was reused with changed input';
+    end if;
+    return jsonb_build_object('approval_receipt_id',existing.id,'approval_ref',existing.evidence_ref,
+      'approval_expires_at',existing.approval_expires_at,'replayed',true);
+  end if;
+  select * into rel from ops.release where release_key=p_release_key for update;
+  if not found or rel.environment<>'staging' or rel.state<>'candidate'
+     or rel.plan_hash is distinct from p_plan_hash or rel.rollback_ready is not true
+     or coalesce(btrim(rel.rollback_plan_ref),'')='' then
+    raise exception 'release is not the exact rollback-ready staging candidate plan requested';
+  end if;
+  if rel.maker_actor is not null and verifier_actor_value=lower(btrim(rel.maker_actor)) then
+    raise exception 'maker cannot independently verify their own staging release';
+  end if;
+  approved_time:=clock_timestamp(); expiry_time:=approved_time+make_interval(hours=>p_expires_hours);
+  projection:=jsonb_build_object('release_id',rel.id,'environment','staging','plan_hash',rel.plan_hash,'approved_by_actor',actor_slug,
+    'approved_at',approved_time,'approval_expires_at',expiry_time,'verifier_actor',verifier_actor_value,
+    'verifier_evidence_ref',verifier_evidence_value);
+  approval_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
+  approval_ref:='ops.staging-release-approval:'||approval_hash;
+  insert into ops.staging_release_approval_receipt(idempotency_key,release_id,plan_hash,approved_by_actor,
+    approved_at,approval_expires_at,verifier_actor,verifier_evidence_ref,approval_sha256,evidence_ref)
+  values(p_idempotency_key,rel.id,rel.plan_hash,actor_slug,approved_time,expiry_time,verifier_actor_value,
+    verifier_evidence_value,approval_hash,approval_ref) returning id into approval_uuid;
+  update ops.release set state='approved',approved_by_actor=actor_slug,approved_at=approved_time,
+    approval_expires_at=expiry_time,verifier_actor=verifier_actor_value,
+    verifier_evidence_ref=verifier_evidence_value,staging_approval_receipt_id=approval_uuid where id=rel.id;
+  return jsonb_build_object('approval_receipt_id',approval_uuid,'approval_ref',approval_ref,
+    'approval_expires_at',expiry_time,'replayed',false);
+end $$;
+
+
+--
 -- Name: assert_guidance_import_inventory(uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3823,6 +3893,16 @@ end $$;
 
 
 --
+-- Name: refuse_staging_release_approval_mutation(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_staging_release_approval_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin raise exception 'staging release approval evidence is append-only'; end $$;
+
+
+--
 -- Name: release_approval_requires_recovery_rehearsal(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -4474,6 +4554,62 @@ begin
   perform ops.assert_guidance_import_inventory(v_batch_id);
   return v_batch_id;
 end $_$;
+
+
+--
+-- Name: staging_release_approval_is_typed(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.staging_release_approval_is_typed() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare receipt ops.staging_release_approval_receipt%rowtype;
+begin
+  if tg_op='UPDATE' and old.environment='staging'
+     and old.state in ('approved','deploying','verifying','complete')
+     and new.environment is distinct from old.environment then
+    raise exception 'promoted staging release environment is immutable';
+  end if;
+  if new.environment<>'staging' or new.state not in ('approved','deploying','verifying','complete') then return new; end if;
+  if new.staging_approval_receipt_id is null then raise exception 'staging promoted release requires its typed approval receipt'; end if;
+  select * into receipt from ops.staging_release_approval_receipt where id=new.staging_approval_receipt_id;
+  if not found or receipt.release_id<>new.id or receipt.plan_hash<>new.plan_hash
+     or receipt.approved_by_actor<>'joe' or new.approved_by_actor<>receipt.approved_by_actor
+     or new.approved_at<>receipt.approved_at or new.approval_expires_at<>receipt.approval_expires_at
+     or new.verifier_actor<>receipt.verifier_actor or new.verifier_evidence_ref<>receipt.verifier_evidence_ref then
+    raise exception 'staging promoted release does not match its typed approval receipt';
+  end if;
+  if tg_op='UPDATE' and old.state in ('approved','deploying','verifying','complete')
+     and (new.staging_approval_receipt_id,new.approved_by_actor,new.approved_at,new.approval_expires_at,
+          new.verifier_actor,new.verifier_evidence_ref) is distinct from
+         (old.staging_approval_receipt_id,old.approved_by_actor,old.approved_at,old.approval_expires_at,
+          old.verifier_actor,old.verifier_evidence_ref) then
+    raise exception 'staging approval projection is immutable across promoted states';
+  end if;
+  if (tg_op='INSERT' or old.state not in ('approved','deploying','verifying','complete'))
+     and session_user<>'carr_authority_joe' then raise exception 'staging approval requires Joe authority'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: staging_release_plan_revision_invalidates_approval(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.staging_release_plan_revision_invalidates_approval() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if old.environment='staging' and old.plan_hash is distinct from new.plan_hash
+     and old.state='complete' then raise exception 'complete staging release plan is immutable';
+  end if;
+  if old.environment='staging' and old.plan_hash is distinct from new.plan_hash
+     and old.state in ('approved','deploying','verifying') then
+    new.state:='candidate'; new.approved_by_actor:=null; new.approved_at:=null;
+    new.approval_expires_at:=null; new.staging_approval_receipt_id:=null;
+  end if;
+  return new;
+end $$;
 
 
 --
@@ -7193,6 +7329,7 @@ CREATE TABLE ops.release (
     schema_applied_count integer,
     schema_ledger_sha256 text,
     approval_receipt_id uuid,
+    staging_approval_receipt_id uuid,
     CONSTRAINT a_failed_release_names_its_class CHECK (((state <> 'failed'::text) OR (failure_class IS NOT NULL))),
     CONSTRAINT a_superseded_release_names_its_successor CHECK (((state <> 'superseded'::text) OR (superseded_by IS NOT NULL))),
     CONSTRAINT a_terminal_release_has_ended CHECK (((state <> ALL (ARRAY['complete'::text, 'failed'::text, 'abandoned'::text, 'superseded'::text])) OR (ended_at IS NOT NULL))),
@@ -7796,6 +7933,31 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     CONSTRAINT staging_recovery_rehearsal_bundle_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-recovery-bundle:sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_recovery_rehearsal_bundle_recovery_strategy_check CHECK ((recovery_strategy = 'rollback'::text)),
     CONSTRAINT staging_recovery_rehearsal_bundle_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_release_approval_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_release_approval_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    release_id uuid NOT NULL,
+    plan_hash text NOT NULL,
+    approved_by_actor text NOT NULL,
+    approved_at timestamp with time zone NOT NULL,
+    approval_expires_at timestamp with time zone NOT NULL,
+    verifier_actor text NOT NULL,
+    verifier_evidence_ref text NOT NULL,
+    approval_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    CONSTRAINT staging_release_approval_receipt_approval_sha256_check CHECK ((approval_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_release_approval_receipt_approved_by_actor_check CHECK ((approved_by_actor = 'joe'::text)),
+    CONSTRAINT staging_release_approval_receipt_check CHECK ((approval_expires_at > approved_at)),
+    CONSTRAINT staging_release_approval_receipt_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-release-approval:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_release_approval_receipt_verifier_actor_check CHECK (((verifier_actor = lower(btrim(verifier_actor))) AND (btrim(verifier_actor) <> ''::text))),
+    CONSTRAINT staging_release_approval_receipt_verifier_evidence_ref_check CHECK (((verifier_evidence_ref = btrim(verifier_evidence_ref)) AND (btrim(verifier_evidence_ref) <> ''::text)))
 );
 
 
@@ -17816,6 +17978,38 @@ ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
 
 
 --
+-- Name: staging_release_approval_receipt staging_release_approval_receipt_approval_sha256_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_approval_receipt
+    ADD CONSTRAINT staging_release_approval_receipt_approval_sha256_key UNIQUE (approval_sha256);
+
+
+--
+-- Name: staging_release_approval_receipt staging_release_approval_receipt_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_approval_receipt
+    ADD CONSTRAINT staging_release_approval_receipt_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: staging_release_approval_receipt staging_release_approval_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_approval_receipt
+    ADD CONSTRAINT staging_release_approval_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_release_approval_receipt staging_release_approval_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_approval_receipt
+    ADD CONSTRAINT staging_release_approval_receipt_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: staging_release_readback_receipt staging_release_readback_rece_recovery_attempt_id_recovery__key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -19490,6 +19684,13 @@ CREATE INDEX release_sha_idx ON ops.release USING btree (git_sha);
 
 
 --
+-- Name: release_staging_approval_receipt_once; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX release_staging_approval_receipt_once ON ops.release USING btree (staging_approval_receipt_id) WHERE (staging_approval_receipt_id IS NOT NULL);
+
+
+--
 -- Name: run_correlation_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -20311,6 +20512,13 @@ CREATE OR REPLACE VIEW public.v_investigation AS
 
 
 --
+-- Name: release a_staging_release_plan_revision_invalidates_approval; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER a_staging_release_plan_revision_invalidates_approval BEFORE UPDATE OF plan_hash ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.staging_release_plan_revision_invalidates_approval();
+
+
+--
 -- Name: authority_receipt authority_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -20566,7 +20774,7 @@ CREATE TRIGGER performance_receipt_requires_read_back BEFORE INSERT OR UPDATE OF
 -- Name: release program5_release_approval_is_joe_owned; Type: TRIGGER; Schema: ops; Owner: -
 --
 
-CREATE TRIGGER program5_release_approval_is_joe_owned BEFORE INSERT OR UPDATE OF state, approved_by_actor, approved_at, approval_expires_at, approval_receipt_id ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.program5_release_approval_is_joe_owned();
+CREATE TRIGGER program5_release_approval_is_joe_owned BEFORE INSERT OR UPDATE OF environment, state, approved_by_actor, approved_at, approval_expires_at, approval_receipt_id ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.program5_release_approval_is_joe_owned();
 
 
 --
@@ -20700,6 +20908,20 @@ CREATE TRIGGER staging_deployment_claim_append_only BEFORE DELETE OR UPDATE ON o
 --
 
 CREATE TRIGGER staging_recovery_bundle_append_only BEFORE DELETE OR UPDATE ON ops.staging_recovery_rehearsal_bundle FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: release staging_release_approval_is_typed; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_release_approval_is_typed BEFORE INSERT OR UPDATE OF environment, state, approved_by_actor, approved_at, approval_expires_at, verifier_actor, verifier_evidence_ref, staging_approval_receipt_id, plan_hash ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.staging_release_approval_is_typed();
+
+
+--
+-- Name: staging_release_approval_receipt staging_release_approval_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_release_approval_receipt_append_only BEFORE DELETE OR UPDATE ON ops.staging_release_approval_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_staging_release_approval_mutation();
 
 
 --
@@ -21613,6 +21835,14 @@ ALTER TABLE ONLY ops.release
 
 
 --
+-- Name: release release_staging_approval_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT release_staging_approval_receipt_id_fkey FOREIGN KEY (staging_approval_receipt_id) REFERENCES ops.staging_release_approval_receipt(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: release release_superseded_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -21914,6 +22144,14 @@ ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
 
 ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
     ADD CONSTRAINT staging_recovery_rehearsal_bundle_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_release_approval_receipt staging_release_approval_receipt_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_release_approval_receipt
+    ADD CONSTRAINT staging_release_approval_receipt_release_id_fkey FOREIGN KEY (release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
 
 
 --
@@ -24037,6 +24275,7 @@ revoke all on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manife
 revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) from public;
 revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) from public;
 revoke all on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) from public;
+revoke all on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) from public;
 revoke all on function ops.assert_guidance_import_inventory(p_batch_id uuid) from public;
 revoke all on function ops.assert_guidance_import_materialization(p_batch_id uuid) from public;
 revoke all on function ops.assert_guidance_registry_coverage() from public;
@@ -24268,6 +24507,10 @@ grant select on table ops.staging_recovery_rehearsal_bundle to carr_authority;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_jobs;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_reader;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_writer;
+grant select on table ops.staging_release_approval_receipt to carr_authority;
+grant select on table ops.staging_release_approval_receipt to carr_jobs;
+grant select on table ops.staging_release_approval_receipt to carr_reader;
+grant select on table ops.staging_release_approval_receipt to carr_writer;
 grant select on table ops.staging_release_readback_receipt to carr_authority;
 grant select on table ops.staging_release_readback_receipt to carr_jobs;
 grant select on table ops.staging_release_readback_receipt to carr_reader;
@@ -24717,9 +24960,10 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
+grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
 grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
@@ -25011,6 +25255,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0212_doctrine_meta_singleton.sql	673545077c5e1bbe37676425a1addfb224acb5ef99921a736ce111fab4c4e8ab	2026-08-21 03:47:57.328664+00
 0215_program5_completion_hash_grant.sql	3fa71fc333056161670342c10d012216f1eab7fb83786afbbb8c131570c4344e	2026-08-21 10:27:38.693707+00
 0218_staging_readback_program6_posture.sql	28ee19228e1616a93a1287463cce2ac156c73bfc4a4040331fbd05be26e7ec3e	2026-08-21 11:14:51.880231+00
+0219_staging_release_approval_receipt.sql	5850057c0644d86a29353948367917021ef4eba54e011661857af7f549c6f5e8	2026-08-21 11:53:12.825284+00
 \.
 
 
