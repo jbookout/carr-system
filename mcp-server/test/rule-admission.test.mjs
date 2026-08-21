@@ -14,7 +14,7 @@ function fakeClient(route) {
     calls,
     query: async (sql, params = []) => {
       calls.push({ sql, params });
-      if (/select request_hash, response from tool_call/i.test(sql)) return { rows: [] };
+      if (/select request_hash, response/i.test(sql)) return { rows: [] };
       if (/insert into tool_call/i.test(sql) || /insert into event/i.test(sql)) return { rows: [] };
       return route(sql, params, calls);
     },

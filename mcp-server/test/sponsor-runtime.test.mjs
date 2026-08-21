@@ -210,11 +210,35 @@ test("runtime attribution and sponsor provenance survive without capability inhe
     // hand (this test's own actor() helper), never decorated by mcp.js's
     // dispatch() the way a real request's actor would be.
     correlation_id: null,
+    // Migration 0208: null for the same reason, and the null is load-bearing
+    // rather than incidental. A hand-built actor passed through no door, so no
+    // door minted it a session, so its writes are legacy/non-qualifying
+    // evidence -- which is exactly what an actor nobody authenticated should
+    // produce.
+    application_session_id: null,
   });
   assert.equal(authorizationClassForActor(runtime), "sponsored_agent");
   assert.equal(runtime.human, false);
   assert.equal(Object.hasOwn(audit, "personal_rules"), false);
   assert.equal(authorizationClassForActor(actorFromProps({ slug: "grok", human: false, via: "agent-token" })), "unsponsored_agent");
+});
+
+test("a session id in grant props is IGNORED — only a door may set one", () => {
+  // The session must come from the door that authenticated THIS request, never
+  // from the grant, which is long-lived and replayable. A grant that carried a
+  // session id -- stale, corrupt, or planted -- would let an old authentication
+  // vouch for a new request, which is the precise thing migration 0208 exists
+  // to make impossible. via and client_id ride through from props by design;
+  // this one must not, and nothing else in actorFromProps distinguishes them,
+  // so it is asserted here rather than assumed.
+  const forged = actorFromProps({
+    slug: "joe", via: "oauth-google",
+    application_session_id: "99999999-9999-9999-9999-999999999999",
+  });
+  assert.equal(forged.application_session_id, undefined,
+    "actorFromProps must not carry a session id out of grant props");
+  assert.equal(auditIdentity(forged).application_session_id, null,
+    "and the audit identity must record no session for it");
 });
 
 test("direct human OAuth remains sponsored by its own verified actor", () => {
@@ -283,7 +307,16 @@ test("audit migration and both write paths preserve actor, sponsor, scope, and a
   }
   assert.match(tools, /insert into tool_call \(idempotency_key, verb, actor_id/);
   assert.match(tools, /insert into event \(occurred_at, actor_id, verb/);
-  const auditHelper = tools.slice(tools.indexOf("export function auditIdentity"), tools.indexOf("async function withEnvelope"));
+  // Bounded at the next declaration after auditIdentity. toolCallInsertSQL was
+  // extracted between them, so the old boundary swept in a statement builder
+  // and its comments rather than the helper this assertion is about.
+  // Bounded at the comment that introduces the next declaration, not at the
+  // declaration itself: a doc comment sits above its function, so anchoring on
+  // the `export function` line sweeps that comment's prose into the slice.
+  const auditHelper = tools.slice(tools.indexOf("export function auditIdentity"), tools.indexOf("// PURE — no DB, no env, no ctx"));
+  assert.ok(auditHelper.length > 0 && auditHelper.length < 3000,
+    "the slice must actually bound auditIdentity — an empty or runaway slice "
+    + "makes the assertions below vacuous");
   assert.doesNotMatch(auditHelper, /statement|personal_rules|human_quote/);
   assert.ok(migration.lastIndexOf("do $$") < migration.lastIndexOf("commit;"),
     "0095 commits only after its postflight guard, so a guard failure rolls back DDL");

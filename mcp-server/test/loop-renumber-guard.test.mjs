@@ -45,7 +45,7 @@ class Fake {
   constructor() { this.writes = []; }
   async query(text, params) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.startsWith("select li.id, li.kind, li.number")) return { rows: [ROW] };
     if (sql.startsWith("select version from loop_item")) return { rows: [{ version: 1 }] };
     if (sql.startsWith("select id from loop_item where kind=")) return { rows: [] };

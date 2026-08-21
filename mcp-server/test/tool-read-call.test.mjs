@@ -29,12 +29,31 @@ test("readCallInsertSQL: targets tool_read_call and carries the identity columns
   assert.match(text, /insert into tool_read_call/);
   assert.match(text, /verb, actor_slug, actor_id, ok, error_kind, via, client_id/);
   assert.match(text, /organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class/);
+  assert.match(text, /application_session_id/);
   // params order: verb, actor_slug (also feeds the actor_id subquery via $2),
-  // ok, error_kind, via, client_id, org_tenant, sponsoring_slug, personal_scope, auth_class
+  // ok, error_kind, via, client_id, org_tenant, sponsoring_slug, personal_scope,
+  // auth_class, application_session_id
   assert.deepEqual(params, [
     "standing-context", "joe", true, null, "oauth-google", "claude",
-    "carr-internal", "joe", "joe-personal", "verified_partner",
+    "carr-internal", "joe", "joe-personal", "verified_partner", null,
   ]);
+});
+
+test("readCallInsertSQL: the session id is carried when the door set one", () => {
+  const sid = "11111111-2222-3333-4444-555555555555";
+  const { params } = readCallInsertSQL({ ...JOE, application_session_id: sid },
+                                       "standing-context", true, null);
+  assert.equal(params.at(-1), sid,
+    "a read made inside an authenticated session must record which session");
+});
+
+test("readCallInsertSQL: null session is the legacy path, not a hole to backfill", () => {
+  // A door that authenticates against a static shared secret leaves this null on
+  // purpose. Migration 0208 makes such a row permanently non-qualifying and
+  // refuses to let it be promoted later, so null here is a durable statement
+  // rather than missing data.
+  const { params } = readCallInsertSQL(JOE, "standing-context", true, null);
+  assert.equal(params.at(-1), null);
 });
 
 test("readCallInsertSQL: a failed call carries ok:false and a short error_kind, never a raw message", () => {
@@ -139,6 +158,15 @@ test("mcp.js: read-call recording lives ONLY in the read branch, never in the wr
   const writeBranch = src.slice(src.indexOf("// writes: real transaction on the writer pool"));
   assert.doesNotMatch(writeBranch, /recordReadCall|tool_read_call/,
     "the write path must stay exactly as it was — read-call recording belongs to reads only");
+  // The old rule was absolute: ALWAYS schedule, never await. It is now split,
+  // and the split is the point. A LEGACY read still schedules, because its
+  // evidence could never be cited and failing the read would cost availability
+  // for no integrity. A QUALIFYING read awaits, because Phase 4 asks a source
+  // claim to rest on a record that exists, and a best-effort write made after
+  // the response is already on the wire may simply never exist.
   assert.match(src, /env\.ctx\?\.waitUntil\?\.\(recordReadCall\(/,
-    "recording must be scheduled via ctx.waitUntil so it never adds latency to the read");
+    "a legacy read must still be scheduled, so recording adds no latency to it");
+  assert.match(src, /await recordReadCallDurable\(/,
+    "a read carrying an authenticated session must CONFIRM its evidence before "
+    + "returning a result");
 });

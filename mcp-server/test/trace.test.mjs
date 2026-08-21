@@ -767,9 +767,12 @@ test("mcp.js: dispatch() decorates env.CORRELATION_ID onto scopedActor.correlati
 test("tools.js: withEnvelope's tool_call insert and writeEvent's event insert both carry identity.correlation_id", async () => {
   const { readFile } = await import("node:fs/promises");
   const src = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
-  const envelopeBody = src.slice(src.indexOf("async function withEnvelope"), src.indexOf("async function writeEvent"));
-  assert.match(envelopeBody, /insert into tool_call[\s\S]*correlation_id/, "withEnvelope's insert must carry correlation_id");
-  assert.match(envelopeBody, /identity\.correlation_id/, "withEnvelope must pass identity.correlation_id as a param");
+  // The tool_call statement now lives in toolCallInsertSQL, a pure builder
+  // extracted so the write path's audit columns are unit-testable the way the
+  // read path's already were. withEnvelope calls it; the statement is here.
+  const envelopeBody = src.slice(src.indexOf("export function toolCallInsertSQL"), src.indexOf("async function writeEvent"));
+  assert.match(envelopeBody, /insert into tool_call[\s\S]*correlation_id/, "the tool_call insert must carry correlation_id");
+  assert.match(envelopeBody, /identity\.correlation_id/, "it must pass identity.correlation_id as a param");
 
   const writeEventBody = src.slice(src.indexOf("async function writeEvent"), src.indexOf("async function writeEvent") + 4000);
   assert.match(writeEventBody, /insert into event[\s\S]*correlation_id/, "writeEvent's insert must carry correlation_id");

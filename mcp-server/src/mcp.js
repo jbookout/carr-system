@@ -15,6 +15,7 @@ import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
+import { sessionForAccessToken } from "./session.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -340,11 +341,12 @@ export function readCallInsertSQL(actor, verb, ok, errorKind) {
   const identity = auditIdentity(actor);
   return {
     text: `insert into tool_read_call (verb, actor_slug, actor_id, ok, error_kind, via, client_id,
-             organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
-           values ($1, $2, (select id from actor where slug=$2), $3, $4, $5, $6, $7, $8, $9, $10)`,
+             organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class,
+             application_session_id)
+           values ($1, $2, (select id from actor where slug=$2), $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     params: [verb, actor.slug || null, ok, errorKind || null, actor.via || null, actor.client_id || null,
              identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
-             identity.authorization_class],
+             identity.authorization_class, identity.application_session_id],
   };
 }
 
@@ -354,6 +356,31 @@ export function readCallInsertSQL(actor, verb, ok, errorKind) {
 // NEVER THROWS: a logging failure must not become a read failure, so any
 // rejection from insertFn is swallowed here, not propagated to the caller
 // that scheduled this via ctx.waitUntil.
+/** The strict twin of recordReadCall, for a read whose evidence will be cited.
+ *
+ * recordReadCall NEVER throws, by design — it exists to keep a logging failure
+ * from becoming a read failure. That is exactly wrong for a qualifying read: if
+ * the evidence cannot be written, the read must not report success, because the
+ * alternative is a caller who believes a provenance record exists when it does
+ * not. This one throws a named ToolError instead, so the failure is visible to
+ * the caller rather than discovered later by its absence.
+ */
+export async function recordReadCallDurable(insertFn, actor, verb, ok, errorKind) {
+  const { text, params } = readCallInsertSQL(actor, verb, ok, errorKind);
+  try {
+    await insertFn(text, params);
+  } catch (e) {
+    throw new ToolError({
+      error: "read_evidence_not_recorded",
+      verb,
+      hint: "this read is bound to an authenticated session, so its evidence must be "
+          + "durable before the result is returned; the evidence write failed and the "
+          + "result is withheld rather than reported without a record",
+      detail: String(e?.message || e).slice(0, 200),
+    });
+  }
+}
+
 export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
   const { text, params } = readCallInsertSQL(actor, verb, ok, errorKind);
   try {
@@ -466,12 +493,6 @@ export async function callTool(env, actor, name, args, profile = "full") {
       hint: "a narrow profile may log the activity but not assert relationships — drop links[] from this call and file the introduction facts with add-loop for an interactive partner session to link-parties" });
   if (!tool.write) {
     const sql = neon(env.DATABASE_URL_READER);
-    // sideWrite is the ONLY way a read verb may write, and it is deliberately
-    // awkward: a separate credential, never awaited, failure isolated. A read
-    // that writes on the read connection is what took doctrine search down —
-    // search_doctrine_situations carried an insert inside its own statement, so
-    // a refused write killed the answer (migration 0223). Anything using this
-    // must treat the write as optional: losing it costs a record, never a reply.
     const client = {
       query: async (text, params = []) => ({ rows: await sql.query(text, params) }),
       sideWrite: env?.DATABASE_URL_WRITER
@@ -483,22 +504,66 @@ export async function callTool(env, actor, name, args, profile = "full") {
           }
         : null,
     };
-    // Record AFTER the response is ready, via ctx.waitUntil, so recording never
-    // adds latency to the read the caller is waiting on. ok/errorKind are
-    // metadata only — never the result itself, never args.
+    // HOW READ EVIDENCE IS RECORDED, AND WHY IT DEPENDS ON THE READ.
+    //
+    // This used to be one rule: schedule the record through ctx.waitUntil and
+    // swallow any failure, so recording could never slow or fail a read. That
+    // was a deliberate choice and it is still the right one for MOST reads.
+    // It cannot be the right one for a read whose evidence will be CITED —
+    // Phase 4 asks a source claim to rest on a durable record, and a record
+    // written on a best-effort basis after the response is already on the wire
+    // is not durable. It may simply never exist, and nothing would say so.
+    //
+    // So the rule is now split by whether the read can ever qualify:
+    //
+    //   QUALIFYING READ (the caller carries an authenticated session) — the
+    //   evidence is written and CONFIRMED before the response is returned. It
+    //   costs one write round trip, and a read can now fail on an audit write
+    //   that previously could not fail it. That is the price of a provenance
+    //   claim that holds.
+    //
+    //   LEGACY READ (no session) — unchanged. Its evidence could never be cited
+    //   whatever happened to it, so failing the read would be an availability
+    //   loss with no integrity gain. Scheduled, swallowed, exactly as before.
+    //
+    // ATOMICITY IS NOT REACHABLE HERE AND IS ALSO NOT NEEDED. Reads run on a
+    // one-shot reader client with no transaction, and the audit insert goes to
+    // a different credential entirely, so the two cannot share a transaction
+    // without moving every read onto the writer pool. They do not need to: a
+    // read produces no row of its own, so the audit row IS the operation's
+    // record and there is no second row for it to disagree with. The only
+    // failure this leaves is recording a read whose response never reached the
+    // caller, which errs toward over-recording rather than under-recording.
     let ok = true, errorKind = null;
+    const insertFn = env?.DATABASE_URL_WRITER
+      ? (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params)
+      : null;
+    let result;
     try {
-      return await executeRegisteredTool(client, actor, name, args || {});
+      result = await executeRegisteredTool(client, actor, name, args || {});
     } catch (e) {
       ok = false;
       errorKind = e instanceof ToolError ? String(e.payload?.error || "tool_error").slice(0, 64) : "internal_error";
+      // A failed read still records, and an audit failure here is swallowed on
+      // purpose: the caller is already being told the read failed, and
+      // replacing that with a logging error would hide the real cause.
+      if (insertFn) {
+        if (actor?.application_session_id) {
+          await recordReadCall(insertFn, actor, name, ok, errorKind);
+        } else {
+          env.ctx?.waitUntil?.(recordReadCall(insertFn, actor, name, ok, errorKind));
+        }
+      }
       throw e;
-    } finally {
-      if (env?.DATABASE_URL_WRITER) {
-        const insertFn = (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params);
+    }
+    if (insertFn) {
+      if (actor?.application_session_id) {
+        await recordReadCallDurable(insertFn, actor, name, ok, errorKind);
+      } else {
         env.ctx?.waitUntil?.(recordReadCall(insertFn, actor, name, ok, errorKind));
       }
     }
+    return result;
   }
 
   // Writes use the routine writer pool except the two authority operations,
@@ -652,6 +717,53 @@ export async function dispatch(request, env, ctx, actor) {
   }
 }
 
+/**
+ * Decorate the authenticated actor with the session this request was minted, or
+ * return it unchanged when this door cannot mint one.
+ *
+ * EXPORTED SO ATTACHMENT IS TESTABLE. A review found that minting correctly and
+ * then never attaching the result passed every test in the repo: the mint was
+ * observable through its fake, but the actor handed to dispatch was not. This
+ * function is the attachment step, so a test can assert the returned actor
+ * carries the session rather than inferring it.
+ *
+ * THE CLASS AND TENANT ARE COMPUTED HERE, not read off the actor. Both are
+ * derived inside dispatch(), which runs after this, so reading them from
+ * `actor` yields undefined — and 0208 raises on a null authorization class. The
+ * first version of this wiring did exactly that and minted nothing on every
+ * request while its tests passed against a hand-built actor shape no door can
+ * produce. Both functions below are pure and server-derived.
+ *
+ * env.SESSION_MINT_FN IS A TEST SEAM and production cannot set it: Worker env
+ * values come from wrangler config and secrets, which are strings, so only a
+ * test in this process can inject a function. It exists because the alternative
+ * is a call site no test can reach, and a call site no test can reach can be
+ * deleted without any test noticing — which is how the first version shipped
+ * inert.
+ */
+export async function withApplicationSession(request, env, ctx, actor) {
+  const mintFn = env.SESSION_MINT_FN
+    || (env.DATABASE_URL_SESSION_ISSUER
+      ? (text, params) => neon(env.DATABASE_URL_SESSION_ISSUER).query(text, params)
+      : null);
+  const sessionId = await sessionForAccessToken(request, env, {
+    ...actor,
+    authorization_class: authorizationClassForActor(actor),
+    organization_tenant_id: organizationTenantForActor(actor),
+  }, {
+    mintFn,
+    // A downgrade goes through the same failure path the Worker already uses,
+    // so "this door stopped qualifying" is visible without anyone thinking to
+    // look for it. Silence is what hid three production-fatal defects.
+    onFailure: (kind, detail) => scheduleFailureRecord(env, ctx, {
+      routeKey: "mcp:session-mint",
+      failureClass: kind,
+      detail: JSON.stringify(detail).slice(0, 200),
+    }),
+  });
+  return sessionId ? { ...actor, application_session_id: sessionId } : actor;
+}
+
 /** Mounted as OAuthProvider `apiHandler` for /mcp. ctx.props is already authenticated. */
 export const mcpApiHandler = {
   async fetch(request, env, ctx) {
@@ -672,6 +784,6 @@ export const mcpApiHandler = {
       });
       return json({ error: "unauthorized" }, 401);
     }
-    return dispatch(request, env, ctx, actor);
+    return dispatch(request, env, ctx, await withApplicationSession(request, env, ctx, actor));
   },
 };

@@ -285,6 +285,23 @@ const protectedApiHandler = {
 // as a full human actor (joe or dell) on the full profile. This token
 // authenticates as its own machine actor, locked to three write verbs, and
 // nothing about the humans' OAuth path changes because it exists.
+// PHASE 4: THIS DOOR MINTS NO APPLICATION SESSION, AND THAT IS THE DESIGN.
+// It authenticates against a STATIC SECRET MAP, which has no issuance instant,
+// no expiry and no revocation state — the three properties migration 0208's
+// session identity exists to carry. A session minted here would be a fiction
+// dressed as evidence: it would assert an authentication moment nobody can
+// point to and a revocability nobody has.
+//
+// Rows written by this actor therefore carry a NULL application_session_id and
+// are permanently non-qualifying. 0208 refuses to promote them later, so this
+// is a durable statement rather than missing data.
+//
+// THE RISK HERE IS NOT THAT THIS BREAKS. It is that a later reader sees "these
+// doors produce no qualified evidence" as a defect and fixes it by minting on
+// their behalf. That change would pass every other test in this repo and would
+// destroy the only property the substrate has. If you are here to do that: the
+// fix is to give this door a real credential with an expiry and a revocation,
+// not to synthesise a session for one that has neither.
 function probeActorFor(request, env) {
   const auth = request.headers.get("authorization") || "";
   const token = auth.replace(/^Bearer\s+/i, "");
@@ -344,6 +361,23 @@ function probeActorFor(request, env) {
 // maps (it never will in practice — they are separate secrets) resolves
 // deterministically to probe first; in practice a caller only ever holds one
 // of the two tokens.
+// PHASE 4: THIS DOOR MINTS NO APPLICATION SESSION, AND THAT IS THE DESIGN.
+// It authenticates against a STATIC SECRET MAP, which has no issuance instant,
+// no expiry and no revocation state — the three properties migration 0208's
+// session identity exists to carry. A session minted here would be a fiction
+// dressed as evidence: it would assert an authentication moment nobody can
+// point to and a revocability nobody has.
+//
+// Rows written by this actor therefore carry a NULL application_session_id and
+// are permanently non-qualifying. 0208 refuses to promote them later, so this
+// is a durable statement rather than missing data.
+//
+// THE RISK HERE IS NOT THAT THIS BREAKS. It is that a later reader sees "these
+// doors produce no qualified evidence" as a defect and fixes it by minting on
+// their behalf. That change would pass every other test in this repo and would
+// destroy the only property the substrate has. If you are here to do that: the
+// fix is to give this door a real credential with an expiry and a revocation,
+// not to synthesise a session for one that has neither.
 function reviewActorFor(request, env) {
   const auth = request.headers.get("authorization") || "";
   const token = auth.replace(/^Bearer\s+/i, "");
@@ -556,6 +590,11 @@ const oauthProvider = new OAuthProvider({
 // exact actor shape dispatch() and pipelineChanges() accept.
 const program6RoutineController = createProgram6RoutineController({ authorizeAction: authorizeProgram6Action });
 const dealroomHandler = createDealroomHandler({
+  // The Deal Room door's mint failures go through the same failure path the
+  // rest of the Worker uses. Without this the default was a no-op and a door
+  // that had stopped qualifying was indistinguishable from one nobody used.
+  onSessionMintFailure: (kind, detail) => console.error(JSON.stringify(
+    { event: "session_mint_failure", door: "dealroom-cookie", kind, detail })),
   mcpHandler: (request, env, ctx, actor) => dispatch(request, env, ctx, actor),
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
   program6Handler: (request, env, ctx, actor, session) =>

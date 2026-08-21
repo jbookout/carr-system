@@ -19,7 +19,7 @@ class IntakeFake {
     const sql = text.replace(/\s+/g, " ").trim();
     this.calls.push({ sql, params });
     if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [] };
-    if (sql.startsWith("select request_hash, response from tool_call")) {
+    if (sql.startsWith("select request_hash, response")) {
       const row = this.toolCalls.get(params[0]);
       return { rows: row ? [row] : [] };
     }
@@ -53,7 +53,7 @@ class IntakeFake {
       doctrine_revision_id: "40000000-0000-0000-0000-000000000001",
     }] };
     if (sql.startsWith("insert into tool_call")) {
-      this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
+      this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]), actor_id: params[2], organization_tenant_id: params[7], application_session_id: params[12] ?? null });
       return { rows: [] };
     }
     if (sql.startsWith("insert into event")) return { rows: [] };

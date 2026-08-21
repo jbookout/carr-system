@@ -95,7 +95,186 @@ export function auditIdentity(actor) {
     // caller that reaches a write handler without going through dispatch() —
     // tests, and anything constructing an actor object by hand.
     correlation_id: actor.correlation_id || null,
+    // THE AUTHENTICATED SESSION THIS WRITE HAPPENED INSIDE (migration 0208).
+    // Server-derived and set on the actor object by the DOOR, never read from
+    // grant props and never accepted from a verb -- the same rule via and
+    // client_id follow above, for the same reason: an attestation the caller
+    // controls proves nothing, and this one is the attestation everything else
+    // now rests on.
+    //
+    // null is a MEANINGFUL, PERMANENT value, not a gap waiting to be filled. A
+    // row written with no session is legacy/non-qualifying evidence forever;
+    // 0208 refuses to let it be promoted later. The doors that authenticate
+    // against a static shared secret deliberately leave this null, because a
+    // static secret has no issuance instant, no expiry and no revocation state,
+    // so any session minted for one would be a fiction.
+    application_session_id: actor.application_session_id || null,
   };
+}
+
+// PURE — no DB, no env, no ctx — so the write path's audit columns are testable
+// on their own, exactly as readCallInsertSQL (mcp.js) makes the read path
+// testable. It is extracted for a specific reason: a review found that dropping
+// application_session_id from this INSERT passed every test in the repo,
+// because nothing could reach the statement without standing up a transaction
+// and a verb. A statement no test can see is a statement that can be silently
+// weakened.
+export function toolCallInsertSQL(key, verb, actor, hash, result) {
+  const identity = auditIdentity(actor);
+  return {
+    text: `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id,
+       application_session_id)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    params: [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null,
+             actor.client_id || null, identity.organization_tenant_id,
+             identity.sponsoring_human_slug, identity.personal_scope,
+             identity.authorization_class, identity.correlation_id,
+             identity.application_session_id],
+  };
+}
+
+// PURE. Decides whether a prior tool_call row is THIS caller's replay, or
+// somebody else's row that happens to share an idempotency key.
+//
+// THE DEFECT THIS CLOSES. The lookup used to select on idempotency_key alone
+// and compare only request_hash. Actor, tenant and session appeared in neither.
+// So a second caller replaying with identical arguments received the FIRST
+// caller's full response, and because the early return happens before any
+// insert, no audit row was ever written for the second caller: the call left no
+// trace that it happened at all. Changed material refused; changed identity did
+// not. An idempotency key is a client-chosen string, so this was reachable by
+// anyone who could guess or reuse one.
+//
+// Identity is (key, actor, tenant, session) and all four must match. Each
+// mismatch raises a DISTINCT error, because "it refused" is not "the right
+// guard refused" — the same rule the database contracts are held to.
+//
+// NULL SESSION IS A VALUE, NOT A WILDCARD. A legacy row (written before any
+// door minted) matches only another legacy call. A qualified caller replaying a
+// legacy key is refused rather than handed the legacy response, and vice versa.
+// That is deliberate and it has a cost worth stating: across the deploy that
+// first turns minting on, a retry whose first attempt was pre-deploy refuses
+// instead of converging. The caller sees a named refusal and can issue a fresh
+// key, which is strictly better than receiving a response that no session
+// vouches for while leaving no record of the retry.
+export function replayDecision(row, hash, actor) {
+  if (row.request_hash !== hash) return { error: "key_reuse" };
+  const identity = auditIdentity(actor);
+  if (row.actor_id !== actor.id) {
+    return { error: "key_bound_to_another_actor",
+      hint: "this idempotency key was already used by a different actor; generate a fresh UUID" };
+  }
+  if ((row.organization_tenant_id || null) !== (identity.organization_tenant_id || null)) {
+    return { error: "key_bound_to_another_tenant",
+      hint: "this idempotency key belongs to a different tenant's record" };
+  }
+  if ((row.application_session_id || null) !== (identity.application_session_id || null)) {
+    return { error: "key_bound_to_another_session",
+      hint: "this idempotency key was used by a different authenticated session; "
+          + "generate a fresh UUID rather than replaying another session's result" };
+  }
+  return { ok: true };
+}
+
+// THE RECEIPT PRODUCER. Without this, ops.write_receipt is a table nothing ever
+// writes to, and 0213's acceptance bar — which requires at least one PROVEN
+// receipt — can never be met. That is the inert-substrate defect one layer up:
+// a surface and a gate that depends on it, with no producer between them.
+//
+// WHY IT HANGS OFF THE EVENT ROWS rather than off the tool_call. A receipt is
+// about a SUBJECT: "this deal now says X, built on it having said Y". tool_call
+// knows the verb and the arguments but not what they were about, while event
+// carries subject_type and subject_id. Reducing a subject's receipts into a
+// continuity state is the whole point of 0213's reducer, and a receipt keyed on
+// the call rather than the subject would give every subject a chain of length
+// one and make the reducer useless.
+//
+// IN THE SAME TRANSACTION as the evidence, and AFTER the tool_call insert. The
+// readback in 0211 reads the frozen tool_call row, so a receipt written before
+// that row exists could never prove. Same transaction means a receipt cannot
+// survive a write that rolled back.
+//
+// A LEGACY WRITE PRODUCES NO RECEIPT AND THAT IS CORRECT, not a gap: 0208 says
+// a row with no session proves nothing, so a receipt vouching for one would be
+// a proof about something already declared unprovable. This also keeps the
+// extra queries off every existing fake-client test, whose actors carry no
+// session.
+export async function writeReceiptsFor(client, actor, verb, key, hash) {
+  const identity = auditIdentity(actor);
+  const sid = identity.application_session_id;
+  if (!sid) return;
+  const subjects = await client.query(
+    `select distinct subject_type, subject_id from event
+      where idempotency_key = $1 and application_session_id = $2
+        and subject_id is not null`, [key, sid]);
+  if (!subjects.rows.length) return;
+  for (const s of subjects.rows) {
+    // TWO DIGESTS, BECAUSE THEY ANSWER TWO DIFFERENT QUESTIONS (0220). The call
+    // digest is proof of attachment: the database recomputes it from the frozen
+    // tool_call row and from this receipt's own subject, and is_proven is that
+    // comparison. The material digest is the claim about the SUBJECT — what this
+    // call wrote about it — and it is what prior_digest, the conflict detector,
+    // exact reversal and the reducer all read. One column could not be honest
+    // about both, which is the defect 0220 exists to remove.
+    //
+    // COMPUTED PER SUBJECT, not once per call. The call digest is bound to the
+    // subject now, so hoisting it out of this loop would hand every subject the
+    // same digest and make it transferable between them.
+    const digestRow = await client.query(
+      `select ops.write_receipt_digest($1,$2,$3,$4,$5,$6,$7) as call_digest,
+              ops.write_receipt_material_digest($8,$4,$6,$7) as material_digest`,
+      [verb, actor.id, identity.organization_tenant_id, sid, hash,
+       s.subject_type, s.subject_id, key]);
+    const callDigest = digestRow.rows[0].call_digest;
+    const material = digestRow.rows[0].material_digest;
+    // SERIALISE PER SUBJECT BEFORE READING THE HEAD. Reading the previous
+    // receipt and then inserting is not atomic, and two writers landing on one
+    // subject at once both read the same head and both build on it. That is a
+    // CONFLICT by the database's definition, or a broken chain when the two
+    // writes are identical restatements and the no-op skip cannot see the other
+    // one. Neither is a fault the writers committed, both block the acceptance
+    // bar, and nothing in the runtime can clear either. A transaction-scoped
+    // advisory lock keyed on the subject makes the read-then-insert atomic for
+    // the only path that produces receipts. It is released at commit or
+    // rollback with no cleanup path to forget.
+    await client.query(`select pg_advisory_xact_lock(hashtext($1))`,
+      [`${s.subject_type}:${s.subject_id}`]);
+    // The state this write BUILT ON: the last PROVEN, unretracted material for
+    // this subject, or 'origin' for the first. Proven and unretracted because
+    // that is exactly what the prior-state guard accepts -- reading the newest
+    // row regardless of proof would hand the guard a prior it refuses, and a
+    // failed readback on one write would then break every write after it.
+    const prev = await client.query(
+      `select w.material_digest from ops.write_receipt w
+        where w.subject_type = $1 and w.subject_id = $2
+          and w.organization_tenant_id = $3
+          and w.is_proven
+          and not exists (select 1 from ops.write_receipt rr
+                           where rr.retracts_receipt_id = w.id and rr.is_proven)
+        order by w.seq desc limit 1`,
+      [s.subject_type, s.subject_id, identity.organization_tenant_id]);
+    const prior = prev.rows.length ? prev.rows[0].material_digest : "origin";
+    // A no-op restatement produces material identical to what it built on. Skip
+    // it: a chain of identical links is noise, and it would make every
+    // restatement look like a change. This compares MATERIAL to MATERIAL — under
+    // the old single digest it compared a subject state to a call digest, which
+    // could only ever be equal by accident.
+    if (prior === material) continue;
+    const rid = crypto.randomUUID();
+    await client.query(
+      `insert into ops.write_receipt
+         (id, application_session_id, actor_id, organization_tenant_id, verb,
+          subject_type, subject_id, tool_call_idempotency_key,
+          call_digest, material_digest, prior_digest)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [rid, sid, actor.id, identity.organization_tenant_id, verb,
+       s.subject_type, s.subject_id, key, callDigest, material, prior]);
+    // Prove it HERE, in the same transaction. A receipt left unproven blocks
+    // 0213's acceptance bar, so producing one and walking away would replace an
+    // empty table with a permanently failing one.
+    await client.query(`select ops.prove_write_receipt($1)`, [rid]);
+  }
 }
 
 async function withEnvelope(client, actor, verb, args, fn) {
@@ -110,20 +289,19 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // are migrated to model the extra query for every historical write verb.
   if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback")
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
-  const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
+  // REPLAY IDENTITY IS FOUR THINGS, NOT ONE. See replayDecision below.
+  const prior = await client.query(
+    `select request_hash, response, actor_id, organization_tenant_id, application_session_id
+       from tool_call where idempotency_key=$1`, [key]);
   if (prior.rows.length) {
-    if (prior.rows[0].request_hash !== hash) throw new ToolError({ error: "key_reuse" });
+    const verdict = replayDecision(prior.rows[0], hash, actor);
+    if (verdict.error) throw new ToolError(verdict);
     return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
   }
   const result = await fn();                                        // inside the open transaction
-  const identity = auditIdentity(actor);
-  await client.query(
-    `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null,
-     identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
-     identity.authorization_class, identity.correlation_id]);
+  const { text, params } = toolCallInsertSQL(key, verb, actor, hash, result);
+  await client.query(text, params);
+  await writeReceiptsFor(client, actor, verb, key, hash);
   return result;
 }
 
@@ -177,14 +355,15 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
   await client.query(
     `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
        old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id,
+       application_session_id)
+     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
      actor.via || null, actor.client_id || null, identity.organization_tenant_id,
      identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
-     identity.correlation_id]);
+     identity.correlation_id, identity.application_session_id]);
 }
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.

@@ -56,7 +56,7 @@ class Fake {
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
 
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
 
     // ref resolution — both inputs arrive as uuids in these tests
     if (sql.includes("v_ref_index")) return { rows: [] };

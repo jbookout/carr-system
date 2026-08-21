@@ -46,7 +46,7 @@ class Fake {
   constructor() { this.inserts = []; }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.includes("v_ref_index") || sql.includes("from vendor") || sql.includes("resolve"))
       return { rows: [{ id: ids.vendor, party_id: ids.vendor, subject_type: "vendor" }] };
     if (sql.startsWith("insert into activity")) {

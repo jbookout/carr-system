@@ -267,6 +267,23 @@ const LOCAL_SPONSOR = Object.freeze({ "joe-local": "joe", "dell-local": "dell" }
  * Fails closed on every path: no header, unparseable JSON, empty map, a token
  * that matches nothing, or a slug that is not a known actor.
  */
+// PHASE 4: THIS DOOR MINTS NO APPLICATION SESSION, AND THAT IS THE DESIGN.
+// It authenticates against a STATIC SECRET MAP, which has no issuance instant,
+// no expiry and no revocation state — the three properties migration 0208's
+// session identity exists to carry. A session minted here would be a fiction
+// dressed as evidence: it would assert an authentication moment nobody can
+// point to and a revocability nobody has.
+//
+// Rows written by this actor therefore carry a NULL application_session_id and
+// are permanently non-qualifying. 0208 refuses to promote them later, so this
+// is a durable statement rather than missing data.
+//
+// THE RISK HERE IS NOT THAT THIS BREAKS. It is that a later reader sees "these
+// doors produce no qualified evidence" as a defect and fixes it by minting on
+// their behalf. That change would pass every other test in this repo and would
+// destroy the only property the substrate has. If you are here to do that: the
+// fix is to give this door a real credential with an expiry and a revocation,
+// not to synthesise a session for one that has neither.
 export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel = "agent-token") {
   const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
@@ -353,6 +370,23 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
  */
 const HERMES_SPONSOR = Object.freeze({ "hermes-pilot": "joe" });
 
+// PHASE 4: THIS DOOR MINTS NO APPLICATION SESSION, AND THAT IS THE DESIGN.
+// It authenticates against a STATIC SECRET MAP, which has no issuance instant,
+// no expiry and no revocation state — the three properties migration 0208's
+// session identity exists to carry. A session minted here would be a fiction
+// dressed as evidence: it would assert an authentication moment nobody can
+// point to and a revocability nobody has.
+//
+// Rows written by this actor therefore carry a NULL application_session_id and
+// are permanently non-qualifying. 0208 refuses to promote them later, so this
+// is a durable statement rather than missing data.
+//
+// THE RISK HERE IS NOT THAT THIS BREAKS. It is that a later reader sees "these
+// doors produce no qualified evidence" as a defect and fixes it by minting on
+// their behalf. That change would pass every other test in this repo and would
+// destroy the only property the substrate has. If you are here to do that: the
+// fix is to give this door a real credential with an expiry and a revocation,
+// not to synthesise a session for one that has neither.
 export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
   const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
