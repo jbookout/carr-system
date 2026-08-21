@@ -310,9 +310,15 @@ def raw_0222_capture_fixture(dsn: str) -> None:
             cur.execute(prepare_sql(), prepare_params(fixture, pre_attempt, "prior", pre_idem)); one(cur)
             owner(cur)
             conn.commit()
-        env = {**os.environ, "DATABASE_URL": isolated}
-        subprocess.run([sys.executable, str(repo / "tools/migrate.py"), "--apply", "--yes"],
-                       cwd=repo, env=env, check=True, capture_output=True, text=True)
+        # Apply the raw historical migration itself. A current snapshot can
+        # legitimately contain later ledger rows, and the production runner
+        # correctly refuses an artificial earlier hole; this fixture is about
+        # 0222's migration-time capture, not bypassing ledger ordering.
+        subprocess.run(
+            [psql, "-v", "ON_ERROR_STOP=1", "-q", "-d", isolated,
+             "-f", str(repo / "migrations/0222_legacy_prior_staging_readback.sql")],
+            cwd=repo, check=True, capture_output=True, text=True,
+        )
         with psycopg.connect(isolated, autocommit=False) as conn, conn.cursor() as cur:
             cur.execute("select deployment_attempt_id from ops.legacy_prior_staging_readback_allowlist where idempotency_key=%s", (pre_idem,))
             captured = one(cur)[0] is not None
