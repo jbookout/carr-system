@@ -11,7 +11,8 @@ import {
   randomString,
   verifyGoogleIdToken,
 } from "./google-oidc.js";
-import { actorFromProps, propsForSlug, slugForEmail } from "./identity.js";
+import { actorFromProps, authorizationClassForActor, organizationTenantForActor,
+         propsForSlug, slugForEmail } from "./identity.js";
 import { neon } from "@neondatabase/serverless";
 import { sessionForDealRoomCookie } from "./session.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
@@ -307,16 +308,34 @@ async function sessionFor(request, env, dependencies) {
   // A null result is normal: the request proceeds and records legacy evidence.
   // It is reported rather than silent, because a door that has quietly stopped
   // qualifying is indistinguishable from one nobody used.
+  // THE CLASS AND TENANT ARE COMPUTED HERE, and leaving them out is not a
+  // detail — it is the whole defect. actorFromProps returns NEITHER: the
+  // authorization class is derived inside dispatch(), which runs after this,
+  // and 0208 refuses a mint whose class is null. The OAuth door computes both
+  // in withApplicationSession (mcp.js) for exactly this reason; this door did
+  // not, so it minted nothing on every request while its tests passed against
+  // a fake mint that ignored its parameters.
+  const mintActor = {
+    ...actor,
+    authorization_class: authorizationClassForActor(actor),
+    organization_tenant_id: organizationTenantForActor(actor),
+  };
   const minted = await sessionForDealRoomCookie({
     record: session,
-    actor,
+    actor: mintActor,
     absoluteEndMs: absoluteEnd,
     now,
     mintFn: env.SESSION_MINT_FN
       || (env.DATABASE_URL_SESSION_ISSUER
         ? (text, params) => neon(env.DATABASE_URL_SESSION_ISSUER).query(text, params)
         : null),
-    onFailure: dependencies.onSessionMintFailure || (() => {}),
+    // A SILENT DEFAULT IS THE WORST CASE THIS SUBSTRATE HAS. Production passes
+    // a real reporter (index.js); the fallback logs rather than swallowing, so
+    // a door that has quietly stopped qualifying is discoverable even in a
+    // context that forgot to wire one.
+    onFailure: dependencies.onSessionMintFailure
+      || ((kind, detail) => console.error(JSON.stringify(
+           { event: "session_mint_failure", door: "dealroom-cookie", kind, detail }))),
   });
   if (minted.sessionId) {
     actor.application_session_id = minted.sessionId;

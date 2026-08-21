@@ -590,6 +590,11 @@ const oauthProvider = new OAuthProvider({
 // exact actor shape dispatch() and pipelineChanges() accept.
 const program6RoutineController = createProgram6RoutineController({ authorizeAction: authorizeProgram6Action });
 const dealroomHandler = createDealroomHandler({
+  // The Deal Room door's mint failures go through the same failure path the
+  // rest of the Worker uses. Without this the default was a no-op and a door
+  // that had stopped qualifying was indistinguishable from one nobody used.
+  onSessionMintFailure: (kind, detail) => console.error(JSON.stringify(
+    { event: "session_mint_failure", door: "dealroom-cookie", kind, detail })),
   mcpHandler: (request, env, ctx, actor) => dispatch(request, env, ctx, actor),
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
   program6Handler: (request, env, ctx, actor, session) =>

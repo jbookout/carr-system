@@ -567,7 +567,8 @@ async function sha256hex(value) {
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function dealroomFixture({ createdAt, expiresAt, mintFn, existingSession = null }) {
+async function dealroomFixture({ createdAt, expiresAt, mintFn, existingSession = null,
+                                 onMintFailure = undefined }) {
   const opaque = "opaque-cookie-value";
   const key = DR_PREFIX + await sha256hex(opaque);
   const record = { props: { slug: "joe", via: "dealroom-cookie" },
@@ -586,6 +587,7 @@ async function dealroomFixture({ createdAt, expiresAt, mintFn, existingSession =
   const seen = {};
   const handler = createDealroomHandler({
     now: () => NOW,
+    onSessionMintFailure: onMintFailure,
     pipelineHandler: async (_req, _env, _ctx, actor) => {
       seen.actor = actor;
       return new Response("ok", { status: 200 });
@@ -626,6 +628,52 @@ test("Deal Room call site: the mint binds the ABSOLUTE ceiling, not the sliding 
     "the idle window slides forward on every request, so binding to it would let "
     + "a continuously used cookie never expire");
   assert.notEqual(sentExpiry, NOW + 3600_000);
+});
+
+test("Deal Room call site: the mint gets a REAL authorization class and tenant", async () => {
+  // THE TEST THAT WAS MISSING, and its absence let this door ship dead. The
+  // OAuth door has had this assertion since the day it minted nothing; the Deal
+  // Room had no counterpart, so a fake mint that ignores its parameters happily
+  // "worked" while 0208 would have refused the real call for a null class.
+  //
+  // The fake now REFUSES WHAT THE DATABASE REFUSES rather than accepting
+  // anything. A fixture more permissive than production cannot see a defect
+  // production would hit on its very first request.
+  const mints = [];
+  const f = await dealroomFixture({
+    createdAt: NOW, expiresAt: NOW + 3600_000,
+    mintFn: async (t, p) => {
+      if (!p[4] || !p[5] || !p[6] || !p[7]) {
+        throw new Error("application session requires door, issuer, class and verified subject");
+      }
+      mints.push({ t, p });
+      return [{ id: "dr-classy" }];
+    },
+  });
+  const res = await f.handler.fetch(f.request, f.env, { waitUntil: () => {} });
+  assert.equal(res.status, 200);
+  assert.equal(mints.length, 1,
+    "the Deal Room door must mint; a null authorization class makes 0208 refuse");
+  const [, slug, tenant, , via, issuer, authClass, subject] = mints[0].p;
+  assert.equal(slug, "joe");
+  assert.ok(tenant, "tenant must be resolved at the door");
+  assert.ok(authClass, "authorization class must be resolved at the door, never null");
+  assert.ok(via && issuer && subject, "door, issuer and verified subject must be sent");
+  assert.equal(f.seen.actor?.application_session_id, "dr-classy");
+});
+
+test("Deal Room call site: a refused mint is REPORTED, never silently swallowed", async () => {
+  const reported = [];
+  const f = await dealroomFixture({
+    createdAt: NOW, expiresAt: NOW + 3600_000,
+    mintFn: async () => { throw new Error("issuer unreachable"); },
+    onMintFailure: (kind, detail) => reported.push({ kind, detail }),
+  });
+  const res = await f.handler.fetch(f.request, f.env, { waitUntil: () => {} });
+  assert.equal(res.status, 200, "the request still proceeds on the legacy path");
+  assert.equal(reported[0]?.kind, "session_mint_failed",
+    "a door that has quietly stopped qualifying must not look like one nobody used");
+  assert.equal(reported[0]?.detail?.door, "dealroom-cookie");
 });
 
 test("Deal Room call site: the session is persisted, so the next request reuses it", async () => {
