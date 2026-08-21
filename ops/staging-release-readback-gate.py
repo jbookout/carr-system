@@ -6,14 +6,19 @@
 from __future__ import annotations
 
 import os
+import pathlib
+import subprocess
 import sys
 import threading
 import uuid
+import ipaddress
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
     import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
 except ImportError:
     sys.exit("staging-release-readback-gate: psycopg not installed")
 
@@ -169,6 +174,11 @@ def record_sql() -> str:
       %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s)"""
 
 
+def legacy_prior_record_sql() -> str:
+    return """select ops.record_staging_release_readback(
+      %s::uuid,%s::uuid,%s,%s,%s,%s,%s)"""
+
+
 def prepare_sql() -> str:
     return """select ops.prepare_staging_deployment_attempt(
       %s::uuid,%s::uuid,%s,%s,%s::uuid,%s,%s)"""
@@ -184,6 +194,13 @@ def record_params(fixture: dict, attempt: uuid.UUID, step: str, idem: uuid.UUID,
     return (idem,version,f"carr-staging-{idem.hex}",verb_count,
             "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170,
             program6_actions_enabled)
+
+
+def legacy_prior_record_params(fixture: dict, attempt: uuid.UUID, step: str,
+                               idem: uuid.UUID, version: uuid.UUID, *,
+                               verb_count: int = 211) -> tuple:
+    return (idem,version,f"carr-staging-{idem.hex}",verb_count,
+            "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170)
 
 
 def prepare_params(fixture: dict, attempt: uuid.UUID, step: str,
@@ -216,10 +233,98 @@ def make_typed_bundle(cur, fixture: dict) -> None:
     owner(cur)
 
 
+def require_loopback(dsn: str) -> None:
+    try:
+        conninfo = conninfo_to_dict(dsn)
+    except psycopg.Error as exc:
+        raise RuntimeError("raw migration fixture requires valid explicit conninfo") from exc
+    if conninfo.get("service") or conninfo.get("servicefile"):
+        raise RuntimeError("raw migration fixture refuses libpq service indirection")
+    hosts: list[str] = []
+    for key in ("host", "hostaddr"):
+        value = str(conninfo.get(key) or "")
+        if not value:
+            continue
+        if "," in value:
+            raise RuntimeError("raw migration fixture refuses multi-host conninfo")
+        hosts.append(value)
+    if not hosts or "," in str(conninfo.get("port") or ""):
+        raise RuntimeError("raw migration fixture requires one explicit loopback target")
+    for host in hosts:
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = host == "localhost"
+        if not loopback:
+            raise RuntimeError("raw migration fixture refuses every non-loopback DATABASE_URL")
+
+
+def raw_0222_capture_fixture(dsn: str) -> None:
+    """Prove 0222's own INSERT captures only pre-boundary prepared truth."""
+    require_loopback(dsn)
+    name = f"p5_0222_capture_{uuid.uuid4().hex}"
+    isolated = make_conninfo(dsn, dbname=name)
+    admin = make_conninfo(dsn, dbname="postgres")
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    psql = "psql"
+    try:
+        with psycopg.connect(admin, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(sql.SQL("create database {}").format(sql.Identifier(name)))
+        subprocess.run([psql, "-v", "ON_ERROR_STOP=1", "-q", "-d", isolated,
+                        "-f", str(repo / "db/schema.sql")], check=True, capture_output=True, text=True)
+        with psycopg.connect(isolated, autocommit=False) as conn, conn.cursor() as cur:
+            # A regenerated snapshot can already contain 0222.  Reconstruct
+            # exactly its predecessor surface before seeding so the raw file is
+            # exercised, while remaining harmless for a pre-0222 snapshot.
+            cur.execute("""delete from public.schema_migrations
+                           where filename='0222_legacy_prior_staging_readback.sql';
+              drop function if exists ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint);
+              drop table if exists ops.legacy_prior_staging_readback_allowlist;
+              do $$ begin
+                if to_regprocedure('ops.record_staging_release_readback_program6(uuid,uuid,text,integer,text,integer,bigint,boolean)') is not null then
+                  drop function ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean);
+                  alter function ops.record_staging_release_readback_program6(uuid,uuid,text,integer,text,integer,bigint,boolean)
+                    rename to record_staging_release_readback;
+                end if;
+              end $$;
+              revoke all on function ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)
+                from public,carr_reader,carr_writer,carr_authority;
+              grant execute on function ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean) to carr_jobs;""")
+            ensure_authority_roles(cur)
+            fixture = seed_fixture(cur, "raw0222")
+            pre_attempt, pre_idem = uuid.uuid4(), uuid.uuid4()
+            authority(cur, "carr_jobs")
+            cur.execute(prepare_sql(), prepare_params(fixture, pre_attempt, "prior", pre_idem)); one(cur)
+            owner(cur)
+            conn.commit()
+        env = {**os.environ, "DATABASE_URL": isolated}
+        subprocess.run([sys.executable, str(repo / "tools/migrate.py"), "--apply", "--yes"],
+                       cwd=repo, env=env, check=True, capture_output=True, text=True)
+        with psycopg.connect(isolated, autocommit=False) as conn, conn.cursor() as cur:
+            cur.execute("select deployment_attempt_id from ops.legacy_prior_staging_readback_allowlist where idempotency_key=%s", (pre_idem,))
+            captured = one(cur)[0] is not None
+            post_attempt, post_idem = uuid.uuid4(), uuid.uuid4()
+            authority(cur, "carr_jobs")
+            cur.execute(prepare_sql(), prepare_params(fixture, post_attempt, "prior", post_idem)); one(cur)
+            owner(cur)
+            cur.execute("select count(*) from ops.legacy_prior_staging_readback_allowlist where idempotency_key=%s", (post_idem,))
+            post_absent = one(cur)[0] == 0
+            check("raw 0222 migration captures only the pre-boundary eligible prior attempt", captured and post_absent)
+            for role in ("carr_reader", "carr_writer", "carr_authority"):
+                cur.execute("select has_table_privilege(%s,'ops.legacy_prior_staging_readback_allowlist','insert,update,delete')", (role,))
+                check(f"{role} has no legacy allowlist DML", one(cur)[0] is False)
+            conn.commit()
+    finally:
+        with psycopg.connect(admin, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute("select pg_terminate_backend(pid) from pg_stat_activity where datname=%s and pid<>pg_backend_pid()", (name,))
+            cur.execute(sql.SQL("drop database if exists {}").format(sql.Identifier(name)))
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         sys.exit("staging-release-readback-gate: DATABASE_URL is not set")
+    raw_0222_capture_fixture(dsn)
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
         ensure_authority_roles(cur)
         fixture = seed_fixture(cur, "main")
@@ -292,9 +397,9 @@ def main() -> int:
                     (enabled["receipt_id"],))
         cur.execute("set local session_replication_role=origin")
         authority(cur,"carr_jobs")
-        cur.execute(record_sql(),record_params(fixture,enabled_attempt,"standalone",enabled_idem,
-                                               enabled_version,program6_actions_enabled=False))
-        check("legacy nullable receipt replays by its immutable common fields",one(cur)[0]["replayed"] is True)
+        check("Program 6 recorder refuses a simulated legacy NULL-posture receipt",refuses(
+            cur,record_sql(),record_params(fixture,enabled_attempt,"standalone",enabled_idem,
+                                            enabled_version,program6_actions_enabled=False)))
         owner(cur)
         cur.execute("""select is_nullable='YES' from information_schema.columns
                        where table_schema='ops' and table_name='staging_release_readback_receipt'
@@ -305,7 +410,89 @@ def main() -> int:
                               has_function_privilege('carr_reader','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute'),
                               has_function_privilege('carr_writer','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute'),
                               has_function_privilege('carr_authority','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute')""")
-        check("only carr_jobs retains the new eight-argument recorder",one(cur)==(True,True,False,False,False))
+        check("only carr_jobs retains the new eight-argument recorder",one(cur)==(False,True,False,False,False))
+
+        # Compatibility is intentionally narrower than the pre-0218 writer:
+        # only the prior observation of a typed recovery may retain its
+        # historical NULL posture projection.
+        legacy_attempt=uuid.uuid4(); legacy_before_idem=uuid.uuid4(); legacy_idem=uuid.uuid4()
+        legacy_before_version=uuid.uuid4(); legacy_version=uuid.uuid4()
+        authority(cur,"carr_jobs")
+        prepare_and_claim(cur,fixture,legacy_attempt,"current_before",legacy_before_idem)
+        cur.execute(record_sql(),record_params(fixture,legacy_attempt,"current_before",
+                                               legacy_before_idem,legacy_before_version))
+        one(cur)
+        cur.execute(prepare_sql(),prepare_params(fixture,legacy_attempt,"prior",legacy_idem))
+        one(cur)
+        # Simulate the one-time migration-time capture of an already prepared
+        # historical prior attempt; runtime roles cannot add this row.
+        owner(cur)
+        cur.execute("""insert into ops.legacy_prior_staging_readback_allowlist(
+                         idempotency_key,deployment_attempt_id)
+                       select idempotency_key,id from ops.staging_deployment_attempt
+                       where idempotency_key=%s""",(legacy_idem,))
+        authority(cur,"carr_jobs")
+        check("runtime carr_jobs cannot extend the legacy compatibility allowlist",refuses(
+            cur,"""insert into ops.legacy_prior_staging_readback_allowlist(
+                     idempotency_key,deployment_attempt_id)
+                   select idempotency_key,id from ops.staging_deployment_attempt
+                   where idempotency_key=%s""",(legacy_idem,)))
+        check("allowlisted legacy prior still refuses before its normal claim",refuses(
+            cur,legacy_prior_record_sql(),legacy_prior_record_params(
+                fixture,legacy_attempt,"prior",legacy_idem,legacy_version)))
+        cur.execute(claim_sql(),(legacy_idem,))
+        check("allowlisted legacy prior receives its normal exclusive claim",
+              one(cur)[0]["deploy_allowed"] is True)
+        cur.execute(legacy_prior_record_sql(),legacy_prior_record_params(
+            fixture,legacy_attempt,"prior",legacy_idem,legacy_version))
+        legacy_result=one(cur)[0]
+        cur.execute("""select r.program6_actions_enabled is null, r.observed_release_id=%s,
+          r.projection_sha256='sha256:'||encode(public.digest(jsonb_build_object(
+            'deployment_attempt_id',a.id,'correlation_id',a.correlation_id,'recovery_attempt_id',a.recovery_attempt_id,
+            'recovery_step',a.recovery_step,'rehearsal_release_id',r.rehearsal_release_id,'observed_release_id',r.observed_release_id,
+            'prior_release_id',a.prior_release_id,'service_id',r.service_id,'environment','staging','git_sha',a.git_sha,
+            'provider','cloudflare-workers','provider_version_id',r.provider_version_id,'provider_tag',r.provider_tag,
+            'verb_count',r.verb_count,'schema_highest_migration',r.schema_highest_migration,'schema_applied_count',r.schema_applied_count,
+            'declared_migration_set_sha256',a.declared_migration_set_sha256,'declared_migration_count',a.declared_migration_count,
+            'declared_schema_applied_count',a.declared_schema_applied_count,'declared_schema_ledger_sha256',a.declared_schema_ledger_sha256,
+            'doctrine_generation',r.doctrine_generation)::text,'sha256'),'hex')
+          from ops.staging_release_readback_receipt r
+          join ops.staging_deployment_attempt a on a.id=r.deployment_attempt_id
+          where r.id=%s""",
+                    (fixture["prior_id"],legacy_result["receipt_id"]))
+        check("legacy seven-argument prior writes NULL posture and exact pre-Program-6 projection for the completed Production release",
+              one(cur)==(True,True,True))
+        cur.execute(legacy_prior_record_sql(),legacy_prior_record_params(
+            fixture,legacy_attempt,"prior",legacy_idem,legacy_version))
+        check("legacy seven-argument prior exact replay is idempotent",
+              one(cur)[0]["replayed"] is True)
+        check("legacy seven-argument prior changed input is refused",refuses(
+            cur,legacy_prior_record_sql(),legacy_prior_record_params(
+                fixture,legacy_attempt,"prior",legacy_idem,legacy_version,verb_count=212)))
+        check("Program 6 recorder refuses a NULL-posture legacy replay",refuses(
+            cur,record_sql(),record_params(fixture,legacy_attempt,"prior",legacy_idem,
+                                            legacy_version,program6_actions_enabled=False)))
+        legacy_after_idem=uuid.uuid4(); legacy_after_version=uuid.uuid4()
+        prepare_and_claim(cur,fixture,legacy_attempt,"current_after",legacy_after_idem)
+        cur.execute(record_sql(),record_params(fixture,legacy_attempt,"current_after",
+                                               legacy_after_idem,legacy_after_version))
+        legacy_after=one(cur)[0]
+        check("legacy prior participates in the exact typed recovery bundle",
+              legacy_after["bundle_id"] is not None and legacy_after["recovery_run_id"] is not None)
+        for rejected_step in ("standalone","current_before","current_after"):
+            rejected_attempt=uuid.uuid4(); rejected_idem=uuid.uuid4()
+            prepare_and_claim(cur,fixture,rejected_attempt,rejected_step,rejected_idem)
+            check(f"legacy seven-argument writer refuses {rejected_step}",refuses(
+                cur,legacy_prior_record_sql(),legacy_prior_record_params(
+                    fixture,rejected_attempt,rejected_step,rejected_idem,uuid.uuid4())))
+        owner(cur)
+        cur.execute("""select to_regprocedure('ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint)') is not null,
+                              has_function_privilege('carr_jobs','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint)'::regprocedure,'execute'),
+                              has_function_privilege('carr_reader','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint)'::regprocedure,'execute'),
+                              has_function_privilege('carr_writer','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint)'::regprocedure,'execute'),
+                              has_function_privilege('carr_authority','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint)'::regprocedure,'execute')""")
+        check("only carr_jobs receives the constrained legacy seven-argument recorder",
+              one(cur)==(True,True,False,False,False))
 
         crash_attempt=uuid.uuid4(); crash_id=uuid.uuid4(); crash_version=uuid.uuid4()
         authority(cur,"carr_jobs")
@@ -404,7 +591,7 @@ def main() -> int:
         cur.execute("set local session_replication_role=replica")
         cur.execute("""update ops.staging_recovery_rehearsal_bundle
           set declared_schema_highest_migration='0201_stale_but_valid.sql'
-          where recovery_attempt_id=%s""",(attempt,))
+          where current_release_id=%s""",(fixture["current_id"],))
         cur.execute("set local session_replication_role=origin")
         authority(cur,"carr_authority_joe")
         check("Joe approval rejects a typed bundle for a stale valid-shaped schema",refuses(cur,
@@ -415,7 +602,7 @@ def main() -> int:
         cur.execute("""update ops.staging_recovery_rehearsal_bundle
           set declared_schema_highest_migration='0202_staging_release_readback_receipt.sql',
               declared_schema_applied_count=%s
-          where recovery_attempt_id=%s""",(SCHEMA_APPLIED_COUNT-1,attempt))
+          where current_release_id=%s""",(SCHEMA_APPLIED_COUNT-1,fixture["current_id"]))
         cur.execute("set local session_replication_role=origin")
         authority(cur,"carr_authority_joe")
         check("Joe approval rejects a typed bundle for a stale applied count",refuses(cur,
@@ -425,13 +612,13 @@ def main() -> int:
         cur.execute("set local session_replication_role=replica")
         cur.execute("""update ops.staging_recovery_rehearsal_bundle
           set declared_schema_applied_count=%s
-          where recovery_attempt_id=%s""",(SCHEMA_APPLIED_COUNT,attempt))
+          where current_release_id=%s""",(SCHEMA_APPLIED_COUNT,fixture["current_id"]))
         cur.execute("set local session_replication_role=origin")
 
         cur.execute("set local session_replication_role=replica")
         cur.execute("""update ops.staging_recovery_rehearsal_bundle
           set declared_schema_ledger_sha256=%s
-          where recovery_attempt_id=%s""",("sha256:"+"8"*64,attempt))
+          where current_release_id=%s""",("sha256:"+"8"*64,fixture["current_id"]))
         cur.execute("set local session_replication_role=origin")
         authority(cur,"carr_authority_joe")
         check("Joe approval rejects a typed bundle for a stale ledger digest",refuses(cur,
@@ -441,7 +628,7 @@ def main() -> int:
         cur.execute("set local session_replication_role=replica")
         cur.execute("""update ops.staging_recovery_rehearsal_bundle
           set declared_schema_ledger_sha256=%s
-          where recovery_attempt_id=%s""",(SCHEMA_LEDGER_SHA256,attempt))
+          where current_release_id=%s""",(SCHEMA_LEDGER_SHA256,fixture["current_id"]))
         cur.execute("set local session_replication_role=origin")
 
         # Dell retains authority capability generally but is never an approval
