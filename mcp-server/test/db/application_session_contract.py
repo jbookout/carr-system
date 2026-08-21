@@ -647,6 +647,72 @@ def main(dsn):  # noqa: C901
     check("definer functions pin search_path and are not PUBLIC",
           definer_functions_are_hardened)
 
+    def guards_have_one_unassumable_owner():
+        """The owner of a function can replace its body. That makes ownership a
+        trust boundary exactly as load-bearing as the EXECUTE grants the sweeps
+        above already police, and it was the one item on this migration's
+        residual-risk list with no test at all.
+
+        Three things are asserted, and the third is the one with teeth:
+          1. Every guard shares ONE owner. Split ownership means a second role
+             can rewrite part of the substrate.
+          2. That owner is not itself a runtime role.
+          3. No runtime role can ASSUME the owner. A role that can SET ROLE to
+             the owner, or that inherits its privileges, can replace any guard
+             and then write whatever it likes -- so the guards would be advice,
+             not enforcement."""
+        guards = ("mint_application_session", "revoke_application_session",
+                  "application_session_is_live", "require_live_application_session",
+                  "refuse_application_session_rewrite",
+                  "refuse_application_session_relink",
+                  "refuse_qualified_evidence_rewrite")
+        runtime_roles = ("carr_writer", "carr_reader", "carr_jobs", "carr_authority",
+                         "carr_exporter", "carr_device_evidence", "carr_session_minter")
+        with conn.cursor() as cur:
+            cur.execute("""select p.proname, pg_get_userbyid(p.proowner)
+                           from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                           where n.nspname='ops' and p.proname = any(%s)""",
+                        (list(guards),))
+            rows = cur.fetchall()
+        assert len(rows) == len(guards), (
+            f"expected {len(guards)} guard functions, found {len(rows)}: "
+            f"{sorted(r[0] for r in rows)}")
+        owners = {owner for _, owner in rows}
+        assert len(owners) == 1, (
+            f"the guards do not share one owner: "
+            f"{sorted((n, o) for n, o in rows)}. Split ownership means more than "
+            f"one role can rewrite this substrate.")
+        owner = owners.pop()
+
+        with conn.cursor() as cur:
+            cur.execute("""select tableowner from pg_tables
+                           where schemaname='ops' and tablename='application_session'""")
+            row = cur.fetchone()
+        assert row, "ops.application_session is absent"
+        assert row[0] == owner, (
+            f"ops.application_session is owned by {row[0]!r} but its guards are "
+            f"owned by {owner!r}; the table owner can disable a trigger on it")
+
+        assert owner not in runtime_roles, (
+            f"the guards are owned by {owner!r}, which is a RUNTIME role. The "
+            f"credential the substrate constrains can replace the guards that "
+            f"constrain it.")
+
+        assumable = []
+        with conn.cursor() as cur:
+            for role in runtime_roles:
+                cur.execute("select pg_has_role(%s,%s,'MEMBER'), pg_has_role(%s,%s,'USAGE')",
+                            (role, owner, role, owner))
+                is_member, has_usage = cur.fetchone()
+                if is_member or has_usage:
+                    assumable.append(
+                        f"{role} (SET ROLE={is_member}, inherits={has_usage})")
+        assert not assumable, (
+            f"these runtime roles can assume the guard owner {owner!r} and so can "
+            f"replace any guard in this migration: {assumable}")
+    check("guard functions and their table share one owner no runtime role can assume",
+          guards_have_one_unassumable_owner)
+
     def triggers_enable_always():
         with conn.cursor() as cur:
             cur.execute("""select c.relname, t.tgname, t.tgenabled
