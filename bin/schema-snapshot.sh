@@ -73,6 +73,8 @@
 # Usage:
 #   bin/schema-snapshot.sh            # regenerate db/schema.sql from production
 #   bin/schema-snapshot.sh --check    # non-zero if the checked-in file is stale
+#   bin/schema-snapshot.sh --from-disposable-local postgres://carr_ci@127.0.0.1:<port>/carr_ci
+#       # generate only from the loopback disposable PG17 full-build target
 #
 # Needs production access, so it runs on Joe's Mac and never in CI — CI consumes
 # the committed file and cannot reach production by construction.
@@ -94,14 +96,44 @@ for c in /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql psql; do
   if command -v "$c" >/dev/null 2>&1; then PSQL="$c"; break; fi
 done
 [ -n "$PSQL" ] || { echo "schema-snapshot: no psql found (needed for the grants section)" >&2; exit 69; }
-[ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
 
+# pg_dump's completion trailer has varied in its number of terminal blank
+# records across client versions. Keep every interior blank line intact, but
+# make the tracked snapshot's EOF a one-newline invariant.
+EOF_NORMALIZER='
+/^[[:space:]]*$/ { trailing = trailing $0 ORS; next }
+{ printf "%s", trailing; trailing = ""; print }
+'
+
+normalise_eof() {
+  awk "$EOF_NORMALIZER"
+}
 CHECK=0
-[ "${1:-}" = "--check" ] && CHECK=1
+URL=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) CHECK=1 ;;
+    --from-disposable-local)
+      [ "$#" -ge 2 ] || { echo "schema-snapshot: --from-disposable-local needs a DSN" >&2; exit 64; }
+      URL="$2"; shift ;;
+    *) echo "schema-snapshot: unknown argument $1" >&2; exit 64 ;;
+  esac
+  shift
+done
 
-URL="$("$NEONCTL" connection-string production \
-        --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
-[ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
+if [ -n "$URL" ]; then
+  printf '%s\n' "$URL" | grep -Eq '^postgres://carr_ci@127\.0\.0\.1:[0-9]{4,5}/carr_ci$' \
+    || { echo "schema-snapshot: disposable source must be passwordless carr_ci on 127.0.0.1/carr_ci" >&2; exit 64; }
+else
+  [ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
+  URL="$("$NEONCTL" connection-string production \
+          --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
+  [ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
+fi
+
+# pg_dump renders timestamptz in the server session timezone; pin it so the
+# Production and disposable-local paths serialize identical instants alike.
+export PGOPTIONS='-c timezone=UTC'
 
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
@@ -333,13 +365,16 @@ select format('grant execute on function %s.%s(%s) to %s;',
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_session_issuer'), ('carr_authority'), ('carr_device_evidence')
 )
-select format('grant %s to %s;', gr.rolname, mem.rolname)
+-- pg_auth_members permits different grantors for the same role/member pair.
+-- The snapshot has no grantor field, so render each semantically identical
+-- membership exactly once without deduplicating any object ACL shape above.
+select distinct format('grant %s to %s;', gr.rolname, mem.rolname)
   from pg_auth_members m
   join pg_roles gr  on gr.oid  = m.roleid
   join pg_roles mem on mem.oid = m.member
  where gr.rolname in (select rolname from app)
    and mem.rolname in (select rolname from app union select 'neondb_owner')
- order by gr.rolname, mem.rolname;
+ order by 1;
 GRANTSQL
 
 cat >> "$TMP" <<'GRANTHDR'
@@ -465,6 +500,20 @@ if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS "$URL" >> "$TMP"; th
   exit 1
 fi
 
+# doctrine_meta is a singleton bootstrap rather than reference vocabulary: its
+# live generation advances with successful doctrine commits and must never be
+# copied into a tracked rebuild declaration.  A rebuilt database always starts
+# from the canonical counter value, exactly as 0075 originally established.
+cat >> "$TMP" <<'DOCTRINE_META'
+--
+-- CARR DOCTRINE META BOOTSTRAP (bin/schema-snapshot.sh) — canonical, not
+-- production data.  A snapshot rebuild starts generation at zero.
+--
+
+insert into public.doctrine_meta (id, generation) values (1, 0);
+
+DOCTRINE_META
+
 # A truncated dump is the failure mode that matters: pg_dump has lost a Neon
 # connection mid-stream before (2026-08-07, on the nightly backup). A short file
 # that parses is worse than no file, because it would silently define a smaller
@@ -485,7 +534,7 @@ fi
 sed -e '/^-- Dumped from database version/d' \
     -e '/^-- Dumped by pg_dump version/d' \
     -e '/^\\restrict /d' \
-    -e '/^\\unrestrict /d' "$TMP" > "$TMP.clean"
+    -e '/^\\unrestrict /d' "$TMP" | normalise_eof > "$TMP.clean"
 mv "$TMP.clean" "$TMP"
 
 if [ "$CHECK" = "1" ]; then

@@ -63,11 +63,13 @@ def run_manifest(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def run_release_verify(payload: str, *, version: str = VERSION) -> subprocess.CompletedProcess[str]:
+def run_release_verify(payload: str, *, version: str = VERSION,
+                       posture: str = "enabled") -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(VERIFY_RELEASE), "--environment", "production",
          "--sha", "a" * 40, "--provider", PROVIDER,
-         "--provider-version-id", version],
+         "--provider-version-id", version,
+         "--expected-program6-actions", posture],
         cwd=REPO,
         input=payload,
         capture_output=True,
@@ -316,6 +318,7 @@ def main() -> int:
         "git_sha": {"value": "a" * 40},
         "provider": PROVIDER,
         "worker_version": {"id": VERSION},
+        "program6_actions": {"enabled": True, "posture": "enabled", "reason": None},
     })
     good = run_release_verify(good_release, version=VERSION.upper())
     check("8d. executable read-back verifier accepts the exact identity",
@@ -330,6 +333,20 @@ def main() -> int:
     check("8f. executable read-back verifier refuses malformed JSON",
           malformed.returncode == 2 and "malformed" in malformed.stderr,
           f"rc={malformed.returncode}")
+    for observed, label in (
+        ({"enabled": False, "posture": "disabled", "reason": None}, "disabled"),
+        ({"enabled": False, "posture": "misconfigured", "reason": "bad"}, "misconfigured"),
+        (None, "missing"),
+    ):
+        changed = json.loads(good_release)
+        if observed is None:
+            changed.pop("program6_actions")
+        else:
+            changed["program6_actions"] = observed
+        rejected = run_release_verify(json.dumps(changed))
+        check(f"8f.{label}. executable verifier refuses {label} Program 6 posture",
+              rejected.returncode == 1 and "program6_actions" in rejected.stderr,
+              f"rc={rejected.returncode} err={rejected.stderr[:120]}")
     check("8g. wrapper delegates parsing to the tested verifier",
           "ops/verify-worker-release.py" in deploy)
 

@@ -493,37 +493,55 @@ export async function callTool(env, actor, name, args, profile = "full") {
       hint: "a narrow profile may log the activity but not assert relationships — drop links[] from this call and file the introduction facts with add-loop for an interactive partner session to link-parties" });
   if (!tool.write) {
     const sql = neon(env.DATABASE_URL_READER);
-    const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
-    // HOW READ EVIDENCE IS RECORDED, AND WHY IT DEPENDS ON THE READ.
+    // sideWrite is the ONLY way a read verb may write, and it is deliberately
+    // awkward: a separate credential, never awaited, failure isolated. A read
+    // that writes on the read connection is what took doctrine search down —
+    // search_doctrine_situations carried an insert inside its own statement, so
+    // a refused write killed the answer (migration 0223). Anything using this
+    // must treat the write as optional: losing it costs a record, never a reply.
+    const client = {
+      query: async (text, params = []) => ({ rows: await sql.query(text, params) }),
+      sideWrite: env?.DATABASE_URL_WRITER
+        ? (text, params = []) => {
+            const run = neon(env.DATABASE_URL_WRITER).query(text, params)
+              .catch(() => {});           // a lost log row must never surface as a failed read
+            env.ctx?.waitUntil?.(run);
+            return run;
+          }
+        : null,
+    };
+    // HOW READ EVIDENCE IS RECORDED, AND THE ONE PLACE THIS BRANCH GAVE GROUND.
     //
-    // This used to be one rule: schedule the record through ctx.waitUntil and
-    // swallow any failure, so recording could never slow or fail a read. That
-    // was a deliberate choice and it is still the right one for MOST reads.
-    // It cannot be the right one for a read whose evidence will be CITED —
-    // Phase 4 asks a source claim to rest on a durable record, and a record
-    // written on a best-effort basis after the response is already on the wire
-    // is not durable. It may simply never exist, and nothing would say so.
+    // Read audit used to be scheduled through ctx.waitUntil with its failure
+    // swallowed, so recording could never slow or fail a read. Phase 4 needs
+    // more than that for a read whose evidence will be CITED: a source claim
+    // resting on a best-effort write made after the response is already on the
+    // wire rests on a record that may simply never exist.
     //
-    // So the rule is now split by whether the read can ever qualify:
+    // So a QUALIFYING read (the caller carries an authenticated session) writes
+    // its evidence and WAITS for it, while a LEGACY read stays scheduled and
+    // swallowed exactly as before — its evidence could never be cited, so
+    // slowing it would buy nothing.
     //
-    //   QUALIFYING READ (the caller carries an authenticated session) — the
-    //   evidence is written and CONFIRMED before the response is returned. It
-    //   costs one write round trip, and a read can now fail on an audit write
-    //   that previously could not fail it. That is the price of a provenance
-    //   claim that holds.
+    // WHAT CHANGED WHEN THIS MET MAIN, and it is a real concession rather than
+    // a merge artifact. An earlier version of this branch FAILED the read when
+    // the evidence write failed. Main now carries the opposite lesson, bought
+    // with a live outage: a read that writes synchronously on its own path took
+    // doctrine search down for hours, and sideWrite above exists so that can
+    // never recur. Failing a read on an audit write is the same shape of
+    // mistake one layer up.
     //
-    //   LEGACY READ (no session) — unchanged. Its evidence could never be cited
-    //   whatever happened to it, so failing the read would be an availability
-    //   loss with no integrity gain. Scheduled, swallowed, exactly as before.
+    // The narrower rule keeps what the requirement actually needed. A failed
+    // evidence write DOWNGRADES this read to non-qualifying and reports itself;
+    // the read still answers. Evidence is therefore durable before any read
+    // CLAIMS to qualify, which is the property a provenance claim rests on,
+    // without a logging failure ever becoming an outage.
     //
-    // ATOMICITY IS NOT REACHABLE HERE AND IS ALSO NOT NEEDED. Reads run on a
-    // one-shot reader client with no transaction, and the audit insert goes to
-    // a different credential entirely, so the two cannot share a transaction
-    // without moving every read onto the writer pool. They do not need to: a
-    // read produces no row of its own, so the audit row IS the operation's
-    // record and there is no second row for it to disagree with. The only
-    // failure this leaves is recording a read whose response never reached the
-    // caller, which errs toward over-recording rather than under-recording.
+    // ATOMICITY IS NOT REACHABLE HERE AND IS NOT NEEDED. Reads run on a one-shot
+    // reader client with no transaction and the audit insert uses a different
+    // credential, so the two cannot share a transaction without moving every
+    // read onto the writer pool. A read produces no row of its own, so the audit
+    // row IS the operation's record and there is no second row to disagree with.
     let ok = true, errorKind = null;
     const insertFn = env?.DATABASE_URL_WRITER
       ? (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params)
@@ -548,7 +566,18 @@ export async function callTool(env, actor, name, args, profile = "full") {
     }
     if (insertFn) {
       if (actor?.application_session_id) {
-        await recordReadCallDurable(insertFn, actor, name, ok, errorKind);
+        // WAITED FOR, BUT NOT FATAL. The read still answers if the evidence
+        // write fails; it simply stops claiming to qualify, and says so.
+        try {
+          await recordReadCallDurable(insertFn, actor, name, ok, errorKind);
+        } catch (e) {
+          scheduleFailureRecord(env, env.ctx, {
+            routeKey: "mcp:read-evidence",
+            failureClass: "read_evidence_not_recorded",
+            detail: JSON.stringify({ verb: name, actor: actor.slug,
+              session: actor.application_session_id }).slice(0, 200),
+          });
+        }
       } else {
         env.ctx?.waitUntil?.(recordReadCall(insertFn, actor, name, ok, errorKind));
       }

@@ -44,6 +44,7 @@ from schema_snapshot_grants import (
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
+GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 
 # The app roles the migrations grant to. neondb_owner may appear as a membership
 # grantee only (0005/0006 bundle it the roles), never as an ACL grantee: its own
@@ -60,8 +61,18 @@ SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
 # age out of the snapshot. This list and the preamble in bin/schema-snapshot.sh
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
+# carr_session_minter and carr_session_issuer joined 2026-08-21 with the
+# authenticated-session substrate. The minter is the privilege bundle permitted
+# to create a session; the issuer is the LOGIN credential that holds it.
+#
+# ADDING A ROLE OBLIGES THREE EDITS, NOT TWO. The role preamble in db/schema.sql
+# and the grant whitelist in bin/schema-snapshot.sh are the two that are known.
+# This list is the third, and missing it fails in the wrong direction: the
+# snapshot creates the role and grants to it, and those grants then report as
+# STRAYS because nothing here recognises the grantee.
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
-             "carr_authority", "carr_device_evidence"]
+             "carr_authority", "carr_device_evidence",
+             "carr_session_minter", "carr_session_issuer"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
 failures: list[str] = []
@@ -163,6 +174,16 @@ def main():
     check("0006's membership bundle survives (exporter is reader-plus)",
           any(ln == "grant carr_reader to carr_exporter;"
               for _, ln in grant_lines))
+
+    generator = open(GENERATOR).read()
+    membership_query = re.search(
+        r"select distinct format\('grant %s to %s;', gr\.rolname, mem\.rolname\)"
+        r".*?from pg_auth_members m.*?order by 1;",
+        generator,
+        re.S,
+    )
+    check("membership renderer de-duplicates only identical rendered lines",
+          membership_query is not None)
 
     # THE WIDENING GUARD. Every grantee in the file must be an app role —
     # or neondb_owner, on membership lines only. Anything else means some

@@ -8,6 +8,7 @@ import {
   normalizeSituationPhrase,
   rankSituationCandidates,
   situationRetrievalTools,
+  searchDoctrineSituations,
 } from "../src/situation-retrieval.js";
 
 
@@ -161,4 +162,117 @@ test("batch approval orders dependencies before promotion", async () => {
     proposal_ids: [], base_versions: {}, golden_suite_digest: "a".repeat(64),
   });
   assert.match(selectSql, /when 'concept' then 1[\s\S]+when 'phrase' then 2[\s\S]+when 'mapping' then 3/i);
+});
+
+
+// THE ENTRY POINT EVERY SESSION USES HAD NO TEST (found 2026-08-21, defect
+// 86403252). search-doctrine returned a bare "internal error" for every live
+// query while the full golden suite stayed green, because the suite exercises
+// the ranker through the in-database gate, which passes a NULL actor
+// (db/schema.sql ~line 5429). The real path resolves a sponsor first, and
+// nothing ever walked it. These two tests walk it.
+
+test("search resolves the SPONSOR row and hands that id to the ranker", async () => {
+  const calls = [];
+  const client = {
+    query: async (sql, params) => {
+      calls.push({ sql, params });
+      if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "sponsor-uuid" }] };
+      return { rows: [] };
+    },
+  };
+  const out = await searchDoctrineSituations(
+    client, { slug: "joe", human: true }, { q: "diagnosis checklist", limit: 3 });
+
+  assert.equal(calls.length, 2, "expected the sponsor lookup then the ranker call");
+  assert.deepEqual(calls[0].params, ["joe"], "sponsor is resolved by slug, never from tool args");
+  assert.equal(calls[1].params[0], "diagnosis checklist");
+  assert.equal(calls[1].params[1], "sponsor-uuid",
+    "the ranker must receive the resolved HUMAN row id, not the runtime principal");
+  assert.equal(out.ok, true);
+  assert.equal(out.generated_text, false);
+});
+
+test("a refused visibility scope names itself instead of becoming internal error", async () => {
+  // mcp.js maps any non-ToolError to the literal string "internal_error", so an
+  // untyped throw here is indistinguishable from a crash and tells no operator
+  // which of the two conditions fired.
+  const client = { query: async () => ({ rows: [] }) };  // sponsor row absent
+  await assert.rejects(
+    searchDoctrineSituations(client, { slug: "joe", human: true }, { q: "runbook" }),
+    error => {
+      assert.ok(error.payload, "the failure must carry a typed payload, not a bare Error");
+      assert.equal(error.payload.error, "retrieval_scope_refused");
+      assert.equal(error.payload.reason, "sponsor_not_active_human");
+      return true;
+    });
+});
+
+
+// THE OUTAGE, as a test (found 2026-08-21 from ops.incident_fact, not from
+// reading code). Commit 4abafd3b put "select id from actor where slug=$1 and
+// kind='human' and active=true" on the READ path. carr_reader has column SELECT
+// on actor.id and actor.slug and none on kind or active, and Postgres refuses a
+// predicate over a column you cannot read — so every doctrine search died with
+// "permission denied for table actor", flattened to a bare "internal error".
+// Migration 0223 moves the lookup behind a definer function. This test fails if
+// anyone puts the raw table back on the read path.
+test("sponsor resolution never touches the actor table from the read path", async () => {
+  const statements = [];
+  const client = {
+    query: async (sql, params) => {
+      statements.push(sql);
+      if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "sponsor-uuid" }] };
+      return { rows: [] };
+    },
+  };
+  await searchDoctrineSituations(client, { slug: "joe", human: true }, { q: "runbook", limit: 3 });
+
+  const lookup = statements.find(sql => /actor/.test(sql));
+  assert.ok(lookup, "the sponsor must still be resolved, not skipped");
+  assert.match(lookup, /retrieval_visibility_actor_id/,
+    "sponsor resolution must go through the definer function");
+  assert.doesNotMatch(lookup, /\bfrom\s+actor\b/,
+    "the read path must never select from the actor table directly");
+  assert.doesNotMatch(lookup, /kind\s*=|active\s*=/,
+    "the read path must not filter on actor columns carr_reader cannot read");
+});
+
+test("a logged query rides the side-write channel, never the read connection", async () => {
+  // The ranker used to carry `insert into retrieval_query_log` inside its own
+  // statement, which made this read a write. The log is worth keeping and worth
+  // strictly less than the answer, so it moves to the write credential and is
+  // never awaited: losing it must cost a log row, never the reply.
+  const readStatements = [], sideWrites = [];
+  const client = {
+    query: async (sql) => {
+      readStatements.push(sql);
+      if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "sponsor-uuid" }] };
+      return { rows: [{ section_id: "sec-1", final_score: 0.9,
+                        provenance: { policy_id: "coequal-normalized-v1", policy_version: 1 } }] };
+    },
+    sideWrite: (sql, params) => { sideWrites.push({ sql, params }); },
+  };
+  const out = await searchDoctrineSituations(client, { slug: "joe", human: true }, { q: "runbook" });
+
+  assert.equal(readStatements.some(sql => /insert\s+into/i.test(sql)), false,
+    "no write may be issued on the read connection");
+  assert.equal(sideWrites.length, 1, "the query log write goes out exactly once");
+  assert.match(sideWrites[0].sql, /log_retrieval_query/);
+  assert.deepEqual(sideWrites[0].params[3], JSON.stringify({ high: 1, medium: 0, low: 0 }),
+    "score bands are computed from the returned rows");
+  assert.equal(out.total, 1, "the answer is returned regardless of logging");
+});
+
+test("search still answers when the side-write channel is absent", async () => {
+  const client = {
+    query: async (sql) => {
+      if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "sponsor-uuid" }] };
+      return { rows: [{ section_id: "sec-1", final_score: 0.5, provenance: {} }] };
+    },
+    sideWrite: null,   // no write credential configured
+  };
+  const out = await searchDoctrineSituations(client, { slug: "joe", human: true }, { q: "runbook" });
+  assert.equal(out.ok, true);
+  assert.equal(out.total, 1);
 });

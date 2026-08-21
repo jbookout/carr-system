@@ -46,6 +46,9 @@ tools/ops-record.py with no database at all.
 import re
 import subprocess
 import sys
+import json
+import os
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -61,6 +64,37 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         FAILURES.append(name)
         print(f"  FAIL  {name}" + (f" — {detail}" if detail else ""))
+
+
+def completion_invocation(source: str) -> tuple[int, list[str]]:
+    """Run only the wrapper's completion branch with a fake recorder."""
+    start = source.index('  if [ "$rd_state" = "complete" ] && [ -n "$RELEASE_KEY" ]; then')
+    end = source.index("\n  return 0\n}", start)
+    close_branch = source[start:end]
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        call_log = tmp / "call.json"
+        fake_python = tmp / "python"
+        fake_python.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['CALL_LOG']).write_text(json.dumps(sys.argv[1:]))\n",
+            encoding="utf-8")
+        fake_python.chmod(0o755)
+        script = tmp / "run.sh"
+        script.write_text(
+            "#!/bin/sh\nset -eu\n"
+            + close_branch + "\n",
+            encoding="utf-8")
+        script.chmod(0o755)
+        done = subprocess.run(
+            ["sh", str(script)], capture_output=True, text=True,
+            env={**os.environ, "PY": str(fake_python), "REPO": str(REPO),
+                 "RELEASE_KEY": "approved-release", "TARGET_ENV": "production",
+                 "rd_state": "complete", "CALL_LOG": str(call_log)})
+        call = json.loads(call_log.read_text()) if call_log.exists() else []
+        return done.returncode, call
 
 
 def main() -> int:
@@ -130,6 +164,12 @@ def main() -> int:
     check("3c. a complete deploy closes the release, and only a complete one",
           close_at != -1 and '"$rd_state" = "complete" ] && [ -n "$RELEASE_KEY"' in source,
           "nothing advances the release past approved, so it and its deployment disagree")
+    close_rc, close_call = completion_invocation(source)
+    check("3c1. completion preserves the approval-bound verifier pair",
+          close_rc == 0
+          and close_call == [str(REPO / "tools" / "ops-record.py"), "release", "complete",
+                             "--key", "approved-release"],
+          f"rc={close_rc} call={close_call!r}")
 
     # 4. the failed path records before it exits
     failed_at = source.find("record_deployment failed")
