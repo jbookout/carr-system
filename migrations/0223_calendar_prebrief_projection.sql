@@ -1,4 +1,4 @@
--- 0216: bounded, redacted, sponsor-fenced Calendar prebrief projection.
+-- 0223: bounded, redacted, sponsor-fenced Calendar prebrief projection.
 --
 -- The EventKit collector supplies only opaque keys and already-resolved CARR
 -- refs.  The database owns the calendar allowlist, derives both the sponsor and
@@ -876,31 +876,31 @@ do $$
 declare v_columns text[]; v_role record;
 begin
   if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_jobs' and not rolcanlogin) then
-    raise exception '0216 FAILED: calendar prebrief capability bundle is not NOLOGIN';
+    raise exception '0223 FAILED: calendar prebrief capability bundle is not NOLOGIN';
   end if;
   if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_canary_jobs' and not rolcanlogin) then
-    raise exception '0216 FAILED: calendar prebrief canary capability bundle is not NOLOGIN';
+    raise exception '0223 FAILED: calendar prebrief canary capability bundle is not NOLOGIN';
   end if;
   if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_attestors' and not rolcanlogin)
      or not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_email_resolver' and not rolcanlogin) then
-    raise exception '0216 FAILED: calendar prebrief device capability bundles are not NOLOGIN';
+    raise exception '0223 FAILED: calendar prebrief device capability bundles are not NOLOGIN';
   end if;
   if (select count(*) from ops.job_definition where version=1 and enabled=false and execution_kind='deterministic'
       and inventory_contract->>'owner'=owner_actor
       and legacy_schedule->>'status'='disabled'
       and recurrence->>'cron'='30 6 * * 1-5'
       and ((key='calendar-prebrief-projection-joe-daily' and owner_actor='joe') or (key='calendar-prebrief-projection-dell-daily' and owner_actor='dell')))<>2 then
-    raise exception '0216 FAILED: separate disabled pre-06:45 Joe/Dell job definitions are missing';
+    raise exception '0223 FAILED: separate disabled pre-06:45 Joe/Dell job definitions are missing';
   end if;
   if (select count(*) from ops.job_definition where version=1 and enabled=false and execution_kind='deterministic'
       and legacy_schedule->>'status'='disabled' and recurrence->>'cron'='30 6 * * 1-5'
       and ((key='calendar-prebrief-canary-joe-daily' and owner_actor='joe') or (key='calendar-prebrief-canary-dell-daily' and owner_actor='dell')))<>2 then
-    raise exception '0216 FAILED: separate disabled isolated Joe/Dell canary definitions are missing';
+    raise exception '0223 FAILED: separate disabled isolated Joe/Dell canary definitions are missing';
   end if;
   if exists(select 1 from information_schema.columns where table_schema='ops' and table_name in
       ('calendar_prebrief_allowed_calendar','calendar_prebrief_allowlist_receipt','calendar_prebrief_projection_event','calendar_prebrief_projection_participant','calendar_prebrief_projection_receipt','calendar_prebrief_source_attestation_receipt','calendar_prebrief_canary_event','calendar_prebrief_canary_receipt')
       and column_name~'(email|description|url|recurrence|credential|eventkit)') then
-    raise exception '0216 FAILED: calendar prebrief base tables retain prohibited source data columns';
+    raise exception '0223 FAILED: calendar prebrief base tables retain prohibited source data columns';
   end if;
   for v_role in select unnest(array['carr_reader','carr_writer','carr_jobs','carr_authority','carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs','carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver']) role_name loop
     if exists(select 1 from unnest(array['ops.calendar_prebrief_allowed_calendar','ops.calendar_prebrief_allowlist_receipt','ops.calendar_prebrief_projection_event','ops.calendar_prebrief_projection_participant','ops.calendar_prebrief_projection_receipt','ops.calendar_prebrief_source_attestation_receipt','ops.calendar_prebrief_capture_challenge','ops.calendar_prebrief_canary_event','ops.calendar_prebrief_canary_receipt']) tbl(name)
@@ -908,7 +908,7 @@ begin
                  or has_table_privilege(v_role.role_name,tbl.name,'insert')
                  or has_table_privilege(v_role.role_name,tbl.name,'update')
                  or has_table_privilege(v_role.role_name,tbl.name,'delete')) then
-      raise exception '0216 FAILED: calendar prebrief table privilege leaked to %',v_role.role_name;
+      raise exception '0223 FAILED: calendar prebrief table privilege leaked to %',v_role.role_name;
     end if;
   end loop;
   if has_function_privilege('carr_reader','ops.ingest_calendar_prebrief_projection(uuid,uuid,text[],jsonb)'::regprocedure,'execute')
@@ -931,14 +931,14 @@ begin
      or has_function_privilege('carr_calendar_prebrief_jobs','ops.ingest_calendar_prebrief_canary_projection(uuid,uuid,text,text[],jsonb)'::regprocedure,'execute')
      or has_function_privilege('carr_calendar_prebrief_canary_jobs','ops.issue_calendar_prebrief_capture_contract(uuid,uuid)'::regprocedure,'execute')
      or not has_function_privilege('carr_calendar_prebrief_canary_jobs','ops.ingest_calendar_prebrief_canary_projection(uuid,uuid,text,text[],jsonb)'::regprocedure,'execute') then
-    raise exception '0216 FAILED: calendar prebrief function privilege boundary is wrong';
+    raise exception '0223 FAILED: calendar prebrief function privilege boundary is wrong';
   end if;
   if not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_allowed_calendar' and column_name='configuration_digest')
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_allowed_calendar' and column_name='active_revision_id')
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_projection_event' and column_name='allowlist_revision_id')
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_projection_receipt' and column_name='allowlist_digest')
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_projection_receipt' and column_name='allowlist_revision_id') then
-    raise exception '0216 FAILED: allowlist freshness revision columns are missing';
+    raise exception '0223 FAILED: allowlist freshness revision columns are missing';
   end if;
   if not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_projection_receipt' and column_name='source_attestation_id')
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_source_attestation_receipt' and column_name='canonical_event_digest')
@@ -948,28 +948,28 @@ begin
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_capture_challenge' and column_name='scheduled_for')
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_canary_receipt' and column_name='allowlist_revision_id')
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_canary_event' and column_name='allowlist_revision_id') then
-    raise exception '0216 FAILED: immutable verified source envelope columns are missing';
+    raise exception '0223 FAILED: immutable verified source envelope columns are missing';
   end if;
   if not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_allowlist_receipt'::regclass and tgname='calendar_prebrief_allowlist_receipt_append_only' and not tgisinternal)
      or not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_projection_receipt'::regclass and tgname='calendar_prebrief_projection_receipt_append_only' and not tgisinternal)
      or not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_source_attestation_receipt'::regclass and tgname='calendar_prebrief_source_attestation_receipt_append_only' and not tgisinternal)
      or not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_capture_challenge'::regclass and tgname='calendar_prebrief_capture_challenge_append_only' and not tgisinternal)
      or not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_canary_receipt'::regclass and tgname='calendar_prebrief_canary_receipt_append_only' and not tgisinternal) then
-    raise exception '0216 FAILED: append-only calendar prebrief receipts are not guarded';
+    raise exception '0223 FAILED: append-only calendar prebrief receipts are not guarded';
   end if;
   if (select count(*) from pg_constraint where contype='f' and confrelid='ops.calendar_prebrief_allowlist_receipt'::regclass
         and conrelid in ('ops.calendar_prebrief_allowed_calendar'::regclass,'ops.calendar_prebrief_projection_event'::regclass,'ops.calendar_prebrief_projection_receipt'::regclass,'ops.calendar_prebrief_source_attestation_receipt'::regclass,'ops.calendar_prebrief_capture_challenge'::regclass,'ops.calendar_prebrief_canary_event'::regclass,'ops.calendar_prebrief_canary_receipt'::regclass))<>7
      or not exists(select 1 from pg_constraint where contype='f'
                    and conrelid='ops.calendar_prebrief_source_attestation_receipt'::regclass
                    and confrelid='ops.calendar_prebrief_capture_challenge'::regclass) then
-    raise exception '0216 FAILED: current allowlist, source receipts, and projections do not all bind immutable revisions and contracts';
+    raise exception '0223 FAILED: current allowlist, source receipts, and projections do not all bind immutable revisions and contracts';
   end if;
   select array_agg(column_name order by ordinal_position) into v_columns from information_schema.columns where table_schema='public' and table_name='v_calendar_prebrief_events';
   if v_columns is distinct from array['sponsor','occurrence_key','starts_at','ends_at','title','location','participant_ref','participant_display_name','participant_org_name','participant_status','participant_last_touch','open_owner','open_action'] then
-    raise exception '0216 FAILED: reader event view column boundary drifted';
+    raise exception '0223 FAILED: reader event view column boundary drifted';
   end if;
   select array_agg(column_name order by ordinal_position) into v_columns from information_schema.columns where table_schema='public' and table_name='v_calendar_prebrief_snapshot_status';
   if v_columns is distinct from array['sponsor','snapshot_at','captured_at','event_count','participant_count'] then
-    raise exception '0216 FAILED: reader snapshot-status view column boundary drifted';
+    raise exception '0223 FAILED: reader snapshot-status view column boundary drifted';
   end if;
 end $$;

@@ -148,6 +148,9 @@ def main() -> int:
             fail("new source job reused an old immutable receipt")
         cur.execute("reset role")
         set_local_role(cur, "carr_reader")
+        # Both seals deliberately occur in this one rollback-only transaction,
+        # where PostgreSQL's now() is identical. The current source must follow
+        # its DB-owned scheduled snapshot time, never UUID tie-breaking.
         if one(cur, "select freshness_state from v_renewal_decision_queue_status")[0] != "empty" or cur.execute("select * from v_renewal_decision_queue").fetchall():
             fail("sealed true-zero source was not explicit empty")
         cur.execute("reset role")

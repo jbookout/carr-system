@@ -1,4 +1,4 @@
--- 0217_renewal_decision_delivery.sql — safe, record-native renewal delivery.
+-- 0224_renewal_decision_delivery.sql — safe, record-native renewal delivery.
 --
 -- A mutable candidate_pool.updated_at is not evidence that the renewal source
 -- completed.  The queue therefore reads only rows bound to the latest immutable,
@@ -105,7 +105,7 @@ end $$;
 
 create or replace view v_renewal_decision_queue_status as
 with current_run as (
-  select * from ops.renewal_decision_source_run order by recorded_at desc,id desc limit 1
+  select * from ops.renewal_decision_source_run order by snapshot_at desc,recorded_at desc,id desc limit 1
 ), current_members as (
   select r.id as source_run_id,r.recorded_at,r.member_count,m.candidate_id,
          cp.id is not null and cp.source='renewal-radar' and cp.status='pool'
@@ -135,7 +135,7 @@ select t1_candidate_count,source_observed_at,
 
 create or replace view v_renewal_decision_queue as
 with current_run as (
-  select * from ops.renewal_decision_source_run order by recorded_at desc,id desc limit 1
+  select * from ops.renewal_decision_source_run order by snapshot_at desc,recorded_at desc,id desc limit 1
 ), current_rows as (
   select cp.name as display_name,cp.org_name,cp.vertical,cp.city,cp.county,cp.state,cp.est_lease_event,
          case when upper(coalesce(cp.source_row->>'tier','')) like 'T1%' then 't1' else 'not_t1' end as tier_status,
@@ -172,19 +172,19 @@ do $$
 declare forbidden text[] := array['id','pool_id','source_key','source_row','email','phone','address'];
 begin
   if exists (select 1 from information_schema.columns where table_schema='public' and table_name='v_renewal_decision_queue' and column_name=any(forbidden)) then
-    raise exception '0217 FAILED: renewal decision queue exposes a prohibited raw field';
+    raise exception '0224 FAILED: renewal decision queue exposes a prohibited raw field';
   end if;
   if not has_table_privilege('carr_reader','v_renewal_decision_queue','select')
      or not has_table_privilege('carr_reader','v_renewal_decision_queue_status','select')
      or has_table_privilege('carr_reader','candidate_pool','select')
      or has_table_privilege('carr_reader','v_export_pool','select') then
-    raise exception '0217 FAILED: renewal reader grant boundary is wrong';
+    raise exception '0224 FAILED: renewal reader grant boundary is wrong';
   end if;
   if has_table_privilege('carr_reader','ops.renewal_decision_source_run','select')
      or has_table_privilege('carr_reader','ops.renewal_decision_source_run_member','select')
      or has_table_privilege('carr_jobs','ops.renewal_decision_source_run','select')
      or has_table_privilege('carr_jobs','ops.renewal_decision_source_run_member','select') then
-    raise exception '0217 FAILED: renewal source-run base tables leaked';
+    raise exception '0224 FAILED: renewal source-run base tables leaked';
   end if;
 end $$;
 

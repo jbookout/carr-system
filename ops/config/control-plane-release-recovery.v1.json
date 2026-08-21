@@ -7,12 +7,13 @@
       "0194_atomic_rule_approval",
       "0195_control_plane_cache_observations",
       "0199_guidance_standing_context_boundary",
-      "0200_calendar_canary_record_layer",
-      "0201_nightly_availability_canary_record_layer",
-      "0203_atomic_rule_lifecycle_forward_upgrade",
       "0212_doctrine_meta_singleton",
       "0215_program5_completion_hash_grant",
-      "0216_calendar_prebrief_projection"
+      "0220_calendar_canary_record_layer",
+      "0221_nightly_availability_canary_record_layer",
+      "0222_atomic_rule_lifecycle_forward_upgrade",
+      "0223_calendar_prebrief_projection",
+      "0224_renewal_decision_delivery"
     ]
   },
   "database_down_migration": "does_not_exist",

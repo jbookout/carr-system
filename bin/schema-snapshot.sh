@@ -165,10 +165,10 @@ cat > "$TMP" <<'ROLES'
 -- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
--- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0216
+-- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0223
 -- ages into the ledger. Until then the migration must remain the only creator;
 -- move that NOLOGIN capability bundle into this active preamble and the grant
--- catalog queries only on the snapshot refresh that records 0216 as applied.
+-- catalog queries only on the snapshot refresh that records 0223 as applied.
 --
 -- ALL SEVEN current production carr_ roles are accounted for. Six are created
 -- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
@@ -443,7 +443,7 @@ fi
 #     enforcement classes, and installed/verification metadata contain no
 #     client, deal, event, secret, or runtime usage data. 0194 is already in a
 #     rebuilt snapshot's ledger, so its seed does not replay; without this
-#     controlled block the 0203 lifecycle cannot validate pinned rules. Do not
+#     controlled block the 0222 lifecycle cannot validate pinned rules. Do not
 #     add rule_control_binding or any receipt/rule table: those are per-rule
 #     history, not bounded internal control configuration.
 #

@@ -6,7 +6,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 LEGACY_MIGRATION = REPO / "migrations" / "0194_atomic_rule_approval.sql"
-MIGRATION = REPO / "migrations" / "0203_atomic_rule_lifecycle_forward_upgrade.sql"
+MIGRATION = REPO / "migrations" / "0222_atomic_rule_lifecycle_forward_upgrade.sql"
 TOOLS = REPO / "mcp-server" / "src" / "tools.js"
 DB_GATE = REPO / "ops" / "control-plane-db-gate.py"
 LOCAL_ACCEPTANCE = REPO / "ops" / "atomic-rule-approval-local-pg-acceptance.py"
@@ -81,10 +81,10 @@ def main() -> int:
           and "do update set" not in catalog_seed
           and "migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js" in catalog_seed
           and "lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py" in catalog_seed
-          and "0203 failed: control catalog does not match the two exact reviewed controls" in catalog_seed
+          and "0222 failed: control catalog does not match the two exact reviewed controls" in catalog_seed
           and catalog_seed.index("on conflict (control_key) do nothing")
-              < catalog_seed.index("0203 failed: control catalog does not match the two exact reviewed controls")
-          and catalog_seed.index("0203 failed: control catalog does not match the two exact reviewed controls")
+              < catalog_seed.index("0222 failed: control catalog does not match the two exact reviewed controls")
+          and catalog_seed.index("0222 failed: control catalog does not match the two exact reviewed controls")
               < forward_sql.index("create or replace function ops.sync_system_rule_control_bindings()")
           and "forward control catalog restoration" in gate)
     check("Joe's existing governance and cost rules bind to distinct exact controls",

@@ -1,4 +1,4 @@
--- 0203_atomic_rule_lifecycle_forward_upgrade.sql
+-- 0222_atomic_rule_lifecycle_forward_upgrade.sql
 -- Forward-only upgrade from deployed 0194 (sha256 14ab5701...) to the reviewed Joe-only lifecycle.
 -- 0194 and 0195 are immutable deployed history; this migration never rewrites prior receipts.
 
@@ -6,7 +6,7 @@ begin;
 
 -- db/schema deliberately records the deployed 0194 ledger entry but can omit
 -- mutable catalog seed rows. Reassert the reviewed control identities before
--- the semantic binding sync; a stale/missing snapshot must not make 0203 fail
+-- the semantic binding sync; a stale/missing snapshot must not make 0222 fail
 -- merely because 0194 is correctly never replayed.
 insert into ops.enforcement_control_catalog
   (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
@@ -37,7 +37,7 @@ begin
          and test_ref='ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py'
          and enforcement_class='deny_gate'
          and installed and verified_at is not null)) <> 2 then
-    raise exception '0203 FAILED: control catalog does not match the two exact reviewed controls';
+    raise exception '0222 FAILED: control catalog does not match the two exact reviewed controls';
   end if;
 end $$;
 
@@ -911,28 +911,28 @@ grant execute on function ops.applicable_rules(text,text,text)
 do $$
 begin
   if to_regprocedure('ops.approve_rule(uuid,text,text[],text,text)') is null then
-    raise exception '0203 FAILED: enforced approval function is missing';
+    raise exception '0222 FAILED: enforced approval function is missing';
   end if;
   if has_function_privilege('carr_writer',
        'ops.approve_rule(uuid,text,text[],text,text)'::regprocedure,'execute') then
-    raise exception '0203 FAILED: routine writer may approve rules';
+    raise exception '0222 FAILED: routine writer may approve rules';
   end if;
   if has_function_privilege('carr_writer',
        'ops.sync_system_rule_control_bindings()'::regprocedure,'execute') then
-    raise exception '0203 FAILED: routine writer may install semantic rule bindings';
+    raise exception '0222 FAILED: routine writer may install semantic rule bindings';
   end if;
   if has_function_privilege('carr_writer',
        'ops.retire_rule(uuid,text,uuid,text)'::regprocedure,'execute') then
-    raise exception '0203 FAILED: routine writer may retire rules';
+    raise exception '0222 FAILED: routine writer may retire rules';
   end if;
   if exists (select 1 from ops.enforcement_control_catalog
               where control_key='standing_context_runtime') then
-    raise exception '0203 FAILED: prose surfacing is mislabeled as unbreakable enforcement';
+    raise exception '0222 FAILED: prose surfacing is mislabeled as unbreakable enforcement';
   end if;
   if not exists (select 1 from ops.enforcement_control_catalog
                   where control_key='platform_metering_pre_dispatch'
                     and installed and verified_at is not null) then
-    raise exception '0203 FAILED: platform metering control is not registered';
+    raise exception '0222 FAILED: platform metering control is not registered';
   end if;
 end $$;
 
