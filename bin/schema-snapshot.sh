@@ -191,7 +191,7 @@ declare
   issuer_can_login boolean;
   issuer_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence','carr_session_minter'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -204,20 +204,14 @@ begin
     jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
-  -- carr_session_issuer (migration 0233) is the SECOND login role, and it is
-  -- added the way carr_jobs is added rather than by widening the NOLOGIN array
-  -- above -- which is what the note further up asks for. It is the credential
-  -- the authentication layer holds to mint an application session, so it must
-  -- connect; carr_session_minter stays NOLOGIN because it is the privilege
-  -- bundle the issuer is a member of, never a credential of its own.
-  select rolcanlogin into issuer_can_login from pg_roles where rolname='carr_session_issuer';
-  if not found then
-    issuer_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
-    execute format('create role %I login password %L', 'carr_session_issuer', issuer_placeholder);
-  elsif not issuer_can_login then
-    issuer_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
-    execute format('alter role %I login password %L', 'carr_session_issuer', issuer_placeholder);
-  end if;
+  -- THE SESSION ROLES ARE NOT CREATED HERE, and that is an ordering fact
+  -- rather than an oversight. This preamble exists so a rebuilt cluster has
+  -- the roles PRODUCTION ALREADY HAS, and production has neither
+  -- carr_session_minter nor carr_session_issuer until the Phase 4 migrations
+  -- are applied. Creating them early breaks the grants test, which requires
+  -- every role it knows to be named by at least one grant in this snapshot --
+  -- and no such grant exists until those migrations land and this file is
+  -- regenerated. The migrations create both roles themselves.
   -- THE ROLE ONLY, NEVER THE MEMBERSHIP, and the reason is about what the
   -- tests then prove. 0232 no longer objects to a purpose-built issuer holding
   -- the membership, so this is a choice on the merits rather than a workaround.
@@ -302,7 +296,7 @@ select format('revoke all on function %s.%s(%s) from public;',
  order by 1;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_session_issuer'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -316,7 +310,7 @@ select format('grant %s on schema %s to %s;',
  order by n.nspname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_session_issuer'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -332,7 +326,7 @@ select format('grant %s on %s %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_session_issuer'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -349,7 +343,7 @@ select format('grant %s (%s) on table %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_session_issuer'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -363,7 +357,7 @@ select format('grant execute on function %s.%s(%s) to %s;',
  order by n.nspname, p.proname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_session_issuer'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 -- pg_auth_members permits different grantors for the same role/member pair.
 -- The snapshot has no grantor field, so render each semantically identical

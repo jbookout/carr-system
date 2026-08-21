@@ -47,6 +47,25 @@ GRANTS_TEST = REPO / "tools" / "test-schema-snapshot-grants.py"
 
 # role -> why the snapshot deliberately does not create it
 EXCLUDED = {
+    # The two Phase 4 session roles are excluded on ORDERING, not on principle,
+    # and they come out of this dict the moment the migrations are deployed.
+    #
+    # This preamble exists so a rebuilt cluster has the roles PRODUCTION ALREADY
+    # HAS. Production has neither of these until the Phase 4 migrations land.
+    # Creating them early fails the grants test instead, because that test
+    # requires every role it knows to be named by at least one grant in the
+    # snapshot — and no such grant can exist until those migrations apply and
+    # this file is regenerated from a database that has them. The migrations
+    # create both roles themselves, so a cluster built from them is complete.
+    "carr_session_minter": (
+        "created by the Phase 4 substrate migration, not yet in production, so "
+        "the snapshot carries no grant naming it; remove this entry when the "
+        "migrations are deployed and db/schema.sql is regenerated"
+    ),
+    "carr_session_issuer": (
+        "the LOGIN credential that holds the minting bundle; same ordering as "
+        "carr_session_minter above, and removed at the same time"
+    ),
     "carr_backup": (
         "the backup credential; bin/backup-dump.sh supplies it, no gate asks "
         "for it, and a second login role with a placeholder password would "

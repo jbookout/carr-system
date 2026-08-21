@@ -61,18 +61,8 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # age out of the snapshot. This list and the preamble in bin/schema-snapshot.sh
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
-# carr_session_minter and carr_session_issuer joined 2026-08-21 with the
-# authenticated-session substrate. The minter is the privilege bundle permitted
-# to create a session; the issuer is the LOGIN credential that holds it.
-#
-# ADDING A ROLE OBLIGES THREE EDITS, NOT TWO. The role preamble in db/schema.sql
-# and the grant whitelist in bin/schema-snapshot.sh are the two that are known.
-# This list is the third, and missing it fails in the wrong direction: the
-# snapshot creates the role and grants to it, and those grants then report as
-# STRAYS because nothing here recognises the grantee.
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
-             "carr_authority", "carr_device_evidence",
-             "carr_session_minter", "carr_session_issuer"]
+             "carr_authority", "carr_device_evidence"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
 failures: list[str] = []
