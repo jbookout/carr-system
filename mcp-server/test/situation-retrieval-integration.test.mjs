@@ -164,17 +164,37 @@ test("no read verb filters the actor table on a column carr_reader cannot read",
 
   const here = path.dirname(fileURLToPath(import.meta.url));
   const srcDir = path.join(here, "../src");
-  const ACTOR = /\bfrom\s+actor\b/i;
-  const PREDICATE = /\bkind\s*(=|in\b)|\bactive\s*=|\band\s+active\b|\bwhere\s+active\b/i;
+  // Matches join as well as from, and an optional schema qualifier. Nothing in
+  // src writes public.actor today, but migrations use that style constantly, so
+  // the next person to qualify a schema would otherwise write an invisible site.
+  const ACTOR = /\b(?:from|join)\s+(?:public\.)?actor\b/i;
+  // Covers =, <>, !=, IN, IS, a bare or aliased `active`, and a negated one.
+  // An alias prefix is allowed (a.kind), an arbitrary suffix is NOT: the looser
+  // form matched error_kind in an unrelated insert and produced a false positive.
+  // Any mention of kind or active inside an actor statement counts, and there is
+  // deliberately no cleverness about whether it is a filter or a projection:
+  // carr_reader cannot read either column, so SELECTING one is denied exactly
+  // like filtering on one. An earlier lookahead here tried to exclude
+  // projections and silently lost `active is true` as well.
+  const PREDICATE = /\b(?:\w+\.)?kind\b|\b(?:\w+\.)?active\b/i;
+
+  // THE UNIT IS THE STRING LITERAL, NOT A LINE WINDOW. A fixed window is a
+  // guess: this repo formats SQL across many lines, so a predicate four lines
+  // below its FROM slipped through. It is also unsafe in the other direction —
+  // an earlier attempt walked back to the nearest quote character and happily
+  // spanned an apostrophe in a comment, flagging a write-path query that has no
+  // such predicate at all. A SQL statement lives inside ONE literal, so that is
+  // the unit. Backticks may span newlines; the quoted forms may not, which is
+  // exactly the language rule that stops a comment apostrophe swallowing code.
+  const LITERAL = /`(?:[^`\\]|\\.)*`|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g;
 
   const found = [];
   for (const name of fs.readdirSync(srcDir).filter(f => f.endsWith(".js")).sort()) {
     const text = fs.readFileSync(path.join(srcDir, name), "utf8");
-    const lines = text.split("\n");
-    for (const m of text.matchAll(new RegExp(ACTOR, "gi"))) {
+    for (const m of text.matchAll(LITERAL)) {
+      if (!ACTOR.test(m[0]) || !PREDICATE.test(m[0])) continue;
       const lineNo = text.slice(0, m.index).split("\n").length;
-      const chunk = lines.slice(lineNo - 1, lineNo + 2).join("\n");
-      if (PREDICATE.test(chunk)) found.push({ name, lineNo, text: lines[lineNo - 1].trim() });
+      found.push({ name, lineNo, text: m[0].replace(/\s+/g, " ").trim().slice(0, 90) });
     }
   }
 
@@ -189,4 +209,37 @@ test("no read verb filters the actor table on a column carr_reader cannot read",
   // The read path specifically must never appear here at all.
   assert.equal(found.some(f => f.name === "situation-retrieval.js"), false,
     "doctrine search must resolve its sponsor through retrieval_visibility_actor_id, not the table");
+});
+
+// The contract above is only worth its allowlist if the scanner cannot be
+// walked around. A second session attacked the first version and found FIVE
+// evasions; every one is pinned here, plus two shapes that must NOT be flagged,
+// because a noisy contract gets switched off. The patterns are duplicated on
+// purpose — if someone edits the ones above without editing these, this fails.
+test("the actor-filter scanner cannot be walked around", () => {
+  const ACTOR = /\b(?:from|join)\s+(?:public\.)?actor\b/i;
+  const PREDICATE = /\b(?:\w+\.)?kind\b|\b(?:\w+\.)?active\b/i;
+  const LITERAL = /`(?:[^`\\]|\\.)*`|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g;
+  const flags = src => [...src.matchAll(LITERAL)].some(m => ACTOR.test(m[0]) && PREDICATE.test(m[0]));
+
+  const mustFlag = {
+    "the outage query itself": `c.query("select id from actor where slug=$1 and kind='human' and active=true")`,
+    "bare and active, the form four live sites use": `c.query("select id from actor where slug=$1 and active")`,
+    "schema-qualified, the style every migration uses": `c.query("select id from public.actor where slug=$1 and active")`,
+    "aliased column": "c.query(`select a.id from actor a where a.slug=$1 and a.active`)",
+    "active is true": `c.query("select id from actor where active is true")`,
+    "negated": `c.query("select id from actor where slug=$1 and not active")`,
+    "inequality on kind": `c.query("select id from actor where kind <> 'automation'")`,
+    "predicate four lines below the from": "c.query(`\n select id\n from actor\n where slug=$1\n and active\n`)",
+  };
+  for (const [why, src] of Object.entries(mustFlag))
+    assert.equal(flags(src), true, `scanner must catch: ${why}`);
+
+  const mustNotFlag = {
+    "a clean lookup on granted columns only": `c.query("select id from actor where slug=$1")`,
+    "an apostrophe in a nearby comment must not swallow code":
+      `// the token's actor is active by now\nc.query("select id from actor where slug=$1")`,
+  };
+  for (const [why, src] of Object.entries(mustNotFlag))
+    assert.equal(flags(src), false, `scanner must not flag: ${why}`);
 });
