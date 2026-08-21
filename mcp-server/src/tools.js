@@ -208,31 +208,48 @@ export async function writeReceiptsFor(client, actor, verb, key, hash) {
       where idempotency_key = $1 and application_session_id = $2
         and subject_id is not null`, [key, sid]);
   if (!subjects.rows.length) return;
-  const digestRow = await client.query(
-    `select ops.write_receipt_digest($1,$2,$3,$4,$5) as d`,
-    [verb, actor.id, identity.organization_tenant_id, sid, hash]);
-  const claimed = digestRow.rows[0].d;
   for (const s of subjects.rows) {
-    // The state this write BUILT ON: the previous receipt's result for this
-    // subject, or 'origin' for the first. This is what makes a later conflict
-    // or reversal checkable rather than assertable.
+    // TWO DIGESTS, BECAUSE THEY ANSWER TWO DIFFERENT QUESTIONS (0220). The call
+    // digest is proof of attachment: the database recomputes it from the frozen
+    // tool_call row and from this receipt's own subject, and is_proven is that
+    // comparison. The material digest is the claim about the SUBJECT — what this
+    // call wrote about it — and it is what prior_digest, the conflict detector,
+    // exact reversal and the reducer all read. One column could not be honest
+    // about both, which is the defect 0220 exists to remove.
+    //
+    // COMPUTED PER SUBJECT, not once per call. The call digest is bound to the
+    // subject now, so hoisting it out of this loop would hand every subject the
+    // same digest and make it transferable between them.
+    const digestRow = await client.query(
+      `select ops.write_receipt_digest($1,$2,$3,$4,$5,$6,$7) as call_digest,
+              ops.write_receipt_material_digest($8,$4,$6,$7) as material_digest`,
+      [verb, actor.id, identity.organization_tenant_id, sid, hash,
+       s.subject_type, s.subject_id, key]);
+    const callDigest = digestRow.rows[0].call_digest;
+    const material = digestRow.rows[0].material_digest;
+    // The state this write BUILT ON: the previous receipt's MATERIAL result for
+    // this subject, or 'origin' for the first. This is what makes a later
+    // conflict or reversal checkable rather than assertable.
     const prev = await client.query(
-      `select claimed_digest from ops.write_receipt
+      `select material_digest from ops.write_receipt
         where subject_type = $1 and subject_id = $2
         order by recorded_at desc, id desc limit 1`, [s.subject_type, s.subject_id]);
-    const prior = prev.rows.length ? prev.rows[0].claimed_digest : "origin";
-    // A no-op restatement would produce a receipt whose result equals what it
-    // built on. Skip it: a chain of identical links is noise, and it would make
-    // every restatement look like a change.
-    if (prior === claimed) continue;
+    const prior = prev.rows.length ? prev.rows[0].material_digest : "origin";
+    // A no-op restatement produces material identical to what it built on. Skip
+    // it: a chain of identical links is noise, and it would make every
+    // restatement look like a change. This compares MATERIAL to MATERIAL — under
+    // the old single digest it compared a subject state to a call digest, which
+    // could only ever be equal by accident.
+    if (prior === material) continue;
     const rid = crypto.randomUUID();
     await client.query(
       `insert into ops.write_receipt
          (id, application_session_id, actor_id, organization_tenant_id, verb,
-          subject_type, subject_id, tool_call_idempotency_key, claimed_digest, prior_digest)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          subject_type, subject_id, tool_call_idempotency_key,
+          call_digest, material_digest, prior_digest)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [rid, sid, actor.id, identity.organization_tenant_id, verb,
-       s.subject_type, s.subject_id, key, claimed, prior]);
+       s.subject_type, s.subject_id, key, callDigest, material, prior]);
     // Prove it HERE, in the same transaction. A receipt left unproven blocks
     // 0213's acceptance bar, so producing one and walking away would replace an
     // empty table with a permanently failing one.

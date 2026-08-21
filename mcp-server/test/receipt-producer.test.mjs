@@ -6,6 +6,14 @@
 // permanently unmeetable — the inert-substrate defect one layer up, where a
 // surface and the gate depending on it both ship and the producer between them
 // does not. These tests drive the producer with a recording fake client.
+//
+// 0220 SPLITS THE DIGEST THE PRODUCER COMPUTES. What was one `claimed_digest`
+// is now two: `call_digest` (proof of attachment, recomputed by the database
+// from the frozen tool_call row and the receipt's own subject) and
+// `material_digest` (the caller's claim about the SUBJECT, read by
+// prior_digest, the conflict detector, exact reversal and the reducer). The
+// producer's single digest query now returns BOTH, computed per subject, and
+// the insert carries 11 columns instead of 10.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,16 +25,25 @@ const QUALIFIED = { id: "actor-joe", slug: "joe", human: true, via: "oauth-googl
                     application_session_id: SID };
 const LEGACY = { id: "actor-codex", slug: "codex", human: false, via: "agent-token" };
 
-function fakeClient({ subjects = [], prior = null, digest = "digest-A" } = {}) {
+function fakeClient({ subjects = [], prior = null, material = "material-A" } = {}) {
   const calls = [];
   return {
     calls,
     async query(sql, params = []) {
       calls.push({ sql: sql.replace(/\s+/g, " ").trim(), params });
       if (sql.includes("from event")) return { rows: subjects };
-      if (sql.includes("write_receipt_digest")) return { rows: [{ d: digest }] };
-      if (sql.includes("select claimed_digest")) {
-        return { rows: prior ? [{ claimed_digest: prior }] : [] };
+      if (sql.includes("write_receipt_digest")) {
+        // params: [verb, actor_id, tenant, sid, hash, subject_type, subject_id, key]
+        // (query 8's write_receipt_material_digest args reuse positions 4,6,7).
+        // THE CALL DIGEST IS COMPUTED PER SUBJECT: this fake derives it from
+        // the subject_id actually passed in, so two different subjects in one
+        // call get two different call digests -- the same guarantee the real
+        // ops.write_receipt_digest gives by taking the subject as an argument.
+        const subjectId = params[6];
+        return { rows: [{ call_digest: `call-digest-for-${subjectId}`, material_digest: material }] };
+      }
+      if (sql.includes("select material_digest from ops.write_receipt")) {
+        return { rows: prior ? [{ material_digest: prior }] : [] };
       }
       if (sql.includes("insert into ops.write_receipt")) return { rows: [] };
       if (sql.includes("prove_write_receipt")) return { rows: [{}] };
@@ -45,7 +62,7 @@ test("a qualifying write produces a receipt AND proves it in the same transactio
                   + "with a permanently failing acceptance bar");
   assert.equal(inserted.params[1], SID, "the receipt must bind the session");
   assert.equal(inserted.params[7], "key-1", "and name the evidence it is about");
-  assert.equal(inserted.params[9], "origin", "the first receipt for a subject builds on origin");
+  assert.equal(inserted.params[10], "origin", "the first receipt for a subject builds on origin");
   assert.ok(c.calls.indexOf(inserted) < c.calls.indexOf(proved), "insert must precede the proof");
 });
 
@@ -59,20 +76,24 @@ test("a LEGACY write produces nothing at all — not even a query", async () => 
 
 test("the receipt chains onto the subject's previous result", async () => {
   const c = fakeClient({ subjects: [{ subject_type: "deal", subject_id: "deal-1" }],
-                         prior: "state-earlier", digest: "state-now" });
+                         prior: "state-earlier", material: "state-now" });
   await writeReceiptsFor(c, QUALIFIED, "update-deal", "key-3", "hash-3");
   const ins = c.calls.find(k => k.sql.includes("insert into ops.write_receipt"));
-  assert.equal(ins.params[8], "state-now", "the receipt records what this write produced");
-  assert.equal(ins.params[9], "state-earlier",
+  assert.equal(ins.params[9], "state-now",
+    "the receipt records the MATERIAL claim of what this write produced");
+  assert.equal(ins.params[10], "state-earlier",
     "and what it built on — which is what makes a later conflict or reversal "
     + "checkable rather than assertable");
 });
 
 test("a no-op restatement writes no receipt", async () => {
-  // Same result as the state it built on. A chain of identical links is noise
-  // and would make every restatement look like a change.
+  // Same MATERIAL as the state it built on. A chain of identical links is
+  // noise and would make every restatement look like a change. This is now a
+  // material-to-material comparison, never a comparison against the call
+  // digest, which is a digest of the CALL and would only ever match by
+  // accident.
   const c = fakeClient({ subjects: [{ subject_type: "deal", subject_id: "deal-1" }],
-                         prior: "same", digest: "same" });
+                         prior: "same", material: "same" });
   await writeReceiptsFor(c, QUALIFIED, "update-deal", "key-4", "hash-4");
   assert.ok(!c.calls.some(k => k.sql.includes("insert into ops.write_receipt")),
     "a restatement that changed nothing must not manufacture a link");
@@ -87,6 +108,25 @@ test("one receipt per subject the write touched", async () => {
   assert.deepEqual(ins.map(i => i.params[5]).sort(), ["deal", "party"]);
 });
 
+test("the call digest is computed per subject — two subjects must not share one", async () => {
+  // 0220 binds the call digest to the receipt's own subject, so hoisting the
+  // digest query out of the per-subject loop (computing it once per CALL
+  // instead of once per SUBJECT) would hand every subject the same digest and
+  // make it transferable between them. This asserts the query actually runs
+  // once per subject, with that subject's own identifiers, and that the two
+  // resulting receipts carry DIFFERENT call digests.
+  const c = fakeClient({ subjects: [{ subject_type: "deal", subject_id: "deal-1" },
+                                    { subject_type: "party", subject_id: "party-9" }] });
+  await writeReceiptsFor(c, QUALIFIED, "link-parties", "key-8", "hash-8");
+  const digestCalls = c.calls.filter(k => k.sql.includes("write_receipt_digest("));
+  assert.equal(digestCalls.length, 2, "the digest must be computed once per subject");
+  assert.deepEqual(digestCalls.map(k => k.params[6]).sort(), ["deal-1", "party-9"],
+    "each digest call must carry that subject's own identifiers");
+  const ins = c.calls.filter(k => k.sql.includes("insert into ops.write_receipt"));
+  assert.notEqual(ins[0].params[8], ins[1].params[8],
+    "two different subjects must not end up with the same call digest");
+});
+
 test("a write that touched no subject produces no receipt", async () => {
   const c = fakeClient({ subjects: [] });
   await writeReceiptsFor(c, QUALIFIED, "log-activity", "key-6", "hash-6");
@@ -95,9 +135,9 @@ test("a write that touched no subject produces no receipt", async () => {
 });
 
 test("nothing the caller sent can reach the receipt", async () => {
-  // Its inputs are (client, actor, verb, key, hash). The digest comes from a
-  // database function over server-derived values, and the subject list comes
-  // from rows already written under this session.
+  // Its inputs are (client, actor, verb, key, hash). The digests come from
+  // database functions over server-derived values, and the subject list
+  // comes from rows already written under this session.
   assert.equal(writeReceiptsFor.length, 5);
   const c = fakeClient({ subjects: [{ subject_type: "deal", subject_id: "deal-1" }] });
   await writeReceiptsFor(c, { ...QUALIFIED, claimed_digest: "forged" },

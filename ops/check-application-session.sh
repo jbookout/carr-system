@@ -56,6 +56,14 @@ MIGRATION_ACCEPT="$REPO/migrations/0213_continuity_reducer_and_acceptance.sql"
 # an authority acceptance, which is the record-layer verifier the static
 # preflight says it cannot be.
 MIGRATION_RETIRE="$REPO/migrations/0214_drive_retirement.sql"
+# 0220 splits the receipt digest. 0211 made claimed_digest carry both the proof
+# that a receipt is attached to a real call AND the claim about what a subject
+# now says; those are different facts, and one column could not be honest about
+# both. Under the old shape an exact reversal could never prove and a single
+# unproven receipt barred acceptance forever — this suite bricked itself on its
+# own first run. It applies AFTER 0214 because it rewrites 0214's retirement
+# trigger as well as 0211's and 0213's functions.
+MIGRATION_SPLIT="$REPO/migrations/0220_receipt_digest_split.sql"
 SUITE="$REPO/mcp-server/test/db/application_session_contract.py"
 export LC_ALL=C LANG=C
 export CARR_DISPOSABLE_PG_DIR="${CARR_DISPOSABLE_PG_DIR:-${TMPDIR:-/tmp}/carr-appsession-check}"
@@ -87,6 +95,8 @@ psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_ACCEPT"
 echo "migration 0213 applied (the reducer folds, and acceptance is gated)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_RETIRE"
 echo "migration 0214 applied (retirement needs two proven receipts and authority)"
+psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SPLIT"
+echo "migration 0220 applied (the call digest and the material claim are two columns)"
 
 # Run TWICE. The suite must be re-runnable; a contract that only passes against
 # a virgin database is testing ordering, not the substrate.

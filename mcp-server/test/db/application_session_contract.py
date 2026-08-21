@@ -887,30 +887,459 @@ def main(dsn):  # noqa: C901
     # This layer was REJECTED once, for three things. Each contract below names
     # which rejection it answers, and every one acts as carr_writer rather than
     # as the superuser the harness hands you.
-    def receipt_fixture(sess=None, key=None, req_hash="req-hash-A"):
+    def receipt_fixture(sess=None, key=None, req_hash="req-hash-A", subject_type="deal",
+                         subject_id=None):
         """A live session plus one qualified tool_call row, written as the
-        writer. Returns (session_id, idempotency_key, digest)."""
+        writer. Returns (session_id, idempotency_key, call_digest, subject_id).
+
+        THE DIGEST IS SUBJECT-BOUND (0220): ops.write_receipt_digest now takes
+        the receipt's own subject_type/subject_id as part of its input, so a
+        digest computed for one subject cannot prove a receipt naming another.
+        A caller that wants the receipt it files to actually PROVE must name
+        THIS subject_type and THIS subject_id on that receipt -- never a fresh
+        one invented separately."""
         sid = sess or mint(conn, joe)
         k = key or str(uuid.uuid4())
+        subj = subject_id if subject_id is not None else uuid.uuid4()
         writer_runs(conn, TOOL_CALL_INSERT.replace("'hash'", f"'{req_hash}'"),
                     (k, joe, sid), because="receipt fixture needs qualified evidence")
         with conn.cursor() as cur:
             cur.execute("""select ops.write_receipt_digest('log-activity', %s,
-                             'carr-internal', %s, %s)""", (joe, sid, req_hash))
+                             'carr-internal', %s, %s, %s, %s)""",
+                        (joe, sid, req_hash, subject_type, subj))
             digest = cur.fetchone()[0]
-        return sid, k, digest
+        return sid, k, digest, subj
 
     RECEIPT_INSERT = """insert into ops.write_receipt
         (id, application_session_id, actor_id, organization_tenant_id, verb,
-         subject_type, subject_id, tool_call_idempotency_key, claimed_digest, prior_digest)
-        values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,%s)"""
+         subject_type, subject_id, tool_call_idempotency_key,
+         call_digest, material_digest, prior_digest)
+        values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,%s,%s)"""
+
+    # Same shape, over a subject_type of 'drive_dependency' -- needed once 0220
+    # binds a retirement receipt's proof to naming the dependency it is about.
+    RECEIPT_INSERT_DEP = RECEIPT_INSERT.replace("'deal'", "'drive_dependency'")
+
+    # ---------------------------------------------------- 0220: the split ----
+    def retraction_clears_the_acceptance_bar():
+        """0220 (C). The escape hatch is a PROVEN retraction, not a delete or
+        an update -- receipts stay immutable. An unproven receipt blocks
+        acceptance until a proven receipt disavows it; only then does the bar
+        stop counting it.
+
+        ORDER-INDEPENDENT AND RE-RUNNABLE, on purpose: ops/check-application-
+        session.sh runs the whole suite TWICE against the SAME database.
+        Receipts are permanently undeletable, so unproven rows left behind by
+        earlier contracts -- in this pass or an earlier one -- accumulate
+        forever, and ops.accept_phase4 counts them GLOBALLY with no scoping.
+        Relying on running first bought nothing on a second pass. So instead
+        of trusting the table to already be clean, this contract SWEEPS every
+        unproven, not-yet-excused receipt in the WHOLE table -- retracting
+        each with its own proven receipt -- before it ever asserts that
+        acceptance SUCCEEDS. It also proves its own anchor receipt up front,
+        so the refusal it demonstrates first is unambiguously about UNPROVEN
+        receipts, not the separate (and, on a bare table, equally true) bar
+        requiring at least one proven receipt to exist at all."""
+        sid, key, digest, subject = receipt_fixture()
+        anchor = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (anchor, sid, joe, subject, key, digest, "m-anchor-c", "origin"),
+                    because="setup: an anchor receipt so proven_receipts > 0 already "
+                            "holds before the refusal below")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (anchor,))
+            assert cur.fetchone()[0] is True, "the anchor receipt must prove"
+            conn.commit()
+
+        bad_subject = uuid.uuid4()
+        bad_key = str(uuid.uuid4())
+        writer_runs(conn, TOOL_CALL_INSERT, (bad_key, joe, sid),
+                    because="setup: the call the deliberately-unproven receipt names")
+        bad = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (bad, sid, joe, bad_subject, bad_key,
+                     "a-digest-nobody-ever-wrote", "m-bad", "origin"),
+                    because="setup: a receipt left deliberately unproven")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (bad,))
+            assert cur.fetchone()[0] is False, "setup receipt must stay unproven"
+            conn.commit()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select ops.accept_phase4(%s,%s,%s)",
+                            (uuid.uuid4(), sid, "must refuse: unproven receipt present"))
+            conn.rollback()
+            raise AssertionError("acceptance succeeded while the receipt was unproven")
+        except psycopg.Error as exc:
+            conn.rollback()
+            assert "phase4_acceptance_no_unproven_receipts" in str(exc), (
+                f"refused, but by a different bar: {str(exc).strip().splitlines()[0]}")
+
+        # THE SWEEP. Every unproven, not-yet-excused receipt in the WHOLE
+        # table -- `bad` included, and anything any other contract (in this
+        # pass or an earlier one) left behind -- gets a proven retraction
+        # naming its own subject. One session and one tool_call row serve
+        # every retraction, because the call digest is computed per subject
+        # against that one call.
+        sweep_key = str(uuid.uuid4())
+        writer_runs(conn, TOOL_CALL_INSERT, (sweep_key, joe, sid),
+                    because="setup: the one call every sweep retraction is proven against")
+        with conn.cursor() as cur:
+            cur.execute("""select id, subject_type, subject_id, material_digest
+                             from ops.write_receipt w
+                            where not w.is_proven
+                              and not exists (
+                                select 1 from ops.write_receipt rr
+                                 where rr.retracts_receipt_id = w.id and rr.is_proven)""")
+            to_sweep = cur.fetchall()
+        for target_id, subj_type, subj_id, target_material in to_sweep:
+            with conn.cursor() as cur:
+                cur.execute("""select ops.write_receipt_digest('log-activity', %s,
+                                 'carr-internal', %s, 'hash', %s, %s)""",
+                            (joe, sid, subj_type, subj_id))
+                sweep_digest = cur.fetchone()[0]
+            rid = uuid.uuid4()
+            writer_runs(conn, """insert into ops.write_receipt
+                    (id, application_session_id, actor_id, organization_tenant_id, verb,
+                     subject_type, subject_id, tool_call_idempotency_key, call_digest,
+                     material_digest, prior_digest, retracts_receipt_id)
+                  values (%s,%s,%s,'carr-internal','log-activity',%s,%s,%s,%s,
+                          %s,%s,%s)""",
+                        (rid, sid, joe, subj_type, subj_id, sweep_key, sweep_digest,
+                         f"m-swept-{rid}", target_material, target_id),
+                        because=f"sweep: retract unproven receipt {target_id}")
+            with as_writer(conn), conn.cursor() as cur:
+                cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+                assert cur.fetchone()[0] is True, \
+                    f"a sweep retraction of {target_id} failed to prove"
+                conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute("select ops.accept_phase4(%s,%s,%s)",
+                        (uuid.uuid4(), sid, "must now succeed: every unproven receipt "
+                                            "is proven or proven-retracted"))
+            accepted_id = cur.fetchone()[0]
+            conn.commit()
+        assert accepted_id is not None, \
+            "acceptance did not succeed once every unproven receipt was swept clear"
+    check("req 6: an unproven receipt no longer bars acceptance once a proven receipt "
+          "retracts it", retraction_clears_the_acceptance_bar)
+
+    def unproven_retraction_clears_nothing():
+        """0220 (C)'s other half. If an UNPROVEN retraction could clear the
+        bar, the escape hatch could be opened from inside by asserting the
+        same thing twice -- a retraction is only as good as its own proof.
+
+        NEITHER `bad` NOR `ret` IS EVER COMMITTED. Both must stay unproven
+        for this contract to mean anything (bad is the receipt threatening to
+        block acceptance; ret, retracting it, must fail to excuse it), and
+        the new prior-existence guard (section E) forces ret's prior to be
+        either 'origin' (which bad already claims, so they would conflict
+        with each other immediately) or bad's own material (which a later
+        system-wide sweep would ALSO have to use to retract bad, colliding
+        with ret at that point instead). Either way, committing this pair
+        makes a permanent conflict unavoidable somewhere down the line, and
+        this contract does not need either row to survive its own
+        assertions -- so the whole fixture runs inside one open transaction
+        and is rolled back at the end. It also proves its own anchor
+        receipt first, for the same reason as the contract above."""
+        sid, key, digest, subject = receipt_fixture()
+        with as_writer(conn), conn.cursor() as cur:
+            anchor = uuid.uuid4()
+            cur.execute(RECEIPT_INSERT,
+                        (anchor, sid, joe, subject, key, digest, "m-anchor-d", "origin"))
+            cur.execute("select ops.prove_write_receipt(%s)", (anchor,))
+            assert cur.fetchone()[0] is True, "the anchor receipt must prove"
+
+            bad_subject = uuid.uuid4()
+            bad_key = str(uuid.uuid4())
+            cur.execute(TOOL_CALL_INSERT, (bad_key, joe, sid))
+            bad = uuid.uuid4()
+            cur.execute(RECEIPT_INSERT,
+                        (bad, sid, joe, bad_subject, bad_key,
+                         "a-digest-nobody-ever-wrote-either", "m-bad-d", "origin"))
+            ret_key = str(uuid.uuid4())
+            cur.execute(TOOL_CALL_INSERT, (ret_key, joe, sid))
+            ret = uuid.uuid4()
+            cur.execute("""insert into ops.write_receipt
+                    (id, application_session_id, actor_id, organization_tenant_id, verb,
+                     subject_type, subject_id, tool_call_idempotency_key, call_digest,
+                     material_digest, prior_digest, retracts_receipt_id)
+                  values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,
+                          'a-digest-never-computed','m-ret-d',%s,%s)""",
+                        (ret, sid, joe, bad_subject, ret_key, "m-bad-d", bad))
+
+            # THREE LEVELS, NOT TWO, AND THE THIRD IS WHAT GIVES THIS CONTRACT
+            # ITS TEETH. With only `bad` and its unproven retraction, the bar
+            # refuses either way -- an unproven retraction is itself an
+            # unproven receipt, so it blocks acceptance on its own account and
+            # the contract passes without ever testing the rule it names. A
+            # mutant that dropped the is_proven test from ops.accept_phase4
+            # survived this contract while the migration's own proof block
+            # killed it. Adding a PROVEN retraction of the retraction splits
+            # the two readings apart: under the real rule `bad` is excused only
+            # by an unproven receipt and still counts, while a mutant that
+            # ignored is_proven would excuse `bad`, then excuse its unproven
+            # retractor in turn, and accept a phase resting on a receipt nobody
+            # ever proved.
+            ret2_key = str(uuid.uuid4())
+            cur.execute(TOOL_CALL_INSERT, (ret2_key, joe, sid))
+            cur.execute("""select ops.write_receipt_digest('log-activity', %s,
+                             'carr-internal', %s, 'hash', 'deal', %s)""",
+                        (joe, sid, bad_subject))
+            ret2_digest = cur.fetchone()[0]
+            ret2 = uuid.uuid4()
+            cur.execute("""insert into ops.write_receipt
+                    (id, application_session_id, actor_id, organization_tenant_id, verb,
+                     subject_type, subject_id, tool_call_idempotency_key, call_digest,
+                     material_digest, prior_digest, retracts_receipt_id)
+                  values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,
+                          'm-ret2-d',%s,%s)""",
+                        (ret2, sid, joe, bad_subject, ret2_key, ret2_digest,
+                         "m-ret-d", ret))
+            cur.execute("select ops.prove_write_receipt(%s)", (ret2,))
+            assert cur.fetchone()[0] is True, \
+                "the second-level retraction must itself prove, or this contract " \
+                "cannot tell the two readings apart"
+
+            # DROP THE WRITER ROLE FOR THE ACCEPTANCE CALL, WITHOUT LEAVING
+            # THE TRANSACTION. carr_writer holds no EXECUTE on accept_phase4
+            # (0213 puts it on carr_authority), so calling it as the writer
+            # returns 'permission denied' -- which IS a refusal, and would
+            # have let this contract report a pass while never reaching the
+            # bar it exists to test. The fixture above is uncommitted and
+            # must stay visible, so the role is reset in place rather than by
+            # exiting the as_writer block, which would roll it back.
+            cur.execute("reset role")
+            try:
+                cur.execute("select ops.accept_phase4(%s,%s,%s)",
+                            (uuid.uuid4(), sid, "must still refuse: retraction is unproven"))
+                raise AssertionError(
+                    "acceptance succeeded while the only retraction was unproven")
+            except psycopg.Error as exc:
+                assert "phase4_acceptance_no_unproven_receipts" in str(exc), (
+                    f"refused, but by a different bar: {str(exc).strip().splitlines()[0]}")
+            conn.rollback()
+    check("req 6: an unproven retraction clears nothing",
+          unproven_retraction_clears_nothing)
+
+    def retraction_must_match_subject():
+        """0220 (C)'s structural half. A retraction that could disavow a claim
+        about a DIFFERENT subject would let a caller clear the bar for one
+        subject by pointing at unrelated evidence."""
+        sid, key, digest, subject = receipt_fixture()
+        target = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (target, sid, joe, subject, key, digest, "m-target-e", "origin"),
+                    because="setup: the receipt a retraction will try to name")
+        other_subject = uuid.uuid4()
+        bad = """insert into ops.write_receipt
+            (id, application_session_id, actor_id, organization_tenant_id, verb,
+             subject_type, subject_id, tool_call_idempotency_key, call_digest,
+             material_digest, prior_digest, retracts_receipt_id)
+            values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,'cd-cross-subj',
+                    'm-cross-subj','m-cross-subj-base',%s)"""
+        refuses(conn, bad, (uuid.uuid4(), sid, joe, other_subject, key, target),
+                because="a retraction must name the same subject as what it retracts",
+                role="carr_writer", expect_message="same subject as the receipt it retracts")
+    check("req 6: a retraction must name the same subject as what it retracts",
+          retraction_must_match_subject)
+
+    def receipt_cannot_reverse_and_retract():
+        """0220's xor constraint. Reversal and retraction mean different
+        things -- one restores a subject's state, the other disavows a claim
+        -- and a row satisfying both sets of rules at once is not sound.
+
+        r1 AND r2 ARE BOTH PROVEN. Left unproven, r2 -- which builds on r1's
+        own material as its prior -- is exactly the shape 0220's global,
+        unscoped acceptance-bar sweep would later retract r1 into, using
+        that SAME material as the retraction's prior and colliding with r2
+        for real. Proving both removes them from ever being swept."""
+        sid, key, digest, subject = receipt_fixture()
+        r1, r2 = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r1, sid, joe, subject, key, digest, "m-f1", "origin"),
+                    because="setup: first receipt")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            assert cur.fetchone()[0] is True, "the first receipt must prove"
+            conn.commit()
+        _sid2, key2, digest2, _ = receipt_fixture(sess=sid, subject_id=subject)
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r2, sid, joe, subject, key2, digest2, "m-f2", "m-f1"),
+                    because="setup: second receipt")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r2,))
+            assert cur.fetchone()[0] is True, "the second receipt must prove"
+            conn.commit()
+        bad = """insert into ops.write_receipt
+            (id, application_session_id, actor_id, organization_tenant_id, verb,
+             subject_type, subject_id, tool_call_idempotency_key, call_digest,
+             material_digest, prior_digest, reverses_receipt_id, retracts_receipt_id)
+            values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,'cd-both',
+                    'origin','m-f2',%s,%s)"""
+        refuses(conn, bad, (uuid.uuid4(), sid, joe, subject, key, r1, r2),
+                because="a receipt must not claim to both reverse and retract",
+                role="carr_writer", expect_message="write_receipt_reverses_xor_retracts")
+    check("req 6: a receipt cannot both reverse and retract",
+          receipt_cannot_reverse_and_retract)
+
+    def call_digest_is_subject_bound():
+        """0220's core guarantee. The call digest now covers the receipt's OWN
+        subject_type/subject_id, so a digest computed honestly for one subject
+        must not be able to prove a receipt that names a different one --
+        otherwise a digest is transferable between subjects and the conflict
+        detector can be fed borrowed proof."""
+        sid, key, digest_for_a, _subject_a = receipt_fixture()
+        subject_b = uuid.uuid4()
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, subject_b, key, digest_for_a, "m-borrowed", "origin"),
+                    because="filing is allowed; the digest just should not PROVE it")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+            proved = cur.fetchone()[0]
+            conn.commit()
+        assert proved is False, (
+            "a call digest computed for subject A proved a receipt naming subject B")
+        with conn.cursor() as cur:
+            cur.execute("select is_proven from ops.write_receipt where id=%s", (rid,))
+            assert cur.fetchone()[0] is False
+    check("req 6: a call digest computed for one subject cannot prove a receipt "
+          "naming another", call_digest_is_subject_bound)
+
+    def verb_mismatch_refuses_by_the_verb_guard():
+        """0220, the readback's other half. The receipt must describe its OWN
+        evidence: a receipt claiming 'log-activity' over a call that actually
+        recorded a different verb is the 'retire-the-entire-drive' attack in
+        miniature, and prove_write_receipt must refuse it outright rather than
+        merely fail to prove it."""
+        sid = mint(conn, joe)
+        key = str(uuid.uuid4())
+        subject = uuid.uuid4()
+        writer_runs(conn, """insert into tool_call
+                (idempotency_key, verb, actor_id, request_hash, response,
+                 organization_tenant_id, application_session_id)
+              values (%s, 'update-deal', %s, 'rh-verb-mismatch', '{}'::jsonb,
+                      'carr-internal', %s)""",
+                    (key, joe, sid), because="setup: evidence for a DIFFERENT verb")
+        with conn.cursor() as cur:
+            cur.execute("""select ops.write_receipt_digest('log-activity', %s,
+                             'carr-internal', %s, 'rh-verb-mismatch', 'deal', %s)""",
+                        (joe, sid, subject))
+            digest = cur.fetchone()[0]
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, subject, key, digest, "m-mislabelled", "origin"),
+                    because="filing a mislabelled receipt is allowed; proving it is not")
+        try:
+            with as_writer(conn), conn.cursor() as cur:
+                cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+            conn.rollback()
+            raise AssertionError(
+                "a receipt proved against evidence recording a DIFFERENT verb")
+        except psycopg.Error as exc:
+            conn.rollback()
+            assert "claims verb" in str(exc), (
+                f"refused, but by a different guard: {str(exc).strip().splitlines()[0]}")
+    check("req 6: a receipt cannot prove against evidence recording a different verb",
+          verb_mismatch_refuses_by_the_verb_guard)
+
+    def prior_state_must_have_existed():
+        """0220 section (E). A FABRICATED prior names a state this subject
+        NEVER REACHED, and nothing honest produces one -- it is refused, not
+        merely left unproven, because the whole point of checking existence
+        is to force an evader who wants to avoid conflicting with a real
+        receipt to name a real prior, which is exactly what makes the
+        conflict visible."""
+        sid, key, digest, subject = receipt_fixture()
+        refuses(conn, RECEIPT_INSERT,
+                (uuid.uuid4(), sid, joe, subject, key, digest,
+                 "m-invented", "a-state-nobody-produced"),
+                because="a receipt must not build on a state its subject never reached",
+                role="carr_writer", expect_message="never reached")
+    check("req 6: a receipt cannot build on a state its subject never reached",
+          prior_state_must_have_existed)
+
+    def stale_but_real_prior_still_reduces_to_broken():
+        """0220 section (E)'s whole point: the rule is EXISTENCE, never
+        RECENCY. r4 repeats r2's transition (prior='X' again, after the head
+        already moved on to 'Y') -- its prior is real, so the guard admits
+        it; it is not the head, so the fold finds a gap; and it AGREES with
+        r2 about material, so it is not a conflict. 'broken' is the only
+        state left for it to produce, and this is the contract that would
+        fail first if the guard were quietly upgraded to 'the prior must be
+        the CURRENT head', which would make continuity_reducer's worst
+        finding unreachable."""
+        subject = uuid.uuid4()
+        r1_sid, r1_key, r1_digest, _ = receipt_fixture(subject_id=subject)
+        _r2sid, r2_key, r2_digest, _ = receipt_fixture(sess=r1_sid, subject_id=subject)
+        _r3sid, r3_key, r3_digest, _ = receipt_fixture(sess=r1_sid, subject_id=subject)
+        _r4sid, r4_key, r4_digest, _ = receipt_fixture(sess=r1_sid, subject_id=subject)
+        r1, r2, r3, r4 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r1, r1_sid, joe, subject, r1_key, r1_digest, "X", "origin"),
+                    because="setup: origin -> X")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r2, r1_sid, joe, subject, r2_key, r2_digest, "Y", "X"),
+                    because="setup: X -> Y")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r3, r1_sid, joe, subject, r3_key, r3_digest, "Z", "Y"),
+                    because="setup: Y -> Z")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r4, r1_sid, joe, subject, r4_key, r4_digest, "Y", "X"),
+                    because="setup: a STALE BUT REAL restatement of r1->r2's "
+                            "transition, arriving after the head moved on to Z")
+        with as_writer(conn), conn.cursor() as cur:
+            for rid in (r1, r2, r3, r4):
+                cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+                assert cur.fetchone()[0] is True, f"setup receipt {rid} must prove"
+            conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("""select state, break_at, conflict_count
+                             from ops.continuity_reducer('deal', %s)""", (subject,))
+            state, break_at, conflict_count = cur.fetchone()
+        assert state == "broken", \
+            f"a stale-but-real prior must still reduce to broken, got {state}"
+        assert break_at == r4, "the reducer must name the receipt where continuity failed"
+        assert conflict_count == 0, (
+            "a restatement that AGREES about material must not be counted as a conflict")
+    check("req 6: a stale but real prior state is still allowed, and still "
+          "reduces to broken", stale_but_real_prior_still_reduces_to_broken)
+
+    def origin_remains_acceptable_after_receipts_exist():
+        """0220 section (E). 'origin' stays ALWAYS-ACCEPTABLE, deliberately,
+        even for a subject that already has receipts -- refusing it would
+        turn an ordinary race (the producer reads no previous receipt, a
+        concurrent transaction commits one, this insert lands second) into a
+        failed verb call for the human.
+
+        THE SECOND RECEIPT IS NEVER COMMITTED: sharing 'origin' with the seed
+        receipt below, whose own prior is also 'origin', is exactly the case
+        ops.receipt_conflicts is guaranteed to catch, and this contract only
+        needs to observe that the INSERT ITSELF succeeds, not that the two
+        coexist forever."""
+        subject = uuid.uuid4()
+        sid, key, digest, _ = receipt_fixture(subject_id=subject)
+        writer_runs(conn, RECEIPT_INSERT,
+                    (uuid.uuid4(), sid, joe, subject, key, digest, "m-seed", "origin"),
+                    because="setup: a receipt already exists on this subject")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute(RECEIPT_INSERT,
+                        (uuid.uuid4(), sid, joe, subject, key, digest, "m-again", "origin"))
+            assert cur.rowcount == 1, \
+                "an 'origin' prior was refused on a subject that already has receipts"
+            conn.rollback()
+    check("req 6: 'origin' is acceptable even after a subject has receipts",
+          origin_remains_acceptable_after_receipts_exist)
 
     def honest_receipt_proves():
         """The whole point, driven as the writer: a receipt over evidence that
         session really wrote proves against a readback the DATABASE computes."""
-        sid, key, digest = receipt_fixture()
-        rid, subject = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "prior-0"),
+        sid, key, digest, subject = receipt_fixture()
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, subject, key, digest, "m-honest", "origin"),
                     because="carr_writer must be able to file a receipt")
         with as_writer(conn), conn.cursor() as cur:
             cur.execute("select ops.prove_write_receipt(%s)", (rid,))
@@ -929,10 +1358,11 @@ def main(dsn):  # noqa: C901
         """REJECTION 2. The readback must be computed from the frozen row, not
         echoed from what the caller claimed. A caller that claims a digest it
         never wrote must end up with an UNPROVEN receipt rather than a proof."""
-        sid, key, _digest = receipt_fixture()
+        sid, key, _digest, _subj = receipt_fixture()
         rid, subject = uuid.uuid4(), uuid.uuid4()
         writer_runs(conn, RECEIPT_INSERT,
-                    (rid, sid, joe, subject, key, "a-digest-nobody-ever-wrote", "prior-0"),
+                    (rid, sid, joe, subject, key,
+                     "a-digest-nobody-ever-wrote", "m-false", "origin"),
                     because="filing a receipt is allowed; proving a false one is not")
         with as_writer(conn), conn.cursor() as cur:
             cur.execute("select ops.prove_write_receipt(%s)", (rid,))
@@ -948,9 +1378,10 @@ def main(dsn):  # noqa: C901
     def readback_is_not_caller_supplied():
         """REJECTION 2, the structural half. If a caller can write the readback
         column, the readback proves nothing. carr_writer holds no UPDATE."""
-        sid, key, digest = receipt_fixture()
-        rid, subject = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "prior-0"),
+        sid, key, digest, subject = receipt_fixture()
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, subject, key, digest, "m-readback", "origin"),
                     because="setup")
         refuses(conn, "update ops.write_receipt set readback_digest=%s where id=%s",
                 (digest, rid),
@@ -970,7 +1401,7 @@ def main(dsn):  # noqa: C901
         time.sleep(1.5)
         key = str(uuid.uuid4())
         rid, subject = uuid.uuid4(), uuid.uuid4()
-        refuses(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, "d", "prior-0"),
+        refuses(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, "d", "m-x", "origin"),
                 because="a receipt naming an expired session would look like proof",
                 role="carr_writer", expect_message="is expired")
     check("req 6: a receipt cannot name an expired session", receipt_needs_a_live_session)
@@ -979,7 +1410,7 @@ def main(dsn):  # noqa: C901
         sid = mint(conn, joe)
         rid, subject = uuid.uuid4(), uuid.uuid4()
         refuses(conn, RECEIPT_INSERT,
-                (rid, sid, dell, subject, str(uuid.uuid4()), "d", "prior-0"),
+                (rid, sid, dell, subject, str(uuid.uuid4()), "d", "m-x", "origin"),
                 because="a receipt whose actor its session never vouched for is worse "
                         "than no receipt, because it looks like proof",
                 role="carr_writer", expect_message="different actor")
@@ -988,10 +1419,11 @@ def main(dsn):  # noqa: C901
 
     def receipt_cannot_prove_another_sessions_evidence():
         """REJECTION 1 again, at readback time rather than insert time."""
-        sid_a, key_a, digest_a = receipt_fixture()
+        sid_a, key_a, digest_a, subject_a = receipt_fixture()
         sid_b = mint(conn, joe)
-        rid, subject = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (rid, sid_b, joe, subject, key_a, digest_a, "prior-0"),
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid_b, joe, subject_a, key_a, digest_a, "m-cross-session", "origin"),
                     because="setup: a receipt on session B naming session A's evidence")
         try:
             with as_writer(conn), conn.cursor() as cur:
@@ -1013,7 +1445,8 @@ def main(dsn):  # noqa: C901
         writer_runs(conn, TOOL_CALL_INSERT, (key, joe, None),
                     because="setup: a legacy row")
         rid, subject = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, "d", "prior-0"),
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, subject, key, "d", "m-legacy", "origin"),
                     because="setup")
         try:
             with as_writer(conn), conn.cursor() as cur:
@@ -1027,40 +1460,109 @@ def main(dsn):  # noqa: C901
     check("req 6: legacy evidence cannot back a receipt", legacy_evidence_cannot_be_read_back)
 
     def reversal_must_be_exact():
-        """REJECTION 3. 'This undoes that' is checked, not believed: a reversal
-        is exact only when it produces the state its target built on."""
-        sid, key, digest = receipt_fixture()
-        rid, subject = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "prior-0"),
+        """REJECTION 3, corrected by 0220. 'This undoes that' is checked, not
+        believed: an exact reversal is one whose MATERIAL claim equals the
+        state its target built on -- never its call digest, which is proof of
+        attachment and says nothing about subject state.
+
+        Under the SPLIT schema an exact reversal must also actually PROVE: the
+        old single-digest scheme made that impossible by construction (a
+        reversal's claimed digest had to equal both the target's prior state
+        AND the call readback, which can never be the same value). That defect
+        is exactly what 0220 removes, so this contract now asserts BOTH
+        halves: an inexact reversal is still refused, and an EXACT one is
+        accepted AND proves.
+
+        THE TARGET IS ALSO PROVEN, here, which the earlier draft of this
+        contract did not do. Left permanently unproven, the target would sit
+        on a subject with a real successor (the reversal) sharing its exact
+        material as that successor's prior -- and 0220's global, unscoped
+        acceptance-bar sweep would eventually have to retract the target
+        using that SAME material, colliding with the reversal that already
+        claims it. Proving both removes either row from ever being swept."""
+        sid, key, digest, subject = receipt_fixture()
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, subject, key, digest, "m-target", "origin"),
                     because="setup: the receipt to be reversed")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+            assert cur.fetchone()[0] is True, "the target receipt must prove"
+            conn.commit()
         bad = """insert into ops.write_receipt
             (id, application_session_id, actor_id, organization_tenant_id, verb,
-             subject_type, subject_id, tool_call_idempotency_key, claimed_digest,
-             prior_digest, reverses_receipt_id)
+             subject_type, subject_id, tool_call_idempotency_key, call_digest,
+             material_digest, prior_digest, reverses_receipt_id)
             values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,
-                    'not-the-prior-state',%s,%s)"""
-        refuses(conn, bad, (uuid.uuid4(), sid, joe, subject, key, digest, rid),
+                    'm-reversal-call','not-the-prior-state',%s,%s)"""
+        refuses(conn, bad, (uuid.uuid4(), sid, joe, subject, key, "m-target", rid),
                 because="a reversal that does not restore the prior state is not a reversal",
                 role="carr_writer", expect_message="reversal is not exact")
-        # and the exact one is accepted
-        good = bad.replace("'not-the-prior-state'", "'prior-0'")
-        writer_runs(conn, good, (uuid.uuid4(), sid, joe, subject, key, digest, rid),
+        # And the exact one is accepted AND proves -- the headline fix 0220
+        # exists for. A reversal's material equals the target's prior state
+        # (now 'origin', a legal prior even though this subject already has
+        # a receipt on it), and its call digest is computed for THIS call
+        # and THIS subject, so nothing stops it proving the way any other
+        # honest receipt does.
+        rev_id = uuid.uuid4()
+        _rev_sid, rev_key, rev_digest, _ = receipt_fixture(sess=sid, subject_id=subject)
+        good = """insert into ops.write_receipt
+            (id, application_session_id, actor_id, organization_tenant_id, verb,
+             subject_type, subject_id, tool_call_idempotency_key, call_digest,
+             material_digest, prior_digest, reverses_receipt_id)
+            values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,
+                    %s,'origin',%s,%s)"""
+        writer_runs(conn, good,
+                    (rev_id, sid, joe, subject, rev_key, rev_digest, "m-target", rid),
                     because="an exact reversal must be permitted, or the guard is "
                             "simply refusing everything")
-    check("req 6: a reversal must land exactly where its target began",
-          reversal_must_be_exact)
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (rev_id,))
+            proved = cur.fetchone()[0]
+            conn.commit()
+        assert proved is True, (
+            "an EXACT reversal did not prove -- the defect 0220 exists to remove "
+            "is still present")
+    check("req 6: a reversal must land exactly where its target began, and an "
+          "exact one proves", reversal_must_be_exact)
 
     def conflicts_are_derived_not_declared():
         """REJECTION 3. Two receipts conflict when they build on the same prior
-        state and produce different results — evaluated, never asserted."""
-        sid, key, digest = receipt_fixture()
+        state and produce different MATERIAL claims — evaluated, never
+        asserted. 0220 moves this comparison from claimed_digest (a digest of
+        the CALL) to material_digest (the claim about the SUBJECT).
+
+        EVERY RECEIPT BELOW IS PROVEN. Not because ops.receipt_conflicts cares
+        about is_proven (it does not check it at all), but because an
+        unproven receipt sharing a subject with a real successor is exactly
+        the shape 0220's global, unscoped acceptance-bar sweep would later
+        retract using that successor's own prior value — and if this subject
+        already has a receipt claiming that exact (prior, different material)
+        pair, the sweep's retraction and that receipt would conflict for
+        real, permanently. Proving everything removes every row here from
+        ever being swept, so this contract's own fixture cannot become
+        tomorrow's unreconcilable conflict.
+
+        THE ONLY LEGAL PRIOR FOR A SUBJECT'S FIRST RECEIPT IS 'ORIGIN' (0220
+        section E), so the shared prior below is 'origin' itself -- which is
+        exactly the case section E carves out as always acceptable, even
+        though it makes two receipts on one subject share it deliberately."""
         subject = uuid.uuid4()
+        a_sid, a_key, a_digest, _ = receipt_fixture(subject_id=subject)
+        _sid2, b_key, b_digest, _ = receipt_fixture(sess=a_sid, subject_id=subject)
         a, b = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (a, sid, joe, subject, key, digest, "shared-prior"),
+        writer_runs(conn, RECEIPT_INSERT,
+                    (a, a_sid, joe, subject, a_key, a_digest, "material-a", "origin"),
                     because="setup")
         writer_runs(conn, RECEIPT_INSERT,
-                    (b, sid, joe, subject, key, "a-different-result", "shared-prior"),
+                    (b, a_sid, joe, subject, b_key, b_digest, "a-different-result", "origin"),
                     because="setup: same prior state, different result")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (a,))
+            assert cur.fetchone()[0] is True
+            cur.execute("select ops.prove_write_receipt(%s)", (b,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
         with conn.cursor() as cur:
             cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)", (subject,))
             assert cur.fetchone()[0] >= 1, \
@@ -1072,12 +1574,21 @@ def main(dsn):  # noqa: C901
         # detector would then call every edit of a subject a conflict, which is
         # the same as detecting nothing.
         seq_subject = uuid.uuid4()
+        s1_sid, s1_key, s1_digest, _ = receipt_fixture(subject_id=seq_subject)
+        _s2sid, s2_key, s2_digest, _ = receipt_fixture(sess=s1_sid, subject_id=seq_subject)
+        s1, s2 = uuid.uuid4(), uuid.uuid4()
         writer_runs(conn, RECEIPT_INSERT,
-                    (uuid.uuid4(), sid, joe, seq_subject, key, "state-1", "state-0"),
+                    (s1, s1_sid, joe, seq_subject, s1_key, s1_digest, "state-1", "origin"),
                     because="setup: first write")
         writer_runs(conn, RECEIPT_INSERT,
-                    (uuid.uuid4(), sid, joe, seq_subject, key, "state-2", "state-1"),
+                    (s2, s1_sid, joe, seq_subject, s2_key, s2_digest, "state-2", "state-1"),
                     because="setup: a second write built on the first")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (s1,))
+            assert cur.fetchone()[0] is True
+            cur.execute("select ops.prove_write_receipt(%s)", (s2,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
         with conn.cursor() as cur:
             cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)",
                         (seq_subject,))
@@ -1089,18 +1600,26 @@ def main(dsn):  # noqa: C901
         # under which a conflict can never close makes the acceptance bar
         # unreachable forever in any database that ever had one. Reversing one
         # side closes it, and reversal is the operation whose exactness the
-        # database already checks.
+        # database already checks. The comparison reads the MATERIAL claim now,
+        # never the call digest.
         with conn.cursor() as cur:
-            cur.execute("select prior_digest, claimed_digest from ops.write_receipt where id=%s", (b,))
-            b_prior, b_claimed = cur.fetchone()
+            cur.execute("select prior_digest, material_digest from ops.write_receipt where id=%s",
+                        (b,))
+            b_prior, b_material = cur.fetchone()
+        _rsid, rev_key, rev_digest, _ = receipt_fixture(sess=a_sid, subject_id=subject)
         rev = """insert into ops.write_receipt
             (id, application_session_id, actor_id, organization_tenant_id, verb,
-             subject_type, subject_id, tool_call_idempotency_key, claimed_digest,
-             prior_digest, reverses_receipt_id)
-            values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,%s,%s)"""
+             subject_type, subject_id, tool_call_idempotency_key, call_digest,
+             material_digest, prior_digest, reverses_receipt_id)
+            values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,%s,%s,%s)"""
+        rev_id = uuid.uuid4()
         writer_runs(conn, rev,
-                    (uuid.uuid4(), sid, joe, subject, key, b_prior, b_claimed, b),
+                    (rev_id, a_sid, joe, subject, rev_key, rev_digest, b_prior, b_material, b),
                     because="an exact reversal of one side reconciles the divergence")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (rev_id,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
         with conn.cursor() as cur:
             cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)", (subject,))
             assert cur.fetchone()[0] == 0, (
@@ -1109,8 +1628,11 @@ def main(dsn):  # noqa: C901
 
         # a subject with one receipt is not a conflict
         lone = uuid.uuid4()
+        lone_sid, lone_key, lone_digest, _ = receipt_fixture(subject_id=lone)
         writer_runs(conn, RECEIPT_INSERT,
-                    (uuid.uuid4(), sid, joe, lone, key, digest, "p"), because="setup")
+                    (uuid.uuid4(), lone_sid, joe, lone, lone_key, lone_digest,
+                     "material-lone", "origin"),
+                    because="setup")
         with conn.cursor() as cur:
             cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)", (lone,))
             assert cur.fetchone()[0] == 0, \
@@ -1119,9 +1641,10 @@ def main(dsn):  # noqa: C901
           conflicts_are_derived_not_declared)
 
     def receipts_are_frozen():
-        sid, key, digest = receipt_fixture()
-        rid, subject = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "prior-0"),
+        sid, key, digest, subject = receipt_fixture()
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, subject, key, digest, "m-frozen", "origin"),
                     because="setup")
         refuses(conn, "delete from ops.write_receipt where id=%s", (rid,),
                 because="a receipt that can be deleted is not a receipt",
@@ -1140,9 +1663,10 @@ def main(dsn):  # noqa: C901
             cur.execute("select state from ops.continuity_reducer('deal', %s)", (subject,))
             assert cur.fetchone()[0] == "empty", "no receipts must reduce to empty"
 
-        sid, key, digest = receipt_fixture()
+        sid, key, call_digest, _subj = receipt_fixture(subject_id=subject)
         r1 = uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (r1, sid, joe, subject, key, digest, "origin"),
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r1, sid, joe, subject, key, call_digest, "produced-1", "origin"),
                     because="setup")
         with conn.cursor() as cur:
             cur.execute("select state, unproven_count from ops.continuity_reducer('deal', %s)",
@@ -1159,51 +1683,100 @@ def main(dsn):  # noqa: C901
                         (subject,))
             state, head = cur.fetchone()
         assert state == "continuous", f"a proven chain must reduce to continuous, got {state}"
-        assert head == digest, "the head must be the last claimed digest"
+        assert head == "produced-1", \
+            "the head must be the last MATERIAL claim, never the call digest"
     check("req 6: the reducer folds receipts into a state derived from the chain",
           reducer_reports_the_worst_thing_it_finds)
 
     def reducer_names_where_the_chain_broke():
         """A gap is not merely reported, it is located. 'Something is wrong with
-        this subject' is not actionable; 'the chain broke at this receipt' is."""
+        this subject' is not actionable; 'the chain broke at this receipt' is.
+
+        THE BREAK IS A STALE-BUT-REAL PRIOR (0220 section E), not a
+        fabricated one: a3 repeats the transition a1->a2 already made
+        (prior='bm1' again, after the head moved on to 'bm2'), which the
+        guard admits because 'bm1' really existed on this subject -- it is
+        simply not the LATEST state. Every receipt here is proven, both
+        because that is what an honest producer would do and because an
+        unproven receipt sharing this subject with a real successor is
+        exactly what 0220's global, unscoped acceptance-bar sweep would
+        later collide with."""
         subject = uuid.uuid4()
-        sid, key, digest = receipt_fixture()
-        a, b = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (a, sid, joe, subject, key, digest, "origin"),
+        a1_sid, a1_key, a1_digest, _ = receipt_fixture(subject_id=subject)
+        _a2sid, a2_key, a2_digest, _ = receipt_fixture(sess=a1_sid, subject_id=subject)
+        _a3sid, a3_key, a3_digest, _ = receipt_fixture(sess=a1_sid, subject_id=subject)
+        a1, a2, a3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (a1, a1_sid, joe, subject, a1_key, a1_digest, "bm1", "origin"),
                     because="setup: first link")
         writer_runs(conn, RECEIPT_INSERT,
-                    (b, sid, joe, subject, key, "second-state", "a-state-nobody-produced"),
-                    because="setup: a link that built on nothing the first produced")
+                    (a2, a1_sid, joe, subject, a2_key, a2_digest, "bm2", "bm1"),
+                    because="setup: second link, continuous")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (a3, a1_sid, joe, subject, a3_key, a3_digest, "bm2", "bm1"),
+                    because="setup: a STALE BUT REAL restatement of a1's transition, "
+                            "arriving after the head already moved on to bm2")
         with as_writer(conn), conn.cursor() as cur:
-            cur.execute("select ops.prove_write_receipt(%s)", (a,))
-            cur.execute("select ops.prove_write_receipt(%s)", (b,))
+            for rid in (a1, a2, a3):
+                cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+                assert cur.fetchone()[0] is True, f"setup receipt {rid} must prove"
             conn.commit()
         with conn.cursor() as cur:
             cur.execute("select state, break_at from ops.continuity_reducer('deal', %s)",
                         (subject,))
             state, break_at = cur.fetchone()
         assert state == "broken", f"a chain with a gap must reduce to broken, got {state}"
-        assert break_at == b, "the reducer must name the receipt where continuity failed"
+        assert break_at == a3, "the reducer must name the receipt where continuity failed"
     check("req 6: a broken chain is located, not just reported",
           reducer_names_where_the_chain_broke)
 
     def reducer_prefers_conflict_over_break():
         """Precedence is asserted, because a reducer that returned whichever
         problem it noticed first would be non-deterministic in exactly the cases
-        that matter most."""
+        that matter most.
+
+        EVERY RECEIPT HERE IS PROVEN, for the same reason as the conflict
+        contract above: an unproven receipt sharing a subject with a real
+        successor is exactly what 0220's global sweep would later have to
+        retract using that successor's own prior, colliding with it for
+        real. The shared prior for r1/r2 is 'origin' (always legal, per
+        section E, even though two receipts deliberately share it here); r3
+        builds honestly on r1's own material, which no reversal ever
+        excludes, so it stays real and non-conflicting on its own."""
         subject = uuid.uuid4()
-        sid, key, digest = receipt_fixture()
-        # two receipts on the same prior state with different results: a conflict
+        r1_sid, r1_key, r1_digest, _ = receipt_fixture(subject_id=subject)
+        _r2sid, r2_key, r2_digest, _ = receipt_fixture(sess=r1_sid, subject_id=subject)
+        _r3sid, r3_key, r3_digest, _ = receipt_fixture(sess=r1_sid, subject_id=subject)
+        r1, r2, r3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        # NEITHER SIDE OF THE CONFLICT MAY HAVE A DESCENDANT, and that shape is
+        # load-bearing rather than stylistic. This contract reconciles the
+        # conflict it creates by REVERSING one side, and receipt_conflicts
+        # picks which side is "right" by comparing two random uuids. The
+        # earlier version hung a third receipt off r1's material, so when the
+        # coin came up r1 the reversal landed on r1's own prior state and
+        # collided with that descendant, manufacturing a FRESH conflict on the
+        # way out. It failed three runs in five, and it passed the gate twice
+        # by luck. Here the divergence is terminal on both branches, so
+        # reversing either side is safe and the outcome does not depend on
+        # uuid ordering.
         writer_runs(conn, RECEIPT_INSERT,
-                    (uuid.uuid4(), sid, joe, subject, key, digest, "shared"),
+                    (r1, r1_sid, joe, subject, r1_key, r1_digest, "first", "origin"),
+                    because="setup: the state both branches build on")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r2, r1_sid, joe, subject, r2_key, r2_digest, "branch-a", "first"),
                     because="setup")
+        # The same prior state, a different result: a conflict. It is also a
+        # break, because whichever of the two folds second did not build on
+        # what the other produced. Both problems are present at once, which is
+        # the whole point of the precedence assertion below.
         writer_runs(conn, RECEIPT_INSERT,
-                    (uuid.uuid4(), sid, joe, subject, key, "other-result", "shared"),
-                    because="setup: divergence")
-        # and a third that also breaks continuity
-        writer_runs(conn, RECEIPT_INSERT,
-                    (uuid.uuid4(), sid, joe, subject, key, "third", "unrelated"),
-                    because="setup: a gap as well")
+                    (r3, r1_sid, joe, subject, r3_key, r3_digest, "branch-b", "first"),
+                    because="setup: divergence, and a gap as well")
+        with as_writer(conn), conn.cursor() as cur:
+            for rid in (r1, r2, r3):
+                cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+                assert cur.fetchone()[0] is True, f"setup receipt {rid} must prove"
+            conn.commit()
         with conn.cursor() as cur:
             cur.execute("select state from ops.continuity_reducer('deal', %s)", (subject,))
             assert cur.fetchone()[0] == "conflicted", \
@@ -1212,20 +1785,40 @@ def main(dsn):  # noqa: C901
         # whole database, so a contract that manufactures one and walks away
         # blocks every later contract that asks whether acceptance is reachable.
         # Leaving the store as it was found is part of the contract, not tidying.
-        with conn.cursor() as cur:
-            cur.execute("""select left_receipt, right_receipt
-                             from ops.receipt_conflicts('deal', %s)""", (subject,))
-            pairs = cur.fetchall()
-        rev = """insert into ops.write_receipt
-            (id, application_session_id, actor_id, organization_tenant_id, verb,
-             subject_type, subject_id, tool_call_idempotency_key, claimed_digest,
-             prior_digest, reverses_receipt_id)
-            select %s,%s,%s,'carr-internal','log-activity','deal',%s,%s,
-                   w.prior_digest, w.claimed_digest, w.id
-              from ops.write_receipt w where w.id = %s"""
-        for _left, right in pairs:
-            writer_runs(conn, rev, (uuid.uuid4(), sid, joe, subject, key, right),
+        # The reversal is proven too, for the same reason as everything above.
+        # RE-QUERY EACH TIME rather than walking one stale list. Closing a
+        # conflict is a write like any other, so the set of open conflicts can
+        # change underneath a loop that decided its work up front.
+        for _attempt in range(6):
+            with conn.cursor() as cur:
+                cur.execute("""select left_receipt, right_receipt
+                                 from ops.receipt_conflicts('deal', %s)""", (subject,))
+                pairs = cur.fetchall()
+            if not pairs:
+                break
+            right = pairs[0][1]
+            with conn.cursor() as cur:
+                cur.execute("""select prior_digest, material_digest
+                                 from ops.write_receipt where id=%s""", (right,))
+                r_prior, r_material = cur.fetchone()
+            _rsid, rev_key, rev_digest, _ = receipt_fixture(sess=r1_sid, subject_id=subject)
+            rev_id = uuid.uuid4()
+            writer_runs(conn, """insert into ops.write_receipt
+                    (id, application_session_id, actor_id, organization_tenant_id, verb,
+                     subject_type, subject_id, tool_call_idempotency_key, call_digest,
+                     material_digest, prior_digest, reverses_receipt_id)
+                  values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,%s,%s,%s)""",
+                        (rev_id, r1_sid, joe, subject, rev_key, rev_digest,
+                         r_prior, r_material, right),
                         because="reconcile the conflict this contract created")
+            with as_writer(conn), conn.cursor() as cur:
+                cur.execute("select ops.prove_write_receipt(%s)", (rev_id,))
+                assert cur.fetchone()[0] is True
+                conn.commit()
+        else:
+            raise AssertionError(
+                "reconciliation never converged: reversing one side of a conflict "
+                "kept producing another")
         with conn.cursor() as cur:
             cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)", (subject,))
             assert cur.fetchone()[0] == 0, "this contract must not leave an open conflict"
@@ -1247,11 +1840,34 @@ def main(dsn):  # noqa: C901
 
     def acceptance_refuses_without_evidence():
         """The bar is a table constraint rather than a judgement call, so it
-        fails the INSERT instead of producing 'accepted, with reservations'."""
-        sid, key, digest = receipt_fixture()
-        subject = uuid.uuid4()
+        fails the INSERT instead of producing 'accepted, with reservations'.
+
+        THIS CONTRACT PROVES ITS OWN ANCHOR RECEIPT FIRST, on a subject
+        separate from the deliberately-unproven one, so 'proven_receipts > 0'
+        already holds before the refusal below is asserted -- otherwise, on
+        a database where nothing has been proven yet, the FIRST constraint
+        Postgres would report is needs_proven_receipts, not the
+        unproven-receipts bar this contract is actually about. It creates
+        its own unproven receipt too, rather than relying on one an earlier
+        contract (or an earlier pass of this whole suite) happened to leave
+        behind."""
+        sid, key, digest, subject = receipt_fixture()
+        anchor = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (anchor, sid, joe, subject, key, digest, "m-anchor-refuse", "origin"),
+                    because="setup: an anchor receipt, proven so this contract's own "
+                            "refusal is unambiguously about the UNPROVEN receipt below")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (anchor,))
+            assert cur.fetchone()[0] is True, "the anchor receipt must prove"
+            conn.commit()
+        rid_subject = uuid.uuid4()
+        rid_key = str(uuid.uuid4())
+        writer_runs(conn, TOOL_CALL_INSERT, (rid_key, joe, sid),
+                    because="setup: the call the deliberately-unproven receipt names")
         rid = uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "origin"),
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, rid_subject, rid_key, "d", "m-unproven", "origin"),
                     because="setup: a receipt left deliberately UNPROVEN")
         try:
             with conn.cursor() as cur:
@@ -1390,12 +2006,14 @@ def main(dsn):  # noqa: C901
     def retirement_needs_proven_receipts():
         """Not merely present — PROVEN. An unproven receipt is a claim the
         database has already declined to confirm."""
-        sid, key, digest = receipt_fixture()
+        sid, key, digest, _subj = receipt_fixture()
         subj_a, subj_b = uuid.uuid4(), uuid.uuid4()
         r1, r2 = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (r1, sid, joe, subj_a, key, digest, "origin"),
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r1, sid, joe, subj_a, key, digest, "m-repoint", "origin"),
                     because="setup: repoint receipt, left unproven")
-        writer_runs(conn, RECEIPT_INSERT, (r2, sid, joe, subj_b, key, digest, "origin"),
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r2, sid, joe, subj_b, key, digest, "m-recovery", "origin"),
                     because="setup: recovery receipt, left unproven")
         with conn.cursor() as cur:
             cur.execute("""insert into ops.drive_dependency
@@ -1407,7 +2025,10 @@ def main(dsn):  # noqa: C901
         # EACH RECEIPT IS CHECKED SEPARATELY. Leaving both unproven passes even
         # when only one of the two checks survives, because the other one fires
         # and the message still says "is not proven". A mutant that deleted the
-        # repoint check lived through exactly that.
+        # repoint check lived through exactly that. (r2's own digest is bound
+        # to subj_a, not subj_b, so this attempt to prove it is expected to
+        # fail quietly -- and either way, r1 staying unproven is what this
+        # contract is actually about.)
         with as_writer(conn), conn.cursor() as cur:
             cur.execute("select ops.prove_write_receipt(%s)", (r2,))
             conn.commit()
@@ -1421,15 +2042,21 @@ def main(dsn):  # noqa: C901
     def retirement_needs_a_proven_recovery_receipt():
         """The mirror. Proving one half and asserting on a shared phrase let a
         mutation that deleted the other half survive."""
-        sid, key, digest = receipt_fixture()
+        subj_1 = uuid.uuid4()
+        sid, key, digest, _subj = receipt_fixture(subject_id=subj_1)
         r1, r2 = uuid.uuid4(), uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (r1, sid, joe, uuid.uuid4(), key, digest, "origin"),
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r1, sid, joe, subj_1, key, digest, "m-repoint", "origin"),
                     because="setup: repoint receipt, proven below")
-        writer_runs(conn, RECEIPT_INSERT, (r2, sid, joe, uuid.uuid4(), key, digest, "origin"),
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r2, sid, joe, uuid.uuid4(), key, digest, "m-recovery", "origin"),
                     because="setup: recovery receipt, left unproven")
         with as_writer(conn), conn.cursor() as cur:
             cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            proved = cur.fetchone()[0]
             conn.commit()
+        assert proved is True, \
+            "the repoint receipt must actually prove for this contract to test the RIGHT half"
         with conn.cursor() as cur:
             cur.execute("""insert into ops.drive_dependency
                              (source_path, reference, classification, operational)
@@ -1447,13 +2074,68 @@ def main(dsn):  # noqa: C901
     def one_receipt_cannot_make_both_claims():
         """Repointing a reader and proving recovery still works are different
         assertions. Letting one receipt stand for both is how 'we checked'
-        becomes 'we checked once, sort of'."""
-        sid, key, digest = receipt_fixture()
+        becomes 'we checked once, sort of'.
+
+        THE RECEIPT MUST NAME THE DEPENDENCY (0220) before this contract can
+        even reach the table-level distinct-receipts constraint it used to be
+        about, so the dependency is created FIRST and the receipt is filed
+        against it -- naming a 'deal' subject here would be refused earlier,
+        by the WRONG guard, for the wrong reason.
+
+        THE GUARD THAT ACTUALLY FIRES ALSO CHANGED. Passing the SAME receipt
+        id for both roles trivially means they share one call AND one
+        material claim, and 0220's new same-call check now fires -- inside
+        the BEFORE INSERT trigger -- before the row is ever validated against
+        the table's drive_retirement_distinct_receipts CHECK. That older
+        constraint is not gone, but this exact input can no longer reach it;
+        'rest on the SAME call' is the guard actually observable here now."""
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        sid, key, digest, _subj = receipt_fixture(subject_type="drive_dependency", subject_id=dep)
         r1 = uuid.uuid4()
-        writer_runs(conn, RECEIPT_INSERT, (r1, sid, joe, uuid.uuid4(), key, digest, "origin"),
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r1, sid, joe, dep, key, digest, "m-repoint", "origin"),
                     because="setup")
         with as_writer(conn), conn.cursor() as cur:
             cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            proved = cur.fetchone()[0]
+            conn.commit()
+        assert proved is True, "setup receipt must prove, or this is testing the wrong failure"
+        refuses(conn, RETIREMENT_INSERT,
+                (uuid.uuid4(), dep, r1, r1, sid, joe, "same receipt twice"),
+                because="one receipt must not stand for two distinct claims",
+                role="carr_writer", expect_message="rest on the same call")
+    check("req 7: one receipt cannot serve as both the repoint and the recovery",
+          one_receipt_cannot_make_both_claims)
+
+    def retirement_receipts_must_name_the_dependency():
+        """0220 (D). Each receipt must NAME the dependency being retired, or a
+        reviewer could retire a dependency with receipts that had never heard
+        of it -- 0214's two-receipt gate separated its two receipts by
+        nothing but row ids until this migration."""
+        subj_1, subj_2 = uuid.uuid4(), uuid.uuid4()
+        sid, key1, digest1, _s1 = receipt_fixture(subject_id=subj_1)
+        r1 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r1, sid, joe, subj_1, key1, digest1, "m-g1", "origin"),
+                    because="setup: repoint receipt, about a 'deal', not a dependency")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        _sid2, key2, digest2, _s2 = receipt_fixture(sess=sid, subject_id=subj_2)
+        r2 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (r2, sid, joe, subj_2, key2, digest2, "m-g2", "origin"),
+                    because="setup: recovery receipt, also about a 'deal'")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r2,))
+            assert cur.fetchone()[0] is True
             conn.commit()
         with conn.cursor() as cur:
             cur.execute("""insert into ops.drive_dependency
@@ -1463,29 +2145,178 @@ def main(dsn):  # noqa: C901
             dep = cur.fetchone()[0]
             conn.commit()
         refuses(conn, RETIREMENT_INSERT,
-                (uuid.uuid4(), dep, r1, r1, sid, joe, "same receipt twice"),
-                because="one receipt must not stand for two distinct claims",
-                role="carr_writer", expect_message="drive_retirement_distinct_receipts")
-    check("req 7: one receipt cannot serve as both the repoint and the recovery",
-          one_receipt_cannot_make_both_claims)
+                (uuid.uuid4(), dep, r1, r2, sid, joe, "receipts about a deal, not a dependency"),
+                because="a dependency must not be retired with receipts that never named it",
+                role="carr_writer", expect_message="does not name dependency")
+    check("req 7: a retirement receipt must name the dependency being retired",
+          retirement_receipts_must_name_the_dependency)
 
-    def readiness_is_computed_and_needs_authority():
-        """A function over the rows, not a flag, and it will not read ready
-        without an acceptance only the authority identity can create."""
-        sid, key, digest = receipt_fixture()
-        r1, r2 = uuid.uuid4(), uuid.uuid4()
-        for r, s_id in ((r1, uuid.uuid4()), (r2, uuid.uuid4())):
-            writer_runs(conn, RECEIPT_INSERT, (r, sid, joe, s_id, key, digest, "origin"),
-                        because="setup")
-            with as_writer(conn), conn.cursor() as cur:
-                cur.execute("select ops.prove_write_receipt(%s)", (r,))
-                conn.commit()
+    def retirement_receipts_cannot_share_a_call():
+        """0220 (D). Two receipts describing ONE call are one piece of
+        evidence counted twice, even when they are two distinct rows.
+
+        r2's prior is r1's OWN material, not 'origin' -- both are legal
+        under the new prior-existence guard, but sharing 'origin' would make
+        r1 and r2 conflict with each other permanently (same prior,
+        different material), which has nothing to do with what this
+        contract is testing."""
         with conn.cursor() as cur:
             cur.execute("""insert into ops.drive_dependency
                              (source_path, reference, classification, operational)
                            values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
                         (f"contract/{uuid.uuid4()}.py:1",))
             dep = cur.fetchone()[0]
+            conn.commit()
+        sid, key, digest, _subj = receipt_fixture(subject_type="drive_dependency", subject_id=dep)
+        r1, r2 = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r1, sid, joe, dep, key, digest, "repointed-h", "origin"),
+                    because="setup: repoint receipt")
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r2, sid, joe, dep, key, digest, "repointed-h-again", "repointed-h"),
+                    because="setup: a SECOND receipt naming the SAME call")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            assert cur.fetchone()[0] is True
+            cur.execute("select ops.prove_write_receipt(%s)", (r2,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        refuses(conn, RETIREMENT_INSERT,
+                (uuid.uuid4(), dep, r1, r2, sid, joe, "same call, two rows"),
+                because="two receipts resting on ONE call are one claim counted twice",
+                role="carr_writer", expect_message="rest on the same call")
+    check("req 7: the two retirement receipts cannot rest on the same call",
+          retirement_receipts_cannot_share_a_call)
+
+    def retirement_receipts_cannot_share_material():
+        """0220 (D). Different calls, but asserting the SAME material state,
+        is still one piece of work counted twice -- repointing and recovering
+        are two claims, not one claim made from two calls."""
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        sid, key1, digest1, _s1 = receipt_fixture(subject_type="drive_dependency", subject_id=dep)
+        r1 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r1, sid, joe, dep, key1, digest1, "repointed-i", "origin"),
+                    because="setup: repoint receipt")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        _sid2, key2, digest2, _s2 = receipt_fixture(sess=sid, subject_type="drive_dependency",
+                                                      subject_id=dep)
+        r2 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r2, sid, joe, dep, key2, digest2, "repointed-i", "origin"),
+                    because="setup: a DIFFERENT call asserting the SAME material")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r2,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        refuses(conn, RETIREMENT_INSERT,
+                (uuid.uuid4(), dep, r1, r2, sid, joe, "different calls, same material"),
+                because="two receipts asserting the SAME material state are one claim "
+                        "counted twice",
+                role="carr_writer", expect_message="assert the same material state")
+    check("req 7: the two retirement receipts cannot assert the same material state",
+          retirement_receipts_cannot_share_material)
+
+    def recovery_must_build_on_the_repoint():
+        """0220 (D). Recovery is only meaningful from the state the repoint
+        produced; a recovery resting on some other state recovers something
+        else entirely.
+
+        A BRIDGE RECEIPT gives r2 a REAL prior to rest on that is neither
+        'origin' (which r1 already claims -- sharing it with r2's different
+        material would make r1 and r2 conflict permanently, for reasons
+        having nothing to do with this contract) nor r1's own material
+        (which would mean r2 correctly builds on the repoint, defeating the
+        point). The bridge's prior IS r1's material, so it does not conflict
+        with r1 either; it exists purely to give r2 a legal, unrelated state
+        to rest on."""
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        sid, key1, digest1, _s1 = receipt_fixture(subject_type="drive_dependency", subject_id=dep)
+        r1 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r1, sid, joe, dep, key1, digest1, "repointed-j", "origin"),
+                    because="setup: repoint receipt")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        _bsid, bkey, bdigest, _bs = receipt_fixture(sess=sid, subject_type="drive_dependency",
+                                                     subject_id=dep)
+        bridge = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (bridge, sid, joe, dep, bkey, bdigest, "unrelated-state", "repointed-j"),
+                    because="setup: a bridge receipt giving the recovery below a real, "
+                            "unrelated state to rest on")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (bridge,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        _sid2, key2, digest2, _s2 = receipt_fixture(sess=sid, subject_type="drive_dependency",
+                                                      subject_id=dep)
+        r2 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r2, sid, joe, dep, key2, digest2, "recovered-j", "unrelated-state"),
+                    because="setup: recovery receipt that ignores the repoint")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r2,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        refuses(conn, RETIREMENT_INSERT,
+                (uuid.uuid4(), dep, r1, r2, sid, joe, "recovery ignores the repoint"),
+                because="a recovery must build on the state the repoint actually produced",
+                role="carr_writer", expect_message="does not build on the repointed state")
+    check("req 7: the recovery receipt must build on the repointed state",
+          recovery_must_build_on_the_repoint)
+
+    def readiness_is_computed_and_needs_authority():
+        """A function over the rows, not a flag, and it will not read ready
+        without an acceptance only the authority identity can create.
+
+        THE TWO RECEIPTS MUST BE HONEST NOW (0220): each must name the
+        dependency, rest on DIFFERENT calls, assert DIFFERENT material
+        claims, and the recovery must build on what the repoint produced.
+        Sharing one call/material (as this contract's setup did before 0220)
+        is now refused before ever reaching drive_retirement_readiness."""
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        sid, key1, digest1, _s1 = receipt_fixture(subject_type="drive_dependency", subject_id=dep)
+        r1 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r1, sid, joe, dep, key1, digest1, "repointed", "origin"),
+                    because="setup: the repoint receipt")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            assert cur.fetchone()[0] is True, "the repoint receipt must prove"
+            conn.commit()
+        _sid2, key2, digest2, _s2 = receipt_fixture(sess=sid, subject_type="drive_dependency",
+                                                      subject_id=dep)
+        r2 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r2, sid, joe, dep, key2, digest2, "recovered", "repointed"),
+                    because="setup: the recovery receipt, built on what the repoint produced")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r2,))
+            assert cur.fetchone()[0] is True, "the recovery receipt must prove"
             conn.commit()
         writer_runs(conn, RETIREMENT_INSERT,
                     (uuid.uuid4(), dep, r1, r2, sid, joe, "an honest retirement"),
@@ -1500,6 +2331,48 @@ def main(dsn):  # noqa: C901
             "readiness must not report ready without an authority acceptance"
     check("req 7: readiness is computed from the rows and requires authority",
           readiness_is_computed_and_needs_authority)
+
+    def honest_retirement_reaches_the_happy_path():
+        """A gate that can only say no is indistinguishable from a broken
+        one. Two proven, distinct receipts -- different calls, different
+        material, the recovery built on the repoint -- must actually be
+        ENOUGH."""
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        sid, key1, digest1, _s1 = receipt_fixture(subject_type="drive_dependency", subject_id=dep)
+        r1 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r1, sid, joe, dep, key1, digest1, "repointed-k", "origin"),
+                    because="setup: repoint receipt")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        _sid2, key2, digest2, _s2 = receipt_fixture(sess=sid, subject_type="drive_dependency",
+                                                      subject_id=dep)
+        r2 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT_DEP,
+                    (r2, sid, joe, dep, key2, digest2, "recovered-k", "repointed-k"),
+                    because="setup: recovery receipt, built on the repoint")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r2,))
+            assert cur.fetchone()[0] is True
+            conn.commit()
+        rid = uuid.uuid4()
+        writer_runs(conn, RETIREMENT_INSERT,
+                    (rid, dep, r1, r2, sid, joe, "an honest retirement, both receipts sound"),
+                    because="two proven, distinct, honestly-related receipts must be "
+                            "enough to retire ONE dependency")
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from ops.drive_retirement where id=%s", (rid,))
+            assert cur.fetchone()[0] == 1, "the honest retirement did not persist"
+    check("req 7: a dependency CAN be retired when both receipts are honest",
+          honest_retirement_reaches_the_happy_path)
 
     def empty_inventory_is_not_ready():
         """Nothing proven about nothing is not proof. A readiness function that
