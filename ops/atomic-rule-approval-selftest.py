@@ -148,13 +148,18 @@ def main() -> int:
           and "retired_rule_revival_refusal" in gate
           and "retired tombstone mutation refused" in acceptance
           and "altered retirement replay was accepted" in acceptance)
+    check("local acceptance reuses an exact authority login created by earlier DB gates",
+          "if not exists (" in acceptance
+          and "select 1 from pg_roles where rolname='carr_authority_joe'" in acceptance
+          and "select rolcanlogin from pg_roles where rolname='carr_authority_joe'" in acceptance
+          and "carr_authority_joe must be an exact LOGIN identity" in acceptance)
     check("advisory prose cannot be approved as an unbreakable rule",
           "advisory guidance is not an unbreakable rule" in sql
           and "standing_context_runtime" in sql
           and "mislabeled as unbreakable enforcement" in sql)
     check("migration invariants run before commit", sql.rfind("do $$") < sql.rfind("commit;"))
 
-    print(f"\natomic-rule-approval-selftest: {22-len(failures)}/22 passed")
+    print(f"\natomic-rule-approval-selftest: {23-len(failures)}/23 passed")
     return 1 if failures else 0
 
 

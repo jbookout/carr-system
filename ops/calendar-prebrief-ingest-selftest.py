@@ -101,7 +101,7 @@ class Conn:
 
 
 result = bridge.ingest(sponsor="joe", job_id="job", lease="lease", snapshot=snapshot,
-                       environ={"CARR_DB_CALENDAR_PREBRIEF_JOE_URL": "postgresql://carr_calendar_prebrief_joe:fixture@db/carr"},
+                       environ={"CARR_DB_CALENDAR_PREBRIEF_JOE_URL": "postgresql://carr_calendar_prebrief_joe:fixture@db/carr"},  # ci-secret-scan: allow
                        connector=lambda _dsn: Conn())
 rendered = json.dumps(snapshot, sort_keys=True)
 call = next(params for sql, params in calls if "ingest_calendar_prebrief_projection" in sql)
@@ -117,7 +117,8 @@ check("cross-sponsor calendar topology refuses", refuses(lambda: bridge.normaliz
 malformed = json.loads(json.dumps(snapshot)); malformed["events"][0]["description"] = "secret"
 check("prohibited event field refuses", refuses(lambda: bridge.normalize_snapshot(malformed, "joe")))
 check("DSN login mismatch refuses", refuses(lambda: bridge.ingest(sponsor="joe", job_id="j", lease="l", snapshot=snapshot,
-      environ={"CARR_DB_CALENDAR_PREBRIEF_JOE_URL": "postgresql://carr_jobs:fixture@db/carr"}, connector=lambda _dsn: Conn())))
+      environ={"CARR_DB_CALENDAR_PREBRIEF_JOE_URL": "postgresql://carr_jobs:fixture@db/carr"},  # ci-secret-scan: allow
+      connector=lambda _dsn: Conn())))
 owners = {row["key"]: row["inventory"]["owner"] for row in manifest["workflows"] if row["key"].startswith("calendar-prebrief-projection-")}
 check("manifest sync preserves sponsor owners", owners == {"calendar-prebrief-projection-joe-daily": "joe", "calendar-prebrief-projection-dell-daily": "dell"})
 

@@ -22,8 +22,12 @@
 -- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
+-- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0208
+-- ages into the ledger. Until then the migration must remain the only creator;
+-- move that NOLOGIN capability bundle into this active preamble and the grant
+-- catalog queries only on the snapshot refresh that records 0208 as applied.
 --
--- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
+-- ALL SEVEN current production carr_ roles are accounted for. Six are created
 -- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
@@ -68,7 +72,7 @@ SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
 SET transaction_timeout = 0;
-SET client_encoding = 'UTF8';
+SET client_encoding = 'SQL_ASCII';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
 SET check_function_bodies = false;
@@ -534,17 +538,54 @@ end $$;
 
 CREATE FUNCTION ops.applicable_rules(p_workflow text DEFAULT NULL::text, p_surface text DEFAULT NULL::text, p_tier text DEFAULT NULL::text) RETURNS TABLE(rule_id uuid, statement text, enforcement_class text, binding_moment text, applicability jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public', 'ops'
+    SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
   select r.id,r.statement,a.enforcement_class,a.binding_moment,a.applicability
-    from public.rule r join ops.rule_admission a on a.rule_id=r.id
-   where r.status='active' and a.state='admitted'
-     and (p_workflow is null or not(a.applicability?'workflows')
-          or a.applicability->'workflows'?'*' or a.applicability->'workflows'?p_workflow)
-     and (p_surface is null or not(a.applicability?'surfaces')
-          or a.applicability->'surfaces'?'*' or a.applicability->'surfaces'?p_surface)
-     and (p_tier is null or not(a.applicability?'tiers')
-          or a.applicability->'tiers'?'*' or a.applicability->'tiers'?p_tier)
+    from rule r
+    join ops.rule_admission a on a.rule_id=r.id
+    join ops.rule_approval_receipt ar
+      on ar.rule_id=r.id and ar.actor_id=r.activated_by
+     and (ar.rule_version=r.version or exists (
+       select 1 from ops.rule_approval_lifecycle_anchor legacy
+        where legacy.approval_receipt_id=ar.id and legacy.rule_id=r.id
+          and legacy.rule_version_after=r.version
+          and legacy.statement_hash=ar.statement_hash))
+     and ar.statement_hash=encode(digest(r.statement,'sha256'),'hex')
+     and ar.policy_kind=a.enforcement_class
+     and ar.enforcement_status=a.enforcement_status
+     and ar.normalized_contract->>'binding_moment'=a.binding_moment
+     and ar.normalized_contract->'applicability'=a.applicability
+     and ar.normalized_contract->'projection'=a.projection
+     and ar.normalized_contract->'reachability'=a.reachability
+     and ar.normalized_contract->'input_contract'=a.input_contract
+     and ar.evidence_refs=a.fixture_refs
+   where r.status='active' and a.state='admitted' and a.admitted_by=ar.actor_id
+     and exists (
+       select 1 from ops.authority_receipt auth
+        where auth.idempotency_key='approval:'||ar.idempotency_key
+          and auth.kind='activation' and auth.subject_type='rule'
+          and auth.subject_id=r.id and auth.actor_id=ar.actor_id
+          and auth.contract_hash=ar.contract_hash)
+     and not exists (
+       select 1 from unnest(ar.requested_control_keys) requested(control_key)
+        where not exists (
+          select 1 from ops.rule_enforcement_point ep
+          join ops.enforcement_control_catalog c using (control_key)
+          join ops.rule_control_binding b
+            on b.rule_id=ep.rule_id and b.control_key=ep.control_key
+         where ep.rule_id=r.id and ep.control_key=requested.control_key
+           and ep.installed and c.installed and c.verified_at is not null
+           and b.statement_hash=ar.statement_hash
+           and c.enforcement_class in ('deny_gate','stop_gate','schema','transactional_schema')))
+     and (p_workflow is null or not (a.applicability ? 'workflows')
+          or a.applicability->'workflows' ? '*'
+          or a.applicability->'workflows' ? p_workflow)
+     and (p_surface is null or not (a.applicability ? 'surfaces')
+          or a.applicability->'surfaces' ? '*'
+          or a.applicability->'surfaces' ? p_surface)
+     and (p_tier is null or not (a.applicability ? 'tiers')
+          or a.applicability->'tiers' ? '*'
+          or a.applicability->'tiers' ? p_tier)
    order by r.created_at,r.id
 $$;
 
@@ -846,6 +887,53 @@ begin
        or v_prior.reason is distinct from btrim(p_reason) then
       raise exception 'rule approval idempotency key was reused with different input';
     end if;
+    select * into v_rule from rule where id=p_rule_id for update;
+    if not found
+       or v_rule.status is distinct from 'active'
+       or not (v_rule.version=v_prior.rule_version or exists (
+         select 1 from ops.rule_approval_lifecycle_anchor legacy
+          where legacy.approval_receipt_id=v_prior.id and legacy.rule_id=v_rule.id
+            and legacy.rule_version_after=v_rule.version
+            and legacy.statement_hash=v_prior.statement_hash))
+       or encode(digest(v_rule.statement,'sha256'),'hex') is distinct from v_prior.statement_hash
+       or v_rule.activated_by is distinct from v_prior.actor_id then
+      raise exception 'rule approval replay refused: current active rule no longer matches the immutable approval';
+    end if;
+    if not exists (
+      select 1 from ops.rule_admission a
+       where a.rule_id=v_rule.id and a.state='admitted'
+         and a.enforcement_status=v_prior.enforcement_status
+         and a.enforcement_class=v_prior.policy_kind
+         and a.admitted_by=v_prior.actor_id
+         and a.binding_moment=v_prior.normalized_contract->>'binding_moment'
+         and a.applicability=v_prior.normalized_contract->'applicability'
+         and a.projection=v_prior.normalized_contract->'projection'
+         and a.reachability=v_prior.normalized_contract->'reachability'
+         and a.input_contract=v_prior.normalized_contract->'input_contract'
+         and a.fixture_refs=v_prior.evidence_refs
+    ) or exists (
+      select 1 from unnest(v_prior.requested_control_keys) requested(control_key)
+       where not exists (
+         select 1
+           from ops.rule_enforcement_point ep
+           join ops.enforcement_control_catalog c using (control_key)
+           join ops.rule_control_binding b
+             on b.rule_id=ep.rule_id and b.control_key=ep.control_key
+          where ep.rule_id=v_rule.id
+            and ep.control_key=requested.control_key
+            and ep.installed and c.installed and c.verified_at is not null
+            and b.statement_hash=v_prior.statement_hash
+            and c.enforcement_class in ('deny_gate','stop_gate','schema','transactional_schema')
+       )
+    ) or not exists (
+      select 1 from ops.authority_receipt ar
+       where ar.idempotency_key='approval:'||v_prior.idempotency_key
+         and ar.kind='activation' and ar.subject_type='rule'
+         and ar.subject_id=v_rule.id and ar.actor_id=v_prior.actor_id
+         and ar.contract_hash=v_prior.contract_hash
+    ) then
+      raise exception 'rule approval replay refused: exact installed enforcement or authority evidence is stale';
+    end if;
     return jsonb_build_object(
       'ok',true,'replayed',true,'rule_id',v_prior.rule_id,
       'policy_status','active','enforcement_status',v_prior.enforcement_status,
@@ -949,7 +1037,10 @@ begin
     (idempotency_key,rule_id,rule_version,statement_hash,actor_id,policy_kind,
      enforcement_status,requested_control_keys,installed_control_keys,reason,
      normalized_contract,contract_hash,evidence_refs)
-  values (p_idempotency_key,p_rule_id,v_rule.version,
+  -- The activation UPDATE below is the one permitted active transition and
+  -- trg_touch_row increments the rule version in that same statement. Store
+  -- the post-activation version so replay can prove no later mutation occurred.
+  values (p_idempotency_key,p_rule_id,v_rule.version+1,
           encode(digest(v_rule.statement,'sha256'),'hex'),v_actor_id,p_policy_kind,v_status,
           v_requested,v_installed,btrim(p_reason),v_contract,v_contract_hash,v_evidence)
   returning * into v_receipt;
@@ -1131,6 +1222,66 @@ begin
     when 'carr_authority_dell' then return 'dell';
     else raise exception 'authority session user % is not an admitted human authority principal', session_user;
   end case;
+end $$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: job; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.job (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    definition_key text NOT NULL,
+    definition_version integer NOT NULL,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key text NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    mode text DEFAULT 'live'::text NOT NULL,
+    state text DEFAULT 'queued'::text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    attempt integer DEFAULT 0 NOT NULL,
+    max_attempts integer NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_owner text,
+    lease_token uuid,
+    leased_until timestamp with time zone,
+    timeout_seconds integer NOT NULL,
+    last_failure_class text,
+    last_failure_detail text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone,
+    ended_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
+    CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
+    CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
+    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
+    CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
+    CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
+    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
+);
+
+
+--
+-- Name: calendar_canary_live_job(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.calendar_canary_live_job(p_job_id uuid, p_lease uuid) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; k text;
+begin
+ if session_user<>'carr_jobs' then raise exception using errcode='42501',message='calendar canary requires carr_jobs identity'; end if;
+ select * into j from ops.job where id=p_job_id for update;
+ select execution_kind into k from ops.job_definition where key=j.definition_key and version=j.definition_version;
+ if not found or j.state<>'running' or j.lease_token<>p_lease or j.leased_until<now() then raise exception using errcode='55000',message='calendar canary requires current live job lease'; end if;
+ if j.definition_key<>'calendar-fetch-daily' or j.definition_version<>5 or j.mode<>'canary' or k<>'deterministic' then raise exception using errcode='22023',message='job is not calendar-fetch-daily v5 deterministic canary'; end if;
+ return j;
 end $$;
 
 
@@ -1557,6 +1708,68 @@ end $$;
 
 
 --
+-- Name: create_calendar_canary_source_snapshot(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) RETURNS TABLE(id uuid, snapshot_digest text, contact_count integer, snapshot_text text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;s jsonb;r ops.calendar_canary_source_snapshot%rowtype;
+begin
+ j:=ops.calendar_canary_live_job(p_job_id,p_lease);
+ select coalesce(jsonb_agg(x order by source_rank,x->>'email',x->>'ref'),'[]') into s from(
+  select jsonb_build_object('email',lower(btrim("Email")),'ref',"Client ID",'name',"Name",'org',"Practice / Entity") x,1 source_rank from v_export_clients where "Email" is not null and position('@' in btrim("Email"))>1
+  union all select jsonb_build_object('email',lower(btrim("Email")),'ref',"Lead ID",'name',"Contact Name",'org',"Practice"),2 from v_export_leads where "Email" is not null and position('@' in btrim("Email"))>1)q;
+ if jsonb_array_length(s)=0 then raise exception using errcode='22023',message='calendar canary source snapshot is empty'; end if;
+ insert into ops.calendar_canary_source_snapshot(job_id,attempt,workflow_version,snapshot,snapshot_digest,contact_count)
+ values(j.id,j.attempt,5,s,encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex'),jsonb_array_length(s)) on conflict(job_id,attempt) do nothing returning * into r;
+ if not found then
+  select * into r from ops.calendar_canary_source_snapshot where job_id=j.id and attempt=j.attempt;
+  if r.snapshot_digest<>encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex') or r.contact_count<>jsonb_array_length(s) then raise exception using errcode='23505',message='calendar canary source snapshot replay conflicts with canonical contacts'; end if;
+ end if;
+ return query select r.id,r.snapshot_digest,r.contact_count,r.snapshot::text;
+end $$;
+
+
+--
+-- Name: create_nightly_availability_canary_source_snapshot(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) RETURNS TABLE(id uuid, snapshot_digest text, availability_count integer, open_search_count integer, snapshot_text text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;s jsonb;r ops.nightly_availability_canary_source_snapshot%rowtype;
+begin
+ j:=ops.nightly_availability_canary_live_job(p_job_id,p_lease);
+ select jsonb_build_object(
+   'availabilities',coalesce((select jsonb_agg(x order by x->>'id') from (
+      select jsonb_build_object('id',av.id::text,'status',av.status,'rate_norm',av.rate_norm_sf_yr,
+        'owed',av.norm_owed,'available_on',av.available_on,'observed',av.observed_at::date,
+        'source',av.source,'area',sp.area_amount,'suite',sp.suite,'city',b.city,'state',b.state,
+        'sub_type',b.sub_type,'address',b.address,'bname',b.name) x
+        from (select distinct on (av.space_id) av.* from availability av
+               order by av.space_id,av.observed_at desc,av.id desc) av
+        join space sp on sp.id=av.space_id join building b on b.id=sp.building_id)q),'[]'::jsonb),
+   'searches',coalesce((select jsonb_agg(x order by x->>'ref',x->>'id') from (
+      select jsonb_build_object('id',s.id::text,'spec',s.spec,'ref',coalesce(c.roster_ref,''),'name',p.name) x
+        from space_search s join client c on c.id=s.client_id join party p on p.id=c.party_id where s.status='open')q),'[]'::jsonb)) into s;
+ if jsonb_array_length(s->'availabilities')=0 or jsonb_array_length(s->'searches')=0 then
+   raise exception using errcode='22023',message='nightly availability canary source must contain availability and open-search evidence';
+ end if;
+ insert into ops.nightly_availability_canary_source_snapshot(job_id,attempt,workflow_version,snapshot,snapshot_digest,availability_count,open_search_count)
+ values(j.id,j.attempt,3,s,encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex'),jsonb_array_length(s->'availabilities'),jsonb_array_length(s->'searches'))
+ on conflict(job_id,attempt) do nothing returning * into r;
+ if not found then
+  select * into r from ops.nightly_availability_canary_source_snapshot where job_id=j.id and attempt=j.attempt;
+  if r.snapshot_digest<>encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex') or r.availability_count<>jsonb_array_length(s->'availabilities') or r.open_search_count<>jsonb_array_length(s->'searches') then raise exception using errcode='23505',message='nightly availability canary source replay conflicts with canonical snapshot'; end if;
+ end if;
+ return query select r.id,r.snapshot_digest,r.availability_count,r.open_search_count,r.snapshot::text;
+end $$;
+
+
+--
 -- Name: deactivate_guidance_registry(uuid, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -1972,47 +2185,6 @@ begin
 end $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
---
--- Name: job; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.job (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    definition_key text CONSTRAINT job_definition_key_not_null1 NOT NULL,
-    definition_version integer CONSTRAINT job_definition_version_not_null1 NOT NULL,
-    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    idempotency_key text NOT NULL,
-    scheduled_for timestamp with time zone NOT NULL,
-    mode text DEFAULT 'live'::text NOT NULL,
-    state text DEFAULT 'queued'::text NOT NULL,
-    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
-    attempt integer DEFAULT 0 NOT NULL,
-    max_attempts integer NOT NULL,
-    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
-    lease_owner text,
-    lease_token uuid,
-    leased_until timestamp with time zone,
-    timeout_seconds integer NOT NULL,
-    last_failure_class text,
-    last_failure_detail text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    started_at timestamp with time zone,
-    ended_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
-    CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
-    CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
-    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
-    CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
-    CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
-    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
-);
-
-
 --
 -- Name: enqueue_job(text, integer, timestamp with time zone, jsonb, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
@@ -2381,6 +2553,25 @@ begin
     returning 1
   ) select count(*) into n from evidence;
   return n;
+end $$;
+
+
+--
+-- Name: nightly_availability_canary_live_job(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; k text;
+begin
+ if session_user<>'carr_jobs' then raise exception using errcode='42501',message='nightly availability canary requires carr_jobs identity'; end if;
+ select * into j from ops.job where id=p_job_id for update;
+ select execution_kind into k from ops.job_definition where key=j.definition_key and version=j.definition_version;
+ if not found or j.state<>'running' or j.lease_token<>p_lease or j.leased_until<now() then raise exception using errcode='55000',message='nightly availability canary requires current live job lease'; end if;
+ if j.definition_key<>'nightly-record-layer' or j.definition_version<>3 or j.mode<>'canary' or k<>'deterministic' then raise exception using errcode='22023',message='job is not nightly-record-layer v3 deterministic canary'; end if;
+ return j;
 end $$;
 
 
@@ -3112,6 +3303,49 @@ end $$;
 
 
 --
+-- Name: calendar_canary_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.calendar_canary_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    source_snapshot_id uuid NOT NULL,
+    source_snapshot_digest text NOT NULL,
+    source_contact_count integer NOT NULL,
+    output_digest text NOT NULL,
+    exact_count integer NOT NULL,
+    domain_count integer NOT NULL,
+    unknown_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT calendar_canary_receipt_domain_count_check CHECK ((domain_count >= 0)),
+    CONSTRAINT calendar_canary_receipt_exact_count_check CHECK ((exact_count >= 0)),
+    CONSTRAINT calendar_canary_receipt_output_digest_check CHECK ((output_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT calendar_canary_receipt_unknown_count_check CHECK ((unknown_count >= 0))
+);
+
+
+--
+-- Name: record_calendar_canary_receipt(uuid, uuid, uuid, text, integer, integer, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) RETURNS ops.calendar_canary_receipt
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare j ops.job%rowtype;s ops.calendar_canary_source_snapshot%rowtype;r ops.calendar_canary_receipt%rowtype;e ops.calendar_canary_receipt%rowtype;
+begin
+ j:=ops.calendar_canary_live_job(p_job_id,p_lease); select * into s from ops.calendar_canary_source_snapshot where id=p_source_snapshot_id and job_id=j.id and attempt=j.attempt;
+ if not found then raise exception using errcode='22023',message='source snapshot is not bound to this job attempt'; end if;
+ if p_output_digest!~'^[0-9a-f]{64}$' or p_exact<0 or p_domain<0 or p_unknown<0 then raise exception using errcode='22023',message='invalid calendar canary aggregate'; end if;
+ insert into ops.calendar_canary_receipt(job_id,attempt,source_snapshot_id,source_snapshot_digest,source_contact_count,output_digest,exact_count,domain_count,unknown_count)
+ values(j.id,j.attempt,s.id,s.snapshot_digest,s.contact_count,p_output_digest,p_exact,p_domain,p_unknown) on conflict(job_id,attempt) do nothing returning * into r;
+ if found then return r; end if; select * into e from ops.calendar_canary_receipt where job_id=j.id and attempt=j.attempt;
+ if e.source_snapshot_id<>s.id or e.output_digest<>p_output_digest or e.exact_count<>p_exact or e.domain_count<>p_domain or e.unknown_count<>p_unknown then raise exception using errcode='23505',message='calendar canary receipt replay conflicts with immutable attempt'; end if; return e;
+end $_$;
+
+
+--
 -- Name: record_claude_scheduler_observation(text, text, text, text, boolean, text, text, text, timestamp with time zone, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3448,6 +3682,52 @@ begin
      contract.plist_sha256,p_launchctl_revision,p_source_fingerprint,p_observed_at,
      principal.device_id);
   return ref;
+end $_$;
+
+
+--
+-- Name: nightly_availability_canary_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.nightly_availability_canary_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    source_snapshot_id uuid NOT NULL,
+    source_snapshot_digest text NOT NULL,
+    availability_count integer NOT NULL,
+    open_search_count integer NOT NULL,
+    match_count integer NOT NULL,
+    output_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT nightly_availability_canary_receipt_availability_count_check CHECK ((availability_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_match_count_check CHECK ((match_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_open_search_count_check CHECK ((open_search_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_output_digest_check CHECK ((output_digest ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: record_nightly_availability_canary_receipt(uuid, uuid, uuid, text, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) RETURNS ops.nightly_availability_canary_receipt
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare j ops.job%rowtype;s ops.nightly_availability_canary_source_snapshot%rowtype;r ops.nightly_availability_canary_receipt%rowtype;e ops.nightly_availability_canary_receipt%rowtype;
+begin
+ j:=ops.nightly_availability_canary_live_job(p_job_id,p_lease);
+ select * into s from ops.nightly_availability_canary_source_snapshot where id=p_source_snapshot_id and job_id=j.id and attempt=j.attempt;
+ if not found then raise exception using errcode='22023',message='nightly availability source snapshot is not bound to this job attempt'; end if;
+ if p_output_digest!~'^[0-9a-f]{64}$' or p_match_count<0 then raise exception using errcode='22023',message='invalid nightly availability canary aggregate'; end if;
+ insert into ops.nightly_availability_canary_receipt(job_id,attempt,source_snapshot_id,source_snapshot_digest,availability_count,open_search_count,match_count,output_digest)
+ values(j.id,j.attempt,s.id,s.snapshot_digest,s.availability_count,s.open_search_count,p_match_count,p_output_digest)
+ on conflict(job_id,attempt) do nothing returning * into r;
+ if found then return r; end if;
+ select * into e from ops.nightly_availability_canary_receipt where job_id=j.id and attempt=j.attempt;
+ if e.source_snapshot_id<>s.id or e.output_digest<>p_output_digest or e.match_count<>p_match_count then raise exception using errcode='23505',message='nightly availability canary receipt replay conflicts with immutable attempt'; end if;
+ return e;
 end $_$;
 
 
@@ -3867,6 +4147,24 @@ $_$;
 
 
 --
+-- Name: refuse_approved_rule_contract_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_approved_rule_contract_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  v_rule_id uuid;
+begin
+  v_rule_id := case when tg_op='INSERT' then new.rule_id else old.rule_id end;
+  if exists (select 1 from ops.rule_approval_receipt where rule_id=v_rule_id) then
+    raise exception 'approved rule % contract is immutable; approve a replacement rule',v_rule_id;
+  end if;
+  return case when tg_op='DELETE' then old else new end;
+end $$;
+
+
+--
 -- Name: refuse_authority_receipt_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3911,6 +4209,25 @@ CREATE FUNCTION ops.refuse_legacy_schedule_disable_receipt_rewrite() RETURNS tri
     AS $$
 begin
   raise exception 'legacy schedule disable receipts are append-only';
+end $$;
+
+
+--
+-- Name: refuse_live_approved_control_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_live_approved_control_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if exists (
+    select 1 from ops.rule_approval_receipt ar
+     join rule r on r.id=ar.rule_id and r.status='active'
+    where old.control_key=any(ar.requested_control_keys)
+  ) then
+    raise exception 'control % backs an active approved rule and is immutable',old.control_key;
+  end if;
+  return case when tg_op='DELETE' then old else new end;
 end $$;
 
 
@@ -4162,6 +4479,60 @@ declare
   a ops.rule_admission%rowtype;
   v_approval ops.rule_approval_receipt%rowtype;
 begin
+  if tg_op='UPDATE' and old.status='retired' then
+    raise exception 'retired rule % is immutable',old.id;
+  end if;
+  -- Once the approval receipt exists, the entire rule row is immutable except
+  -- for the two exact authority transitions owned below: proposed -> active in
+  -- ops.approve_rule, and proposed/active -> retired in ops.retire_rule. This
+  -- also blocks no-op UPDATEs that would otherwise bump the optimistic version
+  -- and silently make an active receipt stale through trg_touch_row.
+  if tg_op='UPDATE'
+     and exists (select 1 from ops.rule_approval_receipt where rule_id=old.id) then
+    if old.status='proposed' and new.status='active'
+       and new.id is not distinct from old.id
+       and new.statement is not distinct from old.statement
+       and new.human_quote is not distinct from old.human_quote
+       and new.taught_by is not distinct from old.taught_by
+       and new.scope is not distinct from old.scope
+       and new.personal_to is not distinct from old.personal_to
+       and new.supersedes is not distinct from old.supersedes
+       and new.created_at is not distinct from old.created_at
+       and new.version is not distinct from old.version
+       and new.updated_at is not distinct from old.updated_at
+       and new.retired_by is not distinct from old.retired_by
+       and new.retired_at is not distinct from old.retired_at then
+      null; -- exact activation fields are validated below
+    elsif old.status in ('proposed','active') and new.status='retired'
+       and new.id is not distinct from old.id
+       and new.statement is not distinct from old.statement
+       and new.human_quote is not distinct from old.human_quote
+       and new.taught_by is not distinct from old.taught_by
+       and new.scope is not distinct from old.scope
+       and new.personal_to is not distinct from old.personal_to
+       and new.activated_by is not distinct from old.activated_by
+       and new.activated_at is not distinct from old.activated_at
+       and new.enforcement is not distinct from old.enforcement
+       and new.supersedes is not distinct from old.supersedes
+       and new.created_at is not distinct from old.created_at
+       and new.version is not distinct from old.version
+       and new.updated_at is not distinct from old.updated_at then
+      null; -- exact retirement actor/receipt is validated below
+    else
+      raise exception 'approved rule % is immutable except through exact Joe approval or retirement',new.id;
+    end if;
+  end if;
+  if tg_op='UPDATE' and old.status is distinct from 'retired' and new.status='retired' then
+    if new.retired_by is null or new.retired_at is null or not exists (
+      select 1 from ops.rule_retirement_receipt rr
+       where rr.rule_id=old.id and rr.actor_id=new.retired_by
+         and rr.rule_version_before=old.version
+         and rr.statement_hash=encode(digest(old.statement,'sha256'),'hex')
+         and rr.previous_status=old.status
+    ) then
+      raise exception 'rule % cannot retire without an exact Joe authority receipt',new.id;
+    end if;
+  end if;
   if not (new.status='active' and
           (tg_op='INSERT' or old.status is distinct from 'active')) then
     return new;
@@ -4185,6 +4556,10 @@ begin
   if not found then
     raise exception 'rule % cannot activate: immutable enforced approval receipt is missing',new.id;
   end if;
+  if new.enforcement is distinct from
+       (case when v_approval.enforcement_status='hard_enforced' then 'gate' else 'constraint' end) then
+    raise exception 'rule % cannot activate: enforcement label does not match approval',new.id;
+  end if;
   if exists (
     select 1 from unnest(v_approval.requested_control_keys) as requested(control_key)
      where not exists (
@@ -4200,6 +4575,67 @@ begin
      )
   ) then
     raise exception 'rule % cannot activate: exact requested enforcement is incomplete',new.id;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: require_rule_approval_lifecycle_anchor(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.require_rule_approval_lifecycle_anchor() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  -- An anchor is not an override and has no caller-supplied trust boundary.
+  -- It can only certify the exact old-0194 pre-activation receipt against the
+  -- current active rule, Joe authority, admitted contract and installed gates.
+  if not exists (
+    select 1
+      from ops.rule_approval_receipt ar
+      join rule r on r.id=ar.rule_id and r.status='active'
+      join actor joe on joe.id=ar.actor_id
+       and joe.slug='joe' and joe.kind='human' and joe.active
+      join ops.rule_admission a on a.rule_id=r.id
+     where ar.id=new.approval_receipt_id
+       and ar.rule_id=new.rule_id
+       and ar.rule_version+1=new.rule_version_after
+       and new.rule_version_after=r.version
+       and new.statement_hash=ar.statement_hash
+       and ar.statement_hash=encode(digest(r.statement,'sha256'),'hex')
+       and r.activated_by=ar.actor_id
+       and r.enforcement=(case when ar.enforcement_status='hard_enforced'
+                               then 'gate' else 'constraint' end)
+       and a.state='admitted' and a.admitted_by=ar.actor_id
+       and ar.policy_kind=a.enforcement_class
+       and ar.enforcement_status=a.enforcement_status
+       and ar.normalized_contract->>'binding_moment'=a.binding_moment
+       and ar.normalized_contract->'applicability'=a.applicability
+       and ar.normalized_contract->'projection'=a.projection
+       and ar.normalized_contract->'reachability'=a.reachability
+       and ar.normalized_contract->'input_contract'=a.input_contract
+       and ar.evidence_refs=a.fixture_refs
+       and exists (
+         select 1 from ops.authority_receipt auth
+          where auth.idempotency_key='approval:'||ar.idempotency_key
+            and auth.kind='activation' and auth.subject_type='rule'
+            and auth.subject_id=r.id and auth.actor_id=ar.actor_id
+            and auth.contract_hash=ar.contract_hash)
+       and not exists (
+         select 1 from unnest(ar.requested_control_keys) requested(control_key)
+          where not exists (
+            select 1 from ops.rule_enforcement_point ep
+            join ops.enforcement_control_catalog c using (control_key)
+            join ops.rule_control_binding b
+              on b.rule_id=ep.rule_id and b.control_key=ep.control_key
+             where ep.rule_id=r.id and ep.control_key=requested.control_key
+               and ep.installed and c.installed and c.verified_at is not null
+               and b.statement_hash=ar.statement_hash
+               and c.enforcement_class in ('deny_gate','stop_gate','schema','transactional_schema')))
+  ) then
+    raise exception 'legacy approval anchor requires an exact active Joe-approved 0194 receipt chain';
   end if;
   return new;
 end $$;
@@ -4235,6 +4671,140 @@ begin
     values(j.id,j.attempt,p_route_key,p_estimated_cost_usd)
   returning id into rid;
   return rid;
+end $$;
+
+
+--
+-- Name: resolve_calendar_canary_receipt(uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) RETURNS SETOF ops.calendar_canary_receipt
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$select * from ops.calendar_canary_receipt where job_id=p_job_id and attempt=p_attempt$$;
+
+
+--
+-- Name: resolve_nightly_availability_canary_receipt(uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) RETURNS SETOF ops.nightly_availability_canary_receipt
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+ select * from ops.nightly_availability_canary_receipt where job_id=p_job_id and attempt=p_attempt
+$$;
+
+
+--
+-- Name: retire_rule(uuid, text, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  v_actor_slug text;
+  v_actor_id uuid;
+  v_rule rule%rowtype;
+  v_prior ops.rule_retirement_receipt%rowtype;
+  v_receipt ops.rule_retirement_receipt%rowtype;
+  v_approval_id uuid;
+  v_contract jsonb;
+  v_contract_hash text;
+  v_retired_at timestamptz;
+begin
+  v_actor_slug := ops.authority_actor_slug();
+  if v_actor_slug<>'joe' then
+    raise exception 'system rule retirement requires Joe authority';
+  end if;
+  select id into v_actor_id from actor
+   where slug=v_actor_slug and kind='human' and active;
+  if v_actor_id is null then raise exception 'Joe authority actor is not active'; end if;
+  if btrim(coalesce(p_reason,''))='' or btrim(coalesce(p_idempotency_key,''))='' then
+    raise exception 'retirement reason and idempotency key are required';
+  end if;
+  if p_superseded_by is not null and p_superseded_by=p_rule_id then
+    raise exception 'a rule cannot supersede itself';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('rule-retirement:'||p_idempotency_key,0));
+  select * into v_prior from ops.rule_retirement_receipt
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if v_prior.rule_id is distinct from p_rule_id
+       or v_prior.reason is distinct from btrim(p_reason)
+       or v_prior.superseded_by is distinct from p_superseded_by
+       or v_prior.actor_id is distinct from v_actor_id then
+      raise exception 'rule retirement idempotency key was reused with different input';
+    end if;
+    select * into v_rule from rule where id=p_rule_id for update;
+    if not found
+       or v_rule.status is distinct from 'retired'
+       or v_rule.version is distinct from v_prior.rule_version_after
+       or encode(digest(v_rule.statement,'sha256'),'hex') is distinct from v_prior.statement_hash
+       or v_rule.retired_by is distinct from v_prior.actor_id
+       or v_rule.retired_at is distinct from v_prior.retired_at then
+      raise exception 'rule retirement replay refused: current retired rule no longer matches the immutable retirement';
+    end if;
+    return jsonb_build_object('ok',true,'replayed',true,'rule_id',p_rule_id,
+      'previous_status',v_prior.previous_status,'status','retired',
+      'retirement_receipt_id',v_prior.id);
+  end if;
+
+  select * into v_rule from rule where id=p_rule_id for update;
+  if not found then raise exception 'rule % not found',p_rule_id; end if;
+  if v_rule.status not in ('proposed','active') then
+    raise exception 'rule % is %, expected proposed or active',p_rule_id,v_rule.status;
+  end if;
+  if p_superseded_by is not null and not exists (select 1 from rule where id=p_superseded_by) then
+    raise exception 'superseding rule % does not exist',p_superseded_by;
+  end if;
+  if v_rule.status='active' then
+    select id into v_approval_id from ops.rule_approval_receipt
+     where rule_id=v_rule.id
+       and (rule_version=v_rule.version or exists (
+         select 1 from ops.rule_approval_lifecycle_anchor legacy
+          where legacy.approval_receipt_id=ops.rule_approval_receipt.id
+            and legacy.rule_id=v_rule.id and legacy.rule_version_after=v_rule.version
+            and legacy.statement_hash=ops.rule_approval_receipt.statement_hash))
+       and statement_hash=encode(digest(v_rule.statement,'sha256'),'hex')
+     order by created_at desc limit 1;
+    if v_approval_id is null then
+      raise exception 'active rule % lacks its exact approval receipt',v_rule.id;
+    end if;
+  end if;
+
+  v_retired_at := now();
+
+  v_contract := jsonb_build_object(
+    'rule_id',v_rule.id,'rule_version_before',v_rule.version,
+    'rule_version_after',v_rule.version+1,
+    'statement_hash',encode(digest(v_rule.statement,'sha256'),'hex'),
+    'previous_status',v_rule.status,'actor_id',v_actor_id,
+    'reason',btrim(p_reason),'superseded_by',p_superseded_by,
+    'approval_receipt_id',v_approval_id,'retired_at',v_retired_at);
+  v_contract_hash := encode(digest(v_contract::text,'sha256'),'hex');
+  insert into ops.rule_retirement_receipt
+    (idempotency_key,rule_id,rule_version_before,rule_version_after,statement_hash,previous_status,
+     actor_id,reason,superseded_by,approval_receipt_id,contract_hash,retired_at)
+  values (p_idempotency_key,v_rule.id,v_rule.version,v_rule.version+1,
+          encode(digest(v_rule.statement,'sha256'),'hex'),v_rule.status,
+          v_actor_id,btrim(p_reason),p_superseded_by,v_approval_id,v_contract_hash,v_retired_at)
+  returning * into v_receipt;
+  insert into ops.authority_receipt
+    (idempotency_key,kind,subject_type,subject_id,actor_id,decision,contract_hash,evidence_refs)
+  values ('retirement:'||p_idempotency_key,'override','rule',v_rule.id,v_actor_id,
+          'retired by Joe authority: '||btrim(p_reason),v_contract_hash,
+          case when v_approval_id is null then '{}'::text[]
+               else array[v_approval_id::text] end);
+  update rule set status='retired',retired_by=v_actor_id,retired_at=v_retired_at
+   where id=v_rule.id and status=v_rule.status;
+  if not found then raise exception 'rule % retirement raced',v_rule.id; end if;
+  return jsonb_build_object('ok',true,'replayed',false,'rule_id',v_rule.id,
+    'previous_status',v_rule.status,'status','retired',
+    'retirement_receipt_id',v_receipt.id);
 end $$;
 
 
@@ -4621,6 +5191,107 @@ CREATE FUNCTION ops.standing_guidance(p_actor text, p_workflow text DEFAULT NULL
      )
    order by g.is_constitution desc,r.personal_to nulls first,r.created_at,r.id
 $$;
+
+
+--
+-- Name: sync_system_rule_control_bindings(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.sync_system_rule_control_bindings() RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare
+  v_expected record;
+  v_rule rule%rowtype;
+  v_rows integer;
+  v_inserted integer := 0;
+begin
+  for v_expected in
+    select * from (values
+      ('ae44e0c0-e773-456c-a85b-2dc4cf4dd49e'::uuid,
+       '9e02f7eee01220fd604ba97d605830ea903d3266f95b626a5ca5d9a73567c8f9',
+       '4a0e59ce-728a-49b5-a055-116156e9470e'::uuid,
+       '1fe7c57e-c23f-4fb0-9cff-36f6d3cfcf08'::uuid,
+       'Joe is the sole required authority for system development and high-level system decisions',
+       $q$One thing I need to make sure of, I do not want this system to become dependent on dell’s approval for changes. He is not involved in system development at all. He is basically just a user of the system who may train a new work flow here and there but he will not be involved in building the system or making high level decisions about the way the system functions. He’s relying on me for that. Don’t block him from any of those decisions but don’t require his approval either$q$,
+       'human_authority_runtime',
+       'Joe-approved sole system authority'),
+      ('a57d981a-8f6d-4c18-95ee-0e63a5a90b89'::uuid,
+       'c6fd62eb91d3f03b21a6098a6fd6b2848b902a45b8c0430b1717edf4e143f668',
+       '8b31938a-e2f2-4b8f-9c29-187efa5c1650'::uuid,
+       'f7ea060c-268b-47f1-8a17-7168841b77e0'::uuid,
+       'Make cost discipline permanent; expire only the temporary emergency restriction',
+       $q$But also, we want a budget rule in affect going forward not just expiring in September. We need to operate the system with cost in mind. Not to the point where it limits the system but just to the point where excessive spending is avoided$q$,
+       'platform_metering_pre_dispatch',
+       'Joe-approved permanent platform cost policy')
+    ) as expected(rule_id,statement_hash,decision_id,decision_event_id,
+                  decision_title,human_quote,control_key,source)
+  loop
+    select * into v_rule from rule where id=v_expected.rule_id;
+    if not found then continue; end if;
+    if v_rule.status not in ('proposed','active') then
+      raise exception 'system rule % is %, expected proposed or active',v_rule.id,v_rule.status;
+    end if;
+    if v_rule.personal_to is not null or v_rule.scope is distinct from '{}'::jsonb then
+      raise exception 'system rule % must retain exact shared system-wide scope',v_rule.id;
+    end if;
+    if encode(digest(v_rule.statement,'sha256'),'hex') is distinct from v_expected.statement_hash then
+      raise exception 'system rule % statement does not match Joe-approved preimage',v_rule.id;
+    end if;
+    if not exists (
+      select 1 from public.v_decision_entry d
+       where d.decision_id=v_expected.decision_id
+         and d.event_id=v_expected.decision_event_id
+         and d.author='joe'
+         and d.title=v_expected.decision_title
+         and d.human_quote=v_expected.human_quote
+    ) then
+      raise exception 'system rule % lacks its exact Joe decision evidence',v_rule.id;
+    end if;
+    if not exists (
+      select 1 from ops.enforcement_control_catalog c
+       where c.control_key=v_expected.control_key
+         and c.installed and c.verified_at is not null
+    ) then
+      raise exception 'system rule % control % is not installed',v_rule.id,v_expected.control_key;
+    end if;
+
+    if not exists (
+      select 1 from ops.rule_control_binding
+       where rule_id=v_rule.id and control_key=v_expected.control_key
+    ) then
+      insert into ops.rule_control_binding
+        (rule_id,control_key,statement_hash,binding_contract)
+      select v_rule.id,v_expected.control_key,v_expected.statement_hash,
+             jsonb_build_object(
+               'source',v_expected.source,
+               'durable_decision_ref',v_expected.decision_id,
+               'decision_event_ref',v_expected.decision_event_id,
+               'rule_id',v_rule.id,
+               'rule_version',v_rule.version,
+               'implementation_ref',c.implementation_ref,
+               'test_ref',c.test_ref)
+        from ops.enforcement_control_catalog c
+       where c.control_key=v_expected.control_key;
+      get diagnostics v_rows = row_count;
+    else
+      v_rows := 0;
+    end if;
+    v_inserted := v_inserted + v_rows;
+
+    if not exists (
+      select 1 from ops.rule_control_binding b
+       where b.rule_id=v_rule.id and b.control_key=v_expected.control_key
+         and b.statement_hash=v_expected.statement_hash
+         and b.binding_contract->>'durable_decision_ref'=v_expected.decision_id::text
+         and b.binding_contract->>'decision_event_ref'=v_expected.decision_event_id::text
+    ) then
+      raise exception 'system rule % has a stale or conflicting control binding',v_rule.id;
+    end if;
+  end loop;
+  return v_inserted;
+end $_$;
 
 
 --
@@ -6201,6 +6872,25 @@ CREATE TABLE ops.authority_receipt (
 
 
 --
+-- Name: calendar_canary_source_snapshot; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.calendar_canary_source_snapshot (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    workflow_version integer NOT NULL,
+    snapshot jsonb NOT NULL,
+    snapshot_digest text NOT NULL,
+    contact_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT calendar_canary_source_snapshot_contact_count_check CHECK ((contact_count >= 0)),
+    CONSTRAINT calendar_canary_source_snapshot_snapshot_digest_check CHECK ((snapshot_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT calendar_canary_source_snapshot_workflow_version_check CHECK ((workflow_version = 5))
+);
+
+
+--
 -- Name: capability_agent_session; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -7164,6 +7854,27 @@ CREATE TABLE ops.legacy_schedule_surface_registry (
 
 
 --
+-- Name: nightly_availability_canary_source_snapshot; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.nightly_availability_canary_source_snapshot (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    workflow_version integer NOT NULL,
+    snapshot jsonb NOT NULL,
+    snapshot_digest text NOT NULL,
+    availability_count integer NOT NULL,
+    open_search_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT nightly_availability_canary_source_sna_availability_count_check CHECK ((availability_count >= 0)),
+    CONSTRAINT nightly_availability_canary_source_snap_open_search_count_check CHECK ((open_search_count >= 0)),
+    CONSTRAINT nightly_availability_canary_source_snaps_workflow_version_check CHECK ((workflow_version = 3)),
+    CONSTRAINT nightly_availability_canary_source_snapsh_snapshot_digest_check CHECK ((snapshot_digest ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
 -- Name: npi_device_evidence_receipt; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -7198,13 +7909,13 @@ CREATE TABLE ops.npi_device_evidence_receipt (
 
 CREATE TABLE ops.program6_browser_action_challenge_redemption (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token_digest text CONSTRAINT program6_browser_action_challenge_redempt_token_digest_not_null NOT NULL,
-    session_digest text CONSTRAINT program6_browser_action_challenge_redem_session_digest_not_null NOT NULL,
+    token_digest text NOT NULL,
+    session_digest text NOT NULL,
     action text NOT NULL,
-    material_digest text CONSTRAINT program6_browser_action_challenge_rede_material_digest_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT program6_browser_action_challenge_rede_idempotency_key_not_null NOT NULL,
-    redeemed_by_actor_id uuid CONSTRAINT program6_browser_action_challenge_redeemed_by_actor_id_not_null NOT NULL,
-    redeemed_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT program6_browser_action_challenge_redempti_redeemed_at_not_null NOT NULL,
+    material_digest text NOT NULL,
+    idempotency_key uuid NOT NULL,
+    redeemed_by_actor_id uuid NOT NULL,
+    redeemed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT program6_browser_action_challenge_redempt_material_digest_check CHECK ((material_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redempti_session_digest_check CHECK ((session_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redemption_action_check CHECK ((action = ANY (ARRAY['accept-ready-plan'::text, 'accept-outcome-feedback'::text]))),
@@ -7437,6 +8148,21 @@ COMMENT ON TABLE ops.rule_admission IS 'Normalized authority contract for one ru
 
 
 --
+-- Name: rule_approval_lifecycle_anchor; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_approval_lifecycle_anchor (
+    approval_receipt_id uuid NOT NULL,
+    rule_id uuid NOT NULL,
+    rule_version_after integer NOT NULL,
+    statement_hash text NOT NULL,
+    anchored_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rule_approval_lifecycle_anchor_rule_version_after_check CHECK ((rule_version_after > 0)),
+    CONSTRAINT rule_approval_lifecycle_anchor_statement_hash_check CHECK ((statement_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
 -- Name: rule_approval_receipt; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -7508,6 +8234,36 @@ CREATE TABLE ops.rule_enforcement_point (
     verified_at timestamp with time zone,
     CONSTRAINT installed_control_has_verification CHECK (((NOT installed) OR (btrim(test_ref) <> ''::text))),
     CONSTRAINT rule_enforcement_point_enforcement_class_check CHECK ((enforcement_class = ANY (ARRAY['deny_gate'::text, 'stop_gate'::text, 'schema'::text, 'surfacing'::text, 'transactional_schema'::text, 'judgment_ambient'::text])))
+);
+
+
+--
+-- Name: rule_retirement_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_retirement_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key text NOT NULL,
+    rule_id uuid NOT NULL,
+    rule_version_before integer NOT NULL,
+    rule_version_after integer NOT NULL,
+    statement_hash text NOT NULL,
+    previous_status text NOT NULL,
+    actor_id uuid NOT NULL,
+    reason text NOT NULL,
+    superseded_by uuid,
+    approval_receipt_id uuid,
+    contract_hash text NOT NULL,
+    retired_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT active_retirement_has_approval CHECK (((previous_status <> 'active'::text) OR (approval_receipt_id IS NOT NULL))),
+    CONSTRAINT rule_retirement_receipt_check CHECK ((rule_version_after = (rule_version_before + 1))),
+    CONSTRAINT rule_retirement_receipt_contract_hash_check CHECK ((contract_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT rule_retirement_receipt_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT rule_retirement_receipt_previous_status_check CHECK ((previous_status = ANY (ARRAY['proposed'::text, 'active'::text]))),
+    CONSTRAINT rule_retirement_receipt_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT rule_retirement_receipt_rule_version_before_check CHECK ((rule_version_before > 0)),
+    CONSTRAINT rule_retirement_receipt_statement_hash_check CHECK ((statement_hash ~ '^[0-9a-f]{64}$'::text))
 );
 
 
@@ -7681,19 +8437,19 @@ CREATE TABLE ops.sourced_work_request_outcome_feedback (
     work_request_id uuid NOT NULL,
     feedback_version integer NOT NULL,
     idempotency_key uuid NOT NULL,
-    work_request_version integer CONSTRAINT sourced_work_request_outcome_feed_work_request_version_not_null NOT NULL,
+    work_request_version integer NOT NULL,
     plan_id uuid NOT NULL,
-    plan_acceptance_receipt_id uuid CONSTRAINT sourced_work_request_outcom_plan_acceptance_receipt_id_not_null NOT NULL,
+    plan_acceptance_receipt_id uuid NOT NULL,
     preimage jsonb NOT NULL,
-    criterion_results jsonb CONSTRAINT sourced_work_request_outcome_feedbac_criterion_results_not_null NOT NULL,
+    criterion_results jsonb NOT NULL,
     evidence_refs jsonb NOT NULL,
     outcome text NOT NULL,
     blocker_code text NOT NULL,
     result_summary text NOT NULL,
     observed_minutes integer NOT NULL,
-    interaction_surface text CONSTRAINT sourced_work_request_outcome_feedb_interaction_surface_not_null NOT NULL,
-    heavy_session_used boolean CONSTRAINT sourced_work_request_outcome_feedba_heavy_session_used_not_null NOT NULL,
-    manual_context_transfers integer CONSTRAINT sourced_work_request_outcome__manual_context_transfers_not_null NOT NULL,
+    interaction_surface text NOT NULL,
+    heavy_session_used boolean NOT NULL,
+    manual_context_transfers integer NOT NULL,
     feedback_hash text NOT NULL,
     feedback_ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -7725,15 +8481,15 @@ COMMENT ON TABLE ops.sourced_work_request_outcome_feedback IS 'Append-only bound
 --
 
 CREATE TABLE ops.sourced_work_request_outcome_feedback_acceptance_receipt (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT sourced_work_request_outcome_feedback_acceptance_re_id_not_null NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_outcome_feedback__work_request_id_not_null NOT NULL,
-    feedback_id uuid CONSTRAINT sourced_work_request_outcome_feedback_acce_feedback_id_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_outcome_feedback__idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_outcome_feedback_acc_base_version_not_null NOT NULL,
-    feedback_hash text CONSTRAINT sourced_work_request_outcome_feedback_ac_feedback_hash_not_null NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_outcome_feed_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT sourced_work_request_outcome_feedback_acce_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_outcome_feedback_a_result_version_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    feedback_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
+    feedback_hash text NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    result_version integer NOT NULL,
     CONSTRAINT sourced_work_request_outcome_feedback_acce_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_outcome_feedback_accep_feedback_hash_check CHECK ((feedback_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT sourced_work_request_outcome_feedback_accept_base_version_check CHECK ((base_version > 0))
@@ -7798,16 +8554,16 @@ COMMENT ON TABLE ops.sourced_work_request_plan IS 'Append-only Program 6 plan pr
 
 CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_plan_acceptance_r_work_request_id_not_null NOT NULL,
+    work_request_id uuid NOT NULL,
     plan_id uuid NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_plan_acceptance_r_idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_plan_acceptance_rece_base_version_not_null NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
     plan_hash text NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_plan_accepta_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_plan_acceptance_recei_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_plan_acceptance_re_result_version_not_null NOT NULL,
-    shape_fixed_surface_ref text CONSTRAINT sourced_work_request_plan_acce_shape_fixed_surface_ref_not_null NOT NULL,
-    shape_rationale text CONSTRAINT sourced_work_request_plan_acceptance_r_shape_rationale_not_null NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT now() NOT NULL,
+    result_version integer NOT NULL,
+    shape_fixed_surface_ref text NOT NULL,
+    shape_rationale text NOT NULL,
     CONSTRAINT sourced_work_request_plan_acceptance_recei_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_base_version_check CHECK ((base_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_plan_hash_check CHECK ((plan_hash ~ '^sha256:[0-9a-f]{64}$'::text))
@@ -7839,11 +8595,11 @@ CREATE TABLE ops.staging_deployment_attempt (
     git_sha text NOT NULL,
     provider text NOT NULL,
     expected_provider_tag text NOT NULL,
-    declared_migration_set_sha256 text CONSTRAINT staging_deployment_attempt_declared_migration_set_sha2_not_null NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
     declared_migration_count integer NOT NULL,
-    declared_schema_highest_migration text CONSTRAINT staging_deployment_attempt_declared_schema_highest_mig_not_null NOT NULL,
-    declared_schema_applied_count integer CONSTRAINT staging_deployment_attempt_declared_schema_applied_cou_not_null NOT NULL,
-    declared_schema_ledger_sha256 text CONSTRAINT staging_deployment_attempt_declared_schema_ledger_sha2_not_null NOT NULL,
+    declared_schema_highest_migration text NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
     prepared_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     writer_session_user text NOT NULL,
     CONSTRAINT staging_attempt_recovery_shape CHECK ((((recovery_step = 'standalone'::text) AND (recovery_attempt_id IS NULL) AND (prior_release_id IS NULL)) OR ((recovery_step <> 'standalone'::text) AND (recovery_attempt_id IS NOT NULL) AND (prior_release_id IS NOT NULL) AND (correlation_id = recovery_attempt_id)))),
@@ -7885,17 +8641,17 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     prior_release_id uuid NOT NULL,
     service_id uuid NOT NULL,
     environment text NOT NULL,
-    current_before_receipt_id uuid CONSTRAINT staging_recovery_rehearsal_b_current_before_receipt_id_not_null NOT NULL,
-    prior_after_rollback_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__prior_after_rollback_recei_not_null NOT NULL,
-    current_after_restore_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__current_after_restore_rece_not_null NOT NULL,
+    current_before_receipt_id uuid NOT NULL,
+    prior_after_rollback_receipt_id uuid NOT NULL,
+    current_after_restore_receipt_id uuid NOT NULL,
     recovery_strategy text NOT NULL,
     recovery_plan_ref text NOT NULL,
     plan_hash text NOT NULL,
-    declared_migration_set_sha256 text CONSTRAINT staging_recovery_rehearsal__declared_migration_set_sha_not_null NOT NULL,
-    declared_migration_count integer CONSTRAINT staging_recovery_rehearsal_bu_declared_migration_count_not_null NOT NULL,
-    declared_schema_highest_migration text CONSTRAINT staging_recovery_rehearsal__declared_schema_highest_mi_not_null NOT NULL,
-    declared_schema_applied_count integer CONSTRAINT staging_recovery_rehearsal__declared_schema_applied_co_not_null NOT NULL,
-    declared_schema_ledger_sha256 text CONSTRAINT staging_recovery_rehearsal__declared_schema_ledger_sha_not_null NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_count integer NOT NULL,
+    declared_schema_highest_migration text NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
     bundle_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
     completed_at timestamp with time zone NOT NULL,
@@ -7937,12 +8693,12 @@ CREATE TABLE ops.staging_release_readback_receipt (
     provider_version_id uuid NOT NULL,
     provider_tag text NOT NULL,
     verb_count integer NOT NULL,
-    schema_highest_migration text CONSTRAINT staging_release_readback_rece_schema_highest_migration_not_null NOT NULL,
+    schema_highest_migration text NOT NULL,
     schema_applied_count integer NOT NULL,
-    declared_migration_set_sha256 text CONSTRAINT staging_release_readback_re_declared_migration_set_sha_not_null NOT NULL,
-    declared_migration_count integer CONSTRAINT staging_release_readback_rece_declared_migration_count_not_null NOT NULL,
-    declared_schema_applied_count integer CONSTRAINT staging_release_readback_re_declared_schema_applied_co_not_null NOT NULL,
-    declared_schema_ledger_sha256 text CONSTRAINT staging_release_readback_re_declared_schema_ledger_sha_not_null NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_count integer NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
     doctrine_generation bigint NOT NULL,
     projection_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
@@ -8978,6 +9734,8 @@ CREATE TABLE public.rule (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    retired_by uuid,
+    retired_at timestamp with time zone,
     CONSTRAINT rule_check CHECK (((status <> 'active'::text) OR (activated_by IS NOT NULL))),
     CONSTRAINT rule_enforcement_check CHECK ((enforcement = ANY (ARRAY['prose'::text, 'checklist'::text, 'gate'::text, 'constraint'::text, 'code'::text]))),
     CONSTRAINT rule_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'active'::text, 'retired'::text, 'superseded'::text])))
@@ -9904,12 +10662,12 @@ COMMENT ON COLUMN public.campaign.coverage_at_scoring IS 'The measurement covera
 --
 
 CREATE TABLE public.candidate_pool (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT prospect_pool_id_not_null NOT NULL,
-    source text CONSTRAINT prospect_pool_source_not_null NOT NULL,
-    source_key text CONSTRAINT prospect_pool_source_key_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source text NOT NULL,
+    source_key text NOT NULL,
     source_seq integer,
-    source_row jsonb CONSTRAINT prospect_pool_source_row_not_null NOT NULL,
-    name text CONSTRAINT prospect_pool_name_not_null NOT NULL,
+    source_row jsonb NOT NULL,
+    name text NOT NULL,
     org_name text,
     vertical text,
     address text,
@@ -9924,19 +10682,19 @@ CREATE TABLE public.candidate_pool (
     score_basis text,
     est_lease_event date,
     est_basis text,
-    status text DEFAULT 'pool'::text CONSTRAINT prospect_pool_status_not_null NOT NULL,
+    status text DEFAULT 'pool'::text NOT NULL,
     promoted_lead_id uuid,
     dup_tier text,
     dup_subject_type text,
     dup_subject_id uuid,
     dup_ref text,
     dup_basis text,
-    dup_do_not_contact boolean DEFAULT false CONSTRAINT prospect_pool_dup_do_not_contact_not_null NOT NULL,
-    version integer DEFAULT 1 CONSTRAINT prospect_pool_version_not_null NOT NULL,
-    created_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_created_at_not_null NOT NULL,
-    created_by uuid CONSTRAINT prospect_pool_created_by_not_null NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_updated_at_not_null NOT NULL,
-    updated_by uuid CONSTRAINT prospect_pool_updated_by_not_null NOT NULL,
+    dup_do_not_contact boolean DEFAULT false NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by uuid NOT NULL,
     declined_at timestamp with time zone,
     declined_by uuid,
     decline_reason text,
@@ -12773,16 +13531,16 @@ CREATE VIEW public.v_capture_coverage AS
            FROM public.deal d
           WHERE ((d.outcome IS NULL) AND (d.phase <> 'closed'::text))
         UNION ALL
-         SELECT 'client'::text,
+         SELECT 'client'::text AS text,
             c.id
            FROM public.client c
           WHERE (c.merged_into IS NULL)
         UNION ALL
-         SELECT 'lead'::text,
+         SELECT 'lead'::text AS text,
             l.id
            FROM public.lead l
         UNION ALL
-         SELECT 'vendor'::text,
+         SELECT 'vendor'::text AS text,
             v.id
            FROM public.vendor v
         )
@@ -15041,7 +15799,7 @@ CREATE VIEW public.v_export_dossier_analysis AS
           WHERE (c.notes_path IS NOT NULL)
         UNION ALL
          SELECT l.id,
-            'lead'::text,
+            'lead'::text AS text,
             ('DNA/Clients/prospects/'::text || regexp_replace(l.notes_path, '^.*/'::text, ''::text))
            FROM public.lead l
           WHERE (l.notes_path IS NOT NULL)
@@ -16744,6 +17502,46 @@ ALTER TABLE ONLY ops.authority_receipt
 
 
 --
+-- Name: calendar_canary_receipt calendar_canary_receipt_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapsh_id_snapshot_digest_contact_co_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapsh_id_snapshot_digest_contact_co_key UNIQUE (id, snapshot_digest, contact_count);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: capability_agent_session capability_agent_session_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -17360,6 +18158,46 @@ ALTER TABLE ONLY ops.legacy_schedule_surface_registry
 
 
 --
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_s_id_snapshot_digest_availabili_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_s_id_snapshot_digest_availabili_key UNIQUE (id, snapshot_digest, availability_count, open_search_count);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: npi_device_evidence_receipt npi_device_evidence_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -17580,6 +18418,22 @@ ALTER TABLE ONLY ops.rule_admission
 
 
 --
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_approval_lifecycle_anchor
+    ADD CONSTRAINT rule_approval_lifecycle_anchor_pkey PRIMARY KEY (approval_receipt_id);
+
+
+--
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_rule_id_rule_version_after_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_approval_lifecycle_anchor
+    ADD CONSTRAINT rule_approval_lifecycle_anchor_rule_id_rule_version_after_key UNIQUE (rule_id, rule_version_after);
+
+
+--
 -- Name: rule_approval_receipt rule_approval_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -17617,6 +18471,22 @@ ALTER TABLE ONLY ops.rule_enforcement_point
 
 ALTER TABLE ONLY ops.rule_enforcement_point
     ADD CONSTRAINT rule_enforcement_point_rule_id_control_key_key UNIQUE (rule_id, control_key);
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_pkey PRIMARY KEY (id);
 
 
 --
@@ -20419,10 +21289,52 @@ CREATE OR REPLACE VIEW public.v_investigation AS
 
 
 --
+-- Name: enforcement_control_catalog active_approved_control_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER active_approved_control_immutable BEFORE DELETE OR UPDATE ON ops.enforcement_control_catalog FOR EACH ROW EXECUTE FUNCTION ops.refuse_live_approved_control_rewrite();
+
+
+--
+-- Name: rule_admission approved_rule_admission_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER approved_rule_admission_immutable BEFORE DELETE OR UPDATE ON ops.rule_admission FOR EACH ROW EXECUTE FUNCTION ops.refuse_approved_rule_contract_rewrite();
+
+
+--
+-- Name: rule_control_binding approved_rule_control_binding_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER approved_rule_control_binding_immutable BEFORE INSERT OR DELETE OR UPDATE ON ops.rule_control_binding FOR EACH ROW EXECUTE FUNCTION ops.refuse_approved_rule_contract_rewrite();
+
+
+--
+-- Name: rule_enforcement_point approved_rule_enforcement_point_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER approved_rule_enforcement_point_immutable BEFORE INSERT OR DELETE OR UPDATE ON ops.rule_enforcement_point FOR EACH ROW EXECUTE FUNCTION ops.refuse_approved_rule_contract_rewrite();
+
+
+--
 -- Name: authority_receipt authority_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
 CREATE TRIGGER authority_receipt_append_only BEFORE DELETE OR UPDATE ON ops.authority_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_authority_receipt_rewrite();
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER calendar_canary_receipt_append_only BEFORE DELETE OR UPDATE ON ops.calendar_canary_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER calendar_canary_source_snapshot_append_only BEFORE DELETE OR UPDATE ON ops.calendar_canary_source_snapshot FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
 
 
 --
@@ -20657,6 +21569,20 @@ CREATE TRIGGER legacy_schedule_observation_receipt_append_only BEFORE DELETE OR 
 
 
 --
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER nightly_availability_canary_receipt_append_only BEFORE DELETE OR UPDATE ON ops.nightly_availability_canary_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER nightly_availability_canary_source_append_only BEFORE DELETE OR UPDATE ON ops.nightly_availability_canary_source_snapshot FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
 -- Name: npi_device_evidence_receipt npi_device_evidence_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -20748,10 +21674,31 @@ CREATE TRIGGER release_provider_identity_immutable BEFORE UPDATE OF provider, pr
 
 
 --
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_approval_lifecycle_anchor_append_only BEFORE DELETE OR UPDATE ON ops.rule_approval_lifecycle_anchor FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
+
+
+--
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_valid; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_approval_lifecycle_anchor_valid BEFORE INSERT ON ops.rule_approval_lifecycle_anchor FOR EACH ROW EXECUTE FUNCTION ops.require_rule_approval_lifecycle_anchor();
+
+
+--
 -- Name: rule_approval_receipt rule_approval_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
 CREATE TRIGGER rule_approval_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_approval_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_retirement_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_retirement_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
 
 
 --
@@ -21010,7 +21957,7 @@ CREATE TRIGGER retrieval_proposal_guard_before_update BEFORE UPDATE ON public.re
 -- Name: rule rule_activation_requires_admission; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER rule_activation_requires_admission BEFORE INSERT OR UPDATE OF status ON public.rule FOR EACH ROW EXECUTE FUNCTION ops.require_rule_admission();
+CREATE TRIGGER rule_activation_requires_admission BEFORE INSERT OR UPDATE ON public.rule FOR EACH ROW EXECUTE FUNCTION ops.require_rule_admission();
 
 
 --
@@ -21102,6 +22049,38 @@ ALTER TABLE ONLY neon_auth.session
 
 ALTER TABLE ONLY ops.authority_receipt
     ADD CONSTRAINT authority_receipt_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_source_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_source_snapshot_id_fkey FOREIGN KEY (source_snapshot_id) REFERENCES ops.calendar_canary_source_snapshot(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_source_snapshot_id_source_snapshot_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_source_snapshot_id_source_snapshot_fkey FOREIGN KEY (source_snapshot_id, source_snapshot_digest, source_contact_count) REFERENCES ops.calendar_canary_source_snapshot(id, snapshot_digest, contact_count);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
 
 
 --
@@ -21657,6 +22636,38 @@ ALTER TABLE ONLY ops.legacy_schedule_surface_registry
 
 
 --
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_r_source_snapshot_id_source_sn_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_r_source_snapshot_id_source_sn_fkey FOREIGN KEY (source_snapshot_id, source_snapshot_digest, availability_count, open_search_count) REFERENCES ops.nightly_availability_canary_source_snapshot(id, snapshot_digest, availability_count, open_search_count);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_source_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_source_snapshot_id_fkey FOREIGN KEY (source_snapshot_id) REFERENCES ops.nightly_availability_canary_source_snapshot(id);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
+
+
+--
 -- Name: npi_device_evidence_receipt npi_device_evidence_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -21753,6 +22764,22 @@ ALTER TABLE ONLY ops.rule_admission
 
 
 --
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_approval_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_approval_lifecycle_anchor
+    ADD CONSTRAINT rule_approval_lifecycle_anchor_approval_receipt_id_fkey FOREIGN KEY (approval_receipt_id) REFERENCES ops.rule_approval_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_approval_lifecycle_anchor
+    ADD CONSTRAINT rule_approval_lifecycle_anchor_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: rule_approval_receipt rule_approval_receipt_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -21790,6 +22817,38 @@ ALTER TABLE ONLY ops.rule_control_binding
 
 ALTER TABLE ONLY ops.rule_enforcement_point
     ADD CONSTRAINT rule_enforcement_point_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_approval_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_approval_receipt_id_fkey FOREIGN KEY (approval_receipt_id) REFERENCES ops.rule_approval_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_superseded_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_superseded_by_fkey FOREIGN KEY (superseded_by) REFERENCES public.rule(id) ON DELETE RESTRICT;
 
 
 --
@@ -23921,6 +24980,14 @@ ALTER TABLE ONLY public.rule
 
 
 --
+-- Name: rule rule_retired_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rule
+    ADD CONSTRAINT rule_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES public.actor(id);
+
+
+--
 -- Name: rule rule_supersedes_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -24141,6 +25208,7 @@ revoke all on function ops.accept_sourced_work_request_plan(p_work_request text,
 revoke all on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) from public;
 revoke all on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
+revoke all on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) from public;
 revoke all on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) from public;
 revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) from public;
@@ -24149,11 +25217,14 @@ revoke all on function ops.assert_guidance_import_inventory(p_batch_id uuid) fro
 revoke all on function ops.assert_guidance_import_materialization(p_batch_id uuid) from public;
 revoke all on function ops.assert_guidance_registry_coverage() from public;
 revoke all on function ops.authority_actor_slug() from public;
+revoke all on function ops.calendar_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
 revoke all on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) from public;
+revoke all on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
+revoke all on function ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
@@ -24169,6 +25240,7 @@ revoke all on function ops.guidance_revision_contract_hash(p_revision_id uuid) f
 revoke all on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) from public;
 revoke all on function ops.invalidate_cognition_cache(p_dependency_ref text) from public;
 revoke all on function ops.invalidate_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_dependency_ref text) from public;
+revoke all on function ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) from public;
 revoke all on function ops.program5_migration_set_sha256(p_migration_set text[]) from public;
@@ -24179,10 +25251,12 @@ revoke all on function ops.propose_sourced_work_request_plan(p_work_request text
 revoke all on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) from public;
 revoke all on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) from public;
 revoke all on function ops.reap_expired_jobs() from public;
+revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
 revoke all on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
 revoke all on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
+revoke all on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) from public;
 revoke all on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
@@ -24192,6 +25266,9 @@ revoke all on function ops.redeem_program6_browser_action_challenge(p_token_dige
 revoke all on function ops.refuse_guidance_history_rewrite() from public;
 revoke all on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) from public;
 revoke all on function ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
+revoke all on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) from public;
+revoke all on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) from public;
+revoke all on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) from public;
 revoke all on function ops.select_provider_routes(p_requested text[]) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
@@ -24200,6 +25277,7 @@ revoke all on function ops.sourced_work_request_plan_digest(p_preimage jsonb) fr
 revoke all on function ops.sourced_work_request_plan_preimage(p_work_request_id uuid, p_scope_summary text, p_runbook_ref text, p_runbook_section_id uuid, p_runbook_revision_id uuid, p_runbook_content_hash text, p_dependency_refs jsonb, p_recovery_ref text, p_observability_ref text, p_caps jsonb) from public;
 revoke all on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) from public;
+revoke all on function ops.sync_system_rule_control_bindings() from public;
 revoke all on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) from public;
 revoke all on function ops.triage_sourced_work_request(p_work_request text, p_base_version integer, p_classification text, p_idempotency_key uuid) from public;
 revoke all on function ops.validate_guidance_authority_binding() from public;
@@ -24347,6 +25425,10 @@ grant select on table ops.rule_control_binding to carr_writer;
 grant select on table ops.rule_enforcement_point to carr_jobs;
 grant select on table ops.rule_enforcement_point to carr_reader;
 grant insert, select, update on table ops.rule_enforcement_point to carr_writer;
+grant select on table ops.rule_retirement_receipt to carr_authority;
+grant select on table ops.rule_retirement_receipt to carr_jobs;
+grant select on table ops.rule_retirement_receipt to carr_reader;
+grant select on table ops.rule_retirement_receipt to carr_writer;
 grant insert, select on table ops.run to carr_jobs;
 grant select on table ops.run to carr_reader;
 grant insert, select on table ops.run to carr_writer;
@@ -24821,12 +25903,13 @@ grant execute on function ops.accept_sourced_work_request_plan(p_work_request te
 grant execute on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) to carr_authority;
 grant execute on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
+grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_authority;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_jobs;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
 grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) to carr_writer;
@@ -24834,6 +25917,8 @@ grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
+grant execute on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
+grant execute on function ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
 grant execute on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) to carr_authority;
@@ -24860,10 +25945,12 @@ grant execute on function ops.propose_sourced_work_request_plan(p_work_request t
 grant execute on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
+grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
 grant execute on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
+grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
@@ -24871,6 +25958,9 @@ grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
 grant execute on function ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
+grant execute on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
+grant execute on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
+grant execute on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) to carr_authority;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
@@ -24910,7 +26000,7 @@ SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
 SET transaction_timeout = 0;
-SET client_encoding = 'UTF8';
+SET client_encoding = 'SQL_ASCII';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
 SET check_function_bodies = false;
@@ -25115,6 +26205,9 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0199_guidance_standing_context_boundary.sql	76bb5327079abbdba667c22ac643a0ddadd0110dcdc46f1393c375304d59dff1	2026-08-21 03:12:08.288479+00
 0202_staging_release_readback_receipt.sql	526b9815897bdfb641329c506826afc230fb2bb76a8a67d59a347e2f7754fcb5	2026-08-21 03:12:08.791175+00
 0205_program5_approval_verifier.sql	02cb742f7be2c2d278704e9a58fa9626abc00323901adca9f2da5b539bfbd38a	2026-08-21 03:12:09.011429+00
+0200_calendar_canary_record_layer.sql	22b740eca07045241f5d48c44131442eac354e6f0df664f35271f6caa19e8594	2026-08-21 04:05:39.337406+00
+0201_nightly_availability_canary_record_layer.sql	53fedf7d84b7b5fdc42f27dbbe9e701fa65e7238e35882100cc8f6a8da1a1cb8	2026-08-21 04:05:41.747623+00
+0203_atomic_rule_lifecycle_forward_upgrade.sql	1a277029b99abe0ea07c9e9cc7b46586de8bed4fe076f74bfe98cbc77b9848c3	2026-08-21 04:05:44.175095+00
 \.
 
 
@@ -25133,7 +26226,7 @@ SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
 SET transaction_timeout = 0;
-SET client_encoding = 'UTF8';
+SET client_encoding = 'SQL_ASCII';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
 SET check_function_bodies = false;
@@ -25493,3 +26586,11 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
+
+
+-- CARR REVIEWED CONTROL CATALOG (bin/schema-snapshot.sh) — exact two-row seed.
+-- Verified against the source immediately before this block is written. The
+-- following safely quoted rows preserve the source verification and update
+-- timestamps; never dump arbitrary ops.enforcement_control_catalog rows.
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('human_authority_runtime','migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js','mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py','transactional_schema','t','2026-08-21T04:05:44.150236Z'::timestamptz,'2026-08-21T04:05:44.150236Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('platform_metering_pre_dispatch','lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py','ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py','deny_gate','t','2026-08-21T04:05:44.150236Z'::timestamptz,'2026-08-21T04:05:44.150236Z'::timestamptz) on conflict (control_key) do nothing;

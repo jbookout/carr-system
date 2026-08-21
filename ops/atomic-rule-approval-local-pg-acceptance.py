@@ -36,7 +36,20 @@ def main() -> int:
                 row = cur.fetchone()
                 if row is None or row[0] is not True:
                     refuse("atomic rule acceptance requires a disposable local superuser")
-                cur.execute("create role carr_authority_joe login")
+                cur.execute(
+                    """do $$
+                       begin
+                         if not exists (
+                           select 1 from pg_roles where rolname='carr_authority_joe'
+                         ) then
+                           create role carr_authority_joe login;
+                         elsif not (
+                           select rolcanlogin from pg_roles where rolname='carr_authority_joe'
+                         ) then
+                           raise exception 'carr_authority_joe must be an exact LOGIN identity';
+                         end if;
+                       end $$"""
+                )
                 cur.execute("grant carr_authority to carr_authority_joe")
                 cur.execute("grant carr_writer to current_user")
                 cur.execute("select id from actor where slug='joe' and kind='human' and active")

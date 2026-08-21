@@ -63,10 +63,10 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # and not the other makes its own grants report as strays.
 #
 # carr_calendar_prebrief_jobs is known here while 0208 remains pending. The
-# generator already includes it in its catalog query and role preamble, but the
-# committed production snapshot cannot contain its grants until 0208 is applied
-# there. Move it into APP_ROLES on that snapshot refresh; naming it here now is
-# what keeps the migration/snapshot role-coverage test honest in the meantime.
+# generator deliberately excludes it from its active catalog query and role
+# preamble so the applied-through-0205 snapshot cannot leak a 0208 artifact.
+# Move it into APP_ROLES and the generator together on the snapshot refresh
+# that records 0208 as applied.
 PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs"]
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence"]
@@ -92,6 +92,13 @@ def main():
         return 1
     sql = open(SNAPSHOT).read()
     lines = sql.split("\n")
+
+    executable_lines = [line for line in lines
+                        if line.strip() and not line.lstrip().startswith("--")]
+    for role in PENDING_ROLE_BUNDLES:
+        check(f"pending role {role} is absent from executable snapshot SQL",
+              not any(role in line for line in executable_lines),
+              "pending migration roles must not leak into the applied-only baseline")
 
     check("the snapshot carries a CARR GRANTS section",
           "CARR GRANTS" in sql)

@@ -54,6 +54,14 @@ EXCLUDED = {
     ),
 }
 
+# role -> why it must be known but absent from the current active preamble
+PENDING = {
+    "carr_calendar_prebrief_jobs": (
+        "0208 remains pending in db/schema.sql; the migration is still the "
+        "only truthful creator until the snapshot ledger records it as applied"
+    ),
+}
+
 CREATE_ROLE = re.compile(r"\bcreate\s+role\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
 
 
@@ -81,6 +89,13 @@ def main() -> int:
 
     script = SNAPSHOT_SCRIPT.read_text(encoding="utf-8")
     grants = GRANTS_TEST.read_text(encoding="utf-8") if GRANTS_TEST.exists() else ""
+    preamble_match = re.search(
+        r"foreach r in array array\[(?P<roles>.*?)\] loop", script, re.DOTALL
+    )
+    active_roles = set(re.findall(r"'([a-z_][a-z0-9_]*)'",
+                                  preamble_match.group("roles") if preamble_match else ""))
+    if "'create role %I login password %L', 'carr_jobs'" in script:
+        active_roles.add("carr_jobs")
     results: list[bool] = []
 
     for role, migration in sorted(created.items()):
@@ -88,9 +103,15 @@ def main() -> int:
             results.append(check(
                 f"{role} is deliberately excluded ({migration})", True))
             continue
+        if role in PENDING:
+            results.append(check(
+                f"{role} is pending and absent from the active snapshot ({migration})",
+                role not in active_roles and role in grants,
+                PENDING[role]))
+            continue
         results.append(check(
             f"{role} is created by the snapshot ({migration})",
-            role in script,
+            role in active_roles,
             f"{migration} runs `create role {role}`, but bin/schema-snapshot.sh\n"
             f"never names it. The day that migration's ledger entry lands, it\n"
             f"stops creating the role and nothing else does. Add it to the role\n"
@@ -101,7 +122,7 @@ def main() -> int:
     # is exactly how carr_authority and carr_device_evidence each failed twice.
     if grants:
         for role, migration in sorted(created.items()):
-            if role in EXCLUDED or role not in script:
+            if role in EXCLUDED or role in PENDING or role not in active_roles:
                 continue
             results.append(check(
                 f"{role} is also known to the grants test",

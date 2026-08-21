@@ -165,20 +165,19 @@ cat > "$TMP" <<'ROLES'
 -- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
--- carr_calendar_prebrief_jobs makes it FIVE by way of 0208. It is the
--- NOLOGIN capability bundle for the two externally provisioned sponsor-bound
--- Calendar projection identities; the snapshot must carry the bundle after
--- 0208 ages into the ledger, but must never manufacture either LOGIN identity.
+-- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0208
+-- ages into the ledger. Until then the migration must remain the only creator;
+-- move that NOLOGIN capability bundle into this active preamble and the grant
+-- catalog queries only on the snapshot refresh that records 0208 as applied.
 --
--- ALL EIGHT of production's carr_ roles are now accounted for. Seven are created
+-- ALL SEVEN current production carr_ roles are accounted for. Six are created
 -- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
 -- widening a pattern.
--- carr_reader, carr_writer, carr_exporter, carr_authority,
--- carr_device_evidence and carr_calendar_prebrief_jobs are privilege bundles,
--- so they stay NOLOGIN. carr_jobs is
+-- carr_reader, carr_writer, carr_exporter, carr_authority and
+-- carr_device_evidence are privilege bundles, so they stay NOLOGIN. carr_jobs is
 -- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
@@ -191,7 +190,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence','carr_calendar_prebrief_jobs'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -276,7 +275,7 @@ select format('revoke all on function %s.%s(%s) from public;',
  order by 1;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -290,7 +289,7 @@ select format('grant %s on schema %s to %s;',
  order by n.nspname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -306,7 +305,7 @@ select format('grant %s on %s %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -323,7 +322,7 @@ select format('grant %s (%s) on table %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -337,7 +336,7 @@ select format('grant execute on function %s.%s(%s) to %s;',
  order by n.nspname, p.proname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 -- pg_auth_members permits different grantors for the same role/member pair.
 -- The snapshot has no grantor field, so render each semantically identical
@@ -438,6 +437,15 @@ fi
 #     the lookup returns null and it raises "golden suite digest mismatch".
 #     Found only after adding the two above, because the gate could not reach
 #     this check until it got past the proposals.
+#   * The exact two reviewed ops.enforcement_control_catalog controls are
+#     verified separately and appended as deterministic SQL below — never via
+#     the vocabulary pg_dump. Their fixed implementation/test references,
+#     enforcement classes, and installed/verification metadata contain no
+#     client, deal, event, secret, or runtime usage data. 0194 is already in a
+#     rebuilt snapshot's ledger, so its seed does not replay; without this
+#     controlled block the 0203 lifecycle cannot validate pinned rules. Do not
+#     add rule_control_binding or any receipt/rule table: those are per-rule
+#     history, not bounded internal control configuration.
 #
 # I counted every other table 0135 and 0168 seed, so the next rebuild does not
 # discover a fourth one the same way: doctrine_concept_mapping,
@@ -471,6 +479,55 @@ done
 # shellcheck disable=SC2086
 if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS "$URL" >> "$TMP"; then
   echo "schema-snapshot: could not dump the reference vocabulary — nothing written" >&2
+  exit 1
+fi
+
+# The control catalog is deliberately NOT a --table dump: carrying every row
+# would let arbitrary implementation prose into a tracked snapshot. Verify the
+# two reviewed identities against the source, then append only safely quoted
+# source rows so an applied 0194 ledger cannot hide missing mutable seed rows.
+if ! "$PSQL" -X -q -v ON_ERROR_STOP=1 "$URL" <<'CONTROL_CATALOG_VERIFY'
+do $$
+begin
+  if (select count(*) from ops.enforcement_control_catalog where
+        (control_key='human_authority_runtime'
+         and implementation_ref='migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js'
+         and test_ref='mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py'
+         and enforcement_class='transactional_schema'
+         and installed and verified_at is not null)
+     or (control_key='platform_metering_pre_dispatch'
+         and implementation_ref='lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py'
+         and test_ref='ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py'
+         and enforcement_class='deny_gate'
+         and installed and verified_at is not null)) <> 2 then
+    raise exception 'schema snapshot refused: exact reviewed control catalog is missing or drifted';
+  end if;
+end $$;
+CONTROL_CATALOG_VERIFY
+then
+  echo "schema-snapshot: exact reviewed control catalog is missing or drifted — nothing written" >&2
+  exit 1
+fi
+
+cat >> "$TMP" <<'CONTROL_CATALOG_HEADER'
+-- CARR REVIEWED CONTROL CATALOG (bin/schema-snapshot.sh) — exact two-row seed.
+-- Verified against the source immediately before this block is written. The
+-- following safely quoted rows preserve the source verification and update
+-- timestamps; never dump arbitrary ops.enforcement_control_catalog rows.
+CONTROL_CATALOG_HEADER
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" <<'CONTROL_CATALOG_ROWS' >> "$TMP"
+select format(
+  'insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values (%L,%L,%L,%L,%L,%L::timestamptz,%L::timestamptz) on conflict (control_key) do nothing;',
+  control_key,implementation_ref,test_ref,enforcement_class,installed,
+  to_char(verified_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+  to_char(updated_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
+  from ops.enforcement_control_catalog
+ where control_key in ('human_authority_runtime','platform_metering_pre_dispatch')
+ order by array_position(array['human_authority_runtime','platform_metering_pre_dispatch'],control_key);
+CONTROL_CATALOG_ROWS
+then
+  echo "schema-snapshot: could not render the reviewed control catalog — nothing written" >&2
   exit 1
 fi
 
