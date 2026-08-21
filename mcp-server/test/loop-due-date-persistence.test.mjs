@@ -66,7 +66,15 @@ class LoopFake {
 
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) {
+    // THE REPLAY READ IS MATCHED ON THE STATEMENT, NOT ON ITS COLUMN LIST.
+    // It selects two columns today and five once the receipt work lands
+    // (request_hash, response, actor_id, organization_tenant_id and
+    // application_session_id), because replay identity is four things rather
+    // than one. A fake pinned to the two-column prefix stops recognising the
+    // query the moment that widens, falls through to the throw at the bottom,
+    // and the test then fails on "unhandled fake query" instead of on the
+    // thing it was written to check.
+    if (/^select request_hash, response.* from tool_call where idempotency_key/.test(sql)) {
       const prior = this.calls.get(params[0]);
       return { rows: prior ? [prior] : [] };
     }
@@ -87,7 +95,16 @@ class LoopFake {
       return { rows: [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      this.calls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
+      // Keep the columns replayDecision reads, in toolCallInsertSQL's own
+      // parameter order, so a replay is judged on identity rather than on the
+      // two fields that used to be all this fake retained.
+      this.calls.set(params[0], {
+        request_hash: params[3],
+        response: JSON.parse(params[4]),
+        actor_id: params[2],
+        organization_tenant_id: params[7],
+        application_session_id: params[12],
+      });
       return { rows: [] };
     }
     throw new Error(`unhandled fake query: ${sql}`);
@@ -192,7 +209,7 @@ class AddLoopFake {
   }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (/^select request_hash, response.* from tool_call where idempotency_key/.test(sql)) return { rows: [] };
     if (sql.startsWith("select id, rel_path, col_order from loop_block") ||
         sql.startsWith("select id, rel_path, renders_closed from loop_block") ||
         sql.startsWith("select id, rel_path from loop_block"))
