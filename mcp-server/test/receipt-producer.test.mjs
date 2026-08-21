@@ -42,7 +42,37 @@ function fakeClient({ subjects = [], prior = null, material = "material-A" } = {
         const subjectId = params[6];
         return { rows: [{ call_digest: `call-digest-for-${subjectId}`, material_digest: material }] };
       }
-      if (sql.includes("select material_digest from ops.write_receipt")) {
+      // THE PER-SUBJECT LOCK. The producer serialises on the subject before it
+      // reads the head, because a read-then-insert that is not atomic lets two
+      // concurrent writers build on the same head and manufacture a conflict
+      // nothing in the runtime can clear. Asserted below rather than merely
+      // tolerated: a fake that quietly accepted any SQL it did not recognise
+      // is how three separate producer mutations stayed green.
+      if (sql.includes("pg_advisory_xact_lock")) {
+        if (!String(params[0] ?? "").includes(":")) {
+          throw new Error("the lock is not keyed on the subject it is protecting");
+        }
+        return { rows: [{}] };
+      }
+      if (sql.includes("from ops.write_receipt w")) {
+        // ORDER IS THE WHOLE POINT OF THE LOCK. Taking it after reading the
+        // head protects nothing: the race this closes is between the read and
+        // the insert. Removing the lock entirely left the live database test
+        // green, because that test cannot run two writers at once, so this is
+        // the only place the ordering is checked.
+        const locked = calls.some(c => c.sql.includes("pg_advisory_xact_lock"));
+        if (!locked) {
+          throw new Error("the producer read the head without first locking the subject");
+        }
+        // The head must be read PROVEN and unretracted: the prior-state guard
+        // accepts nothing else, so reading the newest row regardless of proof
+        // would hand the database a prior it refuses.
+        if (!/is_proven/.test(sql)) {
+          throw new Error("the producer read a prior without requiring it to be proven");
+        }
+        if (!/order by w\.seq desc/.test(sql)) {
+          throw new Error("the producer read the head by something other than seq order");
+        }
         return { rows: prior ? [{ material_digest: prior }] : [] };
       }
       if (sql.includes("insert into ops.write_receipt")) return { rows: [] };

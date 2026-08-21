@@ -56,6 +56,31 @@
 --      DIFFERENT material claims, and the recovery must build on the state the
 --      repoint produced.
 --
+-- APPLY IT THROUGH tools/migrate.py, WHICH WRAPS EACH MIGRATION IN A
+-- TRANSACTION. Applying it by hand with `psql -f` does not: every statement
+-- autocommits, so a failure in the apply-time proof at the bottom leaves the
+-- DDL above it committed and the migration unrecorded -- a database carrying
+-- call_digest and material_digest that the ledger says never ran. A reviewer
+-- hit exactly that while probing this file. bin/migrate-prod.sh goes through
+-- migrate.py; ops/check-application-session.sh uses psql on a disposable
+-- cluster, where a half-applied database is thrown away rather than kept.
+--
+-- APPLYING THIS IS NOT A ROLLING DEPLOY, and an operator needs to know before
+-- they start. 0220 drops the five-argument ops.write_receipt_digest and renames
+-- a column the producer writes, so there is no ordering in which a Worker built
+-- against the other side of this migration keeps working: old code against 0220
+-- fails on the dropped signature, and new code against 0214 fails on the missing
+-- seven-argument one. Both failures land inside the receipt producer, which runs
+-- after the tool_call insert, so the whole verb rolls back and every qualified
+-- write returns an error.
+--
+-- The safe sequences are: apply the WHOLE chain and then deploy, on a database
+-- whose Worker does not yet file receipts at all (which is production's state
+-- today, since no Worker on main references these objects); or deploy and
+-- migrate together. The unsafe ones are applying only part of the chain --
+-- `bin/migrate-prod.sh --through 0214_drive_retirement.sql` is exactly that --
+-- and deploying the new Worker before the migrations land.
+--
 -- WHAT THIS MIGRATION DELIBERATELY DOES NOT DO, so the next reader does not
 -- mistake silence for coverage: prior_digest is still caller-chosen and is not
 -- verified against any existing receipt. Enforcing it would make the reducer's
@@ -96,6 +121,28 @@ comment on column ops.write_receipt.material_digest is
   'THE MATERIAL CLAIM. The state of the SUBJECT this receipt says it produced, '
   'chosen by the caller and built on prior_digest. The conflict detector, exact '
   'reversal and the continuity reducer all read this — never call_digest.';
+
+-- --------------------------------------------------- a deterministic order
+-- THE FOLD ORDER WAS DECIDED BY A RANDOM NUMBER, in the one case that matters.
+-- 0213 folds a subject's receipts by (recorded_at, id) and its comment defends
+-- the tiebreak, but recorded_at is clock_timestamp() and id is gen_random_uuid()
+-- -- so two receipts written inside one clock tick fold in whichever order two
+-- random uuids happen to sort. Measured on this machine the gaps are tens of
+-- microseconds and no tie occurred in two hundred inserts, which is exactly
+-- what makes it dangerous: it is latent, not absent, and clock granularity is a
+-- property of the host. A reducer whose answer depends on the machine it runs
+-- on is not a reducer.
+--
+-- An identity column is monotonic in insertion order within a database and
+-- cannot be written by a caller, so the fold no longer has a tiebreak to lose.
+alter table ops.write_receipt add column seq bigint generated always as identity;
+
+comment on column ops.write_receipt.seq is
+  'Insertion order, assigned by the database. The continuity reducer folds in '
+  'this order; recorded_at is a timestamp for humans and ties on it are real.';
+
+create index write_receipt_subject_seq_idx
+  on ops.write_receipt (subject_type, subject_id, seq);
 
 -- ------------------------------------------------------------- retraction
 -- The acceptance bar in 0213 counts unproven receipts globally and a receipt
@@ -139,6 +186,25 @@ begin
   if target.subject_type is distinct from new.subject_type
      or target.subject_id is distinct from new.subject_id then
     raise exception 'a retraction must name the same subject as the receipt it retracts';
+  end if;
+  -- A RETRACTION STAYS INSIDE ITS OWN TENANT. Without this, any holder of the
+  -- runtime credential could disavow another tenant's receipt: carr_writer has
+  -- INSERT across the whole table and there is no row-level policy behind it.
+  -- The reducer drops a retracted receipt out of the fold, so a cross-tenant
+  -- retraction erased another partner's proven history from continuity.
+  if target.organization_tenant_id is distinct from new.organization_tenant_id then
+    raise exception 'a retraction cannot cross tenants: % may not disavow a receipt of %',
+      new.organization_tenant_id, target.organization_tenant_id;
+  end if;
+  -- AND IT MAY ONLY DISAVOW SOMETHING THE DATABASE NEVER CONFIRMED. Retraction
+  -- exists to clear an unproven receipt off the acceptance bar. Applied to a
+  -- PROVEN receipt it is not a repair, it is an erasure of confirmed history,
+  -- and the operation that undoes a proven write is a reversal, which has to
+  -- state where it puts the subject back.
+  if target.is_proven then
+    raise exception
+      'receipt % is proven and cannot be retracted; reverse it instead, which '
+      'has to say what state it restores', new.retracts_receipt_id;
   end if;
   return new;
 end $$;
@@ -204,10 +270,17 @@ begin
      or target.subject_id is distinct from new.subject_id then
     raise exception 'a reversal must name the same subject as the receipt it reverses';
   end if;
+  if target.organization_tenant_id is distinct from new.organization_tenant_id then
+    raise exception 'a reversal cannot cross tenants: % may not reverse a receipt of %',
+      new.organization_tenant_id, target.organization_tenant_id;
+  end if;
+  -- THE MESSAGE NO LONGER PRINTS THE TARGET'S PRIOR STATE. It used to, which
+  -- turned this guard into an oracle: anyone holding a receipt id could read
+  -- back the digest it was built on by offering a deliberately wrong reversal.
+  -- Naming which guard refused does not require handing back the secret.
   if new.material_digest is distinct from target.prior_digest then
     raise exception
-      'reversal is not exact: it produces % but the receipt it reverses built on %',
-      new.material_digest, target.prior_digest;
+      'reversal is not exact: it does not restore the state its target built on';
   end if;
   return new;
 end $$;
@@ -270,6 +343,15 @@ begin
       p_receipt_id;
   end if;
 
+  -- SHADOWED SINCE SECTION (F), AND NAMED AS SUCH. Every check from here to the
+  -- digest below now also runs at INSERT, where refusing is better than leaving
+  -- a receipt permanently unprovable. A receipt that reaches this function has
+  -- already passed all of them, so none of these branches can fire through the
+  -- filing path. They are kept because this function is SECURITY DEFINER and
+  -- executable by carr_writer on any receipt id: if the insert trigger were
+  -- ever dropped, this is the last thing standing between a mislabelled receipt
+  -- and a clean proof. Recorded as depth, not counted as tested.
+  --
   -- THE RECEIPT MUST DESCRIBE ITS OWN EVIDENCE. Without the verb clause the
   -- digest proved only that SOME qualified call existed in this session, and a
   -- receipt asserting any verb at all over a log-activity row proved cleanly.
@@ -320,19 +402,52 @@ returns table (left_receipt uuid, right_receipt uuid, shared_prior text)
 language sql stable
 set search_path = pg_catalog, ops, public
 as $$
+  -- WHAT COUNTS AS A LIVE CLAIM. A retraction is bookkeeping, not a statement
+  -- about subject state, so it is not a party to a disagreement; and a claim a
+  -- proven receipt has disavowed is no longer being made. Both were previously
+  -- treated as ordinary receipts here, which is how an honest retraction
+  -- manufactured a conflict with the receipt it was repairing.
+  with live as (
+    select w.*
+      from ops.write_receipt w
+     where w.subject_type = p_subject_type
+       and w.subject_id   = p_subject_id
+       and w.retracts_receipt_id is null
+       and not exists (
+         select 1 from ops.write_receipt rr
+          where rr.retracts_receipt_id = w.id and rr.is_proven)
+  )
   select a.id, b.id, a.prior_digest
-    from ops.write_receipt a
-    join ops.write_receipt b
-      on a.subject_type = b.subject_type
-     and a.subject_id   = b.subject_id
-     and a.prior_digest = b.prior_digest
+    from live a
+    join live b
+      on a.prior_digest    = b.prior_digest
      and a.material_digest <> b.material_digest
+     -- TENANTS DO NOT DISAGREE WITH EACH OTHER. A subject id is a bare uuid and
+     -- nothing ties one to a tenant, so without this a writer could file
+     -- receipts naming ANOTHER tenant's subject, manufacture a conflict inside
+     -- that tenant's chain, and block a phase acceptance it has no part in --
+     -- the bar counts open conflicts across the whole database. The prior-state
+     -- guard was written tenant-scoped and this was not, which is the kind of
+     -- gap that only shows up when someone reads the two side by side.
+     and a.organization_tenant_id = b.organization_tenant_id
      and a.id < b.id
-   where a.subject_type = p_subject_type
-     and a.subject_id   = p_subject_id
+   -- ONLY A PROVEN REVERSAL CLOSES ANYTHING. The earlier version accepted ANY
+   -- row that named a side, with no test of proof and no test of whether that
+   -- row had itself been disavowed. Under 0213 that was self-punishing: an
+   -- unproven reversal was a permanent wall on the acceptance bar, so nobody
+   -- could profit from one. Section (C) removed the punishment by making
+   -- unproven receipts retractable, and removing the punishment without
+   -- closing this hole made silencing a real conflict free -- fork a subject,
+   -- reverse both sides with digests you never computed, then retract the
+   -- reversals. The fork survives, proven and unretracted, and the bar reports
+   -- a clean database.
      and not exists (
        select 1 from ops.write_receipt rev
-        where rev.reverses_receipt_id in (a.id, b.id));
+        where rev.reverses_receipt_id in (a.id, b.id)
+          and rev.is_proven
+          and not exists (
+            select 1 from ops.write_receipt rr2
+             where rr2.retracts_receipt_id = rev.id and rr2.is_proven));
 $$;
 
 -- ============================================ (C) the bar gets a way to clear
@@ -366,13 +481,35 @@ begin
   -- go on setting the subject's head state. Only a PROVEN retraction counts,
   -- for the same reason the acceptance bar only honours a proven one: otherwise
   -- anything could be erased by asserting it twice.
+  -- KNOWN LIMIT, DISCLOSED RATHER THAN LEFT FOR A READER TO FIND: this folds a
+  -- subject's receipts across ALL tenants, because its arguments do not name
+  -- one. ops.receipt_conflicts is tenant-scoped and so is the prior-state
+  -- guard, so nothing a second tenant writes can manufacture a conflict or a
+  -- prior in another tenant's chain; what it can do is make this reducer's
+  -- reading of a shared subject id look broken. The reducer gates nothing --
+  -- the acceptance bar counts unproven receipts and open conflicts, never a
+  -- reduced state -- so the exposure is a misleading read, not a false pass.
+  -- Scoping it properly means a third argument and a signature change across
+  -- every caller, which is a change to make deliberately, not inside this one.
+  --
+  -- A RETRACTION IS NOT A STATE TRANSITION, so it does not fold either. When
+  -- it did, the repair displaced the damage: break_at named the retraction
+  -- rather than the receipt that broke the chain, and head_digest became the
+  -- material of a disavowal rather than the subject's state. Dropping both the
+  -- retracted receipt AND its retractor leaves the chain reading as though
+  -- neither had happened, which is what a retraction means.
+  --
+  -- A PROVEN RECEIPT IS NEVER DROPPED. Retracting a proven receipt is refused
+  -- at insert, but a receipt can be retracted while unproven and proved
+  -- afterwards; if that lands, the proof wins and the claim stays in the fold.
   for r in
     select * from ops.write_receipt w
      where w.subject_type = p_subject_type and w.subject_id = p_subject_id
-       and not exists (
+       and w.retracts_receipt_id is null
+       and (w.is_proven or not exists (
          select 1 from ops.write_receipt rr
-          where rr.retracts_receipt_id = w.id and rr.is_proven)
-     order by w.recorded_at, w.id
+          where rr.retracts_receipt_id = w.id and rr.is_proven))
+     order by w.seq
   loop
     n := n + 1;
     if not r.is_proven then
@@ -438,7 +575,9 @@ begin
   select count(*) filter (where w.is_proven),
          count(*) filter (where not w.is_proven and not exists (
            select 1 from ops.write_receipt rr
-            where rr.retracts_receipt_id = w.id and rr.is_proven))
+            where rr.retracts_receipt_id = w.id
+              and rr.is_proven
+              and rr.organization_tenant_id = w.organization_tenant_id))
     into n_proven, n_unproven
     from ops.write_receipt w;
 
@@ -522,6 +661,14 @@ begin
   -- constraint. That constraint is therefore no longer reachable by any input.
   -- It is kept as depth against this trigger being dropped, and it is named
   -- here as shadowed rather than counted as a tested guard.
+  --
+  -- AND THE SAME-CALL CLAUSE BELOW IS ITSELF SHADOWED, one layer further in.
+  -- Section (F) forces two receipts resting on one call and one subject to
+  -- carry the SAME material, so the same-material clause catches that shape
+  -- first and nothing isolates the same-call clause any more. Deleting it is
+  -- still noticed -- its neighbour refuses instead -- but no probe names it.
+  -- It is kept for the one shape (F) exempts, a pair of reversals or
+  -- retractions, and it is recorded here as depth rather than as a tested guard.
   if repoint.tool_call_idempotency_key is not distinct from
      recovery.tool_call_idempotency_key then
     raise exception
@@ -598,16 +745,30 @@ begin
   if new.prior_digest = 'origin' then
     return new;
   end if;
+  -- PROVEN, LIVE, AND IN THIS TENANT. An earlier version accepted material from
+  -- ANY row on the subject, unproven and retracted rows included, which made
+  -- the guard bootstrappable in three cheap steps: insert a junk receipt
+  -- carrying the state you want, let the readback refuse it, use its material
+  -- as your prior, then retract the junk so it stops counting anywhere. The
+  -- result was a PROVEN receipt resting on a state nothing real ever produced,
+  -- which is exactly what this guard exists to refuse. Restricting the source
+  -- to proven, unretracted receipts removes the ladder, and the tenant clause
+  -- stops the lookup doubling as a cross-tenant existence oracle.
   if not exists (
     select 1 from ops.write_receipt w
-     where w.subject_type    = new.subject_type
-       and w.subject_id      = new.subject_id
-       and w.material_digest = new.prior_digest)
+     where w.subject_type           = new.subject_type
+       and w.subject_id             = new.subject_id
+       and w.organization_tenant_id = new.organization_tenant_id
+       and w.material_digest        = new.prior_digest
+       and w.is_proven
+       and not exists (
+         select 1 from ops.write_receipt rr
+          where rr.retracts_receipt_id = w.id and rr.is_proven))
   then
     raise exception
       'receipt builds on a state this subject never reached (%); a prior digest '
-      'must be ''origin'' or name material that some earlier receipt on this '
-      'subject actually produced', new.prior_digest;
+      'must be ''origin'' or name material a PROVEN, unretracted receipt on this '
+      'subject produced', new.prior_digest;
   end if;
   return new;
 end $$;
@@ -659,8 +820,19 @@ as $$
                coalesce(e.old_value::text, '') || chr(31) ||
                coalesce(e.new_value::text, ''),
                chr(29)
-               order by coalesce(e.verb, ''), coalesce(e.field, ''),
-                        coalesce(e.old_value::text, ''), coalesce(e.new_value::text, ''))
+               -- COLLATE "C" ON EVERY SORT KEY, and it is load-bearing rather
+               -- than tidy. Text ordering follows the database collation, so
+               -- the same events folded under C and under en_US produce
+               -- DIFFERENT digests. Field names carry underscores and
+               -- new_value is punctuation-heavy JSON, which is precisely where
+               -- collations disagree. Without this the local harness and the
+               -- production database compute different material for identical
+               -- writes, and a collation change during a major-version upgrade
+               -- silently stops restatements being recognised as no-ops.
+               order by coalesce(e.verb, '')            collate "C",
+                        coalesce(e.field, '')           collate "C",
+                        coalesce(e.old_value::text, '') collate "C",
+                        coalesce(e.new_value::text, '') collate "C")
         from public.event e
        where e.idempotency_key      = p_tool_call_key
          and e.application_session_id = p_session
@@ -672,16 +844,250 @@ revoke all on function ops.write_receipt_material_digest(text,uuid,text,uuid) fr
 grant execute on function ops.write_receipt_material_digest(text,uuid,text,uuid)
   to carr_writer, carr_reader;
 
+-- ===== (G) A WRONG RETIREMENT MUST BE CORRECTABLE
+
+-- THE DEFECT THIS CLOSES IS THE MIRROR OF THE ONE 0220 EXISTS FOR. The original
+-- bug was a permanent REFUSAL: one unproven receipt barred acceptance forever
+-- with no way back. 0214 shipped the opposite and nobody noticed, because it
+-- only bites once something is wrong: ops.drive_retirement rows cannot be
+-- updated, cannot be deleted, and one row per dependency was unique, so a
+-- dependency retired in error stayed retired forever and readiness went on
+-- reporting it. A permanent false yes is worse than a permanent no, because
+-- nothing downstream ever asks again.
+--
+-- A WITHDRAWAL IS A NEW ROW, NEVER AN EDIT. Retirement records stay immutable;
+-- correcting one means recording that it was withdrawn, so the mistake and its
+-- correction are both on the record. Readiness then reads what is true now.
+--
+-- THE UNIQUE CONSTRAINT GOES, because a dependency withdrawn and later retired
+-- properly needs a second row. Counting moves to DISTINCT dependencies so that
+-- two rows for one dependency cannot inflate the retired total.
+alter table ops.drive_retirement drop constraint drive_retirement_one_per_dependency;
+
+create table ops.drive_retirement_withdrawal (
+  id                     uuid primary key,
+  drive_retirement_id    uuid not null unique references ops.drive_retirement(id),
+  application_session_id uuid not null references ops.application_session(id),
+  withdrawn_by_actor_id  uuid not null references public.actor(id),
+  organization_tenant_id text not null,
+  withdrawn_at           timestamptz not null default clock_timestamp(),
+  note                   text not null,
+  constraint drive_retirement_withdrawal_needs_a_note check (length(btrim(note)) > 0)
+);
+
+comment on table ops.drive_retirement_withdrawal is
+  'Records that a drive retirement was made in error. Retirement rows stay '
+  'immutable; this is how a false yes gets corrected without anyone editing '
+  'history. Readiness counts only retirements with no withdrawal.';
+
+create function ops.require_live_session_for_withdrawal()
+returns trigger language plpgsql security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  s ops.application_session%rowtype;
+  r ops.drive_retirement%rowtype;
+begin
+  select * into s from ops.application_session
+   where id = new.application_session_id for share;
+  if not found then
+    raise exception 'unknown application session % for withdrawal', new.application_session_id;
+  end if;
+  if s.revoked_at is not null then
+    raise exception 'application session % is revoked', new.application_session_id;
+  end if;
+  if clock_timestamp() >= s.expires_at then
+    raise exception 'application session % is expired', new.application_session_id;
+  end if;
+  if new.withdrawn_by_actor_id is distinct from s.actor_id then
+    raise exception 'withdrawal names a different actor than its session';
+  end if;
+  if new.organization_tenant_id is distinct from s.organization_tenant_id then
+    raise exception 'withdrawal names a different tenant than its session';
+  end if;
+  select * into r from ops.drive_retirement where id = new.drive_retirement_id;
+  if r.organization_tenant_id is distinct from new.organization_tenant_id then
+    raise exception 'a withdrawal cannot cross tenants';
+  end if;
+  return new;
+end $$;
+
+create trigger drive_retirement_withdrawal_requires_live_session
+before insert on ops.drive_retirement_withdrawal
+for each row execute function ops.require_live_session_for_withdrawal();
+alter table ops.drive_retirement_withdrawal
+  enable always trigger drive_retirement_withdrawal_requires_live_session;
+
+create function ops.refuse_withdrawal_rewrite()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops, public
+as $$
+begin
+  if tg_op = 'DELETE' then
+    raise exception 'a withdrawal cannot be deleted';
+  end if;
+  raise exception 'a withdrawal cannot be rewritten';
+end $$;
+
+create trigger drive_retirement_withdrawal_immutable
+before update or delete on ops.drive_retirement_withdrawal
+for each row execute function ops.refuse_withdrawal_rewrite();
+alter table ops.drive_retirement_withdrawal
+  enable always trigger drive_retirement_withdrawal_immutable;
+
+create or replace function ops.drive_retirement_readiness()
+returns table (
+  operational_total bigint,
+  retired_total     bigint,
+  remaining         bigint,
+  has_authority     boolean,
+  ready             boolean
+)
+language sql stable
+set search_path = pg_catalog, ops, public
+as $$
+  with op as (select count(*) n from ops.drive_dependency where operational),
+       ret as (select count(distinct r.drive_dependency_id) n
+                 from ops.drive_retirement r
+                 join ops.drive_dependency d on d.id = r.drive_dependency_id
+                where d.operational
+                  and not exists (select 1 from ops.drive_retirement_withdrawal w
+                                   where w.drive_retirement_id = r.id)),
+       auth as (select count(*) n from ops.phase4_acceptance)
+  select op.n, ret.n, op.n - ret.n, auth.n > 0,
+         op.n > 0 and op.n = ret.n and auth.n > 0
+    from op, ret, auth;
+$$;
+
+comment on function ops.drive_retirement_readiness() is
+  'ready requires: at least one operational dependency on record, every one of '
+  'them retired with two proven receipts and NOT withdrawn, and a phase '
+  'acceptance only the authority identity can create. Counts DISTINCT '
+  'dependencies, so repeated rows for one dependency cannot inflate the total. '
+  'An empty inventory is NOT ready.';
+
+grant select, insert on ops.drive_retirement_withdrawal to carr_writer;
+grant select on ops.drive_retirement_withdrawal to carr_reader;
+revoke update, delete on ops.drive_retirement_withdrawal from carr_writer;
+revoke all on function ops.require_live_session_for_withdrawal() from public;
+revoke all on function ops.refuse_withdrawal_rewrite() from public;
+
+-- ===== (F) A RECEIPT MUST SAY WHAT ITS OWN CALL WROTE
+
+-- WHAT WAS STILL WRONG AFTER (B). Binding the readback to the receipt's verb
+-- and subject stopped a receipt proving against evidence recording a DIFFERENT
+-- verb. It did not stop a receipt naming a subject its call never touched. One
+-- honest log-activity call, whose single event moved one deal, could back any
+-- number of PROVEN receipts on any subjects at all, each carrying whatever
+-- material the caller felt like: a deal it never opened, a Drive dependency it
+-- never repointed. The digest matched because the digest was computed from the
+-- receipt's own claims, and nothing ever asked whether the call supported them.
+--
+-- The database already knew the answer and was never consulted.
+-- ops.write_receipt_material_digest computes what a call actually wrote about a
+-- subject, and it sat there as a convenience recipe for producers while the
+-- guard that should have used it did not exist.
+--
+-- TWO CHECKS, AT INSERT, SO A RECEIPT LIKE THAT NEVER EXISTS:
+--
+--   THE CALL MUST HAVE TOUCHED THE SUBJECT. A receipt is a claim about what a
+--   write did to a subject; if that call produced no event for that subject, it
+--   did nothing to it and there is nothing to receipt.
+--
+--   AN ORDINARY RECEIPT MUST CARRY THE MATERIAL ITS CALL WROTE, recomputed here
+--   rather than accepted. This is what finally makes is_proven mean something
+--   about content instead of only about attachment.
+--
+-- REVERSALS AND RETRACTIONS ARE EXEMPT FROM THE SECOND CHECK, and must be: a
+-- reversal's material is by construction the state its TARGET built on, never a
+-- digest of its own rows, so a computed material could not express one at all.
+-- They are NOT exempt from the first. Their call must still have touched the
+-- subject they claim to repair.
+--
+-- WHAT THIS DOES NOT DO, stated plainly because the limit matters. An attacker
+-- holding carr_writer can write event rows too, so this does not make
+-- fabrication impossible. It makes fabrication CONSISTENT: a false receipt now
+-- requires false events under the same frozen call, and the record can no
+-- longer contain a proven receipt that its own evidence contradicts.
+create function ops.require_receipt_says_what_its_call_wrote()
+returns trigger language plpgsql security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  tc       public.tool_call%rowtype;
+  computed text;
+begin
+  select * into tc from public.tool_call
+   where idempotency_key = new.tool_call_idempotency_key;
+  if not found then
+    raise exception 'receipt names evidence that does not exist (%)',
+      new.tool_call_idempotency_key;
+  end if;
+  if tc.application_session_id is null then
+    raise exception 'receipt names LEGACY evidence, which vouches for nothing';
+  end if;
+  if tc.application_session_id is distinct from new.application_session_id then
+    raise exception 'receipt names evidence written by a different session';
+  end if;
+  if tc.verb is distinct from new.verb then
+    raise exception 'receipt claims verb % but its evidence records verb %',
+      new.verb, tc.verb;
+  end if;
+
+  if not exists (
+    select 1 from public.event e
+     where e.idempotency_key        = new.tool_call_idempotency_key
+       and e.application_session_id = new.application_session_id
+       and e.subject_type           = new.subject_type
+       and e.subject_id             = new.subject_id)
+  then
+    raise exception
+      'receipt names subject %/% but its call wrote nothing about that subject',
+      new.subject_type, new.subject_id;
+  end if;
+
+  if new.reverses_receipt_id is null and new.retracts_receipt_id is null then
+    computed := ops.write_receipt_material_digest(
+      new.tool_call_idempotency_key, new.application_session_id,
+      new.subject_type, new.subject_id);
+    if new.material_digest is distinct from computed then
+      raise exception
+        'receipt material does not match what its call wrote about %/%',
+        new.subject_type, new.subject_id;
+    end if;
+  end if;
+  return new;
+end $$;
+
+-- Named to fire after the session, retraction and reversal guards and before
+-- the prior-state guard, which Postgres orders alphabetically:
+-- requires_live_session, retraction_is_sound, reversal_is_exact,
+-- says_what_its_call_wrote, state_existed.
+create trigger write_receipt_says_what_its_call_wrote
+before insert on ops.write_receipt
+for each row execute function ops.require_receipt_says_what_its_call_wrote();
+alter table ops.write_receipt
+  enable always trigger write_receipt_says_what_its_call_wrote;
+
+revoke all on function ops.require_receipt_says_what_its_call_wrote() from public;
+
 -- --------------------------------------------------------------- apply-time
 -- EXERCISES every guarantee this migration claims, and rolls all of it back.
--- Same reasoning as 0208, 0211, 0213 and 0214: this file runs where the
--- contract suite does not, and a shape check would let a gutted guard through.
 --
--- EVERY FIXTURE BELOW IS ONE PRODUCTION COULD PRODUCE. The first draft of this
--- block failed that test — it built receipts on invented prior states like
--- 'm-bad-base', which section (E) now refuses and which no producer ever emits.
--- A probe resting on an impossible fixture proves something about a database
--- nobody runs.
+-- EVERY RECEIPT BELOW IS BUILT THE WAY THE PRODUCER BUILDS ONE: write the event
+-- rows first, let the database compute the material from them, then file the
+-- receipt and prove it. The previous version of this block invented material
+-- strings like 'm1' and never once called ops.write_receipt_material_digest,
+-- which is how a hole in that function survived a probe whose stated purpose
+-- was to test it. A fixture that cannot be produced proves nothing about the
+-- database anyone runs.
+--
+-- THE ACCEPTANCE PROBES ARE BASELINE-AWARE. ops.accept_phase4 counts unproven
+-- receipts and open conflicts across the WHOLE table. An earlier version simply
+-- asserted that acceptance succeeds, which held only because its own rows were
+-- the only rows -- so this migration refused to apply to any database that had
+-- already taken traffic and carried one unproven receipt. It measures the
+-- baseline first and says out loud when it cannot exercise the success half.
 do $$
 declare
   probe_actor uuid;
@@ -690,29 +1096,38 @@ declare
   other_subj  uuid := gen_random_uuid();
   ret_subj    uuid := gen_random_uuid();
   brk_subj    uuid := gen_random_uuid();
+  cnf_subj    uuid := gen_random_uuid();
   dep         uuid;
-  k1          text := 'split-probe-1-' || gen_random_uuid()::text;
-  k2          text := 'split-probe-2-' || gen_random_uuid()::text;
-  k3          text := 'split-probe-3-' || gen_random_uuid()::text;
-  k4          text := 'split-probe-4-' || gen_random_uuid()::text;
-  k5          text := 'split-probe-5-' || gen_random_uuid()::text;
-  d1          text;
-  d2          text;
-  d4          text;
   r1          uuid := gen_random_uuid();
   r2          uuid := gen_random_uuid();
   rev         uuid := gen_random_uuid();
   bad         uuid := gen_random_uuid();
   ret         uuid := gen_random_uuid();
-  r           record;
-  failed      boolean;
   mat_a       text;
   mat_b       text;
+  base_unproven bigint;
+  base_conflict bigint;
+  r           record;
+  failed      boolean;
+  k           text;
+  sid2        uuid := gen_random_uuid();
+  foreign_receipt uuid := gen_random_uuid();
+  tsubj       uuid := gen_random_uuid();
+  -- Every probe call uses its idempotency key as its request_hash, so the call
+  -- digest for a subject is ops.write_receipt_digest(..., k, ..., subject).
 begin
   select id into probe_actor from public.actor where kind = 'human' order by slug limit 1;
   if probe_actor is null then
     raise exception '0220 FAILED: need a human actor to exercise the split';
   end if;
+
+  select count(*) filter (where not w.is_proven and not exists (
+           select 1 from ops.write_receipt rr
+            where rr.retracts_receipt_id = w.id and rr.is_proven))
+    into base_unproven from ops.write_receipt w;
+  select coalesce(sum(c), 0) into base_conflict from (
+    select (select count(*) from ops.receipt_conflicts(w.subject_type, w.subject_id)) as c
+      from (select distinct subject_type, subject_id from ops.write_receipt) w) t;
 
   insert into ops.application_session
     (id, actor_id, organization_tenant_id, sponsoring_human_slug, via, auth_issuer,
@@ -720,73 +1135,111 @@ begin
   values (sid, probe_actor, 'carr-internal', 'joe', 'probe', 'probe-issuer',
           'verified_partner', 'probe', clock_timestamp() + interval '1 hour');
 
+  -- ============================================== (1) the honest path, twice
+  k := 'p1-' || gen_random_uuid()::text;
   insert into public.tool_call
     (idempotency_key, verb, actor_id, request_hash, response,
      organization_tenant_id, application_session_id)
-  values (k1, 'log-activity', probe_actor, 'rh-1', '{}'::jsonb, 'carr-internal', sid),
-         (k2, 'log-activity', probe_actor, 'rh-2', '{}'::jsonb, 'carr-internal', sid),
-         (k3, 'update-deal',  probe_actor, 'rh-3', '{}'::jsonb, 'carr-internal', sid),
-         (k4, 'log-activity', probe_actor, 'rh-4', '{}'::jsonb, 'carr-internal', sid),
-         (k5, 'log-activity', probe_actor, 'rh-5', '{}'::jsonb, 'carr-internal', sid);
+  values (k, 'log-activity', probe_actor, k, '{}'::jsonb, 'carr-internal', sid);
+  insert into public.event
+    (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+     cause, idempotency_key, organization_tenant_id, application_session_id)
+  values (clock_timestamp(), probe_actor, 'log-activity', 'deal', subj,
+          'stage', '"under-loi"'::jsonb, 'system', k, 'carr-internal', sid);
+  mat_a := ops.write_receipt_material_digest(k, sid, 'deal', subj);
 
-  d1 := ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal', sid,
-                                 'rh-1', 'deal', subj);
-  d2 := ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal', sid,
-                                 'rh-2', 'deal', subj);
-  d4 := ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal', sid,
-                                 'rh-4', 'deal', subj);
-
-  -- (1) THE CALL DIGEST IS BOUND TO THE SUBJECT. The same call digested for
-  -- another subject must be a different value, or a digest is transferable
-  -- between subjects and proof can be borrowed.
-  if d1 = ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal', sid,
-                                   'rh-1', 'deal', other_subj) then
+  -- The call digest is bound to the subject: the same call digested for another
+  -- subject must be a different value, or proof is transferable between them.
+  if ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal', sid,
+                              k, 'deal', subj)
+   = ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal', sid,
+                              k, 'deal', other_subj) then
     raise exception '0220 FAILED: the call digest is identical for two different subjects';
   end if;
 
-  -- (2) The honest path still proves.
   insert into ops.write_receipt
     (id, application_session_id, actor_id, organization_tenant_id, verb,
      subject_type, subject_id, tool_call_idempotency_key,
      call_digest, material_digest, prior_digest)
-  values (r1, sid, probe_actor, 'carr-internal', 'log-activity',
-          'deal', subj, k1, d1, 'm1', 'origin');
+  values (r1, sid, probe_actor, 'carr-internal', 'log-activity', 'deal', subj, k,
+          ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                   sid, k, 'deal', subj),
+          mat_a, 'origin');
   if not ops.prove_write_receipt(r1) then
     raise exception '0220 FAILED: an honest receipt did not prove after the split';
   end if;
 
-  -- (3) A DIGEST COMPUTED FOR ANOTHER SUBJECT MUST NOT PROVE.
+  -- (2) A RECEIPT MUST SAY WHAT ITS OWN CALL WROTE. Three separate refusals,
+  -- each isolated so only the clause under test can fire.
+  --
+  -- (2a) the call wrote nothing about this subject
   begin
+    failed := false;
     insert into ops.write_receipt
       (id, application_session_id, actor_id, organization_tenant_id, verb,
        subject_type, subject_id, tool_call_idempotency_key,
        call_digest, material_digest, prior_digest)
     values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', other_subj, k1, d1, 'm-other', 'origin');
-    if (select is_proven from ops.write_receipt
-         where subject_id = other_subj and tool_call_idempotency_key = k1) then
-      raise exception '0220 FAILED: a digest computed for a DIFFERENT subject proved';
-    end if;
-    raise exception 'ROLLBACK_SUBJECT_BINDING';
+            'deal', other_subj, k,
+            ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                     sid, k, 'deal', other_subj),
+            ops.write_receipt_material_digest(k, sid, 'deal', other_subj), 'origin');
   exception when others then
-    if sqlerrm <> 'ROLLBACK_SUBJECT_BINDING' then raise; end if;
+    failed := true;
+    if position('wrote nothing about that subject' in sqlerrm) = 0 then
+      raise exception '0220 FAILED: untouched-subject receipt refused by the WRONG guard: %', sqlerrm;
+    end if;
   end;
+  if not failed then
+    raise exception '0220 FAILED: a receipt named a subject its call never wrote to';
+  end if;
 
-  -- (4) A RECEIPT MUST DESCRIBE ITS OWN EVIDENCE. k3 records verb update-deal;
-  -- a receipt claiming log-activity over it is the 'retire-the-entire-drive'
-  -- attack in miniature and must be refused BY THE VERB GUARD.
+  -- (2b) the material is not what the call wrote
   begin
+    failed := false;
     insert into ops.write_receipt
       (id, application_session_id, actor_id, organization_tenant_id, verb,
        subject_type, subject_id, tool_call_idempotency_key,
        call_digest, material_digest, prior_digest)
     values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', subj, k3, d1, 'm-mislabelled', 'm1');
+            'deal', subj, k,
+            ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                     sid, k, 'deal', subj),
+            'THE-DEAL-CLOSED-AT-FORTY-DOLLARS', mat_a);
+  exception when others then
+    failed := true;
+    if position('does not match what its call wrote' in sqlerrm) = 0 then
+      raise exception '0220 FAILED: false-material receipt refused by the WRONG guard: %', sqlerrm;
+    end if;
+  end;
+  if not failed then
+    raise exception '0220 FAILED: a receipt carried material its call never wrote';
+  end if;
+
+  -- (2c) the verb disagrees with the frozen evidence
+  declare
+    kv text := 'p1v-' || gen_random_uuid()::text;
+  begin
+    insert into public.tool_call
+      (idempotency_key, verb, actor_id, request_hash, response,
+       organization_tenant_id, application_session_id)
+    values (kv, 'update-deal', probe_actor, kv, '{}'::jsonb, 'carr-internal', sid);
+    insert into public.event
+      (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+       cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(), probe_actor, 'update-deal', 'deal', subj,
+            'stage', '"closed"'::jsonb, 'system', kv, 'carr-internal', sid);
     failed := false;
     begin
-      perform ops.prove_write_receipt(
-        (select id from ops.write_receipt
-          where tool_call_idempotency_key = k3 and subject_id = subj));
+      insert into ops.write_receipt
+        (id, application_session_id, actor_id, organization_tenant_id, verb,
+         subject_type, subject_id, tool_call_idempotency_key,
+         call_digest, material_digest, prior_digest)
+      values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
+              'deal', subj, kv,
+              ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                       sid, kv, 'deal', subj),
+              ops.write_receipt_material_digest(kv, sid, 'deal', subj), mat_a);
     exception when others then
       failed := true;
       if position('claims verb' in sqlerrm) = 0 then
@@ -794,40 +1247,65 @@ begin
       end if;
     end;
     if not failed then
-      raise exception '0220 FAILED: a receipt proved against evidence recording a DIFFERENT verb';
+      raise exception '0220 FAILED: a receipt claimed a verb its evidence does not record';
     end if;
-    raise exception 'ROLLBACK_VERB_BINDING';
-  exception when others then
-    if sqlerrm <> 'ROLLBACK_VERB_BINDING' then raise; end if;
   end;
 
-  -- (5) THE HEADLINE FIX: AN EXACT REVERSAL CAN NOW PROVE. Under 0211 this was
-  -- impossible by construction — the reversal's digest had to equal both the
-  -- target's prior state and the readback of its own call, and those are never
-  -- the same value. Closing a conflict therefore guaranteed a permanently
-  -- unproven receipt, which permanently barred acceptance.
+  -- ================================ (3) the headline fix: a reversal can prove
+  k := 'p2-' || gen_random_uuid()::text;
+  insert into public.tool_call
+    (idempotency_key, verb, actor_id, request_hash, response,
+     organization_tenant_id, application_session_id)
+  values (k, 'log-activity', probe_actor, k, '{}'::jsonb, 'carr-internal', sid);
+  insert into public.event
+    (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+     cause, idempotency_key, organization_tenant_id, application_session_id)
+  values (clock_timestamp(), probe_actor, 'log-activity', 'deal', subj,
+          'stage', '"closed"'::jsonb, 'system', k, 'carr-internal', sid);
+  mat_b := ops.write_receipt_material_digest(k, sid, 'deal', subj);
+  if mat_b = mat_a then
+    raise exception '0220 FAILED: two DIFFERENT changes hashed to the same material';
+  end if;
   insert into ops.write_receipt
     (id, application_session_id, actor_id, organization_tenant_id, verb,
      subject_type, subject_id, tool_call_idempotency_key,
      call_digest, material_digest, prior_digest)
-  values (r2, sid, probe_actor, 'carr-internal', 'log-activity',
-          'deal', subj, k2, d2, 'm2', 'm1');
+  values (r2, sid, probe_actor, 'carr-internal', 'log-activity', 'deal', subj, k,
+          ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                   sid, k, 'deal', subj),
+          mat_b, mat_a);
   if not ops.prove_write_receipt(r2) then
     raise exception '0220 FAILED: the second honest receipt did not prove';
   end if;
 
+  -- A reversal restores the state its target built on. Its material is by
+  -- construction NOT a digest of its own rows, which is why reversals are
+  -- exempt from the material rule -- and that exemption is exercised here
+  -- rather than assumed.
+  k := 'p3-' || gen_random_uuid()::text;
+  insert into public.tool_call
+    (idempotency_key, verb, actor_id, request_hash, response,
+     organization_tenant_id, application_session_id)
+  values (k, 'log-activity', probe_actor, k, '{}'::jsonb, 'carr-internal', sid);
+  insert into public.event
+    (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+     cause, idempotency_key, organization_tenant_id, application_session_id)
+  values (clock_timestamp(), probe_actor, 'log-activity', 'deal', subj,
+          'stage', '"under-loi"'::jsonb, 'system', k, 'carr-internal', sid);
   insert into ops.write_receipt
     (id, application_session_id, actor_id, organization_tenant_id, verb,
      subject_type, subject_id, tool_call_idempotency_key,
      call_digest, material_digest, prior_digest, reverses_receipt_id)
-  values (rev, sid, probe_actor, 'carr-internal', 'log-activity',
-          'deal', subj, k4, d4, 'm1', 'm2', r2);
+  values (rev, sid, probe_actor, 'carr-internal', 'log-activity', 'deal', subj, k,
+          ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                   sid, k, 'deal', subj),
+          mat_a, mat_b, r2);
   if not ops.prove_write_receipt(rev) then
-    raise exception '0220 FAILED: an EXACT REVERSAL still cannot prove — the '
+    raise exception '0220 FAILED: an EXACT REVERSAL still cannot prove -- the '
                     'defect this migration exists to remove is still present';
   end if;
 
-  -- An inexact reversal must still refuse, and by its own guard.
+  -- An inexact reversal refuses, by its own guard.
   begin
     failed := false;
     insert into ops.write_receipt
@@ -835,99 +1313,256 @@ begin
        subject_type, subject_id, tool_call_idempotency_key,
        call_digest, material_digest, prior_digest, reverses_receipt_id)
     values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', subj, k4, d4, 'not-the-prior-state', 'm1', r2);
+            'deal', subj, k,
+            ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                     sid, k, 'deal', subj),
+            'not-the-prior-state', mat_a, r2);
   exception when others then
     failed := true;
     if position('reversal is not exact' in sqlerrm) = 0 then
       raise exception '0220 FAILED: inexact reversal refused by the WRONG guard: %', sqlerrm;
+    end if;
+    -- AND THE MESSAGE MUST NOT HAND BACK THE SECRET. It used to print the
+    -- target's prior digest, which turned this guard into an oracle: anyone
+    -- holding a receipt id could read the state it was built on by offering a
+    -- deliberately wrong reversal. Naming which guard refused never requires
+    -- disclosing the value that made it refuse.
+    if position(mat_a in sqlerrm) > 0 then
+      raise exception '0220 FAILED: the reversal refusal disclosed its target''s prior state';
     end if;
   end;
   if not failed then
     raise exception '0220 FAILED: an inexact reversal was accepted';
   end if;
 
-  -- (6) THE ACCEPTANCE BAR CLEARS THROUGH A PROVEN RETRACTION, AND ONLY ONE.
-  -- On its own subject, because a bad receipt sharing a prior with an honest
-  -- one would raise a CONFLICT and the bar would then refuse for that reason
-  -- instead — the probe would pass while testing nothing it claims to test.
-  insert into ops.write_receipt
-    (id, application_session_id, actor_id, organization_tenant_id, verb,
-     subject_type, subject_id, tool_call_idempotency_key,
-     call_digest, material_digest, prior_digest)
-  values (bad, sid, probe_actor, 'carr-internal', 'log-activity',
-          'deal', ret_subj, k1, 'a-digest-nobody-wrote', 'm-bad', 'origin');
-  if ops.prove_write_receipt(bad) then
-    raise exception '0220 FAILED: a receipt claiming a digest it never wrote was PROVEN';
-  end if;
-
+  -- AND THE SAME-SUBJECT CLAUSE ON REVERSAL, which had no probe at all while
+  -- the identical clause on retraction had two. r2 lives on subj; this names
+  -- other_subj, and its call did write about other_subj, so only the reversal's
+  -- own subject check can refuse it.
+  declare
+    ko text := 'p3o-' || gen_random_uuid()::text;
   begin
+    insert into public.tool_call
+      (idempotency_key, verb, actor_id, request_hash, response,
+       organization_tenant_id, application_session_id)
+    values (ko, 'log-activity', probe_actor, ko, '{}'::jsonb, 'carr-internal', sid);
+    insert into public.event
+      (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+       cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(), probe_actor, 'log-activity', 'deal', other_subj,
+            'stage', '"x"'::jsonb, 'system', ko, 'carr-internal', sid);
     failed := false;
-    perform ops.accept_phase4(gen_random_uuid(), sid, 'probe: must refuse');
-  exception when others then
-    failed := true;
-    if position('phase4_acceptance_no_unproven_receipts' in sqlerrm) = 0 then
-      raise exception '0220 FAILED: acceptance refused by the WRONG bar: %', sqlerrm;
-    end if;
-  end;
-  if not failed then
-    raise exception '0220 FAILED: Phase 4 was accepted while a receipt was unproven';
-  end if;
-
-  -- AN UNPROVEN RETRACTION CLEARS NOTHING, and this needs THREE levels to test.
-  -- The obvious two-level probe cannot see the guard at all: an unproven
-  -- retraction is itself an unproven receipt, so the bar refuses either way and
-  -- a mutant that ignored is_proven survived it. Stack one more level and the
-  -- two versions finally disagree — under the real rule `bad` is retracted only
-  -- by an UNPROVEN receipt and still counts, while a mutant that ignored
-  -- is_proven would excuse `bad`, then excuse its unproven retractor in turn,
-  -- and accept a phase resting on a receipt nobody ever proved.
-  begin
-    declare
-      unproven_ret uuid := gen_random_uuid();
-      proven_ret2  uuid := gen_random_uuid();
     begin
       insert into ops.write_receipt
         (id, application_session_id, actor_id, organization_tenant_id, verb,
          subject_type, subject_id, tool_call_idempotency_key,
-         call_digest, material_digest, prior_digest, retracts_receipt_id)
-      values (unproven_ret, sid, probe_actor, 'carr-internal', 'log-activity',
-              'deal', ret_subj, k5, 'also-nobody-wrote-this', 'm-ret-u', 'm-bad', bad);
-      if ops.prove_write_receipt(unproven_ret) then
-        raise exception '0220 FAILED: a retraction claiming a digest it never wrote PROVED';
-      end if;
-
-      insert into ops.write_receipt
-        (id, application_session_id, actor_id, organization_tenant_id, verb,
-         subject_type, subject_id, tool_call_idempotency_key,
-         call_digest, material_digest, prior_digest, retracts_receipt_id)
-      values (proven_ret2, sid, probe_actor, 'carr-internal', 'log-activity',
-              'deal', ret_subj, k5,
+         call_digest, material_digest, prior_digest, reverses_receipt_id)
+      values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
+              'deal', other_subj, ko,
               ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                       sid, 'rh-5', 'deal', ret_subj),
-              'm-ret-2', 'm-ret-u', unproven_ret);
-      if not ops.prove_write_receipt(proven_ret2) then
-        raise exception '0220 FAILED: an honest second-level retraction could not prove';
+                                       sid, ko, 'deal', other_subj),
+              mat_a, 'origin', r2);
+    exception when others then
+      failed := true;
+      if position('same subject as the receipt it reverses' in sqlerrm) = 0 then
+        raise exception '0220 FAILED: cross-subject reversal refused by the WRONG guard: %', sqlerrm;
       end if;
+    end;
+    if not failed then
+      raise exception '0220 FAILED: a reversal named a different subject than its target';
+    end if;
+  end;
 
+  -- ============ (6) 'broken' must still be reachable, and must name the damage
+  -- This is the whole reason the prior guard checks EXISTENCE and not RECENCY.
+  -- The shape is a late-arriving restatement: b4 repeats the transition b2
+  -- already made. Its prior is real and proven, so it is admitted; it is not
+  -- the head, so the fold finds a gap; and it AGREES with b2 about material, so
+  -- it is not a conflict. That leaves 'broken' as the only state it can produce.
+  declare
+    b1 uuid := gen_random_uuid(); b2 uuid := gen_random_uuid();
+    b3 uuid := gen_random_uuid(); b4 uuid := gen_random_uuid();
+    kb1 text := 'p7a-' || gen_random_uuid()::text;
+    kb2 text := 'p7b-' || gen_random_uuid()::text;
+    kb3 text := 'p7c-' || gen_random_uuid()::text;
+    kb4 text := 'p7d-' || gen_random_uuid()::text;
+    mb1 text; mb2 text; mb3 text; mb4 text;
+  begin
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (kb1,'log-activity',probe_actor,kb1,'{}'::jsonb,'carr-internal',sid),
+           (kb2,'log-activity',probe_actor,kb2,'{}'::jsonb,'carr-internal',sid),
+           (kb3,'log-activity',probe_actor,kb3,'{}'::jsonb,'carr-internal',sid),
+           (kb4,'log-activity',probe_actor,kb4,'{}'::jsonb,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',brk_subj,'stage','"s1"'::jsonb,'system',kb1,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','deal',brk_subj,'stage','"s2"'::jsonb,'system',kb2,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','deal',brk_subj,'stage','"s3"'::jsonb,'system',kb3,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','deal',brk_subj,'stage','"s2"'::jsonb,'system',kb4,'carr-internal',sid);
+    mb1 := ops.write_receipt_material_digest(kb1, sid, 'deal', brk_subj);
+    mb2 := ops.write_receipt_material_digest(kb2, sid, 'deal', brk_subj);
+    mb3 := ops.write_receipt_material_digest(kb3, sid, 'deal', brk_subj);
+    mb4 := ops.write_receipt_material_digest(kb4, sid, 'deal', brk_subj);
+    if mb4 is distinct from mb2 then
+      raise exception '0220 FAILED: the same change written twice hashed differently, '
+                      'so an idempotent restatement would read as a new link';
+    end if;
+
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (b1,sid,probe_actor,'carr-internal','log-activity','deal',brk_subj,kb1,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kb1,'deal',brk_subj),
+            mb1,'origin');
+    perform ops.prove_write_receipt(b1);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (b2,sid,probe_actor,'carr-internal','log-activity','deal',brk_subj,kb2,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kb2,'deal',brk_subj),
+            mb2,mb1);
+    perform ops.prove_write_receipt(b2);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (b3,sid,probe_actor,'carr-internal','log-activity','deal',brk_subj,kb3,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kb3,'deal',brk_subj),
+            mb3,mb2);
+    perform ops.prove_write_receipt(b3);
+
+    select * into r from ops.continuity_reducer('deal', brk_subj);
+    if r.state <> 'continuous' then
+      raise exception '0220 FAILED: an unbroken chain did not reduce to continuous (got %)', r.state;
+    end if;
+
+    -- The refusal path is caught and RENAMED on purpose. A rule demanding the
+    -- prior be the CURRENT HEAD would reject this insert, and the raw message
+    -- would send the next reader hunting a fixture bug instead of telling them
+    -- what actually broke.
+    begin
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (b4,sid,probe_actor,'carr-internal','log-activity','deal',brk_subj,kb4,
+              ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kb4,'deal',brk_subj),
+              mb4,mb1);
+    exception when others then
+      raise exception '0220 FAILED: a STALE BUT REAL prior state was refused (%), '
+                      'which makes the reducer''s BROKEN state unreachable. The '
+                      'prior guard must check that a state EXISTED, never that '
+                      'it is the latest one.', sqlerrm;
+    end;
+    perform ops.prove_write_receipt(b4);
+
+    select * into r from ops.continuity_reducer('deal', brk_subj);
+    if r.state <> 'broken' then
+      raise exception '0220 FAILED: a stale-but-real prior no longer produces a BROKEN chain (got %)', r.state;
+    end if;
+    if r.break_at is distinct from b4 then
+      raise exception '0220 FAILED: the reducer did not name where the chain broke';
+    end if;
+    if r.conflict_count <> 0 then
+      raise exception '0220 FAILED: a restatement that AGREES about material was counted as a conflict';
+    end if;
+    if r.head_digest is distinct from mb2 then
+      raise exception '0220 FAILED: the reducer head is not the last MATERIAL claim';
+    end if;
+
+    -- (7) A FABRICATED PRIOR IS REFUSED, and so is the bootstrap that used to
+    -- get around it: file a junk receipt carrying the state you want, let the
+    -- readback refuse it, then use its material as your prior. An unproven
+    -- receipt is not a state this subject reached.
+    begin
+      failed := false;
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (gen_random_uuid(),sid,probe_actor,'carr-internal','log-activity','deal',brk_subj,kb4,
+              ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kb4,'deal',brk_subj),
+              mb4,'a-state-nobody-produced');
+    exception when others then
+      failed := true;
+      if position('never reached' in sqlerrm) = 0 then
+        raise exception '0220 FAILED: a fabricated prior refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0220 FAILED: a receipt built on a state its subject never reached';
+    end if;
+
+    declare
+      junk uuid := gen_random_uuid();
+      kj text := 'p7j-' || gen_random_uuid()::text;
+      mj text;
+    begin
+      insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+        response, organization_tenant_id, application_session_id)
+      values (kj,'log-activity',probe_actor,kj,'{}'::jsonb,'carr-internal',sid);
+      insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+        field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+      values (clock_timestamp(),probe_actor,'log-activity','deal',brk_subj,'stage','"junk"'::jsonb,'system',kj,'carr-internal',sid);
+      mj := ops.write_receipt_material_digest(kj, sid, 'deal', brk_subj);
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (junk,sid,probe_actor,'carr-internal','log-activity','deal',brk_subj,kj,
+              'a-digest-i-never-computed', mj, mb2);
+      if ops.prove_write_receipt(junk) then
+        raise exception '0220 FAILED: the bootstrap fixture proved';
+      end if;
       failed := false;
       begin
-        perform ops.accept_phase4(gen_random_uuid(), sid, 'probe: unproven retraction');
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+        values (gen_random_uuid(),sid,probe_actor,'carr-internal','log-activity','deal',brk_subj,kj,
+                ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kj,'deal',brk_subj),
+                mj, mj);
       exception when others then
         failed := true;
-        if position('phase4_acceptance_no_unproven_receipts' in sqlerrm) = 0 then
-          raise exception '0220 FAILED: acceptance refused by the WRONG bar: %', sqlerrm;
+        if position('never reached' in sqlerrm) = 0 then
+          raise exception '0220 FAILED: the bootstrap refused by the WRONG guard: %', sqlerrm;
         end if;
       end;
       if not failed then
-        raise exception '0220 FAILED: an UNPROVEN retraction cleared the acceptance bar';
+        raise exception '0220 FAILED: an UNPROVEN receipt was usable as a prior state, '
+                        'so the prior guard can be bootstrapped with junk';
       end if;
     end;
-    raise exception 'ROLLBACK_UNPROVEN_RETRACTION';
-  exception when others then
-    if sqlerrm <> 'ROLLBACK_UNPROVEN_RETRACTION' then raise; end if;
   end;
 
-  -- A retraction must name the same subject as what it retracts.
+  -- ================================ (4) retraction, and what it may not touch
+  k := 'p4-' || gen_random_uuid()::text;
+  insert into public.tool_call
+    (idempotency_key, verb, actor_id, request_hash, response,
+     organization_tenant_id, application_session_id)
+  values (k, 'log-activity', probe_actor, k, '{}'::jsonb, 'carr-internal', sid);
+  insert into public.event
+    (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+     cause, idempotency_key, organization_tenant_id, application_session_id)
+  values (clock_timestamp(), probe_actor, 'log-activity', 'deal', ret_subj,
+          'stage', '"opened"'::jsonb, 'system', k, 'carr-internal', sid),
+         -- and one for `subj` too, so the proven-retraction probe below is
+         -- refused by the retraction guard rather than by the guard that checks
+         -- a call wrote about the subject its receipt names
+         (clock_timestamp(), probe_actor, 'log-activity', 'deal', subj,
+          'stage', '"also-here"'::jsonb, 'system', k, 'carr-internal', sid);
+  insert into ops.write_receipt
+    (id, application_session_id, actor_id, organization_tenant_id, verb,
+     subject_type, subject_id, tool_call_idempotency_key,
+     call_digest, material_digest, prior_digest)
+  values (bad, sid, probe_actor, 'carr-internal', 'log-activity', 'deal', ret_subj, k,
+          'a-digest-nobody-wrote',
+          ops.write_receipt_material_digest(k, sid, 'deal', ret_subj), 'origin');
+  if ops.prove_write_receipt(bad) then
+    raise exception '0220 FAILED: a receipt claiming a digest it never wrote was PROVEN';
+  end if;
+
+  -- A PROVEN RECEIPT CANNOT BE RETRACTED. Retraction clears an unconfirmed
+  -- claim off the bar; applied to a proven receipt it is an erasure of
+  -- confirmed history, and the reducer drops a retracted receipt out of the
+  -- fold, so this is how one writer quietly deletes another's continuity.
   begin
     failed := false;
     insert into ops.write_receipt
@@ -935,10 +1570,34 @@ begin
        subject_type, subject_id, tool_call_idempotency_key,
        call_digest, material_digest, prior_digest, retracts_receipt_id)
     values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', other_subj, k5,
+            'deal', subj, k,
             ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                     sid, 'rh-5', 'deal', other_subj),
-            'm-ret', 'origin', bad);
+                                     sid, k, 'deal', subj),
+            mat_a, mat_a, r1);
+  exception when others then
+    failed := true;
+    if position('is proven and cannot be retracted' in sqlerrm) = 0 then
+      raise exception '0220 FAILED: retracting a proven receipt refused by the WRONG guard: %', sqlerrm;
+    end if;
+  end;
+  if not failed then
+    raise exception '0220 FAILED: a PROVEN receipt was retracted';
+  end if;
+
+  -- A RETRACTION MUST NAME THE SAME SUBJECT AS WHAT IT RETRACTS. The call
+  -- behind it wrote about both subjects, so the subject clause is the only
+  -- guard that can refuse this.
+  begin
+    failed := false;
+    insert into ops.write_receipt
+      (id, application_session_id, actor_id, organization_tenant_id, verb,
+       subject_type, subject_id, tool_call_idempotency_key,
+       call_digest, material_digest, prior_digest, retracts_receipt_id)
+    values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
+            'deal', subj, k,
+            ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                     sid, k, 'deal', subj),
+            'a-retraction-states-no-material', mat_a, bad);
   exception when others then
     failed := true;
     if position('same subject as the receipt it retracts' in sqlerrm) = 0 then
@@ -949,106 +1608,368 @@ begin
     raise exception '0220 FAILED: a retraction named a different subject than its target';
   end if;
 
-  -- THE PROVEN RETRACTION, and the bar clears.
+  -- A RETRACTION CANNOT CROSS TENANTS. carr_writer holds INSERT across the
+  -- whole table with no row-level policy behind it, so without this any holder
+  -- of the runtime credential could disavow another tenant's receipt.
+  declare
+    kt   text := 'p4t-' || gen_random_uuid()::text;
+    krt  text := 'p4rt-' || gen_random_uuid()::text;
+  begin
+    insert into ops.application_session
+      (id, actor_id, organization_tenant_id, sponsoring_human_slug, via, auth_issuer,
+       authorization_class, verified_subject, expires_at)
+    values (sid2, probe_actor, 'other-tenant', 'joe', 'probe', 'probe-issuer',
+            'verified_partner', 'probe', clock_timestamp() + interval '1 hour');
+    insert into public.tool_call
+      (idempotency_key, verb, actor_id, request_hash, response,
+       organization_tenant_id, application_session_id)
+    values (kt, 'log-activity', probe_actor, kt, '{}'::jsonb, 'other-tenant', sid2);
+    insert into public.event
+      (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+       cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(), probe_actor, 'log-activity', 'deal', tsubj,
+            'stage', '"theirs"'::jsonb, 'system', kt, 'other-tenant', sid2);
+    insert into ops.write_receipt
+      (id, application_session_id, actor_id, organization_tenant_id, verb,
+       subject_type, subject_id, tool_call_idempotency_key,
+       call_digest, material_digest, prior_digest)
+    values (foreign_receipt, sid2, probe_actor, 'other-tenant', 'log-activity',
+            'deal', tsubj, kt, 'not-the-right-digest',
+            ops.write_receipt_material_digest(kt, sid2, 'deal', tsubj), 'origin');
+    if ops.prove_write_receipt(foreign_receipt) then
+      raise exception '0220 FAILED: the cross-tenant fixture proved when it should not';
+    end if;
+
+    insert into public.tool_call
+      (idempotency_key, verb, actor_id, request_hash, response,
+       organization_tenant_id, application_session_id)
+    values (krt, 'log-activity', probe_actor, krt, '{}'::jsonb, 'carr-internal', sid);
+    insert into public.event
+      (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+       cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(), probe_actor, 'log-activity', 'deal', tsubj,
+            'stage', '"mine"'::jsonb, 'system', krt, 'carr-internal', sid);
+    failed := false;
+    begin
+      insert into ops.write_receipt
+        (id, application_session_id, actor_id, organization_tenant_id, verb,
+         subject_type, subject_id, tool_call_idempotency_key,
+         call_digest, material_digest, prior_digest, retracts_receipt_id)
+      values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
+              'deal', tsubj, krt,
+              ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                       sid, krt, 'deal', tsubj),
+              'whatever', 'origin', foreign_receipt);
+    exception when others then
+      failed := true;
+      if position('cannot cross tenants' in sqlerrm) = 0 then
+        raise exception '0220 FAILED: cross-tenant retraction refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0220 FAILED: one tenant disavowed another tenant''s receipt';
+    end if;
+
+    -- And the same boundary on reversal.
+    failed := false;
+    begin
+      insert into ops.write_receipt
+        (id, application_session_id, actor_id, organization_tenant_id, verb,
+         subject_type, subject_id, tool_call_idempotency_key,
+         call_digest, material_digest, prior_digest, reverses_receipt_id)
+      values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
+              'deal', tsubj, krt,
+              ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                       sid, krt, 'deal', tsubj),
+              'origin', 'origin', foreign_receipt);
+    exception when others then
+      failed := true;
+      if position('cannot cross tenants' in sqlerrm) = 0 then
+        raise exception '0220 FAILED: cross-tenant reversal refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0220 FAILED: one tenant reversed another tenant''s receipt';
+    end if;
+  end;
+
+  -- THE HONEST RETRACTION. bad is unproven, so its material is NOT an eligible
+  -- prior; 'origin' is, and always is.
+  k := 'p5-' || gen_random_uuid()::text;
+  insert into public.tool_call
+    (idempotency_key, verb, actor_id, request_hash, response,
+     organization_tenant_id, application_session_id)
+  values (k, 'log-activity', probe_actor, k, '{}'::jsonb, 'carr-internal', sid);
+  insert into public.event
+    (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
+     cause, idempotency_key, organization_tenant_id, application_session_id)
+  values (clock_timestamp(), probe_actor, 'log-activity', 'deal', ret_subj,
+          'stage', '"withdrawn"'::jsonb, 'system', k, 'carr-internal', sid);
   insert into ops.write_receipt
     (id, application_session_id, actor_id, organization_tenant_id, verb,
      subject_type, subject_id, tool_call_idempotency_key,
      call_digest, material_digest, prior_digest, retracts_receipt_id)
-  values (ret, sid, probe_actor, 'carr-internal', 'log-activity',
-          'deal', ret_subj, k5,
+  values (ret, sid, probe_actor, 'carr-internal', 'log-activity', 'deal', ret_subj, k,
           ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                   sid, 'rh-5', 'deal', ret_subj),
-          'm-ret', 'm-bad', bad);
+                                   sid, k, 'deal', ret_subj),
+          'a-retraction-states-no-material', 'origin', bad);
   if not ops.prove_write_receipt(ret) then
     raise exception '0220 FAILED: an honest retraction could not prove';
   end if;
-  perform ops.accept_phase4(gen_random_uuid(), sid,
-    '0220 probe: the bar clears once a proven receipt retracts the unproven one');
 
-  -- The reducer must drop the retracted receipt out of the fold entirely, and
-  -- its head must be the last MATERIAL claim rather than the last call digest.
+  -- A RETRACTION IS NOT A PARTY TO A CONFLICT, and neither is what it retracts.
+  -- bad and ret share the prior 'origin' and assert different material, which
+  -- under the earlier definition made the repair itself a conflict.
+  if (select count(*) from ops.receipt_conflicts('deal', ret_subj)) <> 0 then
+    raise exception '0220 FAILED: an honest retraction manufactured a conflict '
+                    'with the receipt it was repairing';
+  end if;
+
+  -- AND BOTH LEAVE THE FOLD. The chain must read as though neither happened.
   select * into r from ops.continuity_reducer('deal', ret_subj);
-  if r.unproven_count <> 0 then
-    raise exception '0220 FAILED: the reducer still counts a retracted receipt as unproven';
-  end if;
-  if r.head_digest is distinct from 'm-ret' then
-    raise exception '0220 FAILED: the reducer head is not the last MATERIAL claim (got %)',
-      r.head_digest;
+  if r.receipt_count <> 0 or r.state <> 'empty' then
+    raise exception '0220 FAILED: a retracted receipt and its retractor did not '
+                    'both leave the fold (count %, state %)', r.receipt_count, r.state;
   end if;
 
-  -- (7) CONFLICT IS A DISAGREEMENT ABOUT MATERIAL, NOT ABOUT CALLS. Two
-  -- receipts on one subject, built on one prior state, asserting different
-  -- material, from different calls.
+  -- =========================== (5) an unproven reversal closes nothing
+  declare
+    c1 uuid := gen_random_uuid();
+    c2 uuid := gen_random_uuid();
+    kc1 text := 'p6a-' || gen_random_uuid()::text;
+    kc2 text := 'p6b-' || gen_random_uuid()::text;
+    kc3 text := 'p6c-' || gen_random_uuid()::text;
+    kc4 text := 'p6d-' || gen_random_uuid()::text;
+    m1 text; m2 text;
   begin
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest)
-    values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', other_subj, k1,
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (kc1, 'log-activity', probe_actor, kc1, '{}'::jsonb, 'carr-internal', sid),
+           (kc2, 'log-activity', probe_actor, kc2, '{}'::jsonb, 'carr-internal', sid),
+           (kc3, 'log-activity', probe_actor, kc3, '{}'::jsonb, 'carr-internal', sid),
+           (kc4, 'log-activity', probe_actor, kc4, '{}'::jsonb, 'carr-internal', sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(), probe_actor, 'log-activity', 'deal', cnf_subj,
+            'stage', '"branch-a"'::jsonb, 'system', kc1, 'carr-internal', sid),
+           (clock_timestamp(), probe_actor, 'log-activity', 'deal', cnf_subj,
+            'stage', '"branch-b"'::jsonb, 'system', kc2, 'carr-internal', sid),
+           (clock_timestamp(), probe_actor, 'log-activity', 'deal', cnf_subj,
+            'stage', '"undo"'::jsonb,     'system', kc3, 'carr-internal', sid),
+           (clock_timestamp(), probe_actor, 'log-activity', 'deal', cnf_subj,
+            'stage', '"undo2"'::jsonb,    'system', kc4, 'carr-internal', sid);
+    m1 := ops.write_receipt_material_digest(kc1, sid, 'deal', cnf_subj);
+    m2 := ops.write_receipt_material_digest(kc2, sid, 'deal', cnf_subj);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (c1, sid, probe_actor, 'carr-internal', 'log-activity', 'deal', cnf_subj, kc1,
             ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                     sid, 'rh-1', 'deal', other_subj),
-            'branch-x', 'origin'),
-           (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', other_subj, k2,
+                                     sid, kc1, 'deal', cnf_subj), m1, 'origin');
+    perform ops.prove_write_receipt(c1);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (c2, sid, probe_actor, 'carr-internal', 'log-activity', 'deal', cnf_subj, kc2,
             ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                     sid, 'rh-2', 'deal', other_subj),
-            'branch-y', 'origin');
-    if (select count(*) from ops.receipt_conflicts('deal', other_subj)) <> 1 then
+                                     sid, kc2, 'deal', cnf_subj), m2, 'origin');
+    perform ops.prove_write_receipt(c2);
+    if (select count(*) from ops.receipt_conflicts('deal', cnf_subj)) <> 1 then
       raise exception '0220 FAILED: two receipts disagreeing about material did not conflict';
     end if;
-    raise exception 'ROLLBACK_CONFLICT_PROBE';
-  exception when others then
-    if sqlerrm <> 'ROLLBACK_CONFLICT_PROBE' then raise; end if;
+
+    -- An UNPROVEN reversal of one side. Under the earlier definition this alone
+    -- closed the conflict, and section (C) then made it free to clean up after
+    -- itself: fork a subject, silence it with digests you never computed, then
+    -- retract the silencers. The fork survived, proven, and the bar was clean.
+    declare
+      fake_rev uuid := gen_random_uuid();
+    begin
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+        reverses_receipt_id)
+      values (fake_rev, sid, probe_actor, 'carr-internal', 'log-activity', 'deal',
+              cnf_subj, kc3, 'I-NEVER-COMPUTED-THIS', 'origin', m2, c2);
+      if ops.prove_write_receipt(fake_rev) then
+        raise exception '0220 FAILED: the unproven-reversal fixture proved';
+      end if;
+      if (select count(*) from ops.receipt_conflicts('deal', cnf_subj)) <> 1 then
+        raise exception '0220 FAILED: an UNPROVEN reversal silenced a real conflict';
+      end if;
+      -- and it may not be laundered away by retracting it either
+      declare
+        launder uuid := gen_random_uuid();
+      begin
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+          retracts_receipt_id)
+        values (launder, sid, probe_actor, 'carr-internal', 'log-activity', 'deal',
+                cnf_subj, kc4,
+                ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                         sid, kc4, 'deal', cnf_subj),
+                'a-retraction-states-no-material', 'origin', fake_rev);
+        perform ops.prove_write_receipt(launder);
+        if (select count(*) from ops.receipt_conflicts('deal', cnf_subj)) <> 1 then
+          raise exception '0220 FAILED: retracting a lying reversal laundered the conflict away';
+        end if;
+      end;
+    end;
+
+    -- A PROVEN reversal closes it, which is the half that must still work.
+    declare
+      real_rev uuid := gen_random_uuid();
+      kc5 text := 'p6e-' || gen_random_uuid()::text;
+    begin
+      insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+        response, organization_tenant_id, application_session_id)
+      values (kc5, 'log-activity', probe_actor, kc5, '{}'::jsonb, 'carr-internal', sid);
+      insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+        field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+      values (clock_timestamp(), probe_actor, 'log-activity', 'deal', cnf_subj,
+              'stage', '"real-undo"'::jsonb, 'system', kc5, 'carr-internal', sid);
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+        reverses_receipt_id)
+      values (real_rev, sid, probe_actor, 'carr-internal', 'log-activity', 'deal',
+              cnf_subj, kc5,
+              ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
+                                       sid, kc5, 'deal', cnf_subj),
+              'origin', m2, c2);
+      if not ops.prove_write_receipt(real_rev) then
+        raise exception '0220 FAILED: an honest reversal could not prove';
+      end if;
+      if (select count(*) from ops.receipt_conflicts('deal', cnf_subj)) <> 0 then
+        raise exception '0220 FAILED: a PROVEN exact reversal did not close the conflict';
+      end if;
+    end;
   end;
 
-  -- (7b) AND THE OTHER HALF OF THAT DEFINITION, which the probe above cannot
-  -- see on its own: two receipts that AGREE about material are not in conflict
-  -- however many different calls produced them. Written because a mutant that
-  -- compared call digests here survived the probe above — two honest calls
-  -- always differ in their call digest, so that mutant reported a conflict
-  -- between a write and its own idempotent restatement.
+  -- (7f) ONE TENANT CANNOT MANUFACTURE A CONFLICT IN ANOTHER'S CHAIN. Both
+  -- receipts name the same subject uuid and the same prior, and assert
+  -- different material, which is the exact shape of a conflict -- and they are
+  -- in different tenants, so it is not one.
+  declare
+    kx text := 'p7x-' || gen_random_uuid()::text;
+    ky text := 'p7y-' || gen_random_uuid()::text;
+    shared uuid := gen_random_uuid();
+    x1 uuid := gen_random_uuid();
+    y1 uuid := gen_random_uuid();
   begin
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest)
-    values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', other_subj, k1,
-            ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                     sid, 'rh-1', 'deal', other_subj),
-            'same-material', 'origin'),
-           (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', other_subj, k2,
-            ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                     sid, 'rh-2', 'deal', other_subj),
-            'same-material', 'origin');
-    if (select count(*) from ops.receipt_conflicts('deal', other_subj)) <> 0 then
-      raise exception '0220 FAILED: two receipts AGREEING about material were '
-                      'reported as a conflict, so conflict is being decided by '
-                      'the call rather than by the claim';
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (kx,'log-activity',probe_actor,kx,'{}'::jsonb,'carr-internal',sid),
+           (ky,'log-activity',probe_actor,ky,'{}'::jsonb,'other-tenant',sid2);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',shared,'stage','"mine"'::jsonb,'system',kx,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','deal',shared,'stage','"theirs"'::jsonb,'system',ky,'other-tenant',sid2);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (x1,sid,probe_actor,'carr-internal','log-activity','deal',shared,kx,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kx,'deal',shared),
+            ops.write_receipt_material_digest(kx,sid,'deal',shared),'origin');
+    perform ops.prove_write_receipt(x1);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (y1,sid2,probe_actor,'other-tenant','log-activity','deal',shared,ky,
+            ops.write_receipt_digest('log-activity',probe_actor,'other-tenant',sid2,ky,'deal',shared),
+            ops.write_receipt_material_digest(ky,sid2,'deal',shared),'origin');
+    perform ops.prove_write_receipt(y1);
+    if (select count(*) from ops.receipt_conflicts('deal', shared)) <> 0 then
+      raise exception '0220 FAILED: two TENANTS writing the same subject id were '
+                      'reported as being in conflict, so one tenant can block '
+                      'another tenant''s phase acceptance';
     end if;
-    raise exception 'ROLLBACK_AGREEMENT_PROBE';
-  exception when others then
-    if sqlerrm <> 'ROLLBACK_AGREEMENT_PROBE' then raise; end if;
   end;
 
-  -- (7c) A RECEIPT IS A REVERSAL OR A RETRACTION, NEVER BOTH. Both halves below
-  -- are individually valid — the reversal is exact, the retraction names the
-  -- right subject, and the prior is the subject's CURRENT HEAD ('m1', produced
-  -- by the reversal above) — so every trigger passes and the CHECK CONSTRAINT
-  -- is the only guard left that can refuse. The prior is the head rather than
-  -- merely a real state on purpose: this probe is not testing the prior guard,
-  -- so it must not be able to trip it under any variant of that guard.
+  -- ================================== (8) the material recipe's own clauses
+  -- All three were unproven before: a reviewer deleted the subject clause from
+  -- the aggregate and both proof surfaces still passed, because the subject is
+  -- also folded into the hash prefix and two subjects therefore still differed
+  -- while the aggregate swept in every other subject's events.
+  declare
+    ks text := 'p8-' || gen_random_uuid()::text;
+    s1 uuid := gen_random_uuid();
+    s2 uuid := gen_random_uuid();
+    before_other text;
+    sid3 uuid := gen_random_uuid();
+    ka  text := 'p8a-' || gen_random_uuid()::text;
+    kb  text := 'p8b-' || gen_random_uuid()::text;
+  begin
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (ks,'log-activity',probe_actor,ks,'{}'::jsonb,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',s1,'stage','"one"'::jsonb,'system',ks,'carr-internal',sid);
+    before_other := ops.write_receipt_material_digest(ks, sid, 'deal', s1);
+
+    -- ANOTHER SUBJECT'S EVENT UNDER THE SAME CALL MUST NOT MOVE THIS DIGEST.
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',s2,'stage','"two"'::jsonb,'system',ks,'carr-internal',sid);
+    if ops.write_receipt_material_digest(ks, sid, 'deal', s1) is distinct from before_other then
+      raise exception '0220 FAILED: an unrelated subject''s event under the same call '
+                      'changed this subject''s material digest, so the aggregate is '
+                      'not scoped to its subject';
+    end if;
+    if ops.write_receipt_material_digest(ks, sid, 'deal', s2) = before_other then
+      raise exception '0220 FAILED: two different subjects under one call hashed the same';
+    end if;
+
+    -- AND IT MUST BE SCOPED TO ITS SESSION.
+    insert into ops.application_session (id, actor_id, organization_tenant_id,
+      sponsoring_human_slug, via, auth_issuer, authorization_class, verified_subject, expires_at)
+    values (sid3, probe_actor, 'carr-internal', 'joe', 'probe', 'probe-issuer',
+            'verified_partner', 'probe', clock_timestamp() + interval '1 hour');
+    if ops.write_receipt_material_digest(ks, sid3, 'deal', s1) = before_other then
+      raise exception '0220 FAILED: the material digest ignores which session wrote the events';
+    end if;
+
+    -- AND IT MUST NOT DEPEND ON THE ORDER THE ROWS WERE INSERTED IN.
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (ka,'log-activity',probe_actor,ka,'{}'::jsonb,'carr-internal',sid),
+           (kb,'log-activity',probe_actor,kb,'{}'::jsonb,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',s1,'a_field','"alpha"'::jsonb,'system',ka,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','deal',s1,'b-field','"beta"'::jsonb,'system',ka,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',s1,'b-field','"beta"'::jsonb,'system',kb,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','deal',s1,'a_field','"alpha"'::jsonb,'system',kb,'carr-internal',sid);
+    if ops.write_receipt_material_digest(ka, sid, 'deal', s1)
+       is distinct from ops.write_receipt_material_digest(kb, sid, 'deal', s1) then
+      raise exception '0220 FAILED: the same two changes hashed differently depending on '
+                      'the order their rows were written';
+    end if;
+  end;
+
+  -- ================= (9) a receipt is a reversal or a retraction, never both
+  -- Both halves are individually valid here, so every trigger passes and the
+  -- CHECK CONSTRAINT is the only guard left that can refuse.
+  k := 'p9-' || gen_random_uuid()::text;
+  insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+    response, organization_tenant_id, application_session_id)
+  values (k,'log-activity',probe_actor,k,'{}'::jsonb,'carr-internal',sid);
+  insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+    field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+  values (clock_timestamp(),probe_actor,'log-activity','deal',ret_subj,'stage','"both"'::jsonb,'system',k,'carr-internal',sid);
   begin
     failed := false;
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest,
-       reverses_receipt_id, retracts_receipt_id)
-    values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', subj, k4, d4, 'm1', 'm1', r2, r1);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+      reverses_receipt_id, retracts_receipt_id)
+    values (gen_random_uuid(),sid,probe_actor,'carr-internal','log-activity','deal',ret_subj,k,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,k,'deal',ret_subj),
+            'origin','origin', ret, bad);
   exception when others then
     failed := true;
     if position('write_receipt_reverses_xor_retracts' in sqlerrm) = 0 then
@@ -1059,180 +1980,327 @@ begin
     raise exception '0220 FAILED: one receipt both reversed and retracted';
   end if;
 
-  -- (7d) A FABRICATED PRIOR IS REFUSED. This is the guard from section (E):
-  -- 'm2' and 'm1' are states this subject really reached, but nothing on it
-  -- ever produced 'a-state-nobody-produced'.
+  -- ============================ (10) the immutability tuple covers the new fields
+  -- The file's own rule is that a field left out of this tuple is a field a
+  -- receipt can be rewritten through. 0220 added two fields to the row and both
+  -- went untested. Rolled back, because the fixture must be an UNPROVEN receipt
+  -- with no readback yet and leaving one behind would sit on the bar.
+  begin
+    declare
+      mut uuid := gen_random_uuid();
+      km  text := 'p10-' || gen_random_uuid()::text;
+    begin
+      insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+        response, organization_tenant_id, application_session_id)
+      values (km,'log-activity',probe_actor,km,'{}'::jsonb,'carr-internal',sid);
+      insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+        field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+      values (clock_timestamp(),probe_actor,'log-activity','deal',subj,'stage','"mut"'::jsonb,'system',km,'carr-internal',sid);
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (mut,sid,probe_actor,'carr-internal','log-activity','deal',subj,km,
+              ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,km,'deal',subj),
+              ops.write_receipt_material_digest(km, sid, 'deal', subj), mat_a);
+
+      -- THE UPDATE THAT COULD ACTUALLY SLIP THROUGH records a readback at the
+      -- same time as it rewrites a field. An update that only rewrites is
+      -- caught by the final branch ('the only permitted update is recording
+      -- the readback') whatever the identity tuple contains, so an earlier
+      -- version of this probe passed while the tuple went untested.
+      failed := false;
+      begin
+        update ops.write_receipt
+           set material_digest = 'rewritten', readback_digest = 'x',
+               readback_at = clock_timestamp()
+         where id = mut;
+      exception when others then
+        failed := true;
+        if position('identity is immutable' in sqlerrm) = 0 then
+          raise exception '0220 FAILED: rewriting material refused by the WRONG guard: %', sqlerrm;
+        end if;
+      end;
+      if not failed then
+        raise exception '0220 FAILED: a receipt''s MATERIAL CLAIM was rewritten in place';
+      end if;
+
+      failed := false;
+      begin
+        update ops.write_receipt
+           set retracts_receipt_id = bad, readback_digest = 'x',
+               readback_at = clock_timestamp()
+         where id = mut;
+      exception when others then
+        failed := true;
+        if position('identity is immutable' in sqlerrm) = 0 then
+          raise exception '0220 FAILED: rewriting the retraction link refused by the WRONG guard: %', sqlerrm;
+        end if;
+      end;
+      if not failed then
+        raise exception '0220 FAILED: a receipt was turned into a retraction after the fact';
+      end if;
+    end;
+    raise exception 'ROLLBACK_IMMUTABILITY_PROBE';
+  exception when others then
+    if sqlerrm <> 'ROLLBACK_IMMUTABILITY_PROBE' then raise; end if;
+  end;
+
+  -- ================================ (11) the five-argument recipe is really gone
+  -- The migration says leaving the subject-blind recipe callable would leave the
+  -- defect callable. Dynamic SQL, because a direct call would fail to compile.
   begin
     failed := false;
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest)
-    values (gen_random_uuid(), sid, probe_actor, 'carr-internal', 'log-activity',
-            'deal', subj, k4, d4, 'm-invented', 'a-state-nobody-produced');
+    execute 'select ops.write_receipt_digest($1,$2,$3,$4,$5)'
+      using 'log-activity', probe_actor, 'carr-internal', sid, 'rh';
   exception when others then
     failed := true;
-    if position('never reached' in sqlerrm) = 0 then
-      raise exception '0220 FAILED: a fabricated prior refused by the WRONG guard: %', sqlerrm;
+    if position('does not exist' in sqlerrm) = 0 then
+      raise exception '0220 FAILED: the five-argument recipe refused for the WRONG reason: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0220 FAILED: a receipt built on a state its subject never reached';
+    raise exception '0220 FAILED: the subject-blind five-argument digest is still callable';
   end if;
 
-  -- (7e) AND 'broken' MUST STILL BE REACHABLE. This is the whole point of
-  -- checking EXISTENCE rather than RECENCY, and without this probe a stricter
-  -- rule — prior must equal the current head — would pass every other check in
-  -- this file while quietly making the reducer's worst finding impossible.
-  --
-  -- The shape is a late-arriving restatement: b4 repeats the transition b2
-  -- already made. Its prior is real, so it is admitted; it is not the head, so
-  -- the fold finds a gap; and it AGREES with b2 about material, so it is not a
-  -- conflict. That leaves 'broken' as the only state it can produce.
+  -- ================================================ (12) the acceptance bar
+  -- SWEEP FIRST. Every unproven receipt this probe created gets a proven
+  -- retraction naming its own subject, which is the mechanism section (C) adds
+  -- and the only honest way to reach a clean bar. Each retraction needs an
+  -- event for its target's subject under the sweeping call, because a receipt
+  -- must say what its own call wrote.
+  declare
+    sweep_a text := 'p12a-' || gen_random_uuid()::text;
+    sweep_b text := 'p12b-' || gen_random_uuid()::text;
+    sk text;
+    ssid uuid;
   begin
-    declare
-      bd text := ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                          sid, 'rh-1', 'deal', brk_subj);
-      b1 uuid := gen_random_uuid();
-      b2 uuid := gen_random_uuid();
-      b3 uuid := gen_random_uuid();
-      b4 uuid := gen_random_uuid();
-    begin
-      insert into ops.write_receipt
-        (id, application_session_id, actor_id, organization_tenant_id, verb,
-         subject_type, subject_id, tool_call_idempotency_key,
-         call_digest, material_digest, prior_digest)
-      values (b1, sid, probe_actor, 'carr-internal', 'log-activity',
-              'deal', brk_subj, k1, bd, 'bm1', 'origin');
-      insert into ops.write_receipt
-        (id, application_session_id, actor_id, organization_tenant_id, verb,
-         subject_type, subject_id, tool_call_idempotency_key,
-         call_digest, material_digest, prior_digest)
-      values (b2, sid, probe_actor, 'carr-internal', 'log-activity',
-              'deal', brk_subj, k1, bd, 'bm2', 'bm1');
-      insert into ops.write_receipt
-        (id, application_session_id, actor_id, organization_tenant_id, verb,
-         subject_type, subject_id, tool_call_idempotency_key,
-         call_digest, material_digest, prior_digest)
-      values (b3, sid, probe_actor, 'carr-internal', 'log-activity',
-              'deal', brk_subj, k1, bd, 'bm3', 'bm2');
-      perform ops.prove_write_receipt(b1);
-      perform ops.prove_write_receipt(b2);
-      perform ops.prove_write_receipt(b3);
-
-      select * into r from ops.continuity_reducer('deal', brk_subj);
-      if r.state <> 'continuous' then
-        raise exception '0220 FAILED: an unbroken chain did not reduce to continuous (got %)',
-          r.state;
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (sweep_a,'log-activity',probe_actor,sweep_a,'{}'::jsonb,'carr-internal',sid),
+           (sweep_b,'log-activity',probe_actor,sweep_b,'{}'::jsonb,'other-tenant',sid2);
+    for r in
+      select w.id, w.subject_type, w.subject_id, w.application_session_id,
+             w.organization_tenant_id
+        from ops.write_receipt w
+       where w.application_session_id in (sid, sid2)
+         and not w.is_proven
+         and not exists (select 1 from ops.write_receipt rr
+                          where rr.retracts_receipt_id = w.id and rr.is_proven)
+       order by w.seq
+    loop
+      if r.organization_tenant_id = 'carr-internal' then
+        sk := sweep_a; ssid := sid;
+      else
+        sk := sweep_b; ssid := sid2;
       end if;
-
-      -- The refusal path is caught and RENAMED here on purpose. A rule that
-      -- demanded the prior be the CURRENT HEAD would reject this insert, and
-      -- the raw message ('never reached') would send the next reader hunting a
-      -- fixture bug instead of telling them what actually broke.
+      insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+        field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+      values (clock_timestamp(), probe_actor, 'log-activity', r.subject_type,
+              r.subject_id, 'stage', '"swept"'::jsonb, 'system', sk,
+              r.organization_tenant_id, ssid);
+      declare
+        sweep_id uuid := gen_random_uuid();
       begin
-        insert into ops.write_receipt
-          (id, application_session_id, actor_id, organization_tenant_id, verb,
-           subject_type, subject_id, tool_call_idempotency_key,
-           call_digest, material_digest, prior_digest)
-        values (b4, sid, probe_actor, 'carr-internal', 'log-activity',
-                'deal', brk_subj, k1, bd, 'bm2', 'bm1');
-      exception when others then
-        raise exception '0220 FAILED: a STALE BUT REAL prior state was refused (%), '
-                        'which makes the reducer''s BROKEN state unreachable. The '
-                        'prior guard must check that a state EXISTED, never that '
-                        'it is the latest one.', sqlerrm;
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+          retracts_receipt_id)
+        values (sweep_id, ssid, probe_actor, r.organization_tenant_id, 'log-activity',
+                r.subject_type, r.subject_id, sk,
+                ops.write_receipt_digest('log-activity', probe_actor,
+                  r.organization_tenant_id, ssid, sk, r.subject_type, r.subject_id),
+                'a-retraction-states-no-material', 'origin', r.id);
+        if not ops.prove_write_receipt(sweep_id) then
+          raise exception '0220 FAILED: a sweep retraction of % failed to prove', r.id;
+        end if;
       end;
-      perform ops.prove_write_receipt(b4);
-
-      select * into r from ops.continuity_reducer('deal', brk_subj);
-      if r.state <> 'broken' then
-        raise exception '0220 FAILED: a stale-but-real prior no longer produces a '
-                        'BROKEN chain (got %) — the reducer''s worst finding has '
-                        'been made unreachable', r.state;
-      end if;
-      if r.break_at is distinct from b4 then
-        raise exception '0220 FAILED: the reducer did not name where the chain broke';
-      end if;
-      if r.conflict_count <> 0 then
-        raise exception '0220 FAILED: a restatement that AGREES about material was '
-                        'counted as a conflict';
-      end if;
-    end;
-    raise exception 'ROLLBACK_BROKEN_PROBE';
-  exception when others then
-    if sqlerrm <> 'ROLLBACK_BROKEN_PROBE' then raise; end if;
+    end loop;
   end;
 
-  -- (8) THE DRIVE RETIREMENT GATE. Each remaining clause gets a probe that only
-  -- it can refuse. The first version of this section could not do that: the
-  -- same-call probe also shared a material claim, so deleting the same-call
-  -- guard just moved the refusal to the same-material guard and the mutant
-  -- still died — looking tested while nothing tested it. Every fixture below
-  -- satisfies every clause except the one under test.
+  -- BASELINE-AWARE. accept_phase4 counts unproven receipts and open conflicts
+  -- across the WHOLE table, so on a database that already carried either, the
+  -- success half cannot be exercised without disavowing rows this probe does
+  -- not own. It says so rather than failing the migration, which is what an
+  -- earlier version did to every database that had ever taken traffic.
+  if base_unproven = 0 and base_conflict = 0 then
+    perform ops.accept_phase4(gen_random_uuid(), sid,
+      '0220 probe: the bar clears once every unproven receipt is proven-retracted');
+  else
+    raise notice '0220: acceptance-success probe SKIPPED -- this database already '
+                 'carries % unretracted unproven receipt(s) and % open conflict(s) '
+                 'that predate the migration. The refusal half still ran.',
+                 base_unproven, base_conflict;
+  end if;
+
+  -- AN UNPROVEN RETRACTION CLEARS NOTHING, and this needs THREE levels to see.
+  -- The obvious two-level shape cannot test the rule at all: an unproven
+  -- retraction is itself an unproven receipt, so the bar refuses either way and
+  -- a mutant that dropped the is_proven test survives. Stack one more level and
+  -- the two readings finally disagree -- under the real rule the first receipt
+  -- is excused only by an UNPROVEN receipt and still counts, while a mutant
+  -- that ignored proof would excuse it, then excuse its unproven retractor in
+  -- turn, and accept a phase resting on a receipt nobody ever proved.
   --
-  -- Inserted one statement at a time: a receipt's prior state must already
-  -- exist, and rows earlier in a multi-row VALUES list are not reliably visible
-  -- to a later row's BEFORE trigger.
+  -- Runs only on a database whose baseline is clean, for the same reason the
+  -- success probe above does, and is rolled back either way.
+  if base_unproven = 0 and base_conflict = 0 then
+    begin
+      declare
+        u_subj uuid := gen_random_uuid();
+        u1 uuid := gen_random_uuid();
+        ur uuid := gen_random_uuid();
+        ur2 uuid := gen_random_uuid();
+        ku text := 'p12u-' || gen_random_uuid()::text;
+      begin
+        insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+          response, organization_tenant_id, application_session_id)
+        values (ku,'log-activity',probe_actor,ku,'{}'::jsonb,'carr-internal',sid);
+        insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+          field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+        values (clock_timestamp(),probe_actor,'log-activity','deal',u_subj,'stage','"u"'::jsonb,'system',ku,'carr-internal',sid);
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+        values (u1,sid,probe_actor,'carr-internal','log-activity','deal',u_subj,ku,
+                'nobody-computed-this',
+                ops.write_receipt_material_digest(ku, sid, 'deal', u_subj),'origin');
+        if ops.prove_write_receipt(u1) then
+          raise exception '0220 FAILED: the three-level fixture proved when it should not';
+        end if;
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+          retracts_receipt_id)
+        values (ur,sid,probe_actor,'carr-internal','log-activity','deal',u_subj,ku,
+                'nor-this','a-retraction-states-no-material','origin',u1);
+        if ops.prove_write_receipt(ur) then
+          raise exception '0220 FAILED: the unproven retraction proved';
+        end if;
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+          retracts_receipt_id)
+        values (ur2,sid,probe_actor,'carr-internal','log-activity','deal',u_subj,ku,
+                ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,ku,'deal',u_subj),
+                'a-retraction-states-no-material','origin',ur);
+        if not ops.prove_write_receipt(ur2) then
+          raise exception '0220 FAILED: an honest second-level retraction could not prove';
+        end if;
+        failed := false;
+        begin
+          perform ops.accept_phase4(gen_random_uuid(), sid, 'probe: unproven retraction');
+        exception when others then
+          failed := true;
+          if position('phase4_acceptance_no_unproven_receipts' in sqlerrm) = 0 then
+            raise exception '0220 FAILED: acceptance refused by the WRONG bar: %', sqlerrm;
+          end if;
+        end;
+        if not failed then
+          raise exception '0220 FAILED: an UNPROVEN retraction cleared the acceptance bar';
+        end if;
+      end;
+      raise exception 'ROLLBACK_THREE_LEVEL';
+    exception when others then
+      if sqlerrm <> 'ROLLBACK_THREE_LEVEL' then raise; end if;
+    end;
+  end if;
+
+  -- =========================== (13) Drive retirement, and correcting a wrong one
   insert into ops.drive_dependency (source_path, reference, classification, operational)
   values ('tools/split-probe.py:1', '{{VAULT}}', 'vault-path', true)
   returning id into dep;
-
   declare
-    p1 uuid := gen_random_uuid();   -- the repoint: origin -> repointed, call k1
-    p2 uuid := gen_random_uuid();   -- an honest recovery, but on the SAME call
-    p3 uuid := gen_random_uuid();   -- a different call, but the SAME material
-    p4 uuid := gen_random_uuid();   -- different material, built SOMEWHERE ELSE
-    p5 uuid := gen_random_uuid();   -- the honest recovery
-    dd1 text := ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                         sid, 'rh-1', 'drive_dependency', dep);
-    dd2 text := ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                         sid, 'rh-2', 'drive_dependency', dep);
-    dd4 text := ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal',
-                                         sid, 'rh-4', 'drive_dependency', dep);
+    p0 uuid := gen_random_uuid(); p1 uuid := gen_random_uuid();
+    p1b uuid := gen_random_uuid(); p2 uuid := gen_random_uuid();
+    p3 uuid := gen_random_uuid(); p4 uuid := gen_random_uuid();
+    p5 uuid := gen_random_uuid(); p6 uuid := gen_random_uuid();
+    p7 uuid := gen_random_uuid(); p8 uuid := gen_random_uuid();
+    kd0 text := 'pd0-' || gen_random_uuid()::text;
+    kd1 text := 'pd1-' || gen_random_uuid()::text;
+    kd2 text := 'pd2-' || gen_random_uuid()::text;
+    kd3 text := 'pd3-' || gen_random_uuid()::text;
+    kd4 text := 'pd4-' || gen_random_uuid()::text;
+    kd5 text := 'pd5-' || gen_random_uuid()::text;
+    kd6 text := 'pd6-' || gen_random_uuid()::text;
+    kd7 text := 'pd7-' || gen_random_uuid()::text;
+    kd8 text := 'pd8-' || gen_random_uuid()::text;
+    m0 text; m1 text; m3 text; m5 text; m6 text; m7 text; m8 text;
+    retirement_id uuid := gen_random_uuid();
+    rdy record;
   begin
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest)
-    values (p1, sid, probe_actor, 'carr-internal', 'log-activity',
-            'drive_dependency', dep, k1, dd1, 'repointed', 'origin');
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest)
-    values (p2, sid, probe_actor, 'carr-internal', 'log-activity',
-            'drive_dependency', dep, k1, dd1, 'recovered', 'repointed');
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest)
-    values (p3, sid, probe_actor, 'carr-internal', 'log-activity',
-            'drive_dependency', dep, k2, dd2, 'repointed', 'repointed');
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest)
-    values (p4, sid, probe_actor, 'carr-internal', 'log-activity',
-            'drive_dependency', dep, k4, dd4, 'recovered-elsewhere', 'recovered');
-    insert into ops.write_receipt
-      (id, application_session_id, actor_id, organization_tenant_id, verb,
-       subject_type, subject_id, tool_call_idempotency_key,
-       call_digest, material_digest, prior_digest)
-    values (p5, sid, probe_actor, 'carr-internal', 'log-activity',
-            'drive_dependency', dep, k4, dd4, 'recovered', 'repointed');
-    perform ops.prove_write_receipt(p1);
-    perform ops.prove_write_receipt(p2);
-    perform ops.prove_write_receipt(p3);
-    perform ops.prove_write_receipt(p4);
-    perform ops.prove_write_receipt(p5);
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (kd0,'log-activity',probe_actor,kd0,'{}'::jsonb,'carr-internal',sid),
+           (kd1,'log-activity',probe_actor,kd1,'{}'::jsonb,'carr-internal',sid),
+           (kd2,'log-activity',probe_actor,kd2,'{}'::jsonb,'carr-internal',sid),
+           (kd3,'log-activity',probe_actor,kd3,'{}'::jsonb,'carr-internal',sid),
+           (kd4,'log-activity',probe_actor,kd4,'{}'::jsonb,'carr-internal',sid),
+           (kd5,'log-activity',probe_actor,kd5,'{}'::jsonb,'carr-internal',sid),
+           (kd6,'log-activity',probe_actor,kd6,'{}'::jsonb,'carr-internal',sid),
+           (kd7,'log-activity',probe_actor,kd7,'{}'::jsonb,'carr-internal',sid),
+           (kd8,'log-activity',probe_actor,kd8,'{}'::jsonb,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"vault"'::jsonb,'system',kd0,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"repointed"'::jsonb,'system',kd1,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"repointed"'::jsonb,'system',kd2,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"recovered"'::jsonb,'system',kd3,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"recovered"'::jsonb,'system',kd4,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"repointed-again"'::jsonb,'system',kd5,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"recovered-again"'::jsonb,'system',kd6,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"repointed-third"'::jsonb,'system',kd7,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep,'reader','"recovered-third"'::jsonb,'system',kd8,'carr-internal',sid);
+    m0 := ops.write_receipt_material_digest(kd0, sid, 'drive_dependency', dep);
+    m1 := ops.write_receipt_material_digest(kd1, sid, 'drive_dependency', dep);
+    m3 := ops.write_receipt_material_digest(kd3, sid, 'drive_dependency', dep);
+    m5 := ops.write_receipt_material_digest(kd5, sid, 'drive_dependency', dep);
+    m6 := ops.write_receipt_material_digest(kd6, sid, 'drive_dependency', dep);
+    m7 := ops.write_receipt_material_digest(kd7, sid, 'drive_dependency', dep);
+    m8 := ops.write_receipt_material_digest(kd8, sid, 'drive_dependency', dep);
 
-    -- Receipts that name something OTHER than the dependency must be refused.
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p0,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd0,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd0,'drive_dependency',dep),m0,'origin');
+    perform ops.prove_write_receipt(p0);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p1,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd1,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd1,'drive_dependency',dep),m1,m0);
+    perform ops.prove_write_receipt(p1);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p1b,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd1,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd1,'drive_dependency',dep),m1,m1);
+    perform ops.prove_write_receipt(p1b);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p2,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd2,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd2,'drive_dependency',dep),m1,m1);
+    perform ops.prove_write_receipt(p2);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p3,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd3,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd3,'drive_dependency',dep),m3,m0);
+    perform ops.prove_write_receipt(p3);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p4,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd4,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd4,'drive_dependency',dep),m3,m1);
+    perform ops.prove_write_receipt(p4);
+
+    -- Receipts that name something OTHER than the dependency.
     begin
       failed := false;
-      insert into ops.drive_retirement
-        (id, drive_dependency_id, repoint_receipt_id, recovery_receipt_id,
-         application_session_id, retired_by_actor_id, organization_tenant_id, note)
+      insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+        recovery_receipt_id, application_session_id, retired_by_actor_id,
+        organization_tenant_id, note)
       values (gen_random_uuid(), dep, r1, r2, sid, probe_actor, 'carr-internal', 'probe');
     exception when others then
       failed := true;
@@ -1244,14 +2312,14 @@ begin
       raise exception '0220 FAILED: a dependency was retired with receipts that never named it';
     end if;
 
-    -- SAME CALL. p2 differs in material and builds on the repoint, so every
-    -- other clause is satisfied and only the same-call guard can refuse.
+    -- SAME CALL. p1b builds on the repoint and, being the same call, cannot
+    -- differ in material -- which is why the same-call clause has to come first.
     begin
       failed := false;
-      insert into ops.drive_retirement
-        (id, drive_dependency_id, repoint_receipt_id, recovery_receipt_id,
-         application_session_id, retired_by_actor_id, organization_tenant_id, note)
-      values (gen_random_uuid(), dep, p1, p2, sid, probe_actor, 'carr-internal', 'probe');
+      insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+        recovery_receipt_id, application_session_id, retired_by_actor_id,
+        organization_tenant_id, note)
+      values (gen_random_uuid(), dep, p1, p1b, sid, probe_actor, 'carr-internal', 'probe');
     exception when others then
       failed := true;
       if position('rest on the SAME call' in sqlerrm) = 0 then
@@ -1262,14 +2330,14 @@ begin
       raise exception '0220 FAILED: a dependency was retired on two receipts about ONE call';
     end if;
 
-    -- SAME MATERIAL. p3 is a different call and builds on the repointed state,
-    -- so only the same-material guard can refuse.
+    -- SAME MATERIAL, different call, and it builds on the repoint, so only the
+    -- same-material clause is left standing.
     begin
       failed := false;
-      insert into ops.drive_retirement
-        (id, drive_dependency_id, repoint_receipt_id, recovery_receipt_id,
-         application_session_id, retired_by_actor_id, organization_tenant_id, note)
-      values (gen_random_uuid(), dep, p1, p3, sid, probe_actor, 'carr-internal', 'probe');
+      insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+        recovery_receipt_id, application_session_id, retired_by_actor_id,
+        organization_tenant_id, note)
+      values (gen_random_uuid(), dep, p1, p2, sid, probe_actor, 'carr-internal', 'probe');
     exception when others then
       failed := true;
       if position('assert the SAME material state' in sqlerrm) = 0 then
@@ -1280,14 +2348,13 @@ begin
       raise exception '0220 FAILED: a dependency was retired on two receipts asserting the same thing';
     end if;
 
-    -- A RECOVERY THAT IGNORED THE REPOINT. Different call, different material,
-    -- so only the builds-on guard is left.
+    -- A RECOVERY THAT IGNORED THE REPOINT: different call, different material.
     begin
       failed := false;
-      insert into ops.drive_retirement
-        (id, drive_dependency_id, repoint_receipt_id, recovery_receipt_id,
-         application_session_id, retired_by_actor_id, organization_tenant_id, note)
-      values (gen_random_uuid(), dep, p1, p4, sid, probe_actor, 'carr-internal', 'probe');
+      insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+        recovery_receipt_id, application_session_id, retired_by_actor_id,
+        organization_tenant_id, note)
+      values (gen_random_uuid(), dep, p1, p3, sid, probe_actor, 'carr-internal', 'probe');
     exception when others then
       failed := true;
       if position('does not build on the repointed state' in sqlerrm) = 0 then
@@ -1298,39 +2365,102 @@ begin
       raise exception '0220 FAILED: a recovery receipt that ignored the repoint was accepted';
     end if;
 
-    -- AND THE HONEST PATH MUST STILL WORK. A gate that can only say no is
-    -- indistinguishable from a broken one, and nothing above would catch that.
-    insert into ops.drive_retirement
-      (id, drive_dependency_id, repoint_receipt_id, recovery_receipt_id,
-       application_session_id, retired_by_actor_id, organization_tenant_id, note)
-    values (gen_random_uuid(), dep, p1, p5, sid, probe_actor, 'carr-internal',
+    -- THE HONEST PATH.
+    insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+      recovery_receipt_id, application_session_id, retired_by_actor_id,
+      organization_tenant_id, note)
+    values (retirement_id, dep, p1, p4, sid, probe_actor, 'carr-internal',
             'probe: repointed, then recovered from the repointed state');
-  end;
+    select * into rdy from ops.drive_retirement_readiness();
+    if rdy.remaining <> 0 then
+      raise exception '0220 FAILED: a retired dependency still counted as remaining';
+    end if;
 
-  -- (9) THE MATERIAL RECIPE. The same change written twice must hash the same,
-  -- or an idempotent restatement would look like a new link in the chain; a
-  -- different change must hash differently, or the chain would flatten.
-  insert into public.event
-    (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
-     cause, idempotency_key, organization_tenant_id, application_session_id)
-  values (clock_timestamp(), probe_actor, 'log-activity', 'deal', subj,
-          'stage', '"under-loi"'::jsonb, 'system', k1, 'carr-internal', sid),
-         (clock_timestamp(), probe_actor, 'log-activity', 'deal', subj,
-          'stage', '"under-loi"'::jsonb, 'system', k2, 'carr-internal', sid),
-         (clock_timestamp(), probe_actor, 'log-activity', 'deal', subj,
-          'stage', '"closed"'::jsonb,    'system', k4, 'carr-internal', sid);
-  mat_a := ops.write_receipt_material_digest(k1, sid, 'deal', subj);
-  mat_b := ops.write_receipt_material_digest(k2, sid, 'deal', subj);
-  if mat_a is distinct from mat_b then
-    raise exception '0220 FAILED: the same change written twice hashed differently, '
-                    'so an idempotent restatement would read as a new link';
-  end if;
-  if mat_a = ops.write_receipt_material_digest(k4, sid, 'deal', subj) then
-    raise exception '0220 FAILED: a DIFFERENT change hashed the same as the first';
-  end if;
-  if mat_a = ops.write_receipt_material_digest(k1, sid, 'deal', other_subj) then
-    raise exception '0220 FAILED: the material digest is not bound to its subject';
-  end if;
+    -- AND A WRONG ONE MUST BE CORRECTABLE. Before this, a dependency retired in
+    -- error stayed retired forever: the row could not be updated, could not be
+    -- deleted, and was unique per dependency, so readiness went on reporting a
+    -- yes nobody could withdraw.
+    insert into ops.drive_retirement_withdrawal
+      (id, drive_retirement_id, application_session_id, withdrawn_by_actor_id,
+       organization_tenant_id, note)
+    values (gen_random_uuid(), retirement_id, sid, probe_actor, 'carr-internal',
+            'probe: the readers were never actually repointed');
+    select * into rdy from ops.drive_retirement_readiness();
+    if rdy.remaining <> 1 then
+      raise exception '0220 FAILED: a WITHDRAWN retirement still counted as retired';
+    end if;
+    if rdy.ready then
+      raise exception '0220 FAILED: readiness said yes with a withdrawn retirement';
+    end if;
+
+    -- A withdrawal is itself a record, not an edit.
+    begin
+      failed := false;
+      update ops.drive_retirement_withdrawal set note = 'rewritten'
+       where drive_retirement_id = retirement_id;
+    exception when others then
+      failed := true;
+      if position('cannot be rewritten' in sqlerrm) = 0 then
+        raise exception '0220 FAILED: withdrawal rewrite refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0220 FAILED: a withdrawal was rewritten';
+    end if;
+
+    -- AND THE DEPENDENCY CAN THEN BE RETIRED PROPERLY, which the old unique
+    -- constraint made impossible.
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p5,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd5,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd5,'drive_dependency',dep),m5,m1);
+    perform ops.prove_write_receipt(p5);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p6,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd6,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd6,'drive_dependency',dep),m6,m5);
+    perform ops.prove_write_receipt(p6);
+    insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+      recovery_receipt_id, application_session_id, retired_by_actor_id,
+      organization_tenant_id, note)
+    values (gen_random_uuid(), dep, p5, p6, sid, probe_actor, 'carr-internal',
+            'probe: retired again, properly, after the withdrawal');
+    select * into rdy from ops.drive_retirement_readiness();
+    if rdy.remaining <> 0 then
+      raise exception '0220 FAILED: a dependency could not be retired again after '
+                      'its first retirement was withdrawn';
+    end if;
+    -- AND A SECOND LIVE ROW FOR THE SAME DEPENDENCY MUST STILL COUNT ONCE. The
+    -- unique constraint that used to guarantee this is gone, deliberately, so
+    -- that a withdrawn dependency can be retired again -- which means the
+    -- counting has to carry the weight instead. Two rows where NEITHER is
+    -- withdrawn is the case that distinguishes counting rows from counting
+    -- dependencies; the withdrawn pair above does not.
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p7,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd7,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd7,'drive_dependency',dep),m7,m6);
+    perform ops.prove_write_receipt(p7);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (p8,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd8,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd8,'drive_dependency',dep),m8,m7);
+    perform ops.prove_write_receipt(p8);
+    insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+      recovery_receipt_id, application_session_id, retired_by_actor_id,
+      organization_tenant_id, note)
+    values (gen_random_uuid(), dep, p7, p8, sid, probe_actor, 'carr-internal',
+            'probe: a second live retirement row for the same dependency');
+    select * into rdy from ops.drive_retirement_readiness();
+    if rdy.retired_total <> 1 then
+      raise exception '0220 FAILED: two live retirement rows for one dependency inflated '
+                      'the retired total (got %)', rdy.retired_total;
+    end if;
+  end;
 
   raise notice '0220 apply-time proof passed';
   raise exception 'ROLLBACK_0220_PROBE';

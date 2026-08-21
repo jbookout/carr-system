@@ -98,6 +98,16 @@ echo "migration 0214 applied (retirement needs two proven receipts and authority
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SPLIT"
 echo "migration 0220 applied (the call digest and the material claim are two columns)"
 
+# THE PRODUCER, AGAINST A REAL DATABASE, before the contract suite runs. Its own
+# unit test drives a hand-written fake client, and an audit showed that fake
+# refuses what the database refuses -- so the exact SQL the Worker sends had no
+# coverage anywhere. Runs against a TEMPLATE COPY taken now, so the rows it
+# writes cannot colour the contract suite's global acceptance counts.
+psql "$BASE/postgres" -q -c "create database producer template subject"
+( cd "$REPO/mcp-server" && CARR_TEST_DSN="$BASE/producer" \
+    node --test test/receipt-producer-live.test.mjs )
+echo "producer exercised against a real database"
+
 # Run TWICE. The suite must be re-runnable; a contract that only passes against
 # a virgin database is testing ordering, not the substrate.
 "$PYBIN" "$SUITE" "$BASE/subject"

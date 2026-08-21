@@ -227,13 +227,32 @@ export async function writeReceiptsFor(client, actor, verb, key, hash) {
        s.subject_type, s.subject_id, key]);
     const callDigest = digestRow.rows[0].call_digest;
     const material = digestRow.rows[0].material_digest;
-    // The state this write BUILT ON: the previous receipt's MATERIAL result for
-    // this subject, or 'origin' for the first. This is what makes a later
-    // conflict or reversal checkable rather than assertable.
+    // SERIALISE PER SUBJECT BEFORE READING THE HEAD. Reading the previous
+    // receipt and then inserting is not atomic, and two writers landing on one
+    // subject at once both read the same head and both build on it. That is a
+    // CONFLICT by the database's definition, or a broken chain when the two
+    // writes are identical restatements and the no-op skip cannot see the other
+    // one. Neither is a fault the writers committed, both block the acceptance
+    // bar, and nothing in the runtime can clear either. A transaction-scoped
+    // advisory lock keyed on the subject makes the read-then-insert atomic for
+    // the only path that produces receipts. It is released at commit or
+    // rollback with no cleanup path to forget.
+    await client.query(`select pg_advisory_xact_lock(hashtext($1))`,
+      [`${s.subject_type}:${s.subject_id}`]);
+    // The state this write BUILT ON: the last PROVEN, unretracted material for
+    // this subject, or 'origin' for the first. Proven and unretracted because
+    // that is exactly what the prior-state guard accepts -- reading the newest
+    // row regardless of proof would hand the guard a prior it refuses, and a
+    // failed readback on one write would then break every write after it.
     const prev = await client.query(
-      `select material_digest from ops.write_receipt
-        where subject_type = $1 and subject_id = $2
-        order by recorded_at desc, id desc limit 1`, [s.subject_type, s.subject_id]);
+      `select w.material_digest from ops.write_receipt w
+        where w.subject_type = $1 and w.subject_id = $2
+          and w.organization_tenant_id = $3
+          and w.is_proven
+          and not exists (select 1 from ops.write_receipt rr
+                           where rr.retracts_receipt_id = w.id and rr.is_proven)
+        order by w.seq desc limit 1`,
+      [s.subject_type, s.subject_id, identity.organization_tenant_id]);
     const prior = prev.rows.length ? prev.rows[0].material_digest : "origin";
     // A no-op restatement produces material identical to what it built on. Skip
     // it: a chain of identical links is noise, and it would make every

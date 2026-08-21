@@ -91,21 +91,57 @@ def main():
             # contradiction the trigger should have prevented; check anyway,
             # because a verifier that only re-reads the summary it is verifying
             # is not a verifier.
+            # LIVE ROWS ONLY. A retirement that was withdrawn is a mistake
+            # somebody corrected on the record; re-checking its backing would
+            # report the correction as a problem.
+            live = """ and not exists (select 1 from ops.drive_retirement_withdrawal w
+                                         where w.drive_retirement_id = r.id)"""
             cur.execute("""select count(*) from ops.drive_retirement r
                              join ops.write_receipt p on p.id = r.repoint_receipt_id
                              join ops.write_receipt v on v.id = r.recovery_receipt_id
-                            where not p.is_proven or not v.is_proven""")
+                            where (not p.is_proven or not v.is_proven)""" + live)
             unproven_backing = cur.fetchone()[0]
-            cur.execute("""select count(*) from ops.drive_retirement
-                            where repoint_receipt_id = recovery_receipt_id""")
+            cur.execute("""select count(*) from ops.drive_retirement r
+                            where r.repoint_receipt_id = r.recovery_receipt_id""" + live)
             same_receipt = cur.fetchone()[0]
+            # RE-DERIVE THE GATE'S OWN CLAUSES rather than trusting the trigger
+            # that enforced them. A verifier that only re-reads the summary it
+            # is verifying is not a verifier, and the same argument applies to
+            # re-reading a trigger's verdict.
+            cur.execute("""select count(*) from ops.drive_retirement r
+                             join ops.write_receipt p on p.id = r.repoint_receipt_id
+                             join ops.write_receipt v on v.id = r.recovery_receipt_id
+                            where (p.subject_type <> 'drive_dependency'
+                                   or p.subject_id <> r.drive_dependency_id
+                                   or v.subject_type <> 'drive_dependency'
+                                   or v.subject_id <> r.drive_dependency_id)""" + live)
+            unnamed = cur.fetchone()[0]
+            cur.execute("""select count(*) from ops.drive_retirement r
+                             join ops.write_receipt p on p.id = r.repoint_receipt_id
+                             join ops.write_receipt v on v.id = r.recovery_receipt_id
+                            where (p.tool_call_idempotency_key = v.tool_call_idempotency_key
+                                   or p.material_digest = v.material_digest
+                                   or v.prior_digest <> p.material_digest)""" + live)
+            hollow_pairs = cur.fetchone()[0]
+            cur.execute("select count(*) from ops.drive_retirement_withdrawal")
+            withdrawn = cur.fetchone()[0]
             print(f"retirements on unproven    : {unproven_backing}")
             print(f"retirements reusing one    : {same_receipt}")
+            print(f"receipts not naming the dep: {unnamed}")
+            print(f"pairs asserting one thing  : {hollow_pairs}")
+            print(f"withdrawn retirements      : {withdrawn}")
 
     problems = []
     if total == 0:
         problems.append("no operational Drive dependencies are on record; nothing "
                         "proven about nothing is not proof")
+    if unnamed:
+        problems.append(f"{unnamed} live retirements rest on receipts that do not name "
+                        "the dependency they retired")
+    if hollow_pairs:
+        problems.append(f"{hollow_pairs} live retirements rest on two receipts that share "
+                        "a call, assert the same material, or are not causally linked, so "
+                        "one piece of work is being counted as two")
     if remaining and remaining > 0:
         problems.append(f"{remaining} operational dependencies are not retired")
     if not has_auth:
