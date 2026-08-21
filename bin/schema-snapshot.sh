@@ -439,7 +439,7 @@ fi
 #     enforcement classes, and installed/verification metadata contain no
 #     client, deal, event, secret, or runtime usage data. 0194 is already in a
 #     rebuilt snapshot's ledger, so its seed does not replay; without this
-#     controlled block the 0226 lifecycle cannot validate pinned rules. Do not
+#     controlled block the 0228 lifecycle cannot validate pinned rules. Do not
 #     add rule_control_binding or any receipt/rule table: those are per-rule
 #     history, not bounded internal control configuration.
 #

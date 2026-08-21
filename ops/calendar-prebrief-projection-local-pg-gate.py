@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
-"""Disposable local-PG adversarial proof for calendar-prebrief projection 0227."""
+"""Disposable local-PG adversarial proof for calendar-prebrief projection 0229."""
 import os
 import uuid
 from datetime import datetime, timedelta
