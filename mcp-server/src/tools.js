@@ -2518,6 +2518,87 @@ export const TOOLS = {
     handler: async (c) => ({ items: (await c.query("select * from v_today_triage order by due_on nulls last limit 50")).rows }),
   },
 
+  "morning-brief": {
+    write: false,
+    description: "The record-native morning brief for the authenticated Joe or Dell context. It composes live triage, claim-card, deal-room, loop-board, and the redacted renewal decision queue. Every section reports ready, empty, or unavailable; unavailable is never rewritten as empty. Takes no audience, sponsor, or partner argument.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (c, actor, args) => {
+      // This is an audience boundary, not a convenience filter.  A shared-only
+      // runtime cannot choose Joe or Dell by argument, model name, or cwd.
+      const scope = personalScopeForActor(actor);
+      if (scope.status !== "personal")
+        throw new ToolError({ error: "morning_brief_requires_partner_scope",
+          hint: "Reconnect through a verified Joe- or Dell-sponsored context; this brief never accepts a caller-selected audience." });
+      if (Object.keys(args || {}).length)
+        throw new ToolError({ error: "morning_brief_context_not_selectable" });
+
+      // A section returns a deliberately tiny error shape.  Driver errors can
+      // include connection or relation details, so returning them would turn a
+      // freshness signal into a disclosure.  Empty is reserved for a completed
+      // read with zero rows; a missing/stale source is unavailable.
+      const section = async (load) => {
+        try {
+          const value = await load();
+          const items = Array.isArray(value.items) ? value.items : [];
+          return { state: items.length ? "ready" : "empty", ...value, items };
+        } catch {
+          return { state: "unavailable", reason: "source_unavailable", items: [] };
+        }
+      };
+      const ownOrShared = (row) => !row?.owner || String(row.owner).toLowerCase() === scope.sponsor;
+
+      const today = await section(async () => {
+        const value = await TOOLS["today-triage"].handler(c, actor, {});
+        return { items: value.items.filter(ownOrShared) };
+      });
+      const claimCard = await section(async () => {
+        const value = await TOOLS["claim-card"].handler(c, actor, { limit: 5, include_needs_contact: false });
+        return { items: value.candidates, claimable: value.claimable,
+          needs_contact_count: value.needs_contact_count };
+      });
+      const deals = await section(async () => {
+        const value = await TOOLS["deal-room-board"].handler(c, actor, { workspace: "all" });
+        return { items: value.deals.filter(ownOrShared), accounts: value.accounts };
+      });
+      const loops = await section(async () => {
+        const value = await TOOLS["loop-board"].handler(c, actor,
+          { kind: "open_loop", status: "open", owner: scope.sponsor, limit: 60 });
+        return { items: value.loops };
+      });
+      const renewals = await section(async () => {
+        const status = await c.query(
+          "select t1_candidate_count, source_observed_at, freshness_state from v_renewal_decision_queue_status");
+        if (status.rows.length !== 1 || status.rows[0].freshness_state !== "fresh")
+          return { state: "unavailable", reason: "source_unavailable", items: [] };
+        const rows = await c.query(
+          `select display_name, org_name, vertical, city, county, state, est_lease_event,
+                  tier_status, flag_status, has_channel, decision_count, source_observed_at,
+                  freshness_state
+             from v_renewal_decision_queue
+            order by est_lease_event nulls last, display_name
+            limit 20`);
+        return { items: rows.rows, t1_candidate_count: status.rows[0].t1_candidate_count,
+          source_observed_at: status.rows[0].source_observed_at,
+          freshness_state: status.rows[0].freshness_state };
+      });
+      // A stale status is already deliberately shaped as unavailable above. Do
+      // not let section() derive ready/empty over that value.
+      if (renewals.state !== "unavailable" && renewals.freshness_state !== "fresh") {
+        renewals.state = "unavailable";
+        renewals.reason = "source_unavailable";
+        renewals.items = [];
+      }
+      const sections = { today, claim_card: claimCard, deals, loops, renewals };
+      return {
+        state: Object.values(sections).some((value) => value.state === "unavailable")
+          ? "unavailable"
+          : "ready",
+        sponsor: scope.sponsor,
+        sections,
+      };
+    },
+  },
+
   "deal-board": {
     write: false,
     description: "Open pipeline grouped by phase. Never exposes Salesforce commission/close-date placeholders (they are placeholders, not data).",
@@ -6754,7 +6835,7 @@ export const TOOLS = {
 // back to this boundary as a new top-level invocation.
 const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
   "tenant", "tenant_id", "organization_tenant_id", "sponsor", "sponsoring_human_id",
-  "sponsoring_human_slug", "human_slug", "identity", "actor", "runtime_principal",
+  "sponsoring_human_slug", "human_slug", "identity", "actor", "runtime_principal", "audience",
   "authorization", "authorization_class", "profile", "capability", "capabilities",
   "action", "actions", "action_authority", "action_authorities", "allowed_actions",
   "write", "writes_records", "calls_models", "call_models",

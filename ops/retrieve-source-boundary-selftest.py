@@ -298,19 +298,25 @@ exit 0
 
         normal = subprocess.run(["/bin/zsh", str(script)], env=base_env,
                                 text=True, capture_output=True)
-        check("normal scheduled success leaves canonical component outputs", normal.returncode == 0
+        check("legacy scheduled success leaves explicitly noncanonical local projections", normal.returncode == 0
               and all((repo / "out/brief-pack" / name).exists() for name in (
                   "one-thing.md", "claim-card.md", "renewal-shortlist.md")))
         check("normal scheduled success never recreates retired today surfaces",
               not (repo / "out/brief-pack/today.md").exists()
               and not (vault / "00_Context/today.md").exists())
         normal_calls = (repo / "out/fake-run-calls.log").read_text()
-        check("normal scheduler requests only the three activated canonical-safe sections",
+        check("legacy scheduler requests local projections but no canonical morning-delivery verb",
               all(f"brief-pack --quiet --section {section}" in normal_calls
                   for section in ("one-thing", "claim-card", "renewal-shortlist"))
               and "brief-pack --quiet\n" not in normal_calls
               and "--section prebriefs" not in normal_calls
-              and "--recovery" not in normal_calls)
+              and "--recovery" not in normal_calls
+              and "morning-brief" not in normal_calls)
+
+        source = script.read_text(encoding="utf-8")
+        check("legacy local projection names its noncanonical status and the record-native reader",
+              "not a delivery surface" in source and "morning-brief" in source
+              and "canonical-safe sections" not in source)
 
         recovery = subprocess.run(
             ["/bin/zsh", str(script), "--recovery"],

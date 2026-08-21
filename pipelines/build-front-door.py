@@ -37,6 +37,7 @@ PROMPTS = {
     "Renewal Workup": "Resolve the client and deal with find-and-catch-up, read renewal and lease-estimator doctrine through doctrine verbs, and gather current terms one at a time. Use prepare-document only with a registered renewal-comparison template; otherwise name the missing template seam and stop. Label estimates and reconcile outputs.",
     "Deal One-Pager": "Resolve the client/deal with find-and-catch-up and read the comparison doctrine through doctrine verbs. Use prepare-document only with a registered purchase-vs-lease one-page template and verified source numbers; otherwise name the missing template seam and stop.",
     "What's Waiting On Me": "Call today-triage and work from its returned records only. Present the single oldest actionable item first. Use complete-action, set-next-action, triage-item, promote-pool, or decline-candidate only when that exact returned item and Joe's answer fit the verb; then read back the result before continuing.",
+    "Open Morning Brief": "Call morning-brief with no arguments. It derives your authenticated Joe or Dell context and returns the live record-native morning sections. If any section is unavailable, say so; never substitute an old local brief file or call it empty.",
     "Write a Post": "Ask for topic, platform, and angle one at a time. Use the write-content skill and doctrine verbs for voice rules. Produce a draft and graphic for review; do not publish or invent a substance-bank write.",
     "Audit Writing": "Ask for the text, read writing doctrine through search-doctrine and read-doctrine, and provide review-only findings. Do not rewrite or write a record unless asked.",
     "Research a Market": "Ask for market and scope, then perform sourced research and verify each claim. Use record-finding only for evidence that belongs to an existing resolved record; there is no general market-report write verb, so name that seam and return the sourced result without claiming it was saved.",
@@ -82,6 +83,7 @@ def section(name,btns,cls="group"):
 lookup={lbl:sub for _,bs in GROUPS for (lbl,sub) in bs}
 EVERYDAY=[(lbl,lookup[lbl]) for lbl in ["What's Waiting On Me","Log My Day","New Prospect","Draft a Follow-Up","Prep for a Meeting","New Vendor"]]
 BOARDS=[
+ ("Open Morning Brief","Your live morning few"),
  ("Open the Dashboard","Your whole system, live"),
  ("Open the Lead Board","This week, hot, segments"),
  ("Open the Deal Room","Signed, on deck, hot"),

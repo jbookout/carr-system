@@ -26,9 +26,11 @@
 #
 # SKIP-not-FAIL on missing env, per house convention.
 #
-# NORMAL MODE writes only repo-local document outputs. Drive projection is an
-# explicit recovery act: pass --recovery and set CARR_RECOVERY_REASON. The
-# scheduled launchd path passes neither, so it can never silently write Drive.
+# NORMAL MODE refreshes legacy repo-local diagnostic projections only. They are
+# not a delivery surface and are not canonical-safe: the record-native
+# `morning-brief` verb is the reader. This launchd job remains in place only
+# until its runtime owner unloads it; it passes neither recovery control, so it
+# can never silently write Drive.
 REPO="$HOME/carr-system"
 LOG="$REPO/out/local-briefs.log"
 [ -f "$HOME/.config/carr/db.env" ] || { echo "$(date -u +%FT%TZ) SKIP no db.env" >> "$LOG"; exit 0; }
@@ -57,7 +59,9 @@ if [ "$RECOVERY" -eq 1 ]; then
     echo "$(date -u +%FT%TZ) FAIL brief-pack recovery rc=$?" >> "$LOG"; rc=1
   fi
 else
-  # The weekday artifact consumes these three activated canonical-safe sections.
+  # Legacy local projections remain observable while the launchd schedule is
+  # still installed. They must not be described as the morning brief or as a
+  # canonical reader; `morning-brief` is the record-native delivery surface.
   # Canonical prebrief reads are implemented, but their two sponsor-scoped
   # producers remain disabled until the authority allowlists, scoped credentials,
   # installed EventKit bridge and accepted end-to-end receipts exist. Scheduling
