@@ -663,12 +663,27 @@ end $_$;
 --
 
 CREATE FUNCTION ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+  select ops.approve_program5_release($1,$2,$3,$4,null,null)
+$_$;
+
+
+--
+-- Name: approve_program5_release(text, text, uuid, integer, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
 declare actor_slug text; rel ops.release%rowtype; existing ops.release_approval_receipt%rowtype;
   rehearsal_run ops.run%rowtype; approval_uuid uuid; approved_time timestamptz;
   expiry_time timestamptz; projection jsonb; approval_hash text; approval_ref text;
+  supplied_verifier_actor text; supplied_verifier_evidence text;
+  candidate_verifier_actor text; candidate_verifier_evidence text;
+  verifier_actor_value text; verifier_evidence_value text;
 begin
   actor_slug:=ops.authority_actor_slug();
   if actor_slug<>'joe' then raise exception 'Program 5 Production approval requires Joe authority'; end if;
@@ -676,6 +691,13 @@ begin
      or coalesce(p_expires_hours,0) not between 1 and 24 then
     raise exception 'invalid Program 5 approval input';
   end if;
+  if (p_verifier_actor is null) <> (p_verifier_evidence_ref is null)
+     or (p_verifier_actor is not null
+         and (btrim(p_verifier_actor)='' or btrim(p_verifier_evidence_ref)='')) then
+    raise exception 'supplied verifier actor and evidence must be an atomic nonblank pair';
+  end if;
+  supplied_verifier_actor:=case when p_verifier_actor is null then null else lower(btrim(p_verifier_actor)) end;
+  supplied_verifier_evidence:=case when p_verifier_evidence_ref is null then null else btrim(p_verifier_evidence_ref) end;
   perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
   select * into existing from ops.release_approval_receipt where idempotency_key=p_idempotency_key;
   if found then
@@ -687,7 +709,9 @@ begin
         and plan_hash=existing.plan_hash and approval_receipt_id=existing.id
         and state in ('approved','deploying','verifying','complete')
         and approved_at=existing.approved_at
-        and approval_expires_at=existing.approval_expires_at) then
+        and approval_expires_at=existing.approval_expires_at
+        and (supplied_verifier_actor is null or existing.verifier_actor=supplied_verifier_actor)
+        and (supplied_verifier_evidence is null or existing.verifier_evidence_ref=supplied_verifier_evidence)) then
       raise exception 'Program 5 approval idempotency key was reused with changed input';
     end if;
     return jsonb_build_object('approval_receipt_id',existing.id,
@@ -698,6 +722,22 @@ begin
   if not found or rel.environment<>'production' or rel.state<>'candidate'
      or rel.plan_hash is distinct from p_plan_hash then
     raise exception 'release is not the exact Production candidate plan requested';
+  end if;
+  if (rel.verifier_actor is null) <> (rel.verifier_evidence_ref is null)
+     or (rel.verifier_actor is not null
+         and (btrim(rel.verifier_actor)='' or btrim(rel.verifier_evidence_ref)='')) then
+    raise exception 'candidate verifier actor and evidence must be an atomic nonblank pair';
+  end if;
+  candidate_verifier_actor:=case when rel.verifier_actor is null then null else lower(btrim(rel.verifier_actor)) end;
+  candidate_verifier_evidence:=case when rel.verifier_evidence_ref is null then null else btrim(rel.verifier_evidence_ref) end;
+  verifier_actor_value:=coalesce(supplied_verifier_actor,candidate_verifier_actor);
+  verifier_evidence_value:=coalesce(supplied_verifier_evidence,candidate_verifier_evidence);
+  if verifier_actor_value is null or verifier_evidence_value is null then
+    raise exception 'release cannot be approved without an INDEPENDENT VERIFIER and verification evidence';
+  end if;
+  if rel.maker_actor is not null
+     and verifier_actor_value=lower(btrim(rel.maker_actor)) then
+    raise exception 'maker cannot independently verify their own release';
   end if;
   select r.* into rehearsal_run from ops.run r
    join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
@@ -718,16 +758,20 @@ begin
   approved_time:=clock_timestamp(); expiry_time:=approved_time+make_interval(hours=>p_expires_hours);
   projection:=jsonb_build_object('release_id',rel.id,'plan_hash',rel.plan_hash,
     'recovery_run_id',rehearsal_run.id,'recovery_bundle_id',rehearsal_run.recovery_rehearsal_bundle_id,
-    'approved_by_actor',actor_slug,'approved_at',approved_time,'approval_expires_at',expiry_time);
+    'approved_by_actor',actor_slug,'approved_at',approved_time,'approval_expires_at',expiry_time,
+    'verifier_actor',verifier_actor_value,'verifier_evidence_ref',verifier_evidence_value);
   approval_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
   approval_ref:='ops.program5-release-approval:'||approval_hash;
   insert into ops.release_approval_receipt(idempotency_key,release_id,recovery_run_id,
     recovery_bundle_id,plan_hash,approved_by_actor,approved_at,approval_expires_at,
+    verifier_actor,verifier_evidence_ref,
     approval_sha256,evidence_ref)
   values(p_idempotency_key,rel.id,rehearsal_run.id,rehearsal_run.recovery_rehearsal_bundle_id,
-    rel.plan_hash,actor_slug,approved_time,expiry_time,approval_hash,approval_ref)
+    rel.plan_hash,actor_slug,approved_time,expiry_time,verifier_actor_value,verifier_evidence_value,
+    approval_hash,approval_ref)
   returning id into approval_uuid;
-  update ops.release set state='approved',approved_by_actor=actor_slug,
+  update ops.release set verifier_actor=verifier_actor_value,
+    verifier_evidence_ref=verifier_evidence_value,state='approved',approved_by_actor=actor_slug,
     approved_at=approved_time,approval_expires_at=expiry_time,
     approval_receipt_id=approval_uuid where id=rel.id;
   return jsonb_build_object('approval_receipt_id',approval_uuid,'approval_ref',approval_ref,
@@ -941,15 +985,17 @@ begin
     raise exception 'unknown guidance import batch %',p_batch_id;
   end if;
   if exists (
-    (select id from rule where status='active')
+    (select id from rule
+      where status='active' and coalesce(scope->>'kind','') <> 'intro_politics')
     except
     (select distinct source_rule_id from ops.guidance_import_entry where batch_id=p_batch_id)
   ) or exists (
     (select distinct source_rule_id from ops.guidance_import_entry where batch_id=p_batch_id)
     except
-    (select id from rule where status='active')
+    (select id from rule
+      where status='active' and coalesce(scope->>'kind','') <> 'intro_politics')
   ) then
-    raise exception 'guidance import batch source inventory no longer exactly matches active rules';
+    raise exception 'guidance import batch source inventory no longer exactly matches standing-context active rules';
   end if;
 end $$;
 
@@ -1031,7 +1077,8 @@ CREATE FUNCTION ops.assert_guidance_registry_coverage() RETURNS TABLE(source_rul
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
   with active_rules as (
-    select id from rule where status='active'
+    select id from rule
+     where status='active' and coalesce(scope->>'kind','') <> 'intro_politics'
   ), primary_counts as (
     select ar.id,
            count(g.*) filter (where g.is_primary) as primary_count
@@ -1935,8 +1982,8 @@ SET default_table_access_method = heap;
 
 CREATE TABLE ops.job (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    definition_key text CONSTRAINT job_definition_key_not_null1 NOT NULL,
-    definition_version integer CONSTRAINT job_definition_version_not_null1 NOT NULL,
+    definition_key text NOT NULL,
+    definition_version integer NOT NULL,
     correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
     idempotency_key text NOT NULL,
     scheduled_for timestamp with time zone NOT NULL,
@@ -2588,6 +2635,25 @@ begin
          is distinct from
          (old.approved_by_actor,old.approved_at,old.approval_expires_at,old.approval_receipt_id) then
     raise exception 'Program 5 approval projection is immutable across promoted states';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: program5_release_verifier_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.program5_release_verifier_is_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if (new.verifier_actor,new.verifier_evidence_ref)
+       is distinct from (old.verifier_actor,old.verifier_evidence_ref)
+     and (old.approval_receipt_id is not null
+          or old.state in ('approved','deploying','verifying','complete'))
+     and new.plan_hash is not distinct from old.plan_hash then
+    raise exception 'Program 5 verifier evidence is immutable after approval; revise the plan to invalidate approval first';
   end if;
   return new;
 end $$;
@@ -7132,13 +7198,13 @@ CREATE TABLE ops.npi_device_evidence_receipt (
 
 CREATE TABLE ops.program6_browser_action_challenge_redemption (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token_digest text CONSTRAINT program6_browser_action_challenge_redempt_token_digest_not_null NOT NULL,
-    session_digest text CONSTRAINT program6_browser_action_challenge_redem_session_digest_not_null NOT NULL,
+    token_digest text NOT NULL,
+    session_digest text NOT NULL,
     action text NOT NULL,
-    material_digest text CONSTRAINT program6_browser_action_challenge_rede_material_digest_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT program6_browser_action_challenge_rede_idempotency_key_not_null NOT NULL,
-    redeemed_by_actor_id uuid CONSTRAINT program6_browser_action_challenge_redeemed_by_actor_id_not_null NOT NULL,
-    redeemed_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT program6_browser_action_challenge_redempti_redeemed_at_not_null NOT NULL,
+    material_digest text NOT NULL,
+    idempotency_key uuid NOT NULL,
+    redeemed_by_actor_id uuid NOT NULL,
+    redeemed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT program6_browser_action_challenge_redempt_material_digest_check CHECK ((material_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redempti_session_digest_check CHECK ((session_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redemption_action_check CHECK ((action = ANY (ARRAY['accept-ready-plan'::text, 'accept-outcome-feedback'::text]))),
@@ -7320,10 +7386,16 @@ CREATE TABLE ops.release_approval_receipt (
     approval_expires_at timestamp with time zone NOT NULL,
     approval_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
+    verifier_actor text NOT NULL,
+    verifier_evidence_ref text NOT NULL,
     CONSTRAINT approval_expiry_after_approval CHECK ((approval_expires_at > approved_at)),
     CONSTRAINT release_approval_receipt_approval_sha256_check CHECK ((approval_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT release_approval_receipt_approved_by_actor_check CHECK ((approved_by_actor = 'joe'::text)),
-    CONSTRAINT release_approval_receipt_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.program5-release-approval:sha256:[0-9a-f]{64}$'::text))
+    CONSTRAINT release_approval_receipt_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.program5-release-approval:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT release_approval_receipt_verifier_actor_canonical CHECK ((verifier_actor = lower(btrim(verifier_actor)))),
+    CONSTRAINT release_approval_receipt_verifier_actor_nonblank CHECK ((btrim(verifier_actor) <> ''::text)),
+    CONSTRAINT release_approval_receipt_verifier_evidence_canonical CHECK ((verifier_evidence_ref = btrim(verifier_evidence_ref))),
+    CONSTRAINT release_approval_receipt_verifier_evidence_nonblank CHECK ((btrim(verifier_evidence_ref) <> ''::text))
 );
 
 
@@ -7609,19 +7681,19 @@ CREATE TABLE ops.sourced_work_request_outcome_feedback (
     work_request_id uuid NOT NULL,
     feedback_version integer NOT NULL,
     idempotency_key uuid NOT NULL,
-    work_request_version integer CONSTRAINT sourced_work_request_outcome_feed_work_request_version_not_null NOT NULL,
+    work_request_version integer NOT NULL,
     plan_id uuid NOT NULL,
-    plan_acceptance_receipt_id uuid CONSTRAINT sourced_work_request_outcom_plan_acceptance_receipt_id_not_null NOT NULL,
+    plan_acceptance_receipt_id uuid NOT NULL,
     preimage jsonb NOT NULL,
-    criterion_results jsonb CONSTRAINT sourced_work_request_outcome_feedbac_criterion_results_not_null NOT NULL,
+    criterion_results jsonb NOT NULL,
     evidence_refs jsonb NOT NULL,
     outcome text NOT NULL,
     blocker_code text NOT NULL,
     result_summary text NOT NULL,
     observed_minutes integer NOT NULL,
-    interaction_surface text CONSTRAINT sourced_work_request_outcome_feedb_interaction_surface_not_null NOT NULL,
-    heavy_session_used boolean CONSTRAINT sourced_work_request_outcome_feedba_heavy_session_used_not_null NOT NULL,
-    manual_context_transfers integer CONSTRAINT sourced_work_request_outcome__manual_context_transfers_not_null NOT NULL,
+    interaction_surface text NOT NULL,
+    heavy_session_used boolean NOT NULL,
+    manual_context_transfers integer NOT NULL,
     feedback_hash text NOT NULL,
     feedback_ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -7653,15 +7725,15 @@ COMMENT ON TABLE ops.sourced_work_request_outcome_feedback IS 'Append-only bound
 --
 
 CREATE TABLE ops.sourced_work_request_outcome_feedback_acceptance_receipt (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT sourced_work_request_outcome_feedback_acceptance_re_id_not_null NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_outcome_feedback__work_request_id_not_null NOT NULL,
-    feedback_id uuid CONSTRAINT sourced_work_request_outcome_feedback_acce_feedback_id_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_outcome_feedback__idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_outcome_feedback_acc_base_version_not_null NOT NULL,
-    feedback_hash text CONSTRAINT sourced_work_request_outcome_feedback_ac_feedback_hash_not_null NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_outcome_feed_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT sourced_work_request_outcome_feedback_acce_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_outcome_feedback_a_result_version_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    feedback_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
+    feedback_hash text NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    result_version integer NOT NULL,
     CONSTRAINT sourced_work_request_outcome_feedback_acce_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_outcome_feedback_accep_feedback_hash_check CHECK ((feedback_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT sourced_work_request_outcome_feedback_accept_base_version_check CHECK ((base_version > 0))
@@ -7726,16 +7798,16 @@ COMMENT ON TABLE ops.sourced_work_request_plan IS 'Append-only Program 6 plan pr
 
 CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_plan_acceptance_r_work_request_id_not_null NOT NULL,
+    work_request_id uuid NOT NULL,
     plan_id uuid NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_plan_acceptance_r_idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_plan_acceptance_rece_base_version_not_null NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
     plan_hash text NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_plan_accepta_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_plan_acceptance_recei_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_plan_acceptance_re_result_version_not_null NOT NULL,
-    shape_fixed_surface_ref text CONSTRAINT sourced_work_request_plan_acce_shape_fixed_surface_ref_not_null NOT NULL,
-    shape_rationale text CONSTRAINT sourced_work_request_plan_acceptance_r_shape_rationale_not_null NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT now() NOT NULL,
+    result_version integer NOT NULL,
+    shape_fixed_surface_ref text NOT NULL,
+    shape_rationale text NOT NULL,
     CONSTRAINT sourced_work_request_plan_acceptance_recei_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_base_version_check CHECK ((base_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_plan_hash_check CHECK ((plan_hash ~ '^sha256:[0-9a-f]{64}$'::text))
@@ -9832,12 +9904,12 @@ COMMENT ON COLUMN public.campaign.coverage_at_scoring IS 'The measurement covera
 --
 
 CREATE TABLE public.candidate_pool (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT prospect_pool_id_not_null NOT NULL,
-    source text CONSTRAINT prospect_pool_source_not_null NOT NULL,
-    source_key text CONSTRAINT prospect_pool_source_key_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source text NOT NULL,
+    source_key text NOT NULL,
     source_seq integer,
-    source_row jsonb CONSTRAINT prospect_pool_source_row_not_null NOT NULL,
-    name text CONSTRAINT prospect_pool_name_not_null NOT NULL,
+    source_row jsonb NOT NULL,
+    name text NOT NULL,
     org_name text,
     vertical text,
     address text,
@@ -9852,19 +9924,19 @@ CREATE TABLE public.candidate_pool (
     score_basis text,
     est_lease_event date,
     est_basis text,
-    status text DEFAULT 'pool'::text CONSTRAINT prospect_pool_status_not_null NOT NULL,
+    status text DEFAULT 'pool'::text NOT NULL,
     promoted_lead_id uuid,
     dup_tier text,
     dup_subject_type text,
     dup_subject_id uuid,
     dup_ref text,
     dup_basis text,
-    dup_do_not_contact boolean DEFAULT false CONSTRAINT prospect_pool_dup_do_not_contact_not_null NOT NULL,
-    version integer DEFAULT 1 CONSTRAINT prospect_pool_version_not_null NOT NULL,
-    created_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_created_at_not_null NOT NULL,
-    created_by uuid CONSTRAINT prospect_pool_created_by_not_null NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_updated_at_not_null NOT NULL,
-    updated_by uuid CONSTRAINT prospect_pool_updated_by_not_null NOT NULL,
+    dup_do_not_contact boolean DEFAULT false NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by uuid NOT NULL,
     declined_at timestamp with time zone,
     declined_by uuid,
     decline_reason text,
@@ -12701,16 +12773,16 @@ CREATE VIEW public.v_capture_coverage AS
            FROM public.deal d
           WHERE ((d.outcome IS NULL) AND (d.phase <> 'closed'::text))
         UNION ALL
-         SELECT 'client'::text,
+         SELECT 'client'::text AS text,
             c.id
            FROM public.client c
           WHERE (c.merged_into IS NULL)
         UNION ALL
-         SELECT 'lead'::text,
+         SELECT 'lead'::text AS text,
             l.id
            FROM public.lead l
         UNION ALL
-         SELECT 'vendor'::text,
+         SELECT 'vendor'::text AS text,
             v.id
            FROM public.vendor v
         )
@@ -14969,7 +15041,7 @@ CREATE VIEW public.v_export_dossier_analysis AS
           WHERE (c.notes_path IS NOT NULL)
         UNION ALL
          SELECT l.id,
-            'lead'::text,
+            'lead'::text AS text,
             ('DNA/Clients/prospects/'::text || regexp_replace(l.notes_path, '^.*/'::text, ''::text))
            FROM public.lead l
           WHERE (l.notes_path IS NOT NULL)
@@ -20606,6 +20678,13 @@ CREATE TRIGGER program5_release_approval_is_joe_owned BEFORE INSERT OR UPDATE OF
 
 
 --
+-- Name: release program5_release_verifier_is_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER program5_release_verifier_is_immutable BEFORE UPDATE OF verifier_actor, verifier_evidence_ref, state, approval_receipt_id, plan_hash ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.program5_release_verifier_is_immutable();
+
+
+--
 -- Name: program6_browser_action_challenge_redemption program6_browser_action_challenge_redemptions_immutable; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -24045,9 +24124,6 @@ ALTER TABLE ONLY public.vendor
 -- PostgreSQL database dump complete
 --
 
-
-
-
 --
 -- CARR GRANTS (bin/schema-snapshot.sh) — not produced by pg_dump.
 --
@@ -24066,6 +24142,7 @@ revoke all on function ops.activate_guidance_situation_mapping(p_proposed_mappin
 revoke all on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
 revoke all on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) from public;
+revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) from public;
 revoke all on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.assert_guidance_import_inventory(p_batch_id uuid) from public;
 revoke all on function ops.assert_guidance_import_materialization(p_batch_id uuid) from public;
@@ -24748,6 +24825,7 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
 grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) to carr_writer;
@@ -24817,12 +24895,9 @@ grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timest
 grant carr_authority to neondb_owner;
 grant carr_device_evidence to neondb_owner;
 grant carr_exporter to neondb_owner;
-grant carr_exporter to neondb_owner;
 grant carr_jobs to neondb_owner;
 grant carr_reader to carr_exporter;
 grant carr_reader to neondb_owner;
-grant carr_reader to neondb_owner;
-grant carr_writer to neondb_owner;
 grant carr_writer to neondb_owner;
 --
 -- PostgreSQL database dump
@@ -25036,7 +25111,9 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0193_session_work.sql	d2c4c868194cc5500bf9ee99ae749a505dac03bc607ed468b0e22f1c47c4e985	2026-08-20 15:09:00.711206+00
 0194_atomic_rule_approval.sql	14ab570195589b24baeb3706a21a93cabc523bc6e8e4dbb703b46d9dda3deeed	2026-08-20 15:09:02.331211+00
 0195_control_plane_cache_observations.sql	8a14afb37bc1f1d4d3cfb9f1e37f307e8db93452e85757e04da07c8dbd76c56f	2026-08-20 15:09:03.019187+00
-0202_staging_release_readback_receipt.sql	526b9815897bdfb641329c506826afc230fb2bb76a8a67d59a347e2f7754fcb5	2026-08-21 00:26:58.118953+00
+0199_guidance_standing_context_boundary.sql	76bb5327079abbdba667c22ac643a0ddadd0110dcdc46f1393c375304d59dff1	2026-08-21 02:00:42.190993+00
+0202_staging_release_readback_receipt.sql	526b9815897bdfb641329c506826afc230fb2bb76a8a67d59a347e2f7754fcb5	2026-08-21 02:00:42.212701+00
+0205_program5_approval_verifier.sql	02cb742f7be2c2d278704e9a58fa9626abc00323901adca9f2da5b539bfbd38a	2026-08-21 02:00:42.214891+00
 \.
 
 

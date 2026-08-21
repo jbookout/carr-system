@@ -182,6 +182,18 @@ def prepare_and_claim(cur, fixture: dict, attempt: uuid.UUID,
         raise AssertionError("new staging attempt was not exclusively claimed")
 
 
+def make_typed_bundle(cur, fixture: dict) -> None:
+    """Create the exact staging recovery evidence an approval must bind."""
+    attempt = uuid.uuid4()
+    authority(cur, "carr_jobs")
+    for step in ("current_before", "prior", "current_after"):
+        idem, version = uuid.uuid4(), uuid.uuid4()
+        prepare_and_claim(cur, fixture, attempt, step, idem)
+        cur.execute(record_sql(), record_params(fixture, attempt, step, idem, version))
+        one(cur)
+    owner(cur)
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
@@ -370,6 +382,15 @@ def main() -> int:
               (fixture["current_key"],PLAN_HASH,approval_idem)))
         owner(cur)
         authority(cur,"carr_authority_joe")
+        check("six-argument approval refuses a partial verifier pair", refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,12,%s,%s)",
+              (fixture["current_key"], PLAN_HASH, uuid.uuid4(), "verifier", None)))
+        check("six-argument approval refuses whitespace verifier evidence", refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,12,%s,%s)",
+              (fixture["current_key"], PLAN_HASH, uuid.uuid4(), "   ", "   ")))
+        check("six-argument approval refuses a maker normalized as verifier", refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,12,%s,%s)",
+              (fixture["current_key"], PLAN_HASH, uuid.uuid4(), " MAKER ", "proof")))
         cur.execute("select ops.approve_program5_release(%s,%s,%s::uuid,12)",
                     (fixture["current_key"],PLAN_HASH,approval_idem))
         approval=one(cur)[0]
@@ -382,6 +403,25 @@ def main() -> int:
         check("approved projection cannot be rewritten",refuses(cur,
               "update ops.release set approval_expires_at=approval_expires_at+interval '1 minute' where id=%s",
               (fixture["current_id"],)))
+        check("approved verifier fields cannot be rewritten", refuses(cur,
+              "update ops.release set verifier_actor='other' where id=%s",
+              (fixture["current_id"],)))
+        authority(cur,"carr_jobs")
+        check("routine writer cannot rewrite an approved verifier", refuses(cur,
+              "update ops.release set verifier_actor='other' where id=%s",
+              (fixture["current_id"],)))
+        owner(cur)
+        cur.execute("""select a.verifier_actor,a.verifier_evidence_ref,r.verifier_actor,
+                       r.verifier_evidence_ref,a.approval_sha256='sha256:'||encode(public.digest(
+                       jsonb_build_object('release_id',r.id,'plan_hash',r.plan_hash,
+                       'recovery_run_id',a.recovery_run_id,'recovery_bundle_id',a.recovery_bundle_id,
+                       'approved_by_actor',a.approved_by_actor,'approved_at',a.approved_at,
+                       'approval_expires_at',a.approval_expires_at,'verifier_actor',a.verifier_actor,
+                       'verifier_evidence_ref',a.verifier_evidence_ref)::text,'sha256'),'hex')
+                       from ops.release r join ops.release_approval_receipt a on a.id=r.approval_receipt_id
+                       where r.id=%s""", (fixture["current_id"],))
+        check("receipt and approval hash bind the canonical verifier pair", one(cur)==
+              ("verifier","verify-proof","verifier","verify-proof",True))
         authority(cur,"carr_authority_joe")
         cur.execute("select ops.approve_program5_release(%s,%s,%s::uuid,12)",
                     (fixture["current_key"],PLAN_HASH,approval_idem))
@@ -402,8 +442,29 @@ def main() -> int:
         check("plan revision clears only the current approval pointer",
               revised_state=="candidate" and revised_pointer is None and one(cur)[0]==1)
 
+        late_fixture=seed_fixture(cur,"late")
+        make_typed_bundle(cur,late_fixture)
+        cur.execute("update ops.release set verifier_actor=null,verifier_evidence_ref=null where id=%s",
+                    (late_fixture["current_id"],))
+        late_idem=uuid.uuid4()
+        authority(cur,"carr_authority_joe")
+        cur.execute("select ops.approve_program5_release(%s,%s,%s::uuid,12,%s,%s)",
+                    (late_fixture["current_key"],PLAN_HASH,late_idem," Late-Checker "," late:proof "))
+        late_approval=one(cur)[0]
+        check("six-argument late verifier approval succeeds canonically",
+              late_approval["replayed"] is False)
+        cur.execute("select ops.approve_program5_release(%s,%s,%s::uuid,12,%s,%s)",
+                    (late_fixture["current_key"],PLAN_HASH,late_idem,"late-checker","late:proof"))
+        check("six-argument canonical replay is idempotent",one(cur)[0]["replayed"] is True)
+        check("six-argument replay refuses changed verifier input",refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,12,%s,%s)",
+              (late_fixture["current_key"],PLAN_HASH,late_idem,"other","late:proof")))
+        owner(cur)
+
         check("routine writer cannot call Joe approval",not _has_function(cur,"carr_jobs",
               "ops.approve_program5_release(text,text,uuid,integer)"))
+        check("routine writer cannot call six-argument Joe approval",not _has_function(cur,"carr_jobs",
+              "ops.approve_program5_release(text,text,uuid,integer,text,text)"))
         conn.rollback()
 
     concurrency_check(dsn)

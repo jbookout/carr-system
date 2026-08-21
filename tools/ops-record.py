@@ -1498,10 +1498,9 @@ def cmd_release(args) -> int:
     elif not args.key:
         print(f"ops-record: release {args.action} needs --key", file=sys.stderr)
         return 2
-    if args.action == "approve" and (args.actor or args.verifier or args.verifier_evidence):
-        print("ops-record: approval identity and verification are not caller fields; "
-              "the candidate must already carry independent verification and Joe "
-              "is derived from CARR_DB_AUTHORITY_JOE_URL", file=sys.stderr)
+    if args.action == "approve" and args.actor:
+        print("ops-record: approval identity is not a caller field; Joe is derived "
+              "from CARR_DB_AUTHORITY_JOE_URL", file=sys.stderr)
         return 2
 
     manifest = {}
@@ -1809,8 +1808,11 @@ def cmd_release(args) -> int:
                 except ValueError:
                     print("ops-record: approval idempotency key is not a UUID", file=sys.stderr)
                     return 2
-                cur.execute("select ops.approve_program5_release(%s,%s,%s::uuid,%s)",
-                            (args.key,args.plan_hash,approval_key,args.expires_hours))
+                cur.execute(
+                    "select ops.approve_program5_release(%s,%s,%s::uuid,%s,%s,%s)",
+                    (args.key, args.plan_hash, approval_key, args.expires_hours,
+                     args.verifier, args.verifier_evidence),
+                )
                 print(json.dumps(cur.fetchone()[0],sort_keys=True,default=str))
                 return 0
 
@@ -2057,9 +2059,9 @@ def main() -> int:
     rel.add_argument("--actor", help="approve only: deprecated; identity is DB-derived")
     rel.add_argument("--idempotency-key",
                      help="approve only: UUID binding an exact Joe approval replay")
-    rel.add_argument("--verifier", help="complete only: who verified, and it may not be the maker")
+    rel.add_argument("--verifier", help="candidate, approve, or complete: who verified; never the maker")
     rel.add_argument("--verifier-evidence", dest="verifier_evidence",
-                     help="complete only: ref to the verification that closed it")
+                     help="candidate, approve, or complete: ref to that verification")
     rel.add_argument("--reason", help="abandon only: why this release will never "
                                       "ship. Required unless --superseded-by names "
                                       "the release that replaced it.")

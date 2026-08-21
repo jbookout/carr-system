@@ -180,14 +180,22 @@ def main() -> int:
           "verifier_actor" in candidate_insert
           and "verifier_evidence_ref" in candidate_insert)
 
-    approve_block = source[source.index('if args.action == "approve":'):]
-    approve_block = approve_block[:approve_block.index("# read one back")]
+    approval_migration = (REPO / "migrations" /
+                          "0205_program5_approval_verifier.sql").read_text(encoding="utf-8")
+    approval_migration_lower = approval_migration.lower()
     check("9. APPROVE accepts a verifier, for the ordinary case where the "
           "verifying run finishes after the candidate was filed",
-          "verifier_actor = coalesce" in approve_block)
+          "ops.approve_program5_release(%s,%s,%s::uuid,%s,%s,%s)" in source
+          and "p_verifier_actor text,p_verifier_evidence_ref text" in approval_migration
+          and "supplied verifier actor and evidence must be an atomic nonblank pair" in approval_migration
+          and "verifier_actor_value:=coalesce(supplied_verifier_actor,candidate_verifier_actor)" in approval_migration)
     check("10. approve REFUSES in words rather than leaving it to the constraint",
-          "INDEPENDENT VERIFIER" in approve_block
-          and "cannot independently verify their own" in approve_block)
+          "cannot be approved without an INDEPENDENT VERIFIER" in approval_migration
+          and "maker cannot independently verify their own release" in approval_migration)
+    check("11. receipt binding preserves 0202 append-only evidence",
+          "populated 0202 evidence requires a separate audited versioned conversion"
+          in approval_migration
+          and "update ops.release_approval_receipt" not in approval_migration_lower)
 
     if FAILURES:
         print(f"release-assurance-record-selftest: {len(FAILURES)} FAILED")
