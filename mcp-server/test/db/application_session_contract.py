@@ -713,6 +713,101 @@ def main(dsn):  # noqa: C901
     check("guard functions and their table share one owner no runtime role can assume",
           guards_have_one_unassumable_owner)
 
+    # ------------------------------------------- 0206: the minting credential ----
+    # 0204 left carr_session_minter memberless ON PURPOSE and said so; 0206 is
+    # the decision about which credential joins it. 0206's own apply-time block
+    # asserts the MEMBERSHIP GRAPH from the catalog, which is the right tool for
+    # a graph. These three assert what a catalog cannot: what each role can
+    # actually DO when something acts as it.
+    def issuer_can_actually_mint():
+        """The grantee path, not the superuser path. A membership that exists in
+        pg_auth_members but does not carry EXECUTE on the mint function looks
+        correct in every catalog query and mints nothing."""
+        sid = uuid.uuid4()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("set role carr_session_issuer")
+                cur.execute(MINT.format(expires="now() + interval '1 hour'"),
+                            (sid, joe, "joe"))
+            conn.commit()
+        except psycopg.Error as exc:
+            conn.rollback()
+            raise AssertionError(
+                f"carr_session_issuer could not mint, so the substrate is still "
+                f"inert: {str(exc).strip().splitlines()[0]}") from None
+        finally:
+            with contextlib.suppress(Exception), conn.cursor() as cur:
+                cur.execute("reset role")
+                conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from ops.application_session where id=%s", (sid,))
+            assert cur.fetchone()[0] == 1, \
+                "the mint reported success but wrote no session row"
+    check("req 1: carr_session_issuer CAN mint (the credential 0206 chose)",
+          issuer_can_actually_mint)
+
+    def issuer_cannot_write_evidence():
+        """The separation runs BOTH ways, and this is the half that is easy to
+        forget. If the issuer could also insert evidence, one leaked secret
+        would mint a session AND bind rows to it, which is the whole attack
+        0204 exists to prevent -- just performed with a different credential."""
+        sid = mint(conn, joe)
+        key = str(uuid.uuid4())
+        try:
+            with conn.cursor() as cur:
+                cur.execute("set role carr_session_issuer")
+                cur.execute(TOOL_CALL_INSERT, (key, joe, sid))
+            conn.rollback()
+            raise AssertionError(
+                "carr_session_issuer wrote qualified evidence; it must be able "
+                "to mint a session and nothing else")
+        except psycopg.Error as exc:
+            conn.rollback()
+            state = getattr(exc, "sqlstate", None)
+            if state in ABSENCE_SQLSTATES:
+                raise AssertionError(
+                    f"no guard refused this -- the substrate is absent "
+                    f"({state})") from None
+            assert state == "42501", (
+                f"the issuer was refused, but by a guard rather than by privilege. "
+                f"It should not hold the privilege at all: {state}: "
+                f"{str(exc).strip().splitlines()[0]}")
+        finally:
+            with contextlib.suppress(Exception), conn.cursor() as cur:
+                cur.execute("reset role")
+                conn.commit()
+    check("req 1: carr_session_issuer cannot write evidence, only mint",
+          issuer_cannot_write_evidence)
+
+    def minter_membership_is_exactly_the_issuer():
+        """Transitive, via pg_has_role. A direct-edge query against
+        pg_auth_members answers 'not a member' for a role that reaches the mint
+        through one intermediate role, which is exactly the escalation worth
+        catching."""
+        with conn.cursor() as cur:
+            cur.execute("""select m.rolname from pg_auth_members am
+                             join pg_roles r on r.oid = am.roleid
+                             join pg_roles m on m.oid = am.member
+                            where r.rolname='carr_session_minter'
+                            order by m.rolname""")
+            members = [r[0] for r in cur.fetchall()]
+        assert members == ["carr_session_issuer"], (
+            f"carr_session_minter's members must be exactly ['carr_session_issuer']; "
+            f"found {members}. An unnoticed extra member is how a separation "
+            f"quietly stops separating.")
+        reachers = []
+        with conn.cursor() as cur:
+            for role in ("carr_writer", "carr_reader", "carr_jobs", "carr_exporter",
+                         "carr_authority", "carr_device_evidence"):
+                cur.execute("select pg_has_role(%s,'carr_session_minter','MEMBER')", (role,))
+                if cur.fetchone()[0]:
+                    reachers.append(role)
+        assert not reachers, (
+            f"these roles can reach carr_session_minter and so can manufacture an "
+            f"authenticated session: {reachers}")
+    check("req 1: only the issuer reaches the mint, transitively",
+          minter_membership_is_exactly_the_issuer)
+
     def triggers_enable_always():
         with conn.cursor() as cur:
             cur.execute("""select c.relname, t.tgname, t.tgenabled

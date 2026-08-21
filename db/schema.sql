@@ -45,6 +45,8 @@ declare
   r text;
   jobs_can_login boolean;
   jobs_placeholder text;
+  issuer_can_login boolean;
+  issuer_placeholder text;
 begin
   foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence','carr_session_minter'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
@@ -59,6 +61,33 @@ begin
     jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
+  -- carr_session_issuer (migration 0206) is the SECOND login role, and it is
+  -- added the way carr_jobs is added rather than by widening the NOLOGIN array
+  -- above -- which is what the note further up asks for. It is the credential
+  -- the authentication layer holds to mint an application session, so it must
+  -- connect; carr_session_minter stays NOLOGIN because it is the privilege
+  -- bundle the issuer is a member of, never a credential of its own.
+  select rolcanlogin into issuer_can_login from pg_roles where rolname='carr_session_issuer';
+  if not found then
+    issuer_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('create role %I login password %L', 'carr_session_issuer', issuer_placeholder);
+  elsif not issuer_can_login then
+    issuer_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('alter role %I login password %L', 'carr_session_issuer', issuer_placeholder);
+  end if;
+  -- THE ROLE ONLY, NEVER THE MEMBERSHIP, and the reason is about what the
+  -- tests then prove. 0204 no longer objects to a purpose-built issuer holding
+  -- the membership, so this is a choice on the merits rather than a workaround.
+  --
+  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0206
+  -- having run, and the contracts that assert the membership graph would pass
+  -- against the preamble instead of against the migration they exist to test --
+  -- a suite testing its own fixture. Establishing the membership is 0206's
+  -- whole job, so 0206 is where it happens and where a test can see it happen.
+  --
+  -- Creating the role here is still required and is a different question: the
+  -- grant-whitelist gates name it, and has_function_privilege RAISES on a
+  -- missing role rather than returning false.
 end $$;
 
 --

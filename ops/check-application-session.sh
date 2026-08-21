@@ -31,6 +31,17 @@ fi
   echo "psycopg is not importable under $PYBIN; set CARR_PYTHON to an interpreter that has it" >&2
   exit 1; }
 MIGRATION="$REPO/migrations/0204_authenticated_application_session.sql"
+# 0206 chooses the credential that joins carr_session_minter. It MUST be applied
+# after 0204 and never before: 0204 asserts the role is memberless, which is its
+# "inert by construction" contract, and 0206 is what ends that state.
+#
+# ROLE MEMBERSHIP IS CLUSTER-WIDE WHILE MIGRATIONS ARE PER-DATABASE. Once 0206
+# has run anywhere in this cluster, 0204 can no longer apply to a FRESH database
+# in the same cluster -- it will find the member it requires to be absent. That
+# is an artifact of one cluster hosting many test databases, not a production
+# path (each Neon database is its own cluster), but it means this script must
+# stand up its own cluster per run, which it does.
+MIGRATION_ISSUER="$REPO/migrations/0206_session_issuer_credential.sql"
 SUITE="$REPO/mcp-server/test/db/application_session_contract.py"
 export LC_ALL=C LANG=C
 export CARR_DISPOSABLE_PG_DIR="${CARR_DISPOSABLE_PG_DIR:-${TMPDIR:-/tmp}/carr-appsession-check}"
@@ -52,6 +63,8 @@ BASE="${DSN%/carr_h}"
 psql "$BASE/postgres" -q -c "create database subject template carr_h"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION"
 echo "migration 0204 applied (its own apply-time assertions passed)"
+psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_ISSUER"
+echo "migration 0206 applied (the minting credential is chosen and asserted)"
 
 # Run TWICE. The suite must be re-runnable; a contract that only passes against
 # a virgin database is testing ordering, not the substrate.
