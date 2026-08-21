@@ -134,6 +134,21 @@ echo "grandfathered database brought forward through the 0244 backfill"
 # refuses what the database refuses -- so the exact SQL the Worker sends had no
 # coverage anywhere. Runs against a TEMPLATE COPY taken now, so the rows it
 # writes cannot colour the contract suite's global acceptance counts.
+# AND A FIXTURE FOR THE "NOTHING QUALIFIES" VERDICT, taken at the same moment
+# and for the same reason: the migrations are applied, every apply-time probe
+# has rolled itself back, and not one row of qualifying evidence exists. That is
+# the exact state tools/phase4-qualification.py was written to catch and the one
+# state production cannot be put into on purpose.
+psql "$BASE/postgres" -q -c "create database nothing_qualifies template subject"
+
+# AND THE FIXTURE THAT ISOLATES THE EMPTY-INVENTORY CLAUSE. See that file's own
+# header: on any ordinary database six of the verifier's seven NOT-READY reasons
+# are true at once, so a deleted clause is unobservable. This one satisfies every
+# other clause and records no Drive dependency at all.
+psql "$BASE/postgres" -q -c "create database empty_but_accepted template subject"
+psql "$BASE/empty_but_accepted" -v ON_ERROR_STOP=1 -q -f "$REPO/mcp-server/test/db/empty_inventory_fixture.sql"
+echo "empty-but-accepted fixture built (no Drive dependency, everything else satisfied)"
+
 psql "$BASE/postgres" -q -c "create database producer template subject"
 ( cd "$REPO/mcp-server" && CARR_TEST_DSN="$BASE/producer" \
     node --test test/receipt-producer-live.test.mjs )
@@ -144,3 +159,84 @@ echo "producer exercised against a real database"
 "$PYBIN" "$SUITE" "$BASE/subject"
 echo "--- second run, same database ---"
 "$PYBIN" "$SUITE" "$BASE/subject"
+
+# ══════════════════════════════════════════════════════════════════════════
+# THE TWO RECORD-LAYER VERIFIERS, against fixtures for BOTH verdicts.
+#
+# WHY THIS BLOCK EXISTS. tools/phase4-qualification.py and
+# tools/drive-retirement-verifier.py were referenced by no test, no gate and no
+# script -- not one line in the repository ran either of them. Their exit codes
+# are the entire product: 0 means "deployed and qualifying" or "ready", 1 means
+# the guarantees are not load-bearing. Delete the live-qualifying check from the
+# first and a deployed-and-qualifying-nothing database flips from FAIL/exit 1 to
+# PASS/exit 0 with nothing anywhere to notice.
+#
+# BOTH VERDICTS, NOT JUST THE HAPPY ONE. A gate that only ever runs the passing
+# fixture cannot tell a working verifier from one that returns 0 unconditionally
+# -- which is the same "a gate that can only say yes" shape these tools exist to
+# refuse. So each runs twice: once where the answer must be no, once where it
+# must be yes.
+#
+# CARR_QUALIFICATION_DSN IS SET EXPLICITLY ON EVERY INVOCATION. Both tools now
+# refuse to guess a target rather than defaulting to production, but this block
+# does not lean on that: it names the disposable database every time.
+# AND THE EXIT CODE IS NOT ALWAYS ENOUGH. The verifier reports NOT READY for
+# seven reasons, and on an ordinary fresh database six are true at once — so
+# deleting one clause changed nothing observable: still exit 1, just for a
+# different reason. Found exactly that way, by a mutant that survived this very
+# block. Where a clause is the SUBJECT of a check, the fifth argument names the
+# phrase that clause raises, which is the same "a refusal names WHICH bar was
+# not met" discipline the contract suite's refuses() enforces.
+verifier_says() {
+  local want="$1" tool="$2" db="$3" why="$4" saying="${5:-}"
+  local out rc
+  set +e
+  out="$(CARR_QUALIFICATION_DSN="$BASE/$db" "$PYBIN" "$REPO/tools/$tool" 2>&1)"
+  rc=$?
+  set -e
+  if [ "$rc" -ne "$want" ]; then
+    printf '%s\n' "$out"
+    echo "GATE FAILED: $tool against '$db' exited $rc, expected $want — $why" >&2
+    exit 1
+  fi
+  if [ -n "$saying" ] && ! printf '%s' "$out" | grep -q -- "$saying"; then
+    printf '%s\n' "$out"
+    echo "GATE FAILED: $tool against '$db' exited $want but never said: $saying" >&2
+    echo "             The right verdict for the wrong reason is not a passing check." >&2
+    exit 1
+  fi
+  echo "  ok  $tool on '$db' exited $want ($why)"
+}
+
+# AND NEITHER TOOL MAY GUESS A TARGET. Both used to take --project
+# default="production", so a run with no environment and no argument opened a
+# PRODUCTION connection — which is what happened during the review that found
+# it. This is the regression guard for that fix, and it is the reason this whole
+# block can exist at all: without it, wiring these tools into a gate would mean
+# wiring a possible production connection into a gate.
+#
+# DELIBERATELY NOT MUTATION-TESTED, and this is the honest reason. Proving this
+# guard by re-adding the production default would make the tool call
+# tools/db-tap.py, which shells out to neonctl. That is a live Neon call, which
+# this work is not permitted to make, so the mutant is named here and left
+# unrun rather than quietly skipped.
+for guessing_tool in phase4-qualification.py drive-retirement-verifier.py; do
+  set +e
+  guess_out="$(env -u CARR_QUALIFICATION_DSN "$PYBIN" "$REPO/tools/$guessing_tool" 2>&1)"
+  guess_rc=$?
+  set -e
+  if [ "$guess_rc" -ne 2 ] || ! printf '%s' "$guess_out" | grep -q "REFUSING TO GUESS A TARGET"; then
+    printf '%s\n' "$guess_out"
+    echo "GATE FAILED: $guessing_tool with no target exited $guess_rc; it must exit 2 and refuse" >&2
+    echo "             A default target here is a default PRODUCTION connection." >&2
+    exit 1
+  fi
+  echo "  ok  $guessing_tool refuses to guess a target (exit 2)"
+done
+
+echo "--- record-layer verifiers, both verdicts ---"
+verifier_says 1 phase4-qualification.py nothing_qualifies   "a deployed substrate with NOTHING qualifying must FAIL; this is the state the tool exists for"
+verifier_says 0 phase4-qualification.py subject   "the substrate is deployed and the suite above wrote qualifying evidence"
+verifier_says 1 drive-retirement-verifier.py nothing_qualifies   "no operational Drive dependency on record must be NOT READY; nothing proven about nothing is not proof"
+verifier_says 1 drive-retirement-verifier.py empty_but_accepted   "the dangerous empty case: everything satisfied EXCEPT an inventory, so the empty-inventory clause is the only thing that can refuse"   "no operational Drive dependencies are on record"
+verifier_says 0 drive-retirement-verifier.py subject   "every operational dependency retired on proven receipts, with an authority acceptance and a bound inventory"

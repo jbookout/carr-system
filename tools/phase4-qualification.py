@@ -104,7 +104,16 @@ def counts(cur, table, since_hours):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--project", default="production")
+    # NO DEFAULT TARGET. This argument used to default to "production", so a
+    # run with CARR_QUALIFICATION_DSN unset and no --project opened a
+    # PRODUCTION connection -- which is exactly what happened during the review
+    # that found this, and the reason it is a defect rather than a preference.
+    # The tool is read-only, so nothing was harmed; the point is that reaching
+    # production must be something someone TYPED, never what happens when they
+    # typed nothing. Naming --project production still works and still means it.
+    ap.add_argument("--project", default=None,
+                    help="deployment to resolve a DSN for; REQUIRED unless "
+                         "CARR_QUALIFICATION_DSN names a target")
     ap.add_argument("--branch", default=None)
     ap.add_argument("--since-hours", type=int, default=24,
                     help="window for the live check (default 24)")
@@ -116,6 +125,12 @@ def main():
     # production cannot be put into on purpose. Unset in every real run.
     url = os.environ.get("CARR_QUALIFICATION_DSN")
     target_label = args.project if not url else "LOCAL (CARR_QUALIFICATION_DSN)"
+    if not url and not args.project:
+        print("REFUSING TO GUESS A TARGET: neither CARR_QUALIFICATION_DSN nor "
+              "--project was given.\n  --project production  reaches production, "
+              "deliberately.\n  CARR_QUALIFICATION_DSN=...  points at a disposable "
+              "local cluster.\nThere is no default, on purpose.", file=sys.stderr)
+        return 2
     if not url:
         # db-tap.py's filename is not a legal module name, so its DSN function is
         # loaded by path. Reused rather than reimplemented: it is the one place
