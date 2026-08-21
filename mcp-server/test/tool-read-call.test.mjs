@@ -158,6 +158,15 @@ test("mcp.js: read-call recording lives ONLY in the read branch, never in the wr
   const writeBranch = src.slice(src.indexOf("// writes: real transaction on the writer pool"));
   assert.doesNotMatch(writeBranch, /recordReadCall|tool_read_call/,
     "the write path must stay exactly as it was — read-call recording belongs to reads only");
+  // The old rule was absolute: ALWAYS schedule, never await. It is now split,
+  // and the split is the point. A LEGACY read still schedules, because its
+  // evidence could never be cited and failing the read would cost availability
+  // for no integrity. A QUALIFYING read awaits, because Phase 4 asks a source
+  // claim to rest on a record that exists, and a best-effort write made after
+  // the response is already on the wire may simply never exist.
   assert.match(src, /env\.ctx\?\.waitUntil\?\.\(recordReadCall\(/,
-    "recording must be scheduled via ctx.waitUntil so it never adds latency to the read");
+    "a legacy read must still be scheduled, so recording adds no latency to it");
+  assert.match(src, /await recordReadCallDurable\(/,
+    "a read carrying an authenticated session must CONFIRM its evidence before "
+    + "returning a result");
 });

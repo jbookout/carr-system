@@ -356,6 +356,31 @@ export function readCallInsertSQL(actor, verb, ok, errorKind) {
 // NEVER THROWS: a logging failure must not become a read failure, so any
 // rejection from insertFn is swallowed here, not propagated to the caller
 // that scheduled this via ctx.waitUntil.
+/** The strict twin of recordReadCall, for a read whose evidence will be cited.
+ *
+ * recordReadCall NEVER throws, by design — it exists to keep a logging failure
+ * from becoming a read failure. That is exactly wrong for a qualifying read: if
+ * the evidence cannot be written, the read must not report success, because the
+ * alternative is a caller who believes a provenance record exists when it does
+ * not. This one throws a named ToolError instead, so the failure is visible to
+ * the caller rather than discovered later by its absence.
+ */
+export async function recordReadCallDurable(insertFn, actor, verb, ok, errorKind) {
+  const { text, params } = readCallInsertSQL(actor, verb, ok, errorKind);
+  try {
+    await insertFn(text, params);
+  } catch (e) {
+    throw new ToolError({
+      error: "read_evidence_not_recorded",
+      verb,
+      hint: "this read is bound to an authenticated session, so its evidence must be "
+          + "durable before the result is returned; the evidence write failed and the "
+          + "result is withheld rather than reported without a record",
+      detail: String(e?.message || e).slice(0, 200),
+    });
+  }
+}
+
 export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
   const { text, params } = readCallInsertSQL(actor, verb, ok, errorKind);
   try {
@@ -469,22 +494,66 @@ export async function callTool(env, actor, name, args, profile = "full") {
   if (!tool.write) {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
-    // Record AFTER the response is ready, via ctx.waitUntil, so recording never
-    // adds latency to the read the caller is waiting on. ok/errorKind are
-    // metadata only — never the result itself, never args.
+    // HOW READ EVIDENCE IS RECORDED, AND WHY IT DEPENDS ON THE READ.
+    //
+    // This used to be one rule: schedule the record through ctx.waitUntil and
+    // swallow any failure, so recording could never slow or fail a read. That
+    // was a deliberate choice and it is still the right one for MOST reads.
+    // It cannot be the right one for a read whose evidence will be CITED —
+    // Phase 4 asks a source claim to rest on a durable record, and a record
+    // written on a best-effort basis after the response is already on the wire
+    // is not durable. It may simply never exist, and nothing would say so.
+    //
+    // So the rule is now split by whether the read can ever qualify:
+    //
+    //   QUALIFYING READ (the caller carries an authenticated session) — the
+    //   evidence is written and CONFIRMED before the response is returned. It
+    //   costs one write round trip, and a read can now fail on an audit write
+    //   that previously could not fail it. That is the price of a provenance
+    //   claim that holds.
+    //
+    //   LEGACY READ (no session) — unchanged. Its evidence could never be cited
+    //   whatever happened to it, so failing the read would be an availability
+    //   loss with no integrity gain. Scheduled, swallowed, exactly as before.
+    //
+    // ATOMICITY IS NOT REACHABLE HERE AND IS ALSO NOT NEEDED. Reads run on a
+    // one-shot reader client with no transaction, and the audit insert goes to
+    // a different credential entirely, so the two cannot share a transaction
+    // without moving every read onto the writer pool. They do not need to: a
+    // read produces no row of its own, so the audit row IS the operation's
+    // record and there is no second row for it to disagree with. The only
+    // failure this leaves is recording a read whose response never reached the
+    // caller, which errs toward over-recording rather than under-recording.
     let ok = true, errorKind = null;
+    const insertFn = env?.DATABASE_URL_WRITER
+      ? (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params)
+      : null;
+    let result;
     try {
-      return await executeRegisteredTool(client, actor, name, args || {});
+      result = await executeRegisteredTool(client, actor, name, args || {});
     } catch (e) {
       ok = false;
       errorKind = e instanceof ToolError ? String(e.payload?.error || "tool_error").slice(0, 64) : "internal_error";
+      // A failed read still records, and an audit failure here is swallowed on
+      // purpose: the caller is already being told the read failed, and
+      // replacing that with a logging error would hide the real cause.
+      if (insertFn) {
+        if (actor?.application_session_id) {
+          await recordReadCall(insertFn, actor, name, ok, errorKind);
+        } else {
+          env.ctx?.waitUntil?.(recordReadCall(insertFn, actor, name, ok, errorKind));
+        }
+      }
       throw e;
-    } finally {
-      if (env?.DATABASE_URL_WRITER) {
-        const insertFn = (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params);
+    }
+    if (insertFn) {
+      if (actor?.application_session_id) {
+        await recordReadCallDurable(insertFn, actor, name, ok, errorKind);
+      } else {
         env.ctx?.waitUntil?.(recordReadCall(insertFn, actor, name, ok, errorKind));
       }
     }
+    return result;
   }
 
   // Writes use the routine writer pool except the two authority operations,
