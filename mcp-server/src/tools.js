@@ -19,9 +19,10 @@ import { authorizationClassForActor, organizationTenantForActor, personalScopeFo
 
 // ---------- envelope helpers ----------
 
-export class ToolError extends Error {
-  constructor(payload) { super(payload.error); this.payload = payload; }
-}
+// Defined in a leaf module so modules tools.js depends on can throw typed,
+// self-naming failures too; re-exported here so existing imports keep working.
+import { ToolError } from "./tool-error.js";
+export { ToolError };
 
 // DEFECT 2, HALF (b) (found 2026-08-13, decision 7026246b): a write whose bad
 // input reaches the database raw (an enum this file never learned to validate,
