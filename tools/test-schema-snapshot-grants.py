@@ -44,6 +44,7 @@ from schema_snapshot_grants import (
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
+GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 
 # The app roles the migrations grant to. neondb_owner may appear as a membership
 # grantee only (0005/0006 bundle it the roles), never as an ACL grantee: its own
@@ -163,6 +164,16 @@ def main():
     check("0006's membership bundle survives (exporter is reader-plus)",
           any(ln == "grant carr_reader to carr_exporter;"
               for _, ln in grant_lines))
+
+    generator = open(GENERATOR).read()
+    membership_query = re.search(
+        r"select distinct format\('grant %s to %s;', gr\.rolname, mem\.rolname\)"
+        r".*?from pg_auth_members m.*?order by 1;",
+        generator,
+        re.S,
+    )
+    check("membership renderer de-duplicates only identical rendered lines",
+          membership_query is not None)
 
     # THE WIDENING GUARD. Every grantee in the file must be an app role —
     # or neondb_owner, on membership lines only. Anything else means some
