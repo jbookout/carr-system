@@ -1515,10 +1515,25 @@ def cmd_release(args) -> int:
     elif not args.key:
         print(f"ops-record: release {args.action} needs --key", file=sys.stderr)
         return 2
-    if args.action == "approve" and args.actor:
+    if args.action in ("approve", "staging-approve") and args.actor:
         print("ops-record: approval identity is not a caller field; Joe is derived "
               "from CARR_DB_AUTHORITY_JOE_URL", file=sys.stderr)
         return 2
+    if args.action == "staging-approve" and args.environment != "staging":
+        print("ops-record: release staging-approve requires --environment staging", file=sys.stderr)
+        return 2
+    approval_key = None
+    if args.action in ("approve", "staging-approve"):
+        if not args.plan_hash or not args.idempotency_key:
+            print(f"ops-record: release {args.action} requires --plan-hash and "
+                  "--idempotency-key; Joe identity comes from the authority "
+                  "credential, never --actor", file=sys.stderr)
+            return 2
+        try:
+            approval_key = str(uuid.UUID(args.idempotency_key))
+        except ValueError:
+            print("ops-record: approval idempotency key is not a UUID", file=sys.stderr)
+            return 2
 
     manifest = {}
     if getattr(args, "manifest", None):
@@ -1570,7 +1585,7 @@ def cmd_release(args) -> int:
             return 2
 
     try:
-        connection_kind = "authority" if args.action == "approve" else "write"
+        connection_kind = "authority" if args.action in ("approve", "staging-approve") else "write"
         with connect(connection_kind) as conn, conn.cursor() as cur:
             if args.action == "candidate":
                 sid = service_id(cur, args.service)
@@ -1681,6 +1696,13 @@ def cmd_release(args) -> int:
                             where git_sha = %s and environment = %s
                               and state in ('approved','deploying','verifying')
                               and approval_expires_at > now()
+                              and exists (
+                                select 1 from ops.staging_release_approval_receipt a
+                                 where a.id=ops.release.staging_approval_receipt_id
+                                   and a.release_id=ops.release.id and a.plan_hash=ops.release.plan_hash
+                                   and a.approved_by_actor='joe'
+                                   and a.approved_at=ops.release.approved_at
+                                   and a.approval_expires_at=ops.release.approval_expires_at)
                             order by approved_at desc
                             limit 1""",
                         (args.sha, args.environment))
@@ -1707,8 +1729,9 @@ def cmd_release(args) -> int:
                               f"    tools/release-manifest.py build --sha {args.sha} "
                               "> out/release.json\n"
                               "    tools/ops-record.py release candidate --key <key> "
-                              "--manifest out/release.json\n"
-                              "    tools/ops-record.py release approve --key <key> "
+                              "--environment staging --manifest out/release.json\n"
+                              "    tools/ops-record.py release staging-approve --key <key> "
+                              "--environment staging "
                               "--plan-hash <hash> --idempotency-key <uuid>",
                               file=sys.stderr)
                     return 3
@@ -1814,19 +1837,11 @@ def cmd_release(args) -> int:
                 print(f"{args.key} {row[0]}")
                 return 0
 
-            if args.action == "approve":
-                if not args.plan_hash or not args.idempotency_key:
-                    print("ops-record: release approve requires --plan-hash and "
-                          "--idempotency-key; Joe identity comes from the authority "
-                          "credential, never --actor", file=sys.stderr)
-                    return 2
-                try:
-                    approval_key = str(uuid.UUID(args.idempotency_key))
-                except ValueError:
-                    print("ops-record: approval idempotency key is not a UUID", file=sys.stderr)
-                    return 2
+            if args.action in ("approve", "staging-approve"):
+                approval_function = ("ops.approve_staging_release" if args.action == "staging-approve"
+                                     else "ops.approve_program5_release")
                 cur.execute(
-                    "select ops.approve_program5_release(%s,%s,%s::uuid,%s,%s,%s)",
+                    f"select {approval_function}(%s,%s,%s::uuid,%s,%s,%s)",
                     (args.key, args.plan_hash, approval_key, args.expires_hours,
                      args.verifier, args.verifier_evidence),
                 )
@@ -2051,7 +2066,7 @@ def main() -> int:
                     default="production")
 
     rel = sub.add_parser("release", help="record, approve or read one release (P0-1)")
-    rel.add_argument("action", choices=["candidate", "approve", "require", "complete",
+    rel.add_argument("action", choices=["candidate", "approve", "staging-approve", "require", "complete",
                                         "abandon", "show"])
     rel.add_argument("--sha", help="require only: the SHA about to ship")
     rel.add_argument("--provider", help="Production provider, e.g. cloudflare-workers")
@@ -2074,10 +2089,10 @@ def main() -> int:
     rel.add_argument("--rollback-plan", help="ref to the rollback runbook")
     rel.add_argument("--work-request", help="the Work Request this release delivers")
     rel.add_argument("--expires-at", help="when this candidate's evidence goes stale")
-    rel.add_argument("--plan-hash", help="approve only: the hash the approver read")
-    rel.add_argument("--actor", help="approve only: deprecated; identity is DB-derived")
+    rel.add_argument("--plan-hash", help="approve/staging-approve: the hash the approver read")
+    rel.add_argument("--actor", help="approve/staging-approve: deprecated; identity is DB-derived")
     rel.add_argument("--idempotency-key",
-                     help="approve only: UUID binding an exact Joe approval replay")
+                     help="approve/staging-approve: UUID binding an exact Joe approval replay")
     rel.add_argument("--verifier", help="candidate, approve, or complete: who verified; never the maker")
     rel.add_argument("--verifier-evidence", dest="verifier_evidence",
                      help="candidate, approve, or complete: ref to that verification")
@@ -2085,7 +2100,7 @@ def main() -> int:
                                       "ship. Required unless --superseded-by names "
                                       "the release that replaced it.")
     rel.add_argument("--expires-hours", type=int, default=24,
-                     help="approve only: how long the approval stays live. An "
+                     help="approve/staging-approve: how long the approval stays live. An "
                           "approval that never expires is how a plan-hash check "
                           "gets bypassed by time.")
 
