@@ -165,12 +165,8 @@ cat > "$TMP" <<'ROLES'
 -- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
--- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0223
--- ages into the ledger. Until then the migration must remain the only creator;
--- move that NOLOGIN capability bundle into this active preamble and the grant
--- catalog queries only on the snapshot refresh that records 0223 as applied.
 --
--- ALL SEVEN current production carr_ roles are accounted for. Six are created
+-- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
 -- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
