@@ -290,6 +290,35 @@ if portable:
 PYEOF
   }
 
+  # RUN THEM CONCURRENTLY. This loop was strictly sequential, and measured on
+  # 2026-08-21 the gates class was 798s of an 816s run — 98% of CI, across 226
+  # suites whose mean is about three and a half seconds. No single suite
+  # dominates, so there is nothing to optimise individually; the cost is simply
+  # that 226 independent processes were made to wait for each other.
+  #
+  # Same 226 suites at a pool of four finish in 177s, a 4.5x cut, and billed
+  # Actions minutes are wall time, so this is the whole saving.
+  #
+  # SAFE TO PARALLELISE, VERIFIED RATHER THAN ASSUMED. Every suite already
+  # writes to its own $LOGDIR/gate-<name>.log, so nothing shares an output
+  # path. The concurrency question is shared EXTERNAL state — ephemeral Neon
+  # branches, fixed temp paths — and it was answered by running the full set
+  # four-way and diffing outcomes against the sequential run. Exactly one suite
+  # differed, migration-number-contract-selftest.py, and it fails standalone
+  # too: another worktree holds an unregistered 0227 collision. A pre-existing
+  # failure is not a collision, so the parallel-safe count is 226 of 226.
+  #
+  # THE POOL IS SIZED TO THE MACHINE, not to a guess. A hosted runner has four
+  # cores; this Mac has more, and hard-coding either number would make one of
+  # them wrong.
+  local jobs
+  jobs="$( (command -v nproc >/dev/null 2>&1 && nproc) \
+           || sysctl -n hw.ncpu 2>/dev/null || echo 4 )"
+  [ "$jobs" -ge 1 ] 2>/dev/null || jobs=4
+
+  # Phase 1: decide what runs. Exclusions stay SEQUENTIAL and print in glob
+  # order, so the announced-exception output is byte-identical to before.
+  local -a to_run=()
   for t in ops/*-selftest.py tools/test-*.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
@@ -299,10 +328,66 @@ PYEOF
       printf '        \033[33mnot run\033[0m  %s — %s\n' "$base" "$why" >&2
       continue
     fi
+    to_run+=("$t")
+  done
+
+  # SOME SUITES CANNOT SHARE THE TREE, AND THE REASON IS SPECIFIC RATHER THAN
+  # general flakiness. machine-sync-audit-selftest.py snapshots `git status`
+  # before and after the audit and asserts the diff is empty — that is how it
+  # proves the audit is read-only. Any suite running concurrently that writes a
+  # tracked file, even for a moment, appears in that diff and fails a check
+  # about something it never touched. Found the honest way: it passes 16/16
+  # standalone and failed inside the pool, intermittently, which is worse than
+  # failing every time.
+  #
+  # So every suite that reads or writes the working tree runs SEQUENTIALLY and
+  # alone, before the pool starts. Sixteen of 226, selected by grepping for a
+  # `git status` / --porcelain read rather than by guessing at names, because a
+  # list assembled from intuition is a list that silently misses one.
+  local SERIAL_RE='^(commit-claims|delegation-gate|gate-baseline-cochange|git-writer-gate|machine-sync-audit|main-commit-gate|release-manifest|repo-config|session-brief|session-crm-neon|staging-attribution-gate|staging-observation-tracker|sync-enforcement-map-commit)-selftest\.py$|^test-(review-council|worktree-plumb|worktree-sweep)\.py$'
+  local -a serial=() parallel=()
+  local t_split
+  for t_split in "${to_run[@]}"; do
+    if printf '%s' "$(basename "$t_split")" | grep -qE "$SERIAL_RE"; then
+      serial+=("$t_split")
+    else
+      parallel+=("$t_split")
+    fi
+  done
+
+  # Phase 2a: the tree-sensitive ones, one at a time, nothing else running.
+  local t_ser
+  for t_ser in "${serial[@]}"; do
+    local sb; sb="$(basename "$t_ser")"
+    "$PY" "$t_ser" >"$LOGDIR/gate-$sb.log" 2>&1
+    echo $? >"$LOGDIR/gate-$sb.rc"
+  done
+
+  # Phase 2: run the pool. Each child writes its own log and its own rc file;
+  # nothing is interpreted here, so a child cannot race the reporting below.
+  #
+  # xargs -P RATHER THAN BACKGROUND JOBS AND `wait -n`. A hand-rolled pool needs
+  # `wait -n` to keep the slots full as each child exits, and `wait -n` arrived
+  # in bash 4.3 — macOS still ships 3.2, which is the bash this very script runs
+  # under on both partner Macs. The portable fallback is to launch a batch and
+  # wait for ALL of it, which makes every batch as slow as its slowest member;
+  # with one suite at 51s against a 3.5s mean that gives back most of the win.
+  # xargs -P streams properly and is present on macOS and on the runners.
+  printf '%s\n' "${parallel[@]}" | CI_PY="$PY" CI_LOGDIR="$LOGDIR" xargs -P "$jobs" -n 1 sh -c '
+      p="$1"; b=$(basename "$p")
+      "$CI_PY" "$p" >"$CI_LOGDIR/gate-$b.log" 2>&1
+      echo $? >"$CI_LOGDIR/gate-$b.rc"
+    ' _
+
+  # Phase 3: report in the SAME ORDER as the sequential loop did. Parallel
+  # execution with parallel reporting would interleave failure tails from
+  # different suites, and a log whose line order changes run to run cannot be
+  # diffed against a previous run — which is how most of this repo's checks
+  # are actually read.
+  for t in "${to_run[@]}"; do
+    local base; base="$(basename "$t")"
     count=$((count+1))
-    local grc
-    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$t"
-    grc=$?
+    local grc; grc="$(cat "$LOGDIR/gate-$base.rc" 2>/dev/null || echo 1)"
     # EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE. It is EX_CONFIG, and it is
     # already the repo's convention: bin/type-check.sh's header states it and the
     # types class above honours it. This loop counted every nonzero the same, so
