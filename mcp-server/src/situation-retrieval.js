@@ -121,8 +121,14 @@ export async function retrievalVisibilityActorId(c, actor) {
   // separate identities. joe-local/codex/hermes UUIDs must never become the
   // visibility selector. The sponsor was derived by the authenticated server
   // door; resolve that exact human row here and nowhere from tool arguments.
+  // Through a definer function, NOT the table. carr_reader has no grant on
+  // public.actor and must not get one; this query ran directly on the read
+  // connection from 2026-08-17 and returned "permission denied for table actor"
+  // for every doctrine search until migration 0223. The function hard-filters
+  // to active humans, so the reader resolves a sponsor without being able to
+  // read, enumerate, or select anything else from the identity table.
   const found = await c.query(
-    `select id from actor where slug=$1 and kind='human' and active=true`,
+    `select retrieval_visibility_actor_id($1) as id where retrieval_visibility_actor_id($1) is not null`,
     [scope.sponsor],
   );
   // Names the row count, because 0 and 2 are different production faults and a
@@ -145,10 +151,34 @@ export async function searchDoctrineSituations(c, actor, args) {
   const result = await c.query(
     `select * from search_doctrine_situations($1, $2::uuid, $3::text[], $4, $5)`,
     [args.q, actorId, args.content_classes || null, args.limit || 20, policy]);
+  const policyId = result.rows[0]?.provenance?.policy_id || policy || "default";
+
+  // The query log is written HERE, on the write credential, and never awaited.
+  // It used to ride inside search_doctrine_situations as a data-modifying CTE,
+  // which made this read a write and killed every call wherever writes are
+  // refused (migration 0223). The log is worth keeping — curation reads it to
+  // find golden misses — but it is worth strictly less than the answer, so a
+  // failure to log must never reach the caller.
+  if (c.sideWrite) {
+    const bands = { high: 0, medium: 0, low: 0 };
+    for (const row of result.rows) {
+      const score = Number(row.final_score);
+      if (score >= 0.75) bands.high += 1;
+      else if (score >= 0.25) bands.medium += 1;
+      else bands.low += 1;
+    }
+    c.sideWrite(
+      "select log_retrieval_query($1, $2, $3::uuid[], $4::jsonb, $5, $6, $7)",
+      [args.q, result.rows.length, result.rows.map(r => r.section_id),
+       JSON.stringify(bands), policyId,
+       result.rows[0]?.provenance?.policy_version ?? null,
+       result.rows.length > 0]);
+  }
+
   return {
     ok: true,
     query: args.q,
-    policy_id: result.rows[0]?.provenance?.policy_id || policy || "default",
+    policy_id: policyId,
     hits: result.rows,
     total: result.rows.length,
     generated_text: false,

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { TOOLS } from "../src/tools.js";
 
@@ -13,7 +16,7 @@ test("registered search-doctrine resolves joe-local sponsorship to Joe's human a
   const client = {
     query: async (sql, params) => {
       calls.push({ sql, params });
-      if (/select id from actor/.test(sql)) return { rows: [{ id: "joe-human-id" }] };
+      if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "joe-human-id" }] };
       return { rows: [{ section_key: "diagnosis-checklist", final_score: 1 }] };
     },
   };
@@ -28,9 +31,16 @@ test("registered search-doctrine resolves joe-local sponsorship to Joe's human a
   assert.ok(retrievalCall, "search-doctrine must call the shared database ranker");
   assert.deepEqual(retrievalCall.params,
     ["record layer outage diagnosis", "joe-human-id", ["runbook"], 3, null]);
-  const scopeCall = calls.find(call => /select id from actor/.test(call.sql));
+  const scopeCall = calls.find(call => /retrieval_visibility_actor_id/.test(call.sql));
   assert.deepEqual(scopeCall.params, ["joe"]);
-  assert.match(scopeCall.sql, /kind='human' and active=true/);
+  // The active-human constraint still binds; migration 0223 moved it INSIDE
+  // retrieval_visibility_actor_id, because filtering on actor.kind and
+  // actor.active from the read connection is precisely what returned
+  // "permission denied for table actor" for every search. The function body
+  // carries the predicate now, and the migration test below asserts it there.
+  assert.doesNotMatch(scopeCall.sql, /\bfrom\s+actor\b/,
+    "the read path must not select from the actor table directly");
+  assert.match(scopeCall.sql, /retrieval_visibility_actor_id/);
   assert.equal(calls.some(call => /ts_rank_cd|doctrine_revision/.test(call.sql)), false,
     "the verb must not retain a duplicate ranking query");
 });
@@ -39,7 +49,7 @@ test("registered search-doctrine resolves Dell sponsorship only to Dell's human 
   const calls = [];
   const client = { query: async (sql, params) => {
     calls.push({ sql, params });
-    if (/select id from actor/.test(sql)) return { rows: [{ id: "dell-human-id" }] };
+    if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "dell-human-id" }] };
     return { rows: [] };
   } };
   await TOOLS["search-doctrine"].handler(client, sponsored("codex", "dell", "oauth-google"), {
@@ -59,7 +69,7 @@ test("unsponsored search is shared-only and invalid required sponsorship is refu
   await TOOLS["search-doctrine"].handler(sharedClient,
     { slug: "codex", human: false, via: "agent-token", sponsoring_human_slug: null },
     { q: "shared doctrine", limit: 2 });
-  assert.equal(sharedCalls.some(call => /select id from actor/.test(call.sql)), false);
+  assert.equal(sharedCalls.some(call => /retrieval_visibility_actor_id/.test(call.sql)), false);
   assert.deepEqual(sharedCalls[0].params, ["shared doctrine", null, null, 2, null]);
 
   let queried = false;
@@ -100,7 +110,8 @@ test("unsponsored search is shared-only and invalid required sponsorship is refu
     },
   );
   assert.equal(inactiveCalls.length, 1);
-  assert.match(inactiveCalls[0].sql, /kind='human' and active=true/);
+  assert.match(inactiveCalls[0].sql, /retrieval_visibility_actor_id/,
+    "sponsor resolution goes through the definer function, not the actor table");
 });
 
 test("situation curation verbs are registered in the MCP tool surface", () => {
@@ -109,4 +120,20 @@ test("situation curation verbs are registered in the MCP tool surface", () => {
     "propose-retrieval-mapping", "propose-retrieval-retirement",
     "approve-retrieval-proposals", "retire-retrieval-curation",
   ]) assert.ok(TOOLS[name], `${name} is registered`);
+});
+
+test("the visibility resolver still constrains to an active human, in the migration", () => {
+  // The predicate this test used to assert on the WIRE now lives in SQL. If it
+  // is ever dropped there, the read path would resolve any actor row by slug.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const migration = fs.readFileSync(
+    path.join(here, "../../migrations/0223_doctrine_search_reads_without_writing_or_reading_actor.sql"), "utf8");
+  const fn = migration.slice(migration.indexOf("function retrieval_visibility_actor_id"));
+  assert.match(fn, /kind\s*=\s*'human'/, "resolver must still require a human actor");
+  assert.match(fn, /active\s*=\s*true/, "resolver must still require an active actor");
+  assert.match(fn, /security definer/, "the reader depends on definer rights here");
+  assert.match(fn, /grant execute on function retrieval_visibility_actor_id\(text\) to carr_reader/,
+    "carr_reader must be able to call it");
+  assert.doesNotMatch(migration, /grant\s+select\s+on\s+table\s+public\.actor\s+to\s+carr_reader/i,
+    "the fix must not widen the read credential to the identity table");
 });
