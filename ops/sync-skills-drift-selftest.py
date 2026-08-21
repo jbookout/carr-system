@@ -133,6 +133,48 @@ check("the destination is overridable rather than hardcoded",
       "CARR_SKILLS_DST" in body,
       "sync-skills.sh must read CARR_SKILLS_DST so this suite can never touch the real Drive tree")
 
+# ── 6. _to_delete staging is OUTSIDE the mirror entirely (Joe's ruling, 2026-08-21) ──
+#    _to_delete is where a candidate deletion is PARKED for a human ruling rather
+#    than removed, so the mirror has no business touching it in either direction:
+#    it must not push canon's staging onto Drive, and it must not destroy Drive's.
+#    The real case is nested — write-content/graphics/_to_delete/ — so the
+#    exclusion is tested at depth rather than only at the top level.
+with tempfile.TemporaryDirectory() as tmp:
+    src, dst = build(tmp)
+
+    src_staged = os.path.join(src, "skills", "shared-skill", "graphics", "_to_delete")
+    os.makedirs(src_staged)
+    with open(os.path.join(src_staged, "parked-in-canon.b64"), "w") as fh:
+        fh.write("staged on the repo side, awaiting a human ruling\n")
+
+    dst_staged = os.path.join(dst, "skills", "shared-skill", "graphics", "_to_delete")
+    os.makedirs(dst_staged)
+    dst_parked = os.path.join(dst_staged, "parked-on-drive.b64")
+    with open(dst_parked, "w") as fh:
+        fh.write("staged on the projection side, awaiting a human ruling\n")
+
+    r = run(src, dst)
+    check("staging folders are absent from the drift report entirely",
+          "_to_delete" not in r.stdout, r.stdout.strip()[:400])
+    check("two trees differing ONLY inside staging read as identical",
+          "identical" in r.stdout and r.returncode == 0,
+          f"exit {r.returncode}: {r.stdout.strip()[:300]}")
+
+    a = run(src, dst, "--apply")
+    check("--apply leaves a staged file on Drive alone",
+          os.path.exists(dst_parked),
+          "a parked candidate deletion must survive the mirror")
+    check("--apply does not push canon's staging onto Drive",
+          not os.path.exists(os.path.join(dst_staged, "parked-in-canon.b64")),
+          "staging is local to the side it was staged on")
+    check("--apply still mirrors everything outside staging",
+          os.path.exists(os.path.join(dst, "agents", "shared-agent.md")),
+          f"exit {a.returncode}")
+
+check("the exclusion is declared in the script rather than implied",
+      "_to_delete" in body and "--exclude" in body,
+      "sync-skills.sh must pass --exclude for _to_delete on every rsync it runs")
+
 print()
 if failures:
     print(f"sync-skills-drift-selftest: {len(failures)} FAILED — " + "; ".join(failures))
