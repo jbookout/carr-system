@@ -31,6 +31,7 @@ while hosted CI executes them against its already-running local service.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -44,6 +45,15 @@ import psycopg
 from psycopg import sql
 
 REPO = Path(__file__).resolve().parent.parent
+
+# The postgres CLIENT lookup, shared with ops/p1-rebuild-gate.py. Loading by path
+# is how every ops gate reaches tools/db-tap.py, whose hyphenated filename cannot
+# be imported normally.
+_spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
+if _spec is None or _spec.loader is None:
+    sys.exit("release-abandon-selftest: could not load tools/db-tap.py")
+db_tap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(db_tap)
 ABANDON_DB = "abandon_check"
 PROVIDER = "cloudflare-workers"
 PROVIDER_VERSION = "11111111-2222-4333-8444-555555555555"
@@ -63,7 +73,9 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 def psql(dsn, *args):
-    return subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", *args],
+    # Not the bare name: with no client installed that failed as FileNotFoundError
+    # from inside subprocess, naming neither the missing dependency nor the fix.
+    return subprocess.run([db_tap.psql_bin(), dsn, "-v", "ON_ERROR_STOP=1", *args],
                           capture_output=True, text=True, timeout=1800)
 
 

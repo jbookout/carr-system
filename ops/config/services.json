@@ -138,8 +138,8 @@
     },
     {
       "key": "local-briefs",
-      "name": "Local brief pack and review queue",
-      "purpose": "Rebuilds brief-pack and review-queue every business morning.",
+      "name": "Local review queue maintenance",
+      "purpose": "Refreshes the review queue every business morning; legacy brief-pack files are explicit recovery only.",
       "family": "Local Mac edge",
       "criticality": "medium",
       "owner_actor": "joe",

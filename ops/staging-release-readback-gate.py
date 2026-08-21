@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import pathlib
 import subprocess
@@ -21,6 +22,16 @@ try:
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
 except ImportError:
     sys.exit("staging-release-readback-gate: psycopg not installed")
+
+# The postgres CLIENT lookup, shared with ops/p1-rebuild-gate.py. Loading the
+# module by path is how every ops gate reaches tools/db-tap.py, whose filename
+# has a hyphen and cannot be imported normally.
+_REPO = pathlib.Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("db_tap", _REPO / "tools" / "db-tap.py")
+if _spec is None or _spec.loader is None:
+    sys.exit("staging-release-readback-gate: could not load tools/db-tap.py")
+db_tap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(db_tap)
 
 
 PASSES: list[str] = []
@@ -266,7 +277,9 @@ def raw_0222_capture_fixture(dsn: str) -> None:
     isolated = make_conninfo(dsn, dbname=name)
     admin = make_conninfo(dsn, dbname="postgres")
     repo = pathlib.Path(__file__).resolve().parent.parent
-    psql = "psql"
+    # Not the bare name: with no client installed that failed as FileNotFoundError
+    # from inside subprocess, naming neither the missing dependency nor the fix.
+    psql = db_tap.psql_bin()
     try:
         with psycopg.connect(admin, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute(sql.SQL("create database {}").format(sql.Identifier(name)))

@@ -11,8 +11,12 @@
 --
 -- Every check RAISES rather than returning a row, so a failure cannot be
 -- mistaken for output nobody read.
-
-\set ON_ERROR_STOP on
+--
+-- The `\set ON_ERROR_STOP on` line that used to sit here was a psql meta-command,
+-- and db-tap's sql mode no longer runs psql (see _run_sql_in_process). It was
+-- already redundant when it was written — db-tap passed -v ON_ERROR_STOP=1 on the
+-- command line — and stopping on the first error is now structural rather than
+-- requested: the whole script runs inside one transaction that rolls back.
 
 -- 1. It is a real, fully built database, not an empty shell that would pass the
 --    emptiness checks below for the wrong reason.

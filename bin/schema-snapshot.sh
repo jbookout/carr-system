@@ -464,6 +464,15 @@ fi
 #     the lookup returns null and it raises "golden suite digest mismatch".
 #     Found only after adding the two above, because the gate could not reach
 #     this check until it got past the proposals.
+#   * The exact two reviewed ops.enforcement_control_catalog controls are
+#     verified separately and appended as deterministic SQL below — never via
+#     the vocabulary pg_dump. Their fixed implementation/test references,
+#     enforcement classes, and installed/verification metadata contain no
+#     client, deal, event, secret, or runtime usage data. 0194 is already in a
+#     rebuilt snapshot's ledger, so its seed does not replay; without this
+#     controlled block the 0228 lifecycle cannot validate pinned rules. Do not
+#     add rule_control_binding or any receipt/rule table: those are per-rule
+#     history, not bounded internal control configuration.
 #
 # I counted every other table 0135 and 0168 seed, so the next rebuild does not
 # discover a fourth one the same way: doctrine_concept_mapping,
@@ -497,6 +506,55 @@ done
 # shellcheck disable=SC2086
 if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS "$URL" >> "$TMP"; then
   echo "schema-snapshot: could not dump the reference vocabulary — nothing written" >&2
+  exit 1
+fi
+
+# The control catalog is deliberately NOT a --table dump: carrying every row
+# would let arbitrary implementation prose into a tracked snapshot. Verify the
+# two reviewed identities against the source, then append only safely quoted
+# source rows so an applied 0194 ledger cannot hide missing mutable seed rows.
+if ! "$PSQL" -X -q -v ON_ERROR_STOP=1 "$URL" <<'CONTROL_CATALOG_VERIFY'
+do $$
+begin
+  if (select count(*) from ops.enforcement_control_catalog where
+        (control_key='human_authority_runtime'
+         and implementation_ref='migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js'
+         and test_ref='mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py'
+         and enforcement_class='transactional_schema'
+         and installed and verified_at is not null)
+     or (control_key='platform_metering_pre_dispatch'
+         and implementation_ref='lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py'
+         and test_ref='ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py'
+         and enforcement_class='deny_gate'
+         and installed and verified_at is not null)) <> 2 then
+    raise exception 'schema snapshot refused: exact reviewed control catalog is missing or drifted';
+  end if;
+end $$;
+CONTROL_CATALOG_VERIFY
+then
+  echo "schema-snapshot: exact reviewed control catalog is missing or drifted — nothing written" >&2
+  exit 1
+fi
+
+cat >> "$TMP" <<'CONTROL_CATALOG_HEADER'
+-- CARR REVIEWED CONTROL CATALOG (bin/schema-snapshot.sh) — exact two-row seed.
+-- Verified against the source immediately before this block is written. The
+-- following safely quoted rows preserve the source verification and update
+-- timestamps; never dump arbitrary ops.enforcement_control_catalog rows.
+CONTROL_CATALOG_HEADER
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" <<'CONTROL_CATALOG_ROWS' >> "$TMP"
+select format(
+  'insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values (%L,%L,%L,%L,%L,%L::timestamptz,%L::timestamptz) on conflict (control_key) do nothing;',
+  control_key,implementation_ref,test_ref,enforcement_class,installed,
+  to_char(verified_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+  to_char(updated_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
+  from ops.enforcement_control_catalog
+ where control_key in ('human_authority_runtime','platform_metering_pre_dispatch')
+ order by array_position(array['human_authority_runtime','platform_metering_pre_dispatch'],control_key);
+CONTROL_CATALOG_ROWS
+then
+  echo "schema-snapshot: could not render the reviewed control catalog — nothing written" >&2
   exit 1
 fi
 

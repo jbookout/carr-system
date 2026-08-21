@@ -63,7 +63,7 @@ def observed(surface_id: str, *, loaded: set[str], at: str = NOW_TEXT) -> dict:
 
 def healthy_replacement() -> dict:
     return {
-        "workflow_key": "nightly-record-layer", "workflow_version": 2, "healthy": True,
+        "workflow_key": "nightly-record-layer", "workflow_version": 3, "healthy": True,
         "accepted_receipt_refs": ["receipt:shadow", "receipt:canary"],
     }
 
@@ -73,7 +73,7 @@ def receipt_verifier(ref: str) -> dict | None:
     if mode is None:
         return None
     return {"kind": "workflow_acceptance_receipt", "receipt_ref": ref, "workflow_key": "nightly-record-layer",
-            "workflow_version": 2, "mode": mode,
+            "workflow_version": 3, "mode": mode,
             "status": "accepted", "immutable": True}
 
 
@@ -82,7 +82,7 @@ def approval_verifier(ref: str) -> dict | None:
         return None
     return {"kind": "human_authority_receipt", "receipt_ref": ref, "immutable": True,
             "authority_subject": "joe", "action": "disable-legacy-schedule",
-            "subject": {"workflow_key": "nightly-record-layer", "workflow_version": 2,
+            "subject": {"workflow_key": "nightly-record-layer", "workflow_version": 3,
                         "surface_id": "nightly-record-layer.launchd.v1", "locator": "com.carr.nightly-record-layer"},
             "observation_refs": {"pre": "launchd:enabled", "post": "launchd:disabled", "sibling": None}}
 
@@ -106,7 +106,7 @@ def provider_receipt(state: str, ref: str, at: str) -> dict:
 def launchd_receipt(state: str, ref: str, at: str) -> dict:
     return {"kind": "scheduler_observation_receipt", "receipt_ref": ref,
             "surface_id": "nightly-record-layer.launchd.v1", "workflow_key": "nightly-record-layer",
-            "workflow_version": 2, "locator": "com.carr.nightly-record-layer",
+            "workflow_version": 3, "locator": "com.carr.nightly-record-layer",
             "scheduler_kind": "launchd", "scheduler_state": state, "observed_at": at,
             "provider_revision": hashlib.sha256(("launchctl:" + ref).encode()).hexdigest(),
             "source_fingerprint": hashlib.sha256(("launchd-source:" + ref).encode()).hexdigest(),
