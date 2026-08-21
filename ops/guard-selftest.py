@@ -177,8 +177,17 @@ case("sanctioned Worker release wrapper is allowed", bash("./bin/deploy-worker.s
 case("direct Neon branch create is metering-refused",
      bash("neonctl branches create --project-id p --name x"), DENY)
 case("reviewed Neon rebuild wrapper is allowed", bash("python3 ops/p1-rebuild-gate.py"), ALLOW)
-case("direct GitHub workflow dispatch is metering-refused",
-     bash("gh workflow run ci.yml"), DENY)
+# Joe ended the cost restrictions on 2026-08-21: "all i wanted was to stop you
+# from wasting action minutes on testing procedures and just use the action
+# minutes responsibly. now everything is being blocked bc you think you arent
+# allowed to do anything that costs usage or money." A session that cannot
+# re-run a check is not using minutes responsibly, it is unable to work. The
+# rule this enforced is retired, so the assertion is inverted rather than
+# deleted — deleting it would let the block return unnoticed.
+case("dispatching a workflow is allowed; the Actions budget block is retired",
+     bash("gh workflow run ci.yml"), ALLOW)
+case("re-running a check is allowed for the same reason",
+     bash("gh run rerun 12345"), ALLOW)
 case("prose describing a metered dispatch remains inert",
      bash('gh pr create --body "npx wrangler deploy is refused"'), ALLOW)
 

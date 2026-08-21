@@ -1015,7 +1015,21 @@ def delegation_control_plane_write(cmd):
 
 
 def direct_metered_dispatch(cmd):
-    """Refuse paid dispatches that bypass their reviewed budget wrapper.
+    """Refuse paid dispatches that bypass their reviewed deploy wrapper.
+
+    THE ACTIONS BUDGET BLOCK WAS REMOVED, 2026-08-21, on Joe's ruling ending
+    the cost restrictions: "all i wanted was to stop you from wasting action
+    minutes on testing procedures and just use the action minutes responsibly.
+    now everything is being blocked bc you think you arent allowed to do
+    anything that costs usage or money." Refusing `gh workflow run` outright is
+    not responsible use — it is a session that cannot re-run a check it needs.
+    The rule it enforced, requiring a machine-enforced pre-dispatch budget gate
+    on every metered execution, is retired.
+
+    The two patterns that remain are about routing a release through its
+    reviewed wrapper, which is a safety property rather than a budget one: each
+    names a specific script performing admission this guard cannot see, and
+    neither refuses work for costing money.
 
     The wrapper itself is not an escape flag.  The guard sees only the command
     issued by the session; reviewed scripts perform their own in-process
@@ -1028,8 +1042,6 @@ def direct_metered_dispatch(cmd):
          "direct Cloudflare release bypasses bin/deploy-worker.sh"),
         (re.compile(r"\bneonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
          "direct Neon branch create bypasses neon-disposable-branch admission"),
-        (re.compile(r"\bgh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
-         "direct GitHub Actions dispatch bypasses the remote-CI budget gate"),
     )
     for pattern, reason in patterns:
         if pattern.search(executable):
