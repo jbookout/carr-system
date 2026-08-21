@@ -7822,7 +7822,14 @@ Object.assign(TOOLS, {
     },
   },
   "call-verb": {
-    write: true,   // rides the writer path so inner writes work; inner reads work there too
+    // write:true here decides PROFILE and PERMISSION treatment, NOT the database
+    // connection — and the old comment claiming it "rides the writer path" was
+    // wrong in a way that cost a real investigation on 2026-08-21. mcp.js
+    // intercepts this verb by name and re-enters the dispatcher as the INNER
+    // verb, so the inner verb's own write flag picks reader or writer. A
+    // call-verb wrapping a read verb lands on the READER connection and fails
+    // exactly as the direct call would; it did, on the doctrine-search outage.
+    write: true,
     description: "Invoke ANY live verb by name — the deploy-gap passthrough. A freshly deployed verb is callable here the moment the Worker ships, no connector reconnect needed; its first-class tool appears at your next session start. Takes {verb, args} where args is the inner verb's own argument object (including its idempotency_key for writes). All profile and permission checks apply to the inner verb exactly as a direct call.",
     inputSchema: { type: "object", properties: {
       verb: { type: "string" },

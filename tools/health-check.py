@@ -1116,8 +1116,15 @@ _nightly_log = os.path.expanduser("~/carr-system/out/nightly.log")
 # just ended is the honest reading under interleaving: it can over-attribute
 # between two overlapping runs, never lose one.
 try:
-    _done: list[tuple[bool, list[str]]] = []   # newest-last: (clean?, failed step labels)
+    # BLOCKED is tracked beside FAIL, never folded into it (2026-08-21). A step
+    # that refused for want of a canonical seam did not run, so reporting the
+    # chain clean and saying nothing else would be the false-healthy reading the
+    # refusal script warned about. It is not a failure either — see the argument
+    # at the 69 branch in bin/nightly.sh. So it gets its own count, printed
+    # beside the verdict on every line below, and it never sets rc.
+    _done: list[tuple[bool, list[str], list[str]]] = []  # newest-last: (clean?, failed, blocked)
     _pending: list[str] = []
+    _blocked: list[str] = []
     _begins = _overlaps = 0
     _open = 0
     for _ln in open(_nightly_log, errors="replace"):
@@ -1128,21 +1135,27 @@ try:
                 _overlaps += 1
         elif "  FAIL  " in _ln:
             _pending.append(_ln.split("  FAIL  ", 1)[1].strip())
+        elif "  BLOCKED  " in _ln:
+            _blocked.append(_ln.split("  BLOCKED  ", 1)[1].strip())
         elif "chain OK" in _ln or "FINISHED WITH FAILURES" in _ln:
-            _done.append(("chain OK" in _ln, _pending))
+            _done.append(("chain OK" in _ln, _pending, _blocked))
             _pending = []
+            _blocked = []
             _open = max(0, _open - 1)
     if not _done:
         print(f"  -- {'nightly chain result':<22} no completed run in the log — the chain "
               f"has not finished since the log was last trimmed")
     else:
-        _last_ok, _last_fails = _done[-1]
+        _last_ok, _last_fails, _last_blocked = _done[-1]
+        _bl_names = sorted({s.split(" (exit")[0] for s in _last_blocked})
+        _bl = (f"  · {len(_bl_names)} step(s) BLOCKED on a missing canonical seam, "
+               f"not counted as failures: {', '.join(_bl_names)}" if _bl_names else "")
         if _last_ok:
-            print(f"  OK {'nightly chain result':<22} last run exited clean, all steps OK")
+            print(f"  OK {'nightly chain result':<22} last run exited clean, all steps OK{_bl}")
         else:
             # how many consecutive completed runs, newest-first, ended red
             _streak = 0
-            for _ok, _ in reversed(_done):
+            for _ok, _, _ in reversed(_done):
                 if _ok:
                     break
                 _streak += 1
@@ -1153,7 +1166,7 @@ try:
             print(f"  ⚠︎ {'nightly chain result':<22} last run FAILED ({_age}) — "
                   f"{', '.join(_labels) or 'step name not in the log'}  · read "
                   f"out/nightly.log; a chain red for several runs is one nobody is reading, "
-                  f"which is the failure this row exists to catch{_note}")
+                  f"which is the failure this row exists to catch{_note}{_bl}")
             rc = 1
 except OSError as _exc:
     print(f"  -- {'nightly chain result':<22} cannot read {_nightly_log} ({_exc})")

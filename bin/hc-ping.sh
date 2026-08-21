@@ -40,6 +40,22 @@ ping_outcome() {
     echo "         late on its own, which is the honest signal when nobody knows."
     return 0
   fi
+  # 69 = the step refused for want of a canonical seam (see the 69 branch in
+  # bin/nightly.sh). We know it did not run, we know exactly why, and through the
+  # store-first cutover that is true every night. Pinging OK would lie about work
+  # that did not happen. Pinging /fail would page nightly for a state nobody is
+  # going to fix before the seam lands — the alarm-fatigue failure the BLOCKED
+  # outcome was introduced to end, reintroduced one layer down.
+  #
+  # So take the third path this function already has for the unknown case
+  # directly below: ping NOTHING and let the dead-man go late on its own clock.
+  # A gap that persists still surfaces, on a slow timer instead of every morning,
+  # and nothing anywhere claims the export ran.
+  if [ "$step_rc" -eq 69 ]; then
+    echo "hc-ping: $label BLOCKED on a missing canonical seam (exit 69) — NOT pinging."
+    echo "         The check goes late on its own rather than paging every night."
+    return 0
+  fi
   if [ "$step_rc" -eq 0 ]; then
     curl -fsS -m 15 --retry 3 "$url" > /dev/null || rc=1
     echo "hc-ping: $label OK -> pinged"

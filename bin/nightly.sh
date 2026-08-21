@@ -155,10 +155,14 @@ say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
 rc_total=0
 # LAST_STEP_RC carries the outcome of the step that just ran (0 = OK, 78 = SKIP,
-# anything else = FAIL). Added 2026-08-07 so the dead-man pings can report on the
-# steps they are named after instead of on the mere fact that the chain reached
-# the end. See the ping block at the bottom.
+# 69 = BLOCKED, anything else = FAIL). Added 2026-08-07 so the dead-man pings can
+# report on the steps they are named after instead of on the mere fact that the
+# chain reached the end. See the ping block at the bottom.
 LAST_STEP_RC=0
+# How many steps refused tonight for want of a canonical seam. Counted separately
+# from rc_total so the backlog stays a figure somebody reads, rather than either
+# a red chain every night or nothing at all. Reported on the completion line.
+seam_blocked=0
 
 # ── THE JOB-RUN LEDGER (Program 3, 2026-08-14) ───────────────────────────────
 # Until this existed, step() computed exactly the right outcome for every step,
@@ -229,6 +233,29 @@ step() {                        # step <label> <command...>
     if [ "$rc" -eq 78 ]; then
       say "SKIP  $label (exit 78 — not configured; see the step's own message above)"
       record_run "$label" skipped "$rc" "$t0"
+    # 69 = EX_UNAVAILABLE, our seam refusal: a retired Drive projection was
+    # reached without the record/document replacement that has to exist before
+    # the work may resume (drive_projection below). The step ran, wrote nothing,
+    # and named the missing seam.
+    #
+    # NOT A FAILED NIGHT, changed 2026-08-21 on Joe's instruction, and the
+    # argument is the one already settled for 78 above. Through the store-first
+    # cutover FOURTEEN steps refuse this way every single night. A chain that is
+    # red every night is a chain nobody reads, and on the night one of these is a
+    # real break there is no contrast left to see it by — the identical failure
+    # the ORDER 2 addendum fixed for the boards, and the one that let the mypy
+    # tripwire sit red from 08-08 to 08-10 behind an already-red row.
+    #
+    # NOT SILENT EITHER, which is the objection the refusal script itself raised:
+    # skipping quietly would mark the chain healthy while an ordinary system
+    # function did not run. So BLOCKED is its own word in the log, distinct from
+    # SKIP, it is counted in seam_blocked, the count rides the completion line,
+    # and the nightly-chain health row prints the backlog beside the verdict.
+    # Visible and counted, just not fatal.
+    elif [ "$rc" -eq 69 ]; then
+      say "BLOCKED  $label (exit 69 — canonical seam missing; see the step's own message above)"
+      record_run "$label" skipped "$rc" "$t0"
+      seam_blocked=$((seam_blocked + 1))
     else
       say "FAIL  $label (exit $rc)"
       record_run "$label" failed "$rc" "$t0"
@@ -758,6 +785,10 @@ step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/o
 # run appends to out/break-glass-receipts.log, so the escalation is auditable
 # instead of invisible.
 step "incident sweep (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "incident closure requires separately provisioned authority capability"
+
+if [ "$seam_blocked" -gt 0 ]; then
+  say "===== $seam_blocked step(s) BLOCKED on a missing canonical seam — not counted as failures ====="
+fi
 
 if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="
