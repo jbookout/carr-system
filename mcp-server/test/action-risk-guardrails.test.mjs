@@ -37,7 +37,7 @@ class SetLeadFake {
 
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.includes("from v_ref_index where subject_type='deal' and display_name ilike"))
       return { rows: [{ subject_id: DEAL_ID }] };
     if (sql === "select version from deal where id=$1 for update")
@@ -93,7 +93,7 @@ class SharedSetLeadTransaction {
     return {
       async query(text, params = []) {
         const sql = text.replace(/\s+/g, " ").trim();
-        if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+        if (sql.startsWith("select request_hash, response")) return { rows: [] };
         if (sql.includes("from v_ref_index where subject_type='deal' and display_name ilike"))
           return { rows: [{ subject_id: DEAL_ID }] };
         if (sql === "select version from deal where id=$1 for update") {

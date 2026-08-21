@@ -18,7 +18,7 @@ class PlanFake {
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim(); this.calls.push({ sql, params });
     if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [] };
-    if (sql.startsWith("select request_hash, response from tool_call")) { const row = this.toolCalls.get(params[0]); return { rows: row ? [row] : [] }; }
+    if (sql.startsWith("select request_hash, response")) { const row = this.toolCalls.get(params[0]); return { rows: row ? [row] : [] }; }
     if (sql.includes("propose_sourced_work_request_plan")) return { rows: [{ plan_id: "30000000-0000-0000-0000-000000000001", plan_ref: "PLAN-000001", plan_hash: ACCEPT.plan_hash,
       work_request_id: "40000000-0000-0000-0000-000000000001", ref: "WR-000001", state: "triaged", version: 2,
       scope_summary: PROPOSE.scope_summary, runbook_ref: PROPOSE.runbook_ref,
@@ -27,7 +27,7 @@ class PlanFake {
       plan_id: "30000000-0000-0000-0000-000000000001", plan_ref: "PLAN-000001", plan_hash: ACCEPT.plan_hash,
       accepted_by_actor_slug: "joe", accepted_at: "2026-08-16T00:00:00Z", shape_disposition: "not_required", shape_fixed_surface_ref: `sourced-plan:PLAN-000001#${ACCEPT.plan_hash}` }] };
     if (sql.startsWith("insert into event")) return { rows: [] };
-    if (sql.startsWith("insert into tool_call")) { this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) }); return { rows: [] }; }
+    if (sql.startsWith("insert into tool_call")) { this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]), actor_id: params[2], organization_tenant_id: params[7], application_session_id: params[12] ?? null }); return { rows: [] }; }
     throw new Error(`unexpected query: ${sql}`);
   }
 }

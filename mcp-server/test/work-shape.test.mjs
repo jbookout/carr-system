@@ -175,7 +175,7 @@ test("both shape writes serialize identical idempotency keys before replay looku
   const source = fs.readFileSync(path.join(REPO, "mcp-server/src/tools.js"), "utf8");
   const body = source.slice(source.indexOf("async function withEnvelope"), source.indexOf("async function writeEvent"));
   const lock = body.indexOf("pg_advisory_xact_lock");
-  const replayRead = body.indexOf("select request_hash, response from tool_call");
+  const replayRead = body.indexOf("select request_hash, response");
   assert.ok(lock >= 0 && lock < replayRead, "the same-key transaction lock must precede replay lookup");
   assert.match(body, /verb === "write-work-shape" \|\| verb === "set-work-shape-disposition"/);
 });

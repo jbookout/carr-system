@@ -133,6 +133,49 @@ export function toolCallInsertSQL(key, verb, actor, hash, result) {
   };
 }
 
+// PURE. Decides whether a prior tool_call row is THIS caller's replay, or
+// somebody else's row that happens to share an idempotency key.
+//
+// THE DEFECT THIS CLOSES. The lookup used to select on idempotency_key alone
+// and compare only request_hash. Actor, tenant and session appeared in neither.
+// So a second caller replaying with identical arguments received the FIRST
+// caller's full response, and because the early return happens before any
+// insert, no audit row was ever written for the second caller: the call left no
+// trace that it happened at all. Changed material refused; changed identity did
+// not. An idempotency key is a client-chosen string, so this was reachable by
+// anyone who could guess or reuse one.
+//
+// Identity is (key, actor, tenant, session) and all four must match. Each
+// mismatch raises a DISTINCT error, because "it refused" is not "the right
+// guard refused" — the same rule the database contracts are held to.
+//
+// NULL SESSION IS A VALUE, NOT A WILDCARD. A legacy row (written before any
+// door minted) matches only another legacy call. A qualified caller replaying a
+// legacy key is refused rather than handed the legacy response, and vice versa.
+// That is deliberate and it has a cost worth stating: across the deploy that
+// first turns minting on, a retry whose first attempt was pre-deploy refuses
+// instead of converging. The caller sees a named refusal and can issue a fresh
+// key, which is strictly better than receiving a response that no session
+// vouches for while leaving no record of the retry.
+export function replayDecision(row, hash, actor) {
+  if (row.request_hash !== hash) return { error: "key_reuse" };
+  const identity = auditIdentity(actor);
+  if (row.actor_id !== actor.id) {
+    return { error: "key_bound_to_another_actor",
+      hint: "this idempotency key was already used by a different actor; generate a fresh UUID" };
+  }
+  if ((row.organization_tenant_id || null) !== (identity.organization_tenant_id || null)) {
+    return { error: "key_bound_to_another_tenant",
+      hint: "this idempotency key belongs to a different tenant's record" };
+  }
+  if ((row.application_session_id || null) !== (identity.application_session_id || null)) {
+    return { error: "key_bound_to_another_session",
+      hint: "this idempotency key was used by a different authenticated session; "
+          + "generate a fresh UUID rather than replaying another session's result" };
+  }
+  return { ok: true };
+}
+
 async function withEnvelope(client, actor, verb, args, fn) {
   const key = args.idempotency_key;
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
@@ -145,9 +188,13 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // are migrated to model the extra query for every historical write verb.
   if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback")
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
-  const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
+  // REPLAY IDENTITY IS FOUR THINGS, NOT ONE. See replayDecision below.
+  const prior = await client.query(
+    `select request_hash, response, actor_id, organization_tenant_id, application_session_id
+       from tool_call where idempotency_key=$1`, [key]);
   if (prior.rows.length) {
-    if (prior.rows[0].request_hash !== hash) throw new ToolError({ error: "key_reuse" });
+    const verdict = replayDecision(prior.rows[0], hash, actor);
+    if (verdict.error) throw new ToolError(verdict);
     return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
   }
   const result = await fn();                                        // inside the open transaction

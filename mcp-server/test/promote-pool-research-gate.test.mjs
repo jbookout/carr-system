@@ -11,7 +11,7 @@ class PoolFake {
   constructor() { this.partyInserts = 0; }
   async query(text) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.startsWith("select version from candidate_pool")) return { rows: [{ version: 1 }] };
     if (sql.includes("from candidate_pool where id = $1")) return { rows: [{
       id: "pool-id", source: "registry", source_key: "row-1", status: "pool", dup_tier: "review", dup_ref: null,
