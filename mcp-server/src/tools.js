@@ -176,6 +176,70 @@ export function replayDecision(row, hash, actor) {
   return { ok: true };
 }
 
+// THE RECEIPT PRODUCER. Without this, ops.write_receipt is a table nothing ever
+// writes to, and 0213's acceptance bar — which requires at least one PROVEN
+// receipt — can never be met. That is the inert-substrate defect one layer up:
+// a surface and a gate that depends on it, with no producer between them.
+//
+// WHY IT HANGS OFF THE EVENT ROWS rather than off the tool_call. A receipt is
+// about a SUBJECT: "this deal now says X, built on it having said Y". tool_call
+// knows the verb and the arguments but not what they were about, while event
+// carries subject_type and subject_id. Reducing a subject's receipts into a
+// continuity state is the whole point of 0213's reducer, and a receipt keyed on
+// the call rather than the subject would give every subject a chain of length
+// one and make the reducer useless.
+//
+// IN THE SAME TRANSACTION as the evidence, and AFTER the tool_call insert. The
+// readback in 0211 reads the frozen tool_call row, so a receipt written before
+// that row exists could never prove. Same transaction means a receipt cannot
+// survive a write that rolled back.
+//
+// A LEGACY WRITE PRODUCES NO RECEIPT AND THAT IS CORRECT, not a gap: 0208 says
+// a row with no session proves nothing, so a receipt vouching for one would be
+// a proof about something already declared unprovable. This also keeps the
+// extra queries off every existing fake-client test, whose actors carry no
+// session.
+export async function writeReceiptsFor(client, actor, verb, key, hash) {
+  const identity = auditIdentity(actor);
+  const sid = identity.application_session_id;
+  if (!sid) return;
+  const subjects = await client.query(
+    `select distinct subject_type, subject_id from event
+      where idempotency_key = $1 and application_session_id = $2
+        and subject_id is not null`, [key, sid]);
+  if (!subjects.rows.length) return;
+  const digestRow = await client.query(
+    `select ops.write_receipt_digest($1,$2,$3,$4,$5) as d`,
+    [verb, actor.id, identity.organization_tenant_id, sid, hash]);
+  const claimed = digestRow.rows[0].d;
+  for (const s of subjects.rows) {
+    // The state this write BUILT ON: the previous receipt's result for this
+    // subject, or 'origin' for the first. This is what makes a later conflict
+    // or reversal checkable rather than assertable.
+    const prev = await client.query(
+      `select claimed_digest from ops.write_receipt
+        where subject_type = $1 and subject_id = $2
+        order by recorded_at desc, id desc limit 1`, [s.subject_type, s.subject_id]);
+    const prior = prev.rows.length ? prev.rows[0].claimed_digest : "origin";
+    // A no-op restatement would produce a receipt whose result equals what it
+    // built on. Skip it: a chain of identical links is noise, and it would make
+    // every restatement look like a change.
+    if (prior === claimed) continue;
+    const rid = crypto.randomUUID();
+    await client.query(
+      `insert into ops.write_receipt
+         (id, application_session_id, actor_id, organization_tenant_id, verb,
+          subject_type, subject_id, tool_call_idempotency_key, claimed_digest, prior_digest)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [rid, sid, actor.id, identity.organization_tenant_id, verb,
+       s.subject_type, s.subject_id, key, claimed, prior]);
+    // Prove it HERE, in the same transaction. A receipt left unproven blocks
+    // 0213's acceptance bar, so producing one and walking away would replace an
+    // empty table with a permanently failing one.
+    await client.query(`select ops.prove_write_receipt($1)`, [rid]);
+  }
+}
+
 async function withEnvelope(client, actor, verb, args, fn) {
   const key = args.idempotency_key;
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
@@ -200,6 +264,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   const result = await fn();                                        // inside the open transaction
   const { text, params } = toolCallInsertSQL(key, verb, actor, hash, result);
   await client.query(text, params);
+  await writeReceiptsFor(client, actor, verb, key, hash);
   return result;
 }
 
