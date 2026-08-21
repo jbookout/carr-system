@@ -204,10 +204,30 @@ export async function writeReceiptsFor(client, actor, verb, key, hash) {
   const identity = auditIdentity(actor);
   const sid = identity.application_session_id;
   if (!sid) return;
+  // ORDERED, AND THE ORDER IS THE POINT. Each subject below is locked in turn
+  // and every lock is held to commit, so the iteration order IS the lock order.
+  // Without an ORDER BY that order is whatever the planner returns, and the
+  // planner flips between a Sort/Unique plan and a HashAggregate as the subject
+  // count grows -- so two concurrent calls touching the same two subjects can
+  // take the same two locks in opposite orders and deadlock. Reproduced: a
+  // two-subject call and a four-hundred-subject call disagreed on the order of
+  // the two subjects they shared, and Postgres raised `deadlock detected`
+  // inside the verb, rolling back the human's write.
+  //
+  // A total order over subjects makes that class of deadlock impossible by
+  // construction. NO `collate "C"` here, unlike the material digest: under
+  // SELECT DISTINCT, Postgres requires every ORDER BY expression to appear in
+  // the select list, and `subject_type collate "C"` is a different expression
+  // from `subject_type`, so it is rejected outright -- this is the producer's
+  // first query, so that mistake fails every qualified write. The collate is
+  // not needed anyway. The digest folds under C because it must agree ACROSS
+  // databases; a lock order only has to agree between sessions on ONE server,
+  // which share a collation by definition.
   const subjects = await client.query(
     `select distinct subject_type, subject_id from event
       where idempotency_key = $1 and application_session_id = $2
-        and subject_id is not null`, [key, sid]);
+        and subject_id is not null
+      order by subject_type, subject_id`, [key, sid]);
   if (!subjects.rows.length) return;
   for (const s of subjects.rows) {
     // TWO DIGESTS, BECAUSE THEY ANSWER TWO DIFFERENT QUESTIONS (0238). The call
