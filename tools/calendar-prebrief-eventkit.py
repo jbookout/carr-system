@@ -273,6 +273,74 @@ def capture_snapshot(store: Any, allowlist: list[dict[str, str]], resolver: Call
             "events": projection}
 
 
+def capture_raw_snapshot(
+    store: Any,
+    allowlist: list[dict[str, str]],
+    *,
+    starts_at: datetime,
+    ends_at: datetime,
+    predicate_date: Callable[[datetime], Any] | None = None,
+) -> dict[str, Any]:
+    """Read an exact DB-issued window while keeping attendee email only in RAM.
+
+    The caller must immediately pass the returned object through a process pipe
+    to the sponsor-bound resolver.  This helper intentionally has no JSON/file
+    output path: its raw addresses are not a durable projection.
+    """
+    _request_access(store)
+    start = starts_at.astimezone(timezone.utc).replace(microsecond=0)
+    end = ends_at.astimezone(timezone.utc).replace(microsecond=0)
+    if end <= start:
+        raise Refusal("EventKit capture window is invalid")
+    all_calendars = store.calendarsForEntityType_(0) or []
+    by_identifier = {_identifier(cal, "calendarIdentifier"): cal for cal in all_calendars}
+    if len(by_identifier) != len(all_calendars):
+        raise Refusal("EventKit calendar identifiers are not unique")
+    configured: list[tuple[dict[str, str], Any]] = []
+    for entry in allowlist:
+        calendar = by_identifier.get(entry["identifier"])
+        if calendar is None:
+            raise Refusal("configured allowlisted calendar is absent")
+        configured.append((entry, calendar))
+    converter = predicate_date or (lambda value: value)
+    predicate = store.predicateForEventsWithStartDate_endDate_calendars_(
+        converter(start), converter(end), [calendar for _, calendar in configured]
+    )
+    entry_by_id = {entry["identifier"]: entry for entry, _ in configured}
+    events: list[dict[str, Any]] = []
+    for event in store.eventsMatchingPredicate_(predicate) or []:
+        calendar_id = _identifier(_event_calendar(event), "calendarIdentifier")
+        entry = entry_by_id.get(calendar_id)
+        if entry is None:
+            raise Refusal("EventKit returned event outside configured calendar coverage")
+        event_start, event_end = _utc(event.startDate()), _utc(event.endDate())
+        if event_end <= event_start or event_start < start or event_start >= end:
+            raise Refusal("EventKit returned event outside requested bounded window")
+        start_text = event_start.isoformat().replace("+00:00", "Z")
+        events.append({
+            "sponsor": entry["sponsor"],
+            "calendar_key": opaque_key("calendar", calendar_id),
+            "event_key": opaque_key("event", calendar_id, _identifier(event, "eventIdentifier")),
+            "occurrence_key": opaque_key("occurrence", calendar_id, _identifier(event, "eventIdentifier"), start_text),
+            "starts_at": start_text,
+            "ends_at": event_end.isoformat().replace("+00:00", "Z"),
+            "title": _compact_text(event.title(), "title") or "(untitled)",
+            "location": _compact_text(event.location(), "location"),
+            "attendee_emails": sorted(_emails(event)),
+        })
+    events.sort(key=lambda row: (row["starts_at"], row["occurrence_key"]))
+    observed = sorted(
+        ({"sponsor": entry["sponsor"], "calendar_key": opaque_key("calendar", entry["identifier"])} for entry, _ in configured),
+        key=lambda row: (row["sponsor"], row["calendar_key"]),
+    )
+    return {
+        "version": 1,
+        "window": {"starts_at": start.isoformat().replace("+00:00", "Z"), "ends_at": end.isoformat().replace("+00:00", "Z")},
+        "observed_calendars": observed,
+        "events": events,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allowlist", required=True, type=Path, help="0600 JSON EventKit calendar allowlist")

@@ -18,7 +18,9 @@ SPECS={
  "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_JOE_URL":"carr_calendar_prebrief_resolver_joe",
  "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_DELL_URL":"carr_calendar_prebrief_resolver_dell",
  "CARR_DB_CALENDAR_PREBRIEF_JOE_URL":"carr_calendar_prebrief_joe",
- "CARR_DB_CALENDAR_PREBRIEF_DELL_URL":"carr_calendar_prebrief_dell", "CARR_DB_JOBS_URL":"carr_jobs"}
+ "CARR_DB_CALENDAR_PREBRIEF_DELL_URL":"carr_calendar_prebrief_dell",
+ "CARR_DB_CALENDAR_PREBRIEF_CANARY_JOE_URL":"carr_calendar_prebrief_canary_joe",
+ "CARR_DB_CALENDAR_PREBRIEF_CANARY_DELL_URL":"carr_calendar_prebrief_canary_dell", "CARR_DB_JOBS_URL":"carr_jobs"}
 BROAD={"DATABASE_URL","CARR_DB_WRITER_URL","CARR_DB_OWNER_URL","CARR_DB_READER_URL","CARR_DB_EXPORTER_URL","CARR_DB_BACKUP_URL","CARR_DB_DEVICE_URL","CARR_DB_AUTHORITY_URL"}
 CAPABILITY={"CARR_DB_AUTHORITY_JOE_URL":"carr_authority","CARR_DB_AUTHORITY_DELL_URL":"carr_authority",
  "CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_JOE_URL":"carr_calendar_prebrief_attestors",
@@ -26,6 +28,7 @@ CAPABILITY={"CARR_DB_AUTHORITY_JOE_URL":"carr_authority","CARR_DB_AUTHORITY_DELL
  "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_JOE_URL":"carr_calendar_prebrief_email_resolver",
  "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_DELL_URL":"carr_calendar_prebrief_email_resolver",
  "CARR_DB_CALENDAR_PREBRIEF_JOE_URL":"carr_calendar_prebrief_jobs","CARR_DB_CALENDAR_PREBRIEF_DELL_URL":"carr_calendar_prebrief_jobs",
+ "CARR_DB_CALENDAR_PREBRIEF_CANARY_JOE_URL":"carr_calendar_prebrief_canary_jobs","CARR_DB_CALENDAR_PREBRIEF_CANARY_DELL_URL":"carr_calendar_prebrief_canary_jobs",
  "CARR_DB_JOBS_URL":"carr_jobs"}
 class Refusal(RuntimeError): pass
 

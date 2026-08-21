@@ -54,7 +54,7 @@ create trigger renewal_decision_source_run_member_append_only
 -- metadata.  A later row edit makes the old sealed member ineligible.
 create or replace function ops.renewal_decision_candidate_digest(p_candidate candidate_pool)
 returns text language sql stable security definer set search_path=ops,public,pg_temp as $$
-  select encode(digest(convert_to((to_jsonb(p_candidate) - array['updated_at','updated_by'])::text,'UTF8'),'sha256'),'hex'
+  select encode(digest(convert_to((to_jsonb(p_candidate) - array['updated_at','updated_by'])::text,'UTF8'),'sha256'),'hex')
 $$;
 
 create or replace function ops.seal_renewal_decision_source_run(p_job_id uuid,p_lease uuid)
