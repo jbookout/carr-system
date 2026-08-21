@@ -6,6 +6,31 @@ from pathlib import Path
 from typing import Any
 
 ROOT=Path(__file__).resolve().parents[1]
+
+
+# EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE — the convention ops/ci.sh's
+# gate loop already honours. THE GUARD BEING TRIPPED IS CORRECT AND MUST NOT BE
+# RELAXED: pipelines/availability_matcher.py's _safe_canary_root refuses a
+# canary root that crosses a symlink, and refuses any root that is not a direct
+# child of REPO/out/canary/nightly-record-layer. Both are deliberate.
+#
+# ./run.sh worktree plumbs each worktree's out/ as a symlink back to the
+# canonical tree, so inside a worktree that first check fires and the canary
+# cannot run — correctly. Since rule 4a53ff82 makes worktree-per-session the
+# DEFAULT, this suite was failing 12/14 in the normal place work happens while
+# passing in the canonical tree, which reads as a broken proof rather than an
+# unavailable one. That is what sent a session to CARR_SKIP_CI on 2026-08-21.
+#
+# So the tree declines instead of failing. NOTHING IS RELAXED: CI and the
+# canonical tree both have a real out/, where all 14 checks run and must pass.
+# The narrow condition is the symlink itself — any OTHER canary failure is still
+# a failure here, and the fix for a real one is never to widen this.
+if (ROOT / "out").is_symlink():
+    print(f"out/ is a symlink to {os.readlink(ROOT / 'out')} — the canary proof "
+          f"needs a real out/ and cannot run in a worktree; run it in the "
+          f"canonical checkout or on CI")
+    sys.exit(78)
+
 failed: list[str] = []; checks = 0
 def check(label, ok):
     global checks; checks+=1
