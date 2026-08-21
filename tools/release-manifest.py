@@ -27,6 +27,7 @@ whether a release may ship. It computes evidence and compares evidence.
             any mismatch. THIS IS THE ACCEPTANCE TEST for the rebuild clause.
   bind-provider  Record the immutable provider version returned after upload,
             recompute the approval-plan hash, and print the updated manifest.
+  program6-posture  Print the exact reviewed Program 6 posture in a manifest.
   plan-hash Hash the fields an approver actually reads, so a changed plan is
             detectable by the database trigger that voids stale approvals.
 
@@ -45,6 +46,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -183,6 +185,39 @@ def expand_config_paths(sha: str) -> tuple[str, ...]:
     return tuple(sorted(set(paths)))
 
 
+def program6_actions_at(sha: str, environment: str) -> dict[str, object]:
+    """Read the reviewed Program 6 posture from this manifest's git object."""
+    try:
+        config = tomllib.loads(git("show", f"{sha}:mcp-server/wrangler.toml"))
+    except (tomllib.TOMLDecodeError, SystemExit) as exc:
+        raise ValueError("Program 6 Wrangler configuration cannot be parsed") from exc
+    if environment == "production":
+        variables = config.get("vars")
+    else:
+        variables = (config.get("env") or {}).get(environment, {}).get("vars")
+    if not isinstance(variables, dict):
+        raise ValueError(f"Program 6 {environment} configuration has no vars table")
+    value = variables.get("DEALROOM_PROGRAM6_ACTIONS_ENABLED")
+    if value == "true":
+        return {"enabled": True, "posture": "enabled"}
+    if value == "false":
+        return {"enabled": False, "posture": "disabled"}
+    raise ValueError("DEALROOM_PROGRAM6_ACTIONS_ENABLED must be exactly true or false")
+
+
+def manifest_program6_posture(manifest: dict) -> str:
+    """Return the one reviewed posture a serving release must report."""
+    value = manifest.get("program6_actions")
+    if not isinstance(value, dict):
+        raise ValueError("manifest has no Program 6 posture")
+    enabled, posture = value.get("enabled"), value.get("posture")
+    if enabled is True and posture == "enabled":
+        return "enabled"
+    if enabled is False and posture == "disabled":
+        return "disabled"
+    raise ValueError("manifest Program 6 posture is invalid")
+
+
 def migration_set(sha: str, since: str | None = None) -> tuple[list[str], str]:
     """The migrations this release carries, and the basis that word is using.
 
@@ -300,6 +335,10 @@ def build(sha_ref: str, service: str, environment: str,
         applied_schema_ledger(sha)
     )
     config_paths = expand_config_paths(sha)
+    try:
+        program6_actions = program6_actions_at(sha, environment)
+    except ValueError as exc:
+        sys.exit(f"release-manifest: {exc}")
 
     manifest = {
         "manifest_version": 1,
@@ -321,6 +360,7 @@ def build(sha_ref: str, service: str, environment: str,
 
         "config_fingerprint": digest_files(sha, config_paths),
         "config_paths": list(config_paths),
+        "program6_actions": program6_actions,
 
         "migration_set": migrations,
         "migration_set_basis": basis,
@@ -416,7 +456,7 @@ def verify(manifest: dict) -> int:
                     manifest.get("performance_budget_ms"),
                     manifest.get("recovery_strategy"),
                     manifest.get("rollback_plan_ref"))
-    compared = ("artifact_digest", "dependency_lock_digest", "config_fingerprint",
+    compared = ("artifact_digest", "dependency_lock_digest", "config_fingerprint", "program6_actions",
                 "schema_highest_migration", "schema_applied_count",
                 "schema_ledger_sha256", "migration_set", "artifact_file_count")
 
@@ -483,6 +523,9 @@ def main() -> int:
     bp.add_argument("--provider", required=True)
     bp.add_argument("--provider-version-id", required=True)
 
+    pp = sub.add_parser("program6-posture", help="print the manifest-bound Program 6 posture")
+    pp.add_argument("--manifest", required=True)
+
     args = p.parse_args()
 
     if args.cmd == "build":
@@ -499,6 +542,13 @@ def main() -> int:
         try:
             print(json.dumps(bind_provider(manifest, args.provider,
                                            args.provider_version_id), indent=2))
+        except ValueError as exc:
+            print(f"release-manifest: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "program6-posture":
+        try:
+            print(manifest_program6_posture(manifest))
         except ValueError as exc:
             print(f"release-manifest: {exc}", file=sys.stderr)
             return 1

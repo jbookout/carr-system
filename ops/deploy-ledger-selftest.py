@@ -92,7 +92,7 @@ def write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def exercise_program5_failure(failure: str) -> subprocess.CompletedProcess[str]:
+def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subprocess.CompletedProcess[str]:
     """Run the Production promotion path with every external boundary mocked."""
     with tempfile.TemporaryDirectory(prefix="deploy-ledger-", dir=REPO) as raw:
         root = Path(raw)
@@ -134,8 +134,16 @@ def exercise_program5_failure(failure: str) -> subprocess.CompletedProcess[str]:
                     print("{}")
                 elif rest and rest[0] == "plan-hash":
                     print("plan:selftest")
+                elif rest and rest[0] == "program6-posture":
+                    print(os.environ.get("FAKE_PROGRAM6_POSTURE", "enabled"))
                 raise SystemExit(0)
-            if tool in ("verify-worker-release.py", "performance-budget-gate.py"):
+            if tool == "verify-worker-release.py":
+                expected = os.environ.get("FAKE_PROGRAM6_POSTURE", "enabled")
+                if ("--expected-program6-actions" not in rest
+                        or rest[rest.index("--expected-program6-actions") + 1] != expected):
+                    raise SystemExit(9)
+                raise SystemExit(0)
+            if tool == "performance-budget-gate.py":
                 raise SystemExit(0)
             raise SystemExit(0)
         ''')
@@ -152,6 +160,7 @@ def exercise_program5_failure(failure: str) -> subprocess.CompletedProcess[str]:
         env["TMPDIR"] = str(root / "tmp")
         env["CARR_CORRELATION_ID"] = "77777777-7777-4777-8777-777777777777"
         env["FAKE_PROGRAM5_FAILURE"] = failure
+        env["FAKE_PROGRAM6_POSTURE"] = posture
         return subprocess.run(
             ["sh", str(script), "--promote-version",
              "11111111-2222-4333-8444-555555555555",
@@ -255,6 +264,11 @@ def main() -> int:
           release_failure.returncode != 0
           and "did not close" in release_output,
           f"rc={release_failure.returncode} output={release_output[-240:]}")
+
+    disabled_posture = exercise_program5_failure("", posture="disabled")
+    check("manifest-derived disabled posture is forwarded through Production rollback verification",
+          disabled_posture.returncode == 0,
+          f"rc={disabled_posture.returncode} output={(disabled_posture.stdout + disabled_posture.stderr)[-240:]}")
 
     check("promotion temp files are portable across macOS and GNU mktemp",
           "mktemp -t" not in text and text.count(".XXXXXX") >= 4,

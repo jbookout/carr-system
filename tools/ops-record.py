@@ -156,7 +156,8 @@ def _read_bounded_regular_file(path: str) -> bytes:
 
 
 def staging_readback_projection(path: str, expected_sha: str,
-                                expected_provider_tag: str) -> dict:
+                                expected_provider_tag: str,
+                                expected_program6_actions: str) -> dict:
     """Parse only the bounded typed fields trusted by the DB receipt writer."""
     try:
         body = _read_bounded_regular_file(path)
@@ -180,6 +181,15 @@ def staging_readback_projection(path: str, expected_sha: str,
         raise ValueError("staging readback environment/SHA identity does not match")
     if raw.get("provider") != "cloudflare-workers":
         raise ValueError("staging readback provider is not cloudflare-workers")
+    if expected_program6_actions not in ("enabled", "disabled"):
+        raise ValueError("expected Program 6 posture must be enabled or disabled")
+    program6_actions = raw.get("program6_actions")
+    expected_enabled = expected_program6_actions == "enabled"
+    if (not isinstance(program6_actions, dict)
+            or program6_actions.get("enabled") is not expected_enabled
+            or program6_actions.get("posture") != expected_program6_actions
+            or program6_actions.get("reason") is not None):
+        raise ValueError("staging readback Program 6 posture does not match this deploy")
     try:
         version_id = str(uuid.UUID(str(version.get("id"))))
     except (ValueError, TypeError, AttributeError) as exc:
@@ -207,6 +217,9 @@ def staging_readback_projection(path: str, expected_sha: str,
         "schema_highest_migration": migration,
         "schema_applied_count": _exact_int(schema.get("applied_count"), "schema applied count", minimum=1),
         "doctrine_generation": _exact_int(doctrine_value, "doctrine generation"),
+        # The boolean is the only database type: posture text is derived from
+        # it and malformed values have already been refused above.
+        "program6_actions_enabled": expected_enabled,
     }
 
 
@@ -273,12 +286,13 @@ def record_staging_release_readback(cur, args, projection: dict) -> dict:
     """Call the sole DB writer. Actor/time/digest/evidence refs are DB-derived."""
     cur.execute(
         """select ops.record_staging_release_readback(
-               %s::uuid,%s::uuid,%s,%s,%s,%s,%s)
+               %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s)
         """,
         (args.idempotency_key, projection["provider_version_id"],
          projection["provider_tag"], projection["verb_count"],
          projection["schema_highest_migration"],
-         projection["schema_applied_count"], projection["doctrine_generation"]))
+         projection["schema_applied_count"], projection["doctrine_generation"],
+         projection["program6_actions_enabled"]))
     row = cur.fetchone()
     if not row or not isinstance(row[0], dict):
         raise RuntimeError("staging receipt writer returned no durable readback")
@@ -1288,7 +1302,8 @@ def cmd_staging_attempt(args) -> int:
 def cmd_staging_readback_verify(args) -> int:
     try:
         projection = staging_readback_projection(args.file, args.git_sha,
-                                                  args.provider_tag)
+                                                  args.provider_tag,
+                                                  args.expected_program6_actions)
     except ValueError as exc:
         print(f"ops-record: {exc}", file=sys.stderr)
         return 2
@@ -1350,10 +1365,11 @@ def cmd_deployment(args) -> int:
     if args.staging_readback_file:
         if (args.environment != "staging" or args.state != "complete"
                 or not args.git_sha or not args.release_key
-                or not args.idempotency_key or not args.expected_provider_tag):
+                or not args.idempotency_key or not args.expected_provider_tag
+                or not args.expected_program6_actions):
             print("ops-record: typed staging readback requires complete staging, "
                   "--git-sha, --release-key, --idempotency-key and "
-                  "--expected-provider-tag", file=sys.stderr)
+                  "--expected-provider-tag and --expected-program6-actions", file=sys.stderr)
             return 2
         if args.recovery_step not in ("standalone", "current_before", "prior", "current_after"):
             print("ops-record: invalid recovery step", file=sys.stderr)
@@ -1371,7 +1387,8 @@ def cmd_deployment(args) -> int:
                 args.recovery_attempt_id = str(uuid.UUID(args.recovery_attempt_id))
             args.correlation = correlation_of(args.correlation)
             projection = staging_readback_projection(
-                args.staging_readback_file, args.git_sha, args.expected_provider_tag)
+                args.staging_readback_file, args.git_sha, args.expected_provider_tag,
+                args.expected_program6_actions)
             with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
                 receipt = record_staging_release_readback(cur, args, projection)
         except (ValueError, RuntimeError) as exc:
@@ -2004,6 +2021,8 @@ def main() -> int:
     d.add_argument("--staging-readback-file", help="one local /release JSON file; only a whitelisted digest is retained")
     d.add_argument("--expected-provider-tag",
                    help="server-observed Worker tag minted for this exact staging deploy")
+    d.add_argument("--expected-program6-actions", choices=["enabled", "disabled"],
+                   help="reviewed Program 6 posture required in the staging /release receipt")
     d.add_argument("--idempotency-key",
                    help="exact UUID for atomic staging receipt replay")
     d.add_argument("--recovery-attempt-id",
@@ -2098,6 +2117,8 @@ def main() -> int:
     srv.add_argument("--file", required=True)
     srv.add_argument("--git-sha", required=True)
     srv.add_argument("--provider-tag", required=True)
+    srv.add_argument("--expected-program6-actions", required=True,
+                     choices=["enabled", "disabled"])
     srv.add_argument("--field", required=True,
                      choices=["provider_version_id", "schema_highest_migration"])
 

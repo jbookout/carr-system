@@ -99,6 +99,10 @@ def main() -> int:
     check("0c. highest applied migration is a full ledger filename",
           isinstance(first.get("schema_highest_migration"), str)
           and first["schema_highest_migration"].endswith(".sql"))
+    check("0d. manifest derives one exact Program 6 posture from its SHA config",
+          first.get("program6_actions") in (
+              {"enabled": True, "posture": "enabled"},
+              {"enabled": False, "posture": "disabled"}))
 
     # 1. determinism
     check("1. two builds of one SHA are identical",
@@ -179,6 +183,16 @@ def main() -> int:
     moved = out.stdout.strip()
     check("6a. changing configuration moves the plan hash",
           moved and moved != first["plan_hash"])
+
+    posture = dict(first)
+    posture["program6_actions"] = {"enabled": not first["program6_actions"]["enabled"],
+                                   "posture": "disabled" if first["program6_actions"]["enabled"] else "enabled"}
+    out = run("plan-hash", "--manifest", _tmp_json(posture))
+    check("6aa. derived Program 6 posture preserves the established plan-hash contract",
+          out.stdout.strip() == first["plan_hash"])
+    out = run("program6-posture", "--manifest", _tmp_json(first))
+    check("6ab. manifest posture reader returns the reviewed typed value",
+          out.returncode == 0 and out.stdout.strip() == first["program6_actions"]["posture"])
 
     observed = dict(first)
     observed["commit_subject"] = "a different subject line entirely"
