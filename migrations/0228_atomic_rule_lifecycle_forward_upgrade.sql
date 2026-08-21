@@ -41,12 +41,10 @@ begin
   end if;
 end $$;
 
--- Two Joe-approved system rules were captured before this enforcement
--- architecture existed: sole system authority and permanent cost discipline.
--- They are different rules backed by different decisions and controls. Pin
--- every UUID, decision event, title, quote and statement digest so deployment
--- cannot bless arbitrary text at a familiar UUID or cross-wire governance to
--- the cost gate. Fresh databases contain neither row and remain a no-op.
+-- Joe's sole-system-authority rule was captured before this enforcement
+-- architecture existed. Pin every UUID, decision event, title, quote and
+-- statement digest so deployment cannot bless arbitrary text at a familiar
+-- UUID. Fresh databases contain no such row and remain a no-op.
 create or replace function ops.sync_system_rule_control_bindings()
 returns integer
 language plpgsql security definer set search_path=ops,public,pg_temp
@@ -66,15 +64,19 @@ begin
        'Joe is the sole required authority for system development and high-level system decisions',
        $q$One thing I need to make sure of, I do not want this system to become dependent on dell’s approval for changes. He is not involved in system development at all. He is basically just a user of the system who may train a new work flow here and there but he will not be involved in building the system or making high level decisions about the way the system functions. He’s relying on me for that. Don’t block him from any of those decisions but don’t require his approval either$q$,
        'human_authority_runtime',
-       'Joe-approved sole system authority'),
-      ('a57d981a-8f6d-4c18-95ee-0e63a5a90b89'::uuid,
-       'c6fd62eb91d3f03b21a6098a6fd6b2848b902a45b8c0430b1717edf4e143f668',
-       '8b31938a-e2f2-4b8f-9c29-187efa5c1650'::uuid,
-       'f7ea060c-268b-47f1-8a17-7168841b77e0'::uuid,
-       'Make cost discipline permanent; expire only the temporary emergency restriction',
-       $q$But also, we want a budget rule in affect going forward not just expiring in September. We need to operate the system with cost in mind. Not to the point where it limits the system but just to the point where excessive spending is avoided$q$,
-       'platform_metering_pre_dispatch',
-       'Joe-approved permanent platform cost policy')
+       'Joe-approved sole system authority')
+      -- THE COST RULE IS NOT BOUND HERE ANY MORE. This list carried a second
+      -- entry binding rule a57d981a — "every metered CARR execution must pass a
+      -- machine-enforced pre-dispatch budget gate" — to the control
+      -- platform_metering_pre_dispatch. Joe retired that rule on 2026-08-21:
+      -- "end the cost restrictions ... now everything is being blocked bc you
+      -- think you arent allowed to do anything that costs usage or money."
+      --
+      -- Binding it now would be worse than pointless. The loop above refuses
+      -- any rule that is not proposed or active, so a retired rule makes this
+      -- migration raise and stop — and if it did apply, it would install the
+      -- interlock the same day it was ended. What remains is the one rule this
+      -- migration is still for: Joe as sole required system authority.
     ) as expected(rule_id,statement_hash,decision_id,decision_event_id,
                   decision_title,human_quote,control_key,source)
   loop
@@ -83,17 +85,8 @@ begin
     if v_rule.status not in ('proposed','active') then
       raise exception 'system rule % is %, expected proposed or active',v_rule.id,v_rule.status;
     end if;
-    -- SCOPE CARRIES PAYLOAD, NOT ONLY AUDIENCE. This demanded scope be exactly
-    -- '{}', which reads as "not narrowed to anyone" but also rejects any
-    -- descriptive field. In production the cost-discipline rule carries
-    -- {"domain":"system","applies_to":[the nine metered vendors]} — that names
-    -- what the rule meters, it does not narrow who it binds. Emptying it to
-    -- satisfy this check would have deleted the list to make the gate pass,
-    -- which is the wrong direction of fit.
-    --
-    -- What still has to hold is what the check was for: the rule is nobody's
-    -- personal rule, and it lives in the system domain. Both were verified true
-    -- for both rules against production before this was loosened.
+    -- This first-pass check preserves the shared system audience; 0247 replaces
+    -- it with the exact approved scope once the lifecycle objects exist.
     if v_rule.personal_to is not null
        or coalesce(v_rule.scope->>'domain','system') is distinct from 'system' then
       raise exception 'system rule % must retain shared system-wide scope',v_rule.id;
@@ -103,8 +96,8 @@ begin
     end if;
     -- AUTHOR RECORDS THE SEAT THAT WROTE THE ENTRY, NOT THE HUMAN WHO DECIDED.
     -- This check also required d.author='joe' and could therefore never pass:
-    -- BOTH decisions it names were recorded from a Codex seat and carry
-    -- author='codex', as 45 other decisions in this log do. Requiring 'joe'
+    -- The decision it names was recorded from a Codex seat and carries
+    -- author='codex', as many other decisions in this log do. Requiring 'joe'
     -- means a ruling Joe made is inadmissible as evidence of his own authority
     -- because of which client happened to be open when it was written down.
     -- Verified 2026-08-21 against production: neither decision has ever
