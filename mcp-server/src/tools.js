@@ -94,7 +94,7 @@ export function auditIdentity(actor) {
     // caller that reaches a write handler without going through dispatch() —
     // tests, and anything constructing an actor object by hand.
     correlation_id: actor.correlation_id || null,
-    // THE AUTHENTICATED SESSION THIS WRITE HAPPENED INSIDE (migration 0204).
+    // THE AUTHENTICATED SESSION THIS WRITE HAPPENED INSIDE (migration 0208).
     // Server-derived and set on the actor object by the DOOR, never read from
     // grant props and never accepted from a verb -- the same rule via and
     // client_id follow above, for the same reason: an attestation the caller
@@ -103,7 +103,7 @@ export function auditIdentity(actor) {
     //
     // null is a MEANINGFUL, PERMANENT value, not a gap waiting to be filled. A
     // row written with no session is legacy/non-qualifying evidence forever;
-    // 0204 refuses to let it be promoted later. The doors that authenticate
+    // 0208 refuses to let it be promoted later. The doors that authenticate
     // against a static shared secret deliberately leave this null, because a
     // static secret has no issuance instant, no expiry and no revocation state,
     // so any session minted for one would be a fiction.

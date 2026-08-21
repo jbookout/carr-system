@@ -1,4 +1,4 @@
-// application-session.test.mjs — the minting layer for migration 0204/0206.
+// application-session.test.mjs — the minting layer for migration 0208/0209.
 //
 // Every test here drives the real exported function with injected fakes. None
 // asserts on source text: this file exists because the substrate below it was
@@ -45,7 +45,7 @@ test("sessionExpiry: the credential's own expiry wins when it is sooner than the
   assert.equal(sessionExpiry(oneHour, NOW), oneHour);
 });
 
-test("sessionExpiry: 0204's 30-day cap wins over a longer-lived credential", () => {
+test("sessionExpiry: 0208's 30-day cap wins over a longer-lived credential", () => {
   const ninetyDays = NOW + 90 * 24 * 3600_000;
   assert.equal(sessionExpiry(ninetyDays, NOW), NOW + SESSION_CAP_MS,
     "a 90-day refresh lifetime must not become a 90-day session");
@@ -223,7 +223,7 @@ test("bearer-token doors build actors carrying NO session, and none may gain one
   }
 });
 
-test("a static-secret actor produces legacy evidence, and 0204 keeps it that way forever", async () => {
+test("a static-secret actor produces legacy evidence, and 0208 keeps it that way forever", async () => {
   const { auditIdentity } = await import("../src/tools.js");
   const agent = agentActorForToken("Bearer codex-secret", JSON.stringify({ codex: "codex-secret" }), "agent-token");
   assert.equal(auditIdentity(agent).application_session_id, null,
@@ -270,7 +270,7 @@ test("the OAuth door actually mints — delete the call site and this fails", as
 
 test("the door sends a real authorization class and tenant, not undefined", async () => {
   // Both are derived in dispatch(), which runs AFTER the mint. Reading them off
-  // the actor yields undefined, and 0204 raises on a null authorization class —
+  // the actor yields undefined, and 0208 raises on a null authorization class —
   // the exact reason the first version minted nothing.
   const token = "joe:g2:live";
   const id = await accessTokenIdentity(bearer(token));
@@ -292,7 +292,7 @@ test("the door mints by SLUG, because it has no actor id to give", async () => {
   // A mint keyed on an actor uuid therefore cannot be called from here at all.
   const built = actorFromProps({ slug: "joe", via: "oauth-google" });
   assert.equal(built.id, undefined,
-    "if this ever gains an id, re-examine 0207's reason for existing");
+    "if this ever gains an id, re-examine 0210's reason for existing");
 });
 
 // ─────────────────────────────────────────── downgrades are observable ─────
@@ -371,7 +371,7 @@ test("tool_call INSERT names application_session_id and binds it last", () => {
 test("tool_call INSERT records null for a door that minted no session", () => {
   const { params } = toolCallInsertSQL("key-2", "log-activity", DOOR_ACTOR, "hash", {});
   assert.equal(params.at(-1), null,
-    "null is the permanent legacy marker; 0204 refuses to promote such a row later");
+    "null is the permanent legacy marker; 0208 refuses to promote such a row later");
 });
 
 test("tool_call INSERT cannot take a session from the verb's own arguments", () => {

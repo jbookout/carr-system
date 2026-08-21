@@ -650,7 +650,7 @@ export async function dispatch(request, env, ctx, actor) {
  *
  * THE CLASS AND TENANT ARE COMPUTED HERE, not read off the actor. Both are
  * derived inside dispatch(), which runs after this, so reading them from
- * `actor` yields undefined — and 0204 raises on a null authorization class. The
+ * `actor` yields undefined — and 0208 raises on a null authorization class. The
  * first version of this wiring did exactly that and minted nothing on every
  * request while its tests passed against a hand-built actor shape no door can
  * produce. Both functions below are pure and server-derived.

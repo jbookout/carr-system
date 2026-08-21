@@ -116,7 +116,7 @@ not aliases and receive no exemption.
 
 ## The application-session substrate has a gate that CI does not run (2026-08-20)
 
-`0204_authenticated_application_session.sql` is the authenticated application-session
+`0208_authenticated_application_session.sql` is the authenticated application-session
 floor. Its guarantees are database-level — trigger shapes, role separation, expiry and
 revocation — and they are proven by executing them, not by reading the SQL:
 
@@ -136,6 +136,6 @@ not write a single qualified row. A gate nobody runs is the same failure one lev
 which is why this note exists rather than only a docstring inside the test.
 
 Anything that creates a role must also add it to the role preamble in `db/schema.sql`.
-`0204` creates `carr_session_minter`, and that role is the whole of its separation
-argument: on the day the snapshot's ledger passes 0204, the migration stops replaying
+`0208` creates `carr_session_minter`, and that role is the whole of its separation
+argument: on the day the snapshot's ledger passes 0208, the migration stops replaying
 and a rebuilt cluster would not have the role at all.

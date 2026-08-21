@@ -217,7 +217,7 @@ def refuse_non_disposable(dsn):
     if host not in LOOPBACK:
         raise SystemExit(
             f"REFUSING TO RUN against host {host!r}. This suite writes rows that "
-            f"0204 makes permanently undeletable; it may only target a disposable "
+            f"0208 makes permanently undeletable; it may only target a disposable "
             f"local cluster (see ops/disposable-pg.sh).")
     dbname = (info.get("dbname") or "").lower()
     for banned in ("prod", "production", "staging", "neon"):
@@ -713,9 +713,9 @@ def main(dsn):  # noqa: C901
     check("guard functions and their table share one owner no runtime role can assume",
           guards_have_one_unassumable_owner)
 
-    # ------------------------------------------- 0206: the minting credential ----
-    # 0204 left carr_session_minter memberless ON PURPOSE and said so; 0206 is
-    # the decision about which credential joins it. 0206's own apply-time block
+    # ------------------------------------------- 0209: the minting credential ----
+    # 0208 left carr_session_minter memberless ON PURPOSE and said so; 0209 is
+    # the decision about which credential joins it. 0209's own apply-time block
     # asserts the MEMBERSHIP GRAPH from the catalog, which is the right tool for
     # a graph. These three assert what a catalog cannot: what each role can
     # actually DO when something acts as it.
@@ -743,14 +743,14 @@ def main(dsn):  # noqa: C901
             cur.execute("select count(*) from ops.application_session where id=%s", (sid,))
             assert cur.fetchone()[0] == 1, \
                 "the mint reported success but wrote no session row"
-    check("req 1: carr_session_issuer CAN mint (the credential 0206 chose)",
+    check("req 1: carr_session_issuer CAN mint (the credential 0209 chose)",
           issuer_can_actually_mint)
 
     def issuer_cannot_write_evidence():
         """The separation runs BOTH ways, and this is the half that is easy to
         forget. If the issuer could also insert evidence, one leaked secret
         would mint a session AND bind rows to it, which is the whole attack
-        0204 exists to prevent -- just performed with a different credential."""
+        0208 exists to prevent -- just performed with a different credential."""
         sid = mint(conn, joe)
         key = str(uuid.uuid4())
         try:
@@ -808,7 +808,7 @@ def main(dsn):  # noqa: C901
     check("req 1: only the issuer reaches the mint, transitively",
           minter_membership_is_exactly_the_issuer)
 
-    # ------------------------------------- 0207: minting from an actor slug ----
+    # ------------------------------------- 0210: minting from an actor slug ----
     def issuer_can_mint_by_slug():
         """The door authenticates a SLUG and has no actor id: actor.id is not
         resolved until callTool runs, long after authentication. The first
@@ -838,12 +838,12 @@ def main(dsn):  # noqa: C901
             row = cur.fetchone()
         assert row and row[0] == "joe", \
             "the session must resolve to the actor the slug names, not a null principal"
-    check("req 1: the issuer can mint from a slug (0207 — the door has no actor id)",
+    check("req 1: the issuer can mint from a slug (0210 — the door has no actor id)",
           issuer_can_mint_by_slug)
 
     def unknown_slug_refuses():
         """A session with a null actor would satisfy 'a row exists' while failing
-        the only thing the row is for: 0204's guard matches the evidence row's
+        the only thing the row is for: 0208's guard matches the evidence row's
         actor against the session's, and null matches nothing."""
         sid = uuid.uuid4()
         try:
@@ -871,7 +871,7 @@ def main(dsn):  # noqa: C901
     def writer_cannot_mint_by_slug():
         """The slug wrapper must not become a second door into the mint. It is
         SECURITY DEFINER, so an over-broad grant here would hand the writer
-        exactly what 0206 spent a role separating it from."""
+        exactly what 0209 spent a role separating it from."""
         sid = uuid.uuid4()
         refuses(conn, """select ops.mint_application_session_for_slug(
                            %s,'joe','carr-internal','joe','oauth-google',

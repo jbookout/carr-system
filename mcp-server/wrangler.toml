@@ -3,14 +3,14 @@
 #   DATABASE_URL_READER — Neon login role granted carr_reader (views only)
 #   DATABASE_URL_WRITER — Neon login role granted carr_writer (write path; set when verbs land)
 #   DATABASE_URL_SESSION_ISSUER
-#                       — Neon login role carr_session_issuer (migrations 0206/0207).
+#                       — Neon login role carr_session_issuer (migrations 0209/0210).
 #                         The ONLY credential permitted to mint an authenticated
 #                         application session, and deliberately NOT the writer: if the
 #                         verb path could mint, a bug there manufactures its own
-#                         authentication and every guarantee 0204 enforces is enforced
+#                         authentication and every guarantee 0208 enforces is enforced
 #                         against someone who issued themselves a session first.
 #                         Used only by session.js at the OAuth door; never imported by
-#                         tools.js. 0206 creates the role with a placeholder password
+#                         tools.js. 0209 creates the role with a placeholder password
 #                         that no operator is told, so the real one is set out of band
 #                         and put here. UNTIL IT IS SET the door mints nothing and every
 #                         row is legacy, non-qualifying evidence — visible as a
