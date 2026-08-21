@@ -534,17 +534,54 @@ end $$;
 
 CREATE FUNCTION ops.applicable_rules(p_workflow text DEFAULT NULL::text, p_surface text DEFAULT NULL::text, p_tier text DEFAULT NULL::text) RETURNS TABLE(rule_id uuid, statement text, enforcement_class text, binding_moment text, applicability jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public', 'ops'
+    SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
   select r.id,r.statement,a.enforcement_class,a.binding_moment,a.applicability
-    from public.rule r join ops.rule_admission a on a.rule_id=r.id
-   where r.status='active' and a.state='admitted'
-     and (p_workflow is null or not(a.applicability?'workflows')
-          or a.applicability->'workflows'?'*' or a.applicability->'workflows'?p_workflow)
-     and (p_surface is null or not(a.applicability?'surfaces')
-          or a.applicability->'surfaces'?'*' or a.applicability->'surfaces'?p_surface)
-     and (p_tier is null or not(a.applicability?'tiers')
-          or a.applicability->'tiers'?'*' or a.applicability->'tiers'?p_tier)
+    from rule r
+    join ops.rule_admission a on a.rule_id=r.id
+    join ops.rule_approval_receipt ar
+      on ar.rule_id=r.id and ar.actor_id=r.activated_by
+     and (ar.rule_version=r.version or exists (
+       select 1 from ops.rule_approval_lifecycle_anchor legacy
+        where legacy.approval_receipt_id=ar.id and legacy.rule_id=r.id
+          and legacy.rule_version_after=r.version
+          and legacy.statement_hash=ar.statement_hash))
+     and ar.statement_hash=encode(digest(r.statement,'sha256'),'hex')
+     and ar.policy_kind=a.enforcement_class
+     and ar.enforcement_status=a.enforcement_status
+     and ar.normalized_contract->>'binding_moment'=a.binding_moment
+     and ar.normalized_contract->'applicability'=a.applicability
+     and ar.normalized_contract->'projection'=a.projection
+     and ar.normalized_contract->'reachability'=a.reachability
+     and ar.normalized_contract->'input_contract'=a.input_contract
+     and ar.evidence_refs=a.fixture_refs
+   where r.status='active' and a.state='admitted' and a.admitted_by=ar.actor_id
+     and exists (
+       select 1 from ops.authority_receipt auth
+        where auth.idempotency_key='approval:'||ar.idempotency_key
+          and auth.kind='activation' and auth.subject_type='rule'
+          and auth.subject_id=r.id and auth.actor_id=ar.actor_id
+          and auth.contract_hash=ar.contract_hash)
+     and not exists (
+       select 1 from unnest(ar.requested_control_keys) requested(control_key)
+        where not exists (
+          select 1 from ops.rule_enforcement_point ep
+          join ops.enforcement_control_catalog c using (control_key)
+          join ops.rule_control_binding b
+            on b.rule_id=ep.rule_id and b.control_key=ep.control_key
+         where ep.rule_id=r.id and ep.control_key=requested.control_key
+           and ep.installed and c.installed and c.verified_at is not null
+           and b.statement_hash=ar.statement_hash
+           and c.enforcement_class in ('deny_gate','stop_gate','schema','transactional_schema')))
+     and (p_workflow is null or not (a.applicability ? 'workflows')
+          or a.applicability->'workflows' ? '*'
+          or a.applicability->'workflows' ? p_workflow)
+     and (p_surface is null or not (a.applicability ? 'surfaces')
+          or a.applicability->'surfaces' ? '*'
+          or a.applicability->'surfaces' ? p_surface)
+     and (p_tier is null or not (a.applicability ? 'tiers')
+          or a.applicability->'tiers' ? '*'
+          or a.applicability->'tiers' ? p_tier)
    order by r.created_at,r.id
 $$;
 
@@ -725,6 +762,53 @@ begin
        or v_prior.reason is distinct from btrim(p_reason) then
       raise exception 'rule approval idempotency key was reused with different input';
     end if;
+    select * into v_rule from rule where id=p_rule_id for update;
+    if not found
+       or v_rule.status is distinct from 'active'
+       or not (v_rule.version=v_prior.rule_version or exists (
+         select 1 from ops.rule_approval_lifecycle_anchor legacy
+          where legacy.approval_receipt_id=v_prior.id and legacy.rule_id=v_rule.id
+            and legacy.rule_version_after=v_rule.version
+            and legacy.statement_hash=v_prior.statement_hash))
+       or encode(digest(v_rule.statement,'sha256'),'hex') is distinct from v_prior.statement_hash
+       or v_rule.activated_by is distinct from v_prior.actor_id then
+      raise exception 'rule approval replay refused: current active rule no longer matches the immutable approval';
+    end if;
+    if not exists (
+      select 1 from ops.rule_admission a
+       where a.rule_id=v_rule.id and a.state='admitted'
+         and a.enforcement_status=v_prior.enforcement_status
+         and a.enforcement_class=v_prior.policy_kind
+         and a.admitted_by=v_prior.actor_id
+         and a.binding_moment=v_prior.normalized_contract->>'binding_moment'
+         and a.applicability=v_prior.normalized_contract->'applicability'
+         and a.projection=v_prior.normalized_contract->'projection'
+         and a.reachability=v_prior.normalized_contract->'reachability'
+         and a.input_contract=v_prior.normalized_contract->'input_contract'
+         and a.fixture_refs=v_prior.evidence_refs
+    ) or exists (
+      select 1 from unnest(v_prior.requested_control_keys) requested(control_key)
+       where not exists (
+         select 1
+           from ops.rule_enforcement_point ep
+           join ops.enforcement_control_catalog c using (control_key)
+           join ops.rule_control_binding b
+             on b.rule_id=ep.rule_id and b.control_key=ep.control_key
+          where ep.rule_id=v_rule.id
+            and ep.control_key=requested.control_key
+            and ep.installed and c.installed and c.verified_at is not null
+            and b.statement_hash=v_prior.statement_hash
+            and c.enforcement_class in ('deny_gate','stop_gate','schema','transactional_schema')
+       )
+    ) or not exists (
+      select 1 from ops.authority_receipt ar
+       where ar.idempotency_key='approval:'||v_prior.idempotency_key
+         and ar.kind='activation' and ar.subject_type='rule'
+         and ar.subject_id=v_rule.id and ar.actor_id=v_prior.actor_id
+         and ar.contract_hash=v_prior.contract_hash
+    ) then
+      raise exception 'rule approval replay refused: exact installed enforcement or authority evidence is stale';
+    end if;
     return jsonb_build_object(
       'ok',true,'replayed',true,'rule_id',v_prior.rule_id,
       'policy_status','active','enforcement_status',v_prior.enforcement_status,
@@ -828,7 +912,10 @@ begin
     (idempotency_key,rule_id,rule_version,statement_hash,actor_id,policy_kind,
      enforcement_status,requested_control_keys,installed_control_keys,reason,
      normalized_contract,contract_hash,evidence_refs)
-  values (p_idempotency_key,p_rule_id,v_rule.version,
+  -- The activation UPDATE below is the one permitted active transition and
+  -- trg_touch_row increments the rule version in that same statement. Store
+  -- the post-activation version so replay can prove no later mutation occurred.
+  values (p_idempotency_key,p_rule_id,v_rule.version+1,
           encode(digest(v_rule.statement,'sha256'),'hex'),v_actor_id,p_policy_kind,v_status,
           v_requested,v_installed,btrim(p_reason),v_contract,v_contract_hash,v_evidence)
   returning * into v_receipt;
@@ -864,15 +951,17 @@ begin
     raise exception 'unknown guidance import batch %',p_batch_id;
   end if;
   if exists (
-    (select id from rule where status='active')
+    (select id from rule
+      where status='active' and coalesce(scope->>'kind','') <> 'intro_politics')
     except
     (select distinct source_rule_id from ops.guidance_import_entry where batch_id=p_batch_id)
   ) or exists (
     (select distinct source_rule_id from ops.guidance_import_entry where batch_id=p_batch_id)
     except
-    (select id from rule where status='active')
+    (select id from rule
+      where status='active' and coalesce(scope->>'kind','') <> 'intro_politics')
   ) then
-    raise exception 'guidance import batch source inventory no longer exactly matches active rules';
+    raise exception 'guidance import batch source inventory no longer exactly matches standing-context active rules';
   end if;
 end $$;
 
@@ -954,7 +1043,8 @@ CREATE FUNCTION ops.assert_guidance_registry_coverage() RETURNS TABLE(source_rul
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
   with active_rules as (
-    select id from rule where status='active'
+    select id from rule
+     where status='active' and coalesce(scope->>'kind','') <> 'intro_politics'
   ), primary_counts as (
     select ar.id,
            count(g.*) filter (where g.is_primary) as primary_count
@@ -1007,6 +1097,66 @@ begin
     when 'carr_authority_dell' then return 'dell';
     else raise exception 'authority session user % is not an admitted human authority principal', session_user;
   end case;
+end $$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: job; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.job (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    definition_key text NOT NULL,
+    definition_version integer NOT NULL,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key text NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    mode text DEFAULT 'live'::text NOT NULL,
+    state text DEFAULT 'queued'::text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    attempt integer DEFAULT 0 NOT NULL,
+    max_attempts integer NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_owner text,
+    lease_token uuid,
+    leased_until timestamp with time zone,
+    timeout_seconds integer NOT NULL,
+    last_failure_class text,
+    last_failure_detail text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone,
+    ended_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
+    CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
+    CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
+    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
+    CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
+    CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
+    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
+);
+
+
+--
+-- Name: calendar_canary_live_job(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.calendar_canary_live_job(p_job_id uuid, p_lease uuid) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; k text;
+begin
+ if session_user<>'carr_jobs' then raise exception using errcode='42501',message='calendar canary requires carr_jobs identity'; end if;
+ select * into j from ops.job where id=p_job_id for update;
+ select execution_kind into k from ops.job_definition where key=j.definition_key and version=j.definition_version;
+ if not found or j.state<>'running' or j.lease_token<>p_lease or j.leased_until<now() then raise exception using errcode='55000',message='calendar canary requires current live job lease'; end if;
+ if j.definition_key<>'calendar-fetch-daily' or j.definition_version<>5 or j.mode<>'canary' or k<>'deterministic' then raise exception using errcode='22023',message='job is not calendar-fetch-daily v5 deterministic canary'; end if;
+ return j;
 end $$;
 
 
@@ -1398,6 +1548,68 @@ begin
   insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
     values(j.id,j.attempt,'completion',p_receipt_ref,coalesce(p_evidence,'{}'::jsonb));
   return true;
+end $$;
+
+
+--
+-- Name: create_calendar_canary_source_snapshot(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) RETURNS TABLE(id uuid, snapshot_digest text, contact_count integer, snapshot_text text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;s jsonb;r ops.calendar_canary_source_snapshot%rowtype;
+begin
+ j:=ops.calendar_canary_live_job(p_job_id,p_lease);
+ select coalesce(jsonb_agg(x order by source_rank,x->>'email',x->>'ref'),'[]') into s from(
+  select jsonb_build_object('email',lower(btrim("Email")),'ref',"Client ID",'name',"Name",'org',"Practice / Entity") x,1 source_rank from v_export_clients where "Email" is not null and position('@' in btrim("Email"))>1
+  union all select jsonb_build_object('email',lower(btrim("Email")),'ref',"Lead ID",'name',"Contact Name",'org',"Practice"),2 from v_export_leads where "Email" is not null and position('@' in btrim("Email"))>1)q;
+ if jsonb_array_length(s)=0 then raise exception using errcode='22023',message='calendar canary source snapshot is empty'; end if;
+ insert into ops.calendar_canary_source_snapshot(job_id,attempt,workflow_version,snapshot,snapshot_digest,contact_count)
+ values(j.id,j.attempt,5,s,encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex'),jsonb_array_length(s)) on conflict(job_id,attempt) do nothing returning * into r;
+ if not found then
+  select * into r from ops.calendar_canary_source_snapshot where job_id=j.id and attempt=j.attempt;
+  if r.snapshot_digest<>encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex') or r.contact_count<>jsonb_array_length(s) then raise exception using errcode='23505',message='calendar canary source snapshot replay conflicts with canonical contacts'; end if;
+ end if;
+ return query select r.id,r.snapshot_digest,r.contact_count,r.snapshot::text;
+end $$;
+
+
+--
+-- Name: create_nightly_availability_canary_source_snapshot(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) RETURNS TABLE(id uuid, snapshot_digest text, availability_count integer, open_search_count integer, snapshot_text text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;s jsonb;r ops.nightly_availability_canary_source_snapshot%rowtype;
+begin
+ j:=ops.nightly_availability_canary_live_job(p_job_id,p_lease);
+ select jsonb_build_object(
+   'availabilities',coalesce((select jsonb_agg(x order by x->>'id') from (
+      select jsonb_build_object('id',av.id::text,'status',av.status,'rate_norm',av.rate_norm_sf_yr,
+        'owed',av.norm_owed,'available_on',av.available_on,'observed',av.observed_at::date,
+        'source',av.source,'area',sp.area_amount,'suite',sp.suite,'city',b.city,'state',b.state,
+        'sub_type',b.sub_type,'address',b.address,'bname',b.name) x
+        from (select distinct on (av.space_id) av.* from availability av
+               order by av.space_id,av.observed_at desc,av.id desc) av
+        join space sp on sp.id=av.space_id join building b on b.id=sp.building_id)q),'[]'::jsonb),
+   'searches',coalesce((select jsonb_agg(x order by x->>'ref',x->>'id') from (
+      select jsonb_build_object('id',s.id::text,'spec',s.spec,'ref',coalesce(c.roster_ref,''),'name',p.name) x
+        from space_search s join client c on c.id=s.client_id join party p on p.id=c.party_id where s.status='open')q),'[]'::jsonb)) into s;
+ if jsonb_array_length(s->'availabilities')=0 or jsonb_array_length(s->'searches')=0 then
+   raise exception using errcode='22023',message='nightly availability canary source must contain availability and open-search evidence';
+ end if;
+ insert into ops.nightly_availability_canary_source_snapshot(job_id,attempt,workflow_version,snapshot,snapshot_digest,availability_count,open_search_count)
+ values(j.id,j.attempt,3,s,encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex'),jsonb_array_length(s->'availabilities'),jsonb_array_length(s->'searches'))
+ on conflict(job_id,attempt) do nothing returning * into r;
+ if not found then
+  select * into r from ops.nightly_availability_canary_source_snapshot where job_id=j.id and attempt=j.attempt;
+  if r.snapshot_digest<>encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex') or r.availability_count<>jsonb_array_length(s->'availabilities') or r.open_search_count<>jsonb_array_length(s->'searches') then raise exception using errcode='23505',message='nightly availability canary source replay conflicts with canonical snapshot'; end if;
+ end if;
+ return query select r.id,r.snapshot_digest,r.availability_count,r.open_search_count,r.snapshot::text;
 end $$;
 
 
@@ -1817,47 +2029,6 @@ begin
 end $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
---
--- Name: job; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.job (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    definition_key text CONSTRAINT job_definition_key_not_null1 NOT NULL,
-    definition_version integer CONSTRAINT job_definition_version_not_null1 NOT NULL,
-    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    idempotency_key text NOT NULL,
-    scheduled_for timestamp with time zone NOT NULL,
-    mode text DEFAULT 'live'::text NOT NULL,
-    state text DEFAULT 'queued'::text NOT NULL,
-    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
-    attempt integer DEFAULT 0 NOT NULL,
-    max_attempts integer NOT NULL,
-    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
-    lease_owner text,
-    lease_token uuid,
-    leased_until timestamp with time zone,
-    timeout_seconds integer NOT NULL,
-    last_failure_class text,
-    last_failure_detail text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    started_at timestamp with time zone,
-    ended_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
-    CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
-    CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
-    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
-    CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
-    CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
-    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
-);
-
-
 --
 -- Name: enqueue_job(text, integer, timestamp with time zone, jsonb, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
@@ -2226,6 +2397,25 @@ begin
     returning 1
   ) select count(*) into n from evidence;
   return n;
+end $$;
+
+
+--
+-- Name: nightly_availability_canary_live_job(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; k text;
+begin
+ if session_user<>'carr_jobs' then raise exception using errcode='42501',message='nightly availability canary requires carr_jobs identity'; end if;
+ select * into j from ops.job where id=p_job_id for update;
+ select execution_kind into k from ops.job_definition where key=j.definition_key and version=j.definition_version;
+ if not found or j.state<>'running' or j.lease_token<>p_lease or j.leased_until<now() then raise exception using errcode='55000',message='nightly availability canary requires current live job lease'; end if;
+ if j.definition_key<>'nightly-record-layer' or j.definition_version<>3 or j.mode<>'canary' or k<>'deterministic' then raise exception using errcode='22023',message='job is not nightly-record-layer v3 deterministic canary'; end if;
+ return j;
 end $$;
 
 
@@ -2750,6 +2940,49 @@ end $$;
 
 
 --
+-- Name: calendar_canary_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.calendar_canary_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    source_snapshot_id uuid NOT NULL,
+    source_snapshot_digest text NOT NULL,
+    source_contact_count integer NOT NULL,
+    output_digest text NOT NULL,
+    exact_count integer NOT NULL,
+    domain_count integer NOT NULL,
+    unknown_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT calendar_canary_receipt_domain_count_check CHECK ((domain_count >= 0)),
+    CONSTRAINT calendar_canary_receipt_exact_count_check CHECK ((exact_count >= 0)),
+    CONSTRAINT calendar_canary_receipt_output_digest_check CHECK ((output_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT calendar_canary_receipt_unknown_count_check CHECK ((unknown_count >= 0))
+);
+
+
+--
+-- Name: record_calendar_canary_receipt(uuid, uuid, uuid, text, integer, integer, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) RETURNS ops.calendar_canary_receipt
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare j ops.job%rowtype;s ops.calendar_canary_source_snapshot%rowtype;r ops.calendar_canary_receipt%rowtype;e ops.calendar_canary_receipt%rowtype;
+begin
+ j:=ops.calendar_canary_live_job(p_job_id,p_lease); select * into s from ops.calendar_canary_source_snapshot where id=p_source_snapshot_id and job_id=j.id and attempt=j.attempt;
+ if not found then raise exception using errcode='22023',message='source snapshot is not bound to this job attempt'; end if;
+ if p_output_digest!~'^[0-9a-f]{64}$' or p_exact<0 or p_domain<0 or p_unknown<0 then raise exception using errcode='22023',message='invalid calendar canary aggregate'; end if;
+ insert into ops.calendar_canary_receipt(job_id,attempt,source_snapshot_id,source_snapshot_digest,source_contact_count,output_digest,exact_count,domain_count,unknown_count)
+ values(j.id,j.attempt,s.id,s.snapshot_digest,s.contact_count,p_output_digest,p_exact,p_domain,p_unknown) on conflict(job_id,attempt) do nothing returning * into r;
+ if found then return r; end if; select * into e from ops.calendar_canary_receipt where job_id=j.id and attempt=j.attempt;
+ if e.source_snapshot_id<>s.id or e.output_digest<>p_output_digest or e.exact_count<>p_exact or e.domain_count<>p_domain or e.unknown_count<>p_unknown then raise exception using errcode='23505',message='calendar canary receipt replay conflicts with immutable attempt'; end if; return e;
+end $_$;
+
+
+--
 -- Name: record_claude_scheduler_observation(text, text, text, text, boolean, text, text, text, timestamp with time zone, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3090,6 +3323,52 @@ end $_$;
 
 
 --
+-- Name: nightly_availability_canary_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.nightly_availability_canary_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    source_snapshot_id uuid NOT NULL,
+    source_snapshot_digest text NOT NULL,
+    availability_count integer NOT NULL,
+    open_search_count integer NOT NULL,
+    match_count integer NOT NULL,
+    output_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT nightly_availability_canary_receipt_availability_count_check CHECK ((availability_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_match_count_check CHECK ((match_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_open_search_count_check CHECK ((open_search_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_output_digest_check CHECK ((output_digest ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: record_nightly_availability_canary_receipt(uuid, uuid, uuid, text, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) RETURNS ops.nightly_availability_canary_receipt
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare j ops.job%rowtype;s ops.nightly_availability_canary_source_snapshot%rowtype;r ops.nightly_availability_canary_receipt%rowtype;e ops.nightly_availability_canary_receipt%rowtype;
+begin
+ j:=ops.nightly_availability_canary_live_job(p_job_id,p_lease);
+ select * into s from ops.nightly_availability_canary_source_snapshot where id=p_source_snapshot_id and job_id=j.id and attempt=j.attempt;
+ if not found then raise exception using errcode='22023',message='nightly availability source snapshot is not bound to this job attempt'; end if;
+ if p_output_digest!~'^[0-9a-f]{64}$' or p_match_count<0 then raise exception using errcode='22023',message='invalid nightly availability canary aggregate'; end if;
+ insert into ops.nightly_availability_canary_receipt(job_id,attempt,source_snapshot_id,source_snapshot_digest,availability_count,open_search_count,match_count,output_digest)
+ values(j.id,j.attempt,s.id,s.snapshot_digest,s.availability_count,s.open_search_count,p_match_count,p_output_digest)
+ on conflict(job_id,attempt) do nothing returning * into r;
+ if found then return r; end if;
+ select * into e from ops.nightly_availability_canary_receipt where job_id=j.id and attempt=j.attempt;
+ if e.source_snapshot_id<>s.id or e.output_digest<>p_output_digest or e.match_count<>p_match_count then raise exception using errcode='23505',message='nightly availability canary receipt replay conflicts with immutable attempt'; end if;
+ return e;
+end $_$;
+
+
+--
 -- Name: record_npi_device_evidence(uuid, timestamp with time zone, text, text, jsonb, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3284,6 +3563,24 @@ $_$;
 
 
 --
+-- Name: refuse_approved_rule_contract_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_approved_rule_contract_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  v_rule_id uuid;
+begin
+  v_rule_id := case when tg_op='INSERT' then new.rule_id else old.rule_id end;
+  if exists (select 1 from ops.rule_approval_receipt where rule_id=v_rule_id) then
+    raise exception 'approved rule % contract is immutable; approve a replacement rule',v_rule_id;
+  end if;
+  return case when tg_op='DELETE' then old else new end;
+end $$;
+
+
+--
 -- Name: refuse_authority_receipt_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3328,6 +3625,25 @@ CREATE FUNCTION ops.refuse_legacy_schedule_disable_receipt_rewrite() RETURNS tri
     AS $$
 begin
   raise exception 'legacy schedule disable receipts are append-only';
+end $$;
+
+
+--
+-- Name: refuse_live_approved_control_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_live_approved_control_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if exists (
+    select 1 from ops.rule_approval_receipt ar
+     join rule r on r.id=ar.rule_id and r.status='active'
+    where old.control_key=any(ar.requested_control_keys)
+  ) then
+    raise exception 'control % backs an active approved rule and is immutable',old.control_key;
+  end if;
+  return case when tg_op='DELETE' then old else new end;
 end $$;
 
 
@@ -3608,6 +3924,60 @@ declare
   a ops.rule_admission%rowtype;
   v_approval ops.rule_approval_receipt%rowtype;
 begin
+  if tg_op='UPDATE' and old.status='retired' then
+    raise exception 'retired rule % is immutable',old.id;
+  end if;
+  -- Once the approval receipt exists, the entire rule row is immutable except
+  -- for the two exact authority transitions owned below: proposed -> active in
+  -- ops.approve_rule, and proposed/active -> retired in ops.retire_rule. This
+  -- also blocks no-op UPDATEs that would otherwise bump the optimistic version
+  -- and silently make an active receipt stale through trg_touch_row.
+  if tg_op='UPDATE'
+     and exists (select 1 from ops.rule_approval_receipt where rule_id=old.id) then
+    if old.status='proposed' and new.status='active'
+       and new.id is not distinct from old.id
+       and new.statement is not distinct from old.statement
+       and new.human_quote is not distinct from old.human_quote
+       and new.taught_by is not distinct from old.taught_by
+       and new.scope is not distinct from old.scope
+       and new.personal_to is not distinct from old.personal_to
+       and new.supersedes is not distinct from old.supersedes
+       and new.created_at is not distinct from old.created_at
+       and new.version is not distinct from old.version
+       and new.updated_at is not distinct from old.updated_at
+       and new.retired_by is not distinct from old.retired_by
+       and new.retired_at is not distinct from old.retired_at then
+      null; -- exact activation fields are validated below
+    elsif old.status in ('proposed','active') and new.status='retired'
+       and new.id is not distinct from old.id
+       and new.statement is not distinct from old.statement
+       and new.human_quote is not distinct from old.human_quote
+       and new.taught_by is not distinct from old.taught_by
+       and new.scope is not distinct from old.scope
+       and new.personal_to is not distinct from old.personal_to
+       and new.activated_by is not distinct from old.activated_by
+       and new.activated_at is not distinct from old.activated_at
+       and new.enforcement is not distinct from old.enforcement
+       and new.supersedes is not distinct from old.supersedes
+       and new.created_at is not distinct from old.created_at
+       and new.version is not distinct from old.version
+       and new.updated_at is not distinct from old.updated_at then
+      null; -- exact retirement actor/receipt is validated below
+    else
+      raise exception 'approved rule % is immutable except through exact Joe approval or retirement',new.id;
+    end if;
+  end if;
+  if tg_op='UPDATE' and old.status is distinct from 'retired' and new.status='retired' then
+    if new.retired_by is null or new.retired_at is null or not exists (
+      select 1 from ops.rule_retirement_receipt rr
+       where rr.rule_id=old.id and rr.actor_id=new.retired_by
+         and rr.rule_version_before=old.version
+         and rr.statement_hash=encode(digest(old.statement,'sha256'),'hex')
+         and rr.previous_status=old.status
+    ) then
+      raise exception 'rule % cannot retire without an exact Joe authority receipt',new.id;
+    end if;
+  end if;
   if not (new.status='active' and
           (tg_op='INSERT' or old.status is distinct from 'active')) then
     return new;
@@ -3631,6 +4001,10 @@ begin
   if not found then
     raise exception 'rule % cannot activate: immutable enforced approval receipt is missing',new.id;
   end if;
+  if new.enforcement is distinct from
+       (case when v_approval.enforcement_status='hard_enforced' then 'gate' else 'constraint' end) then
+    raise exception 'rule % cannot activate: enforcement label does not match approval',new.id;
+  end if;
   if exists (
     select 1 from unnest(v_approval.requested_control_keys) as requested(control_key)
      where not exists (
@@ -3646,6 +4020,67 @@ begin
      )
   ) then
     raise exception 'rule % cannot activate: exact requested enforcement is incomplete',new.id;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: require_rule_approval_lifecycle_anchor(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.require_rule_approval_lifecycle_anchor() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  -- An anchor is not an override and has no caller-supplied trust boundary.
+  -- It can only certify the exact old-0194 pre-activation receipt against the
+  -- current active rule, Joe authority, admitted contract and installed gates.
+  if not exists (
+    select 1
+      from ops.rule_approval_receipt ar
+      join rule r on r.id=ar.rule_id and r.status='active'
+      join actor joe on joe.id=ar.actor_id
+       and joe.slug='joe' and joe.kind='human' and joe.active
+      join ops.rule_admission a on a.rule_id=r.id
+     where ar.id=new.approval_receipt_id
+       and ar.rule_id=new.rule_id
+       and ar.rule_version+1=new.rule_version_after
+       and new.rule_version_after=r.version
+       and new.statement_hash=ar.statement_hash
+       and ar.statement_hash=encode(digest(r.statement,'sha256'),'hex')
+       and r.activated_by=ar.actor_id
+       and r.enforcement=(case when ar.enforcement_status='hard_enforced'
+                               then 'gate' else 'constraint' end)
+       and a.state='admitted' and a.admitted_by=ar.actor_id
+       and ar.policy_kind=a.enforcement_class
+       and ar.enforcement_status=a.enforcement_status
+       and ar.normalized_contract->>'binding_moment'=a.binding_moment
+       and ar.normalized_contract->'applicability'=a.applicability
+       and ar.normalized_contract->'projection'=a.projection
+       and ar.normalized_contract->'reachability'=a.reachability
+       and ar.normalized_contract->'input_contract'=a.input_contract
+       and ar.evidence_refs=a.fixture_refs
+       and exists (
+         select 1 from ops.authority_receipt auth
+          where auth.idempotency_key='approval:'||ar.idempotency_key
+            and auth.kind='activation' and auth.subject_type='rule'
+            and auth.subject_id=r.id and auth.actor_id=ar.actor_id
+            and auth.contract_hash=ar.contract_hash)
+       and not exists (
+         select 1 from unnest(ar.requested_control_keys) requested(control_key)
+          where not exists (
+            select 1 from ops.rule_enforcement_point ep
+            join ops.enforcement_control_catalog c using (control_key)
+            join ops.rule_control_binding b
+              on b.rule_id=ep.rule_id and b.control_key=ep.control_key
+             where ep.rule_id=r.id and ep.control_key=requested.control_key
+               and ep.installed and c.installed and c.verified_at is not null
+               and b.statement_hash=ar.statement_hash
+               and c.enforcement_class in ('deny_gate','stop_gate','schema','transactional_schema')))
+  ) then
+    raise exception 'legacy approval anchor requires an exact active Joe-approved 0194 receipt chain';
   end if;
   return new;
 end $$;
@@ -3681,6 +4116,140 @@ begin
     values(j.id,j.attempt,p_route_key,p_estimated_cost_usd)
   returning id into rid;
   return rid;
+end $$;
+
+
+--
+-- Name: resolve_calendar_canary_receipt(uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) RETURNS SETOF ops.calendar_canary_receipt
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$select * from ops.calendar_canary_receipt where job_id=p_job_id and attempt=p_attempt$$;
+
+
+--
+-- Name: resolve_nightly_availability_canary_receipt(uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) RETURNS SETOF ops.nightly_availability_canary_receipt
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+ select * from ops.nightly_availability_canary_receipt where job_id=p_job_id and attempt=p_attempt
+$$;
+
+
+--
+-- Name: retire_rule(uuid, text, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  v_actor_slug text;
+  v_actor_id uuid;
+  v_rule rule%rowtype;
+  v_prior ops.rule_retirement_receipt%rowtype;
+  v_receipt ops.rule_retirement_receipt%rowtype;
+  v_approval_id uuid;
+  v_contract jsonb;
+  v_contract_hash text;
+  v_retired_at timestamptz;
+begin
+  v_actor_slug := ops.authority_actor_slug();
+  if v_actor_slug<>'joe' then
+    raise exception 'system rule retirement requires Joe authority';
+  end if;
+  select id into v_actor_id from actor
+   where slug=v_actor_slug and kind='human' and active;
+  if v_actor_id is null then raise exception 'Joe authority actor is not active'; end if;
+  if btrim(coalesce(p_reason,''))='' or btrim(coalesce(p_idempotency_key,''))='' then
+    raise exception 'retirement reason and idempotency key are required';
+  end if;
+  if p_superseded_by is not null and p_superseded_by=p_rule_id then
+    raise exception 'a rule cannot supersede itself';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('rule-retirement:'||p_idempotency_key,0));
+  select * into v_prior from ops.rule_retirement_receipt
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if v_prior.rule_id is distinct from p_rule_id
+       or v_prior.reason is distinct from btrim(p_reason)
+       or v_prior.superseded_by is distinct from p_superseded_by
+       or v_prior.actor_id is distinct from v_actor_id then
+      raise exception 'rule retirement idempotency key was reused with different input';
+    end if;
+    select * into v_rule from rule where id=p_rule_id for update;
+    if not found
+       or v_rule.status is distinct from 'retired'
+       or v_rule.version is distinct from v_prior.rule_version_after
+       or encode(digest(v_rule.statement,'sha256'),'hex') is distinct from v_prior.statement_hash
+       or v_rule.retired_by is distinct from v_prior.actor_id
+       or v_rule.retired_at is distinct from v_prior.retired_at then
+      raise exception 'rule retirement replay refused: current retired rule no longer matches the immutable retirement';
+    end if;
+    return jsonb_build_object('ok',true,'replayed',true,'rule_id',p_rule_id,
+      'previous_status',v_prior.previous_status,'status','retired',
+      'retirement_receipt_id',v_prior.id);
+  end if;
+
+  select * into v_rule from rule where id=p_rule_id for update;
+  if not found then raise exception 'rule % not found',p_rule_id; end if;
+  if v_rule.status not in ('proposed','active') then
+    raise exception 'rule % is %, expected proposed or active',p_rule_id,v_rule.status;
+  end if;
+  if p_superseded_by is not null and not exists (select 1 from rule where id=p_superseded_by) then
+    raise exception 'superseding rule % does not exist',p_superseded_by;
+  end if;
+  if v_rule.status='active' then
+    select id into v_approval_id from ops.rule_approval_receipt
+     where rule_id=v_rule.id
+       and (rule_version=v_rule.version or exists (
+         select 1 from ops.rule_approval_lifecycle_anchor legacy
+          where legacy.approval_receipt_id=ops.rule_approval_receipt.id
+            and legacy.rule_id=v_rule.id and legacy.rule_version_after=v_rule.version
+            and legacy.statement_hash=ops.rule_approval_receipt.statement_hash))
+       and statement_hash=encode(digest(v_rule.statement,'sha256'),'hex')
+     order by created_at desc limit 1;
+    if v_approval_id is null then
+      raise exception 'active rule % lacks its exact approval receipt',v_rule.id;
+    end if;
+  end if;
+
+  v_retired_at := now();
+
+  v_contract := jsonb_build_object(
+    'rule_id',v_rule.id,'rule_version_before',v_rule.version,
+    'rule_version_after',v_rule.version+1,
+    'statement_hash',encode(digest(v_rule.statement,'sha256'),'hex'),
+    'previous_status',v_rule.status,'actor_id',v_actor_id,
+    'reason',btrim(p_reason),'superseded_by',p_superseded_by,
+    'approval_receipt_id',v_approval_id,'retired_at',v_retired_at);
+  v_contract_hash := encode(digest(v_contract::text,'sha256'),'hex');
+  insert into ops.rule_retirement_receipt
+    (idempotency_key,rule_id,rule_version_before,rule_version_after,statement_hash,previous_status,
+     actor_id,reason,superseded_by,approval_receipt_id,contract_hash,retired_at)
+  values (p_idempotency_key,v_rule.id,v_rule.version,v_rule.version+1,
+          encode(digest(v_rule.statement,'sha256'),'hex'),v_rule.status,
+          v_actor_id,btrim(p_reason),p_superseded_by,v_approval_id,v_contract_hash,v_retired_at)
+  returning * into v_receipt;
+  insert into ops.authority_receipt
+    (idempotency_key,kind,subject_type,subject_id,actor_id,decision,contract_hash,evidence_refs)
+  values ('retirement:'||p_idempotency_key,'override','rule',v_rule.id,v_actor_id,
+          'retired by Joe authority: '||btrim(p_reason),v_contract_hash,
+          case when v_approval_id is null then '{}'::text[]
+               else array[v_approval_id::text] end);
+  update rule set status='retired',retired_by=v_actor_id,retired_at=v_retired_at
+   where id=v_rule.id and status=v_rule.status;
+  if not found then raise exception 'rule % retirement raced',v_rule.id; end if;
+  return jsonb_build_object('ok',true,'replayed',false,'rule_id',v_rule.id,
+    'previous_status',v_rule.status,'status','retired',
+    'retirement_receipt_id',v_receipt.id);
 end $$;
 
 
@@ -4067,6 +4636,107 @@ CREATE FUNCTION ops.standing_guidance(p_actor text, p_workflow text DEFAULT NULL
      )
    order by g.is_constitution desc,r.personal_to nulls first,r.created_at,r.id
 $$;
+
+
+--
+-- Name: sync_system_rule_control_bindings(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.sync_system_rule_control_bindings() RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare
+  v_expected record;
+  v_rule rule%rowtype;
+  v_rows integer;
+  v_inserted integer := 0;
+begin
+  for v_expected in
+    select * from (values
+      ('ae44e0c0-e773-456c-a85b-2dc4cf4dd49e'::uuid,
+       '9e02f7eee01220fd604ba97d605830ea903d3266f95b626a5ca5d9a73567c8f9',
+       '4a0e59ce-728a-49b5-a055-116156e9470e'::uuid,
+       '1fe7c57e-c23f-4fb0-9cff-36f6d3cfcf08'::uuid,
+       'Joe is the sole required authority for system development and high-level system decisions',
+       $q$One thing I need to make sure of, I do not want this system to become dependent on dell’s approval for changes. He is not involved in system development at all. He is basically just a user of the system who may train a new work flow here and there but he will not be involved in building the system or making high level decisions about the way the system functions. He’s relying on me for that. Don’t block him from any of those decisions but don’t require his approval either$q$,
+       'human_authority_runtime',
+       'Joe-approved sole system authority'),
+      ('a57d981a-8f6d-4c18-95ee-0e63a5a90b89'::uuid,
+       'c6fd62eb91d3f03b21a6098a6fd6b2848b902a45b8c0430b1717edf4e143f668',
+       '8b31938a-e2f2-4b8f-9c29-187efa5c1650'::uuid,
+       'f7ea060c-268b-47f1-8a17-7168841b77e0'::uuid,
+       'Make cost discipline permanent; expire only the temporary emergency restriction',
+       $q$But also, we want a budget rule in affect going forward not just expiring in September. We need to operate the system with cost in mind. Not to the point where it limits the system but just to the point where excessive spending is avoided$q$,
+       'platform_metering_pre_dispatch',
+       'Joe-approved permanent platform cost policy')
+    ) as expected(rule_id,statement_hash,decision_id,decision_event_id,
+                  decision_title,human_quote,control_key,source)
+  loop
+    select * into v_rule from rule where id=v_expected.rule_id;
+    if not found then continue; end if;
+    if v_rule.status not in ('proposed','active') then
+      raise exception 'system rule % is %, expected proposed or active',v_rule.id,v_rule.status;
+    end if;
+    if v_rule.personal_to is not null or v_rule.scope is distinct from '{}'::jsonb then
+      raise exception 'system rule % must retain exact shared system-wide scope',v_rule.id;
+    end if;
+    if encode(digest(v_rule.statement,'sha256'),'hex') is distinct from v_expected.statement_hash then
+      raise exception 'system rule % statement does not match Joe-approved preimage',v_rule.id;
+    end if;
+    if not exists (
+      select 1 from public.v_decision_entry d
+       where d.decision_id=v_expected.decision_id
+         and d.event_id=v_expected.decision_event_id
+         and d.author='joe'
+         and d.title=v_expected.decision_title
+         and d.human_quote=v_expected.human_quote
+    ) then
+      raise exception 'system rule % lacks its exact Joe decision evidence',v_rule.id;
+    end if;
+    if not exists (
+      select 1 from ops.enforcement_control_catalog c
+       where c.control_key=v_expected.control_key
+         and c.installed and c.verified_at is not null
+    ) then
+      raise exception 'system rule % control % is not installed',v_rule.id,v_expected.control_key;
+    end if;
+
+    if not exists (
+      select 1 from ops.rule_control_binding
+       where rule_id=v_rule.id and control_key=v_expected.control_key
+    ) then
+      insert into ops.rule_control_binding
+        (rule_id,control_key,statement_hash,binding_contract)
+      select v_rule.id,v_expected.control_key,v_expected.statement_hash,
+             jsonb_build_object(
+               'source',v_expected.source,
+               'durable_decision_ref',v_expected.decision_id,
+               'decision_event_ref',v_expected.decision_event_id,
+               'rule_id',v_rule.id,
+               'rule_version',v_rule.version,
+               'implementation_ref',c.implementation_ref,
+               'test_ref',c.test_ref)
+        from ops.enforcement_control_catalog c
+       where c.control_key=v_expected.control_key;
+      get diagnostics v_rows = row_count;
+    else
+      v_rows := 0;
+    end if;
+    v_inserted := v_inserted + v_rows;
+
+    if not exists (
+      select 1 from ops.rule_control_binding b
+       where b.rule_id=v_rule.id and b.control_key=v_expected.control_key
+         and b.statement_hash=v_expected.statement_hash
+         and b.binding_contract->>'durable_decision_ref'=v_expected.decision_id::text
+         and b.binding_contract->>'decision_event_ref'=v_expected.decision_event_id::text
+    ) then
+      raise exception 'system rule % has a stale or conflicting control binding',v_rule.id;
+    end if;
+  end loop;
+  return v_inserted;
+end $_$;
 
 
 --
@@ -5619,6 +6289,25 @@ CREATE TABLE ops.authority_receipt (
 
 
 --
+-- Name: calendar_canary_source_snapshot; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.calendar_canary_source_snapshot (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    workflow_version integer NOT NULL,
+    snapshot jsonb NOT NULL,
+    snapshot_digest text NOT NULL,
+    contact_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT calendar_canary_source_snapshot_contact_count_check CHECK ((contact_count >= 0)),
+    CONSTRAINT calendar_canary_source_snapshot_snapshot_digest_check CHECK ((snapshot_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT calendar_canary_source_snapshot_workflow_version_check CHECK ((workflow_version = 5))
+);
+
+
+--
 -- Name: capability_agent_session; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -6582,6 +7271,27 @@ CREATE TABLE ops.legacy_schedule_surface_registry (
 
 
 --
+-- Name: nightly_availability_canary_source_snapshot; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.nightly_availability_canary_source_snapshot (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    workflow_version integer NOT NULL,
+    snapshot jsonb NOT NULL,
+    snapshot_digest text NOT NULL,
+    availability_count integer NOT NULL,
+    open_search_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT nightly_availability_canary_source_sna_availability_count_check CHECK ((availability_count >= 0)),
+    CONSTRAINT nightly_availability_canary_source_snap_open_search_count_check CHECK ((open_search_count >= 0)),
+    CONSTRAINT nightly_availability_canary_source_snaps_workflow_version_check CHECK ((workflow_version = 3)),
+    CONSTRAINT nightly_availability_canary_source_snapsh_snapshot_digest_check CHECK ((snapshot_digest ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
 -- Name: npi_device_evidence_receipt; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -6616,13 +7326,13 @@ CREATE TABLE ops.npi_device_evidence_receipt (
 
 CREATE TABLE ops.program6_browser_action_challenge_redemption (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token_digest text CONSTRAINT program6_browser_action_challenge_redempt_token_digest_not_null NOT NULL,
-    session_digest text CONSTRAINT program6_browser_action_challenge_redem_session_digest_not_null NOT NULL,
+    token_digest text NOT NULL,
+    session_digest text NOT NULL,
     action text NOT NULL,
-    material_digest text CONSTRAINT program6_browser_action_challenge_rede_material_digest_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT program6_browser_action_challenge_rede_idempotency_key_not_null NOT NULL,
-    redeemed_by_actor_id uuid CONSTRAINT program6_browser_action_challenge_redeemed_by_actor_id_not_null NOT NULL,
-    redeemed_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT program6_browser_action_challenge_redempti_redeemed_at_not_null NOT NULL,
+    material_digest text NOT NULL,
+    idempotency_key uuid NOT NULL,
+    redeemed_by_actor_id uuid NOT NULL,
+    redeemed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT program6_browser_action_challenge_redempt_material_digest_check CHECK ((material_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redempti_session_digest_check CHECK ((session_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redemption_action_check CHECK ((action = ANY (ARRAY['accept-ready-plan'::text, 'accept-outcome-feedback'::text]))),
@@ -6821,6 +7531,21 @@ COMMENT ON TABLE ops.rule_admission IS 'Normalized authority contract for one ru
 
 
 --
+-- Name: rule_approval_lifecycle_anchor; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_approval_lifecycle_anchor (
+    approval_receipt_id uuid NOT NULL,
+    rule_id uuid NOT NULL,
+    rule_version_after integer NOT NULL,
+    statement_hash text NOT NULL,
+    anchored_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rule_approval_lifecycle_anchor_rule_version_after_check CHECK ((rule_version_after > 0)),
+    CONSTRAINT rule_approval_lifecycle_anchor_statement_hash_check CHECK ((statement_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
 -- Name: rule_approval_receipt; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -6892,6 +7617,36 @@ CREATE TABLE ops.rule_enforcement_point (
     verified_at timestamp with time zone,
     CONSTRAINT installed_control_has_verification CHECK (((NOT installed) OR (btrim(test_ref) <> ''::text))),
     CONSTRAINT rule_enforcement_point_enforcement_class_check CHECK ((enforcement_class = ANY (ARRAY['deny_gate'::text, 'stop_gate'::text, 'schema'::text, 'surfacing'::text, 'transactional_schema'::text, 'judgment_ambient'::text])))
+);
+
+
+--
+-- Name: rule_retirement_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_retirement_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key text NOT NULL,
+    rule_id uuid NOT NULL,
+    rule_version_before integer NOT NULL,
+    rule_version_after integer NOT NULL,
+    statement_hash text NOT NULL,
+    previous_status text NOT NULL,
+    actor_id uuid NOT NULL,
+    reason text NOT NULL,
+    superseded_by uuid,
+    approval_receipt_id uuid,
+    contract_hash text NOT NULL,
+    retired_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT active_retirement_has_approval CHECK (((previous_status <> 'active'::text) OR (approval_receipt_id IS NOT NULL))),
+    CONSTRAINT rule_retirement_receipt_check CHECK ((rule_version_after = (rule_version_before + 1))),
+    CONSTRAINT rule_retirement_receipt_contract_hash_check CHECK ((contract_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT rule_retirement_receipt_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT rule_retirement_receipt_previous_status_check CHECK ((previous_status = ANY (ARRAY['proposed'::text, 'active'::text]))),
+    CONSTRAINT rule_retirement_receipt_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT rule_retirement_receipt_rule_version_before_check CHECK ((rule_version_before > 0)),
+    CONSTRAINT rule_retirement_receipt_statement_hash_check CHECK ((statement_hash ~ '^[0-9a-f]{64}$'::text))
 );
 
 
@@ -7064,19 +7819,19 @@ CREATE TABLE ops.sourced_work_request_outcome_feedback (
     work_request_id uuid NOT NULL,
     feedback_version integer NOT NULL,
     idempotency_key uuid NOT NULL,
-    work_request_version integer CONSTRAINT sourced_work_request_outcome_feed_work_request_version_not_null NOT NULL,
+    work_request_version integer NOT NULL,
     plan_id uuid NOT NULL,
-    plan_acceptance_receipt_id uuid CONSTRAINT sourced_work_request_outcom_plan_acceptance_receipt_id_not_null NOT NULL,
+    plan_acceptance_receipt_id uuid NOT NULL,
     preimage jsonb NOT NULL,
-    criterion_results jsonb CONSTRAINT sourced_work_request_outcome_feedbac_criterion_results_not_null NOT NULL,
+    criterion_results jsonb NOT NULL,
     evidence_refs jsonb NOT NULL,
     outcome text NOT NULL,
     blocker_code text NOT NULL,
     result_summary text NOT NULL,
     observed_minutes integer NOT NULL,
-    interaction_surface text CONSTRAINT sourced_work_request_outcome_feedb_interaction_surface_not_null NOT NULL,
-    heavy_session_used boolean CONSTRAINT sourced_work_request_outcome_feedba_heavy_session_used_not_null NOT NULL,
-    manual_context_transfers integer CONSTRAINT sourced_work_request_outcome__manual_context_transfers_not_null NOT NULL,
+    interaction_surface text NOT NULL,
+    heavy_session_used boolean NOT NULL,
+    manual_context_transfers integer NOT NULL,
     feedback_hash text NOT NULL,
     feedback_ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -7108,15 +7863,15 @@ COMMENT ON TABLE ops.sourced_work_request_outcome_feedback IS 'Append-only bound
 --
 
 CREATE TABLE ops.sourced_work_request_outcome_feedback_acceptance_receipt (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT sourced_work_request_outcome_feedback_acceptance_re_id_not_null NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_outcome_feedback__work_request_id_not_null NOT NULL,
-    feedback_id uuid CONSTRAINT sourced_work_request_outcome_feedback_acce_feedback_id_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_outcome_feedback__idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_outcome_feedback_acc_base_version_not_null NOT NULL,
-    feedback_hash text CONSTRAINT sourced_work_request_outcome_feedback_ac_feedback_hash_not_null NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_outcome_feed_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT sourced_work_request_outcome_feedback_acce_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_outcome_feedback_a_result_version_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    feedback_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
+    feedback_hash text NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    result_version integer NOT NULL,
     CONSTRAINT sourced_work_request_outcome_feedback_acce_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_outcome_feedback_accep_feedback_hash_check CHECK ((feedback_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT sourced_work_request_outcome_feedback_accept_base_version_check CHECK ((base_version > 0))
@@ -7181,16 +7936,16 @@ COMMENT ON TABLE ops.sourced_work_request_plan IS 'Append-only Program 6 plan pr
 
 CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_plan_acceptance_r_work_request_id_not_null NOT NULL,
+    work_request_id uuid NOT NULL,
     plan_id uuid NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_plan_acceptance_r_idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_plan_acceptance_rece_base_version_not_null NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
     plan_hash text NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_plan_accepta_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_plan_acceptance_recei_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_plan_acceptance_re_result_version_not_null NOT NULL,
-    shape_fixed_surface_ref text CONSTRAINT sourced_work_request_plan_acce_shape_fixed_surface_ref_not_null NOT NULL,
-    shape_rationale text CONSTRAINT sourced_work_request_plan_acceptance_r_shape_rationale_not_null NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT now() NOT NULL,
+    result_version integer NOT NULL,
+    shape_fixed_surface_ref text NOT NULL,
+    shape_rationale text NOT NULL,
     CONSTRAINT sourced_work_request_plan_acceptance_recei_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_base_version_check CHECK ((base_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_plan_hash_check CHECK ((plan_hash ~ '^sha256:[0-9a-f]{64}$'::text))
@@ -8213,6 +8968,8 @@ CREATE TABLE public.rule (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    retired_by uuid,
+    retired_at timestamp with time zone,
     CONSTRAINT rule_check CHECK (((status <> 'active'::text) OR (activated_by IS NOT NULL))),
     CONSTRAINT rule_enforcement_check CHECK ((enforcement = ANY (ARRAY['prose'::text, 'checklist'::text, 'gate'::text, 'constraint'::text, 'code'::text]))),
     CONSTRAINT rule_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'active'::text, 'retired'::text, 'superseded'::text])))
@@ -9139,12 +9896,12 @@ COMMENT ON COLUMN public.campaign.coverage_at_scoring IS 'The measurement covera
 --
 
 CREATE TABLE public.candidate_pool (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT prospect_pool_id_not_null NOT NULL,
-    source text CONSTRAINT prospect_pool_source_not_null NOT NULL,
-    source_key text CONSTRAINT prospect_pool_source_key_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source text NOT NULL,
+    source_key text NOT NULL,
     source_seq integer,
-    source_row jsonb CONSTRAINT prospect_pool_source_row_not_null NOT NULL,
-    name text CONSTRAINT prospect_pool_name_not_null NOT NULL,
+    source_row jsonb NOT NULL,
+    name text NOT NULL,
     org_name text,
     vertical text,
     address text,
@@ -9159,19 +9916,19 @@ CREATE TABLE public.candidate_pool (
     score_basis text,
     est_lease_event date,
     est_basis text,
-    status text DEFAULT 'pool'::text CONSTRAINT prospect_pool_status_not_null NOT NULL,
+    status text DEFAULT 'pool'::text NOT NULL,
     promoted_lead_id uuid,
     dup_tier text,
     dup_subject_type text,
     dup_subject_id uuid,
     dup_ref text,
     dup_basis text,
-    dup_do_not_contact boolean DEFAULT false CONSTRAINT prospect_pool_dup_do_not_contact_not_null NOT NULL,
-    version integer DEFAULT 1 CONSTRAINT prospect_pool_version_not_null NOT NULL,
-    created_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_created_at_not_null NOT NULL,
-    created_by uuid CONSTRAINT prospect_pool_created_by_not_null NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_updated_at_not_null NOT NULL,
-    updated_by uuid CONSTRAINT prospect_pool_updated_by_not_null NOT NULL,
+    dup_do_not_contact boolean DEFAULT false NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by uuid NOT NULL,
     declined_at timestamp with time zone,
     declined_by uuid,
     decline_reason text,
@@ -12008,16 +12765,16 @@ CREATE VIEW public.v_capture_coverage AS
            FROM public.deal d
           WHERE ((d.outcome IS NULL) AND (d.phase <> 'closed'::text))
         UNION ALL
-         SELECT 'client'::text,
+         SELECT 'client'::text AS text,
             c.id
            FROM public.client c
           WHERE (c.merged_into IS NULL)
         UNION ALL
-         SELECT 'lead'::text,
+         SELECT 'lead'::text AS text,
             l.id
            FROM public.lead l
         UNION ALL
-         SELECT 'vendor'::text,
+         SELECT 'vendor'::text AS text,
             v.id
            FROM public.vendor v
         )
@@ -14276,7 +15033,7 @@ CREATE VIEW public.v_export_dossier_analysis AS
           WHERE (c.notes_path IS NOT NULL)
         UNION ALL
          SELECT l.id,
-            'lead'::text,
+            'lead'::text AS text,
             ('DNA/Clients/prospects/'::text || regexp_replace(l.notes_path, '^.*/'::text, ''::text))
            FROM public.lead l
           WHERE (l.notes_path IS NOT NULL)
@@ -14886,7 +15643,7 @@ CREATE VIEW public.v_loop_no_blocker AS
     li.since_text,
     lb.block_key AS section,
     "left"(COALESCE(li.body, li.title, ''::text), 160) AS gist,
-    (li.created_at < '2026-08-09 22:20:28.647+00'::timestamp with time zone) AS predates_gate
+    (li.created_at < '2026-08-09 17:20:28.647-05'::timestamp with time zone) AS predates_gate
    FROM (public.loop_item li
      JOIN public.loop_block lb ON ((lb.id = li.block_id)))
   WHERE ((li.kind = 'open_loop'::text) AND (li.status = 'open'::text) AND (li.blocker_class IS NULL))
@@ -15979,6 +16736,46 @@ ALTER TABLE ONLY ops.authority_receipt
 
 
 --
+-- Name: calendar_canary_receipt calendar_canary_receipt_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapsh_id_snapshot_digest_contact_co_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapsh_id_snapshot_digest_contact_co_key UNIQUE (id, snapshot_digest, contact_count);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: capability_agent_session capability_agent_session_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -16595,6 +17392,46 @@ ALTER TABLE ONLY ops.legacy_schedule_surface_registry
 
 
 --
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_s_id_snapshot_digest_availabili_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_s_id_snapshot_digest_availabili_key UNIQUE (id, snapshot_digest, availability_count, open_search_count);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: npi_device_evidence_receipt npi_device_evidence_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -16767,6 +17604,22 @@ ALTER TABLE ONLY ops.rule_admission
 
 
 --
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_approval_lifecycle_anchor
+    ADD CONSTRAINT rule_approval_lifecycle_anchor_pkey PRIMARY KEY (approval_receipt_id);
+
+
+--
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_rule_id_rule_version_after_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_approval_lifecycle_anchor
+    ADD CONSTRAINT rule_approval_lifecycle_anchor_rule_id_rule_version_after_key UNIQUE (rule_id, rule_version_after);
+
+
+--
 -- Name: rule_approval_receipt rule_approval_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -16804,6 +17657,22 @@ ALTER TABLE ONLY ops.rule_enforcement_point
 
 ALTER TABLE ONLY ops.rule_enforcement_point
     ADD CONSTRAINT rule_enforcement_point_rule_id_control_key_key UNIQUE (rule_id, control_key);
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_pkey PRIMARY KEY (id);
 
 
 --
@@ -19416,10 +20285,52 @@ CREATE OR REPLACE VIEW public.v_investigation AS
 
 
 --
+-- Name: enforcement_control_catalog active_approved_control_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER active_approved_control_immutable BEFORE DELETE OR UPDATE ON ops.enforcement_control_catalog FOR EACH ROW EXECUTE FUNCTION ops.refuse_live_approved_control_rewrite();
+
+
+--
+-- Name: rule_admission approved_rule_admission_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER approved_rule_admission_immutable BEFORE DELETE OR UPDATE ON ops.rule_admission FOR EACH ROW EXECUTE FUNCTION ops.refuse_approved_rule_contract_rewrite();
+
+
+--
+-- Name: rule_control_binding approved_rule_control_binding_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER approved_rule_control_binding_immutable BEFORE INSERT OR DELETE OR UPDATE ON ops.rule_control_binding FOR EACH ROW EXECUTE FUNCTION ops.refuse_approved_rule_contract_rewrite();
+
+
+--
+-- Name: rule_enforcement_point approved_rule_enforcement_point_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER approved_rule_enforcement_point_immutable BEFORE INSERT OR DELETE OR UPDATE ON ops.rule_enforcement_point FOR EACH ROW EXECUTE FUNCTION ops.refuse_approved_rule_contract_rewrite();
+
+
+--
 -- Name: authority_receipt authority_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
 CREATE TRIGGER authority_receipt_append_only BEFORE DELETE OR UPDATE ON ops.authority_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_authority_receipt_rewrite();
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER calendar_canary_receipt_append_only BEFORE DELETE OR UPDATE ON ops.calendar_canary_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER calendar_canary_source_snapshot_append_only BEFORE DELETE OR UPDATE ON ops.calendar_canary_source_snapshot FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
 
 
 --
@@ -19654,6 +20565,20 @@ CREATE TRIGGER legacy_schedule_observation_receipt_append_only BEFORE DELETE OR 
 
 
 --
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER nightly_availability_canary_receipt_append_only BEFORE DELETE OR UPDATE ON ops.nightly_availability_canary_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER nightly_availability_canary_source_append_only BEFORE DELETE OR UPDATE ON ops.nightly_availability_canary_source_snapshot FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
 -- Name: npi_device_evidence_receipt npi_device_evidence_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -19717,10 +20642,31 @@ CREATE TRIGGER release_provider_identity_immutable BEFORE UPDATE OF provider, pr
 
 
 --
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_approval_lifecycle_anchor_append_only BEFORE DELETE OR UPDATE ON ops.rule_approval_lifecycle_anchor FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
+
+
+--
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_valid; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_approval_lifecycle_anchor_valid BEFORE INSERT ON ops.rule_approval_lifecycle_anchor FOR EACH ROW EXECUTE FUNCTION ops.require_rule_approval_lifecycle_anchor();
+
+
+--
 -- Name: rule_approval_receipt rule_approval_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
 CREATE TRIGGER rule_approval_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_approval_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_retirement_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_retirement_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
 
 
 --
@@ -19944,7 +20890,7 @@ CREATE TRIGGER retrieval_proposal_guard_before_update BEFORE UPDATE ON public.re
 -- Name: rule rule_activation_requires_admission; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER rule_activation_requires_admission BEFORE INSERT OR UPDATE OF status ON public.rule FOR EACH ROW EXECUTE FUNCTION ops.require_rule_admission();
+CREATE TRIGGER rule_activation_requires_admission BEFORE INSERT OR UPDATE ON public.rule FOR EACH ROW EXECUTE FUNCTION ops.require_rule_admission();
 
 
 --
@@ -20036,6 +20982,38 @@ ALTER TABLE ONLY neon_auth.session
 
 ALTER TABLE ONLY ops.authority_receipt
     ADD CONSTRAINT authority_receipt_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_source_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_source_snapshot_id_fkey FOREIGN KEY (source_snapshot_id) REFERENCES ops.calendar_canary_source_snapshot(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_source_snapshot_id_source_snapshot_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_source_snapshot_id_source_snapshot_fkey FOREIGN KEY (source_snapshot_id, source_snapshot_digest, source_contact_count) REFERENCES ops.calendar_canary_source_snapshot(id, snapshot_digest, contact_count);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
 
 
 --
@@ -20591,6 +21569,38 @@ ALTER TABLE ONLY ops.legacy_schedule_surface_registry
 
 
 --
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_r_source_snapshot_id_source_sn_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_r_source_snapshot_id_source_sn_fkey FOREIGN KEY (source_snapshot_id, source_snapshot_digest, availability_count, open_search_count) REFERENCES ops.nightly_availability_canary_source_snapshot(id, snapshot_digest, availability_count, open_search_count);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_source_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_source_snapshot_id_fkey FOREIGN KEY (source_snapshot_id) REFERENCES ops.nightly_availability_canary_source_snapshot(id);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
+
+
+--
 -- Name: npi_device_evidence_receipt npi_device_evidence_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -20655,6 +21665,22 @@ ALTER TABLE ONLY ops.rule_admission
 
 
 --
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_approval_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_approval_lifecycle_anchor
+    ADD CONSTRAINT rule_approval_lifecycle_anchor_approval_receipt_id_fkey FOREIGN KEY (approval_receipt_id) REFERENCES ops.rule_approval_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_approval_lifecycle_anchor
+    ADD CONSTRAINT rule_approval_lifecycle_anchor_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: rule_approval_receipt rule_approval_receipt_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -20692,6 +21718,38 @@ ALTER TABLE ONLY ops.rule_control_binding
 
 ALTER TABLE ONLY ops.rule_enforcement_point
     ADD CONSTRAINT rule_enforcement_point_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_approval_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_approval_receipt_id_fkey FOREIGN KEY (approval_receipt_id) REFERENCES ops.rule_approval_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_retirement_receipt rule_retirement_receipt_superseded_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_retirement_receipt
+    ADD CONSTRAINT rule_retirement_receipt_superseded_by_fkey FOREIGN KEY (superseded_by) REFERENCES public.rule(id) ON DELETE RESTRICT;
 
 
 --
@@ -22679,6 +23737,14 @@ ALTER TABLE ONLY public.rule
 
 
 --
+-- Name: rule rule_retired_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rule
+    ADD CONSTRAINT rule_retired_by_fkey FOREIGN KEY (retired_by) REFERENCES public.actor(id);
+
+
+--
 -- Name: rule rule_supersedes_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -22881,6 +23947,8 @@ ALTER TABLE ONLY public.vendor
 --
 -- PostgreSQL database dump complete
 --
+
+
 --
 -- CARR GRANTS (bin/schema-snapshot.sh) — not produced by pg_dump.
 --
@@ -22897,16 +23965,20 @@ revoke all on function ops.accept_sourced_work_request_plan(p_work_request text,
 revoke all on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) from public;
 revoke all on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
+revoke all on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) from public;
 revoke all on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.assert_guidance_import_inventory(p_batch_id uuid) from public;
 revoke all on function ops.assert_guidance_import_materialization(p_batch_id uuid) from public;
 revoke all on function ops.assert_guidance_registry_coverage() from public;
 revoke all on function ops.authority_actor_slug() from public;
+revoke all on function ops.calendar_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) from public;
+revoke all on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
+revoke all on function ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
@@ -22922,6 +23994,7 @@ revoke all on function ops.guidance_revision_contract_hash(p_revision_id uuid) f
 revoke all on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) from public;
 revoke all on function ops.invalidate_cognition_cache(p_dependency_ref text) from public;
 revoke all on function ops.invalidate_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_dependency_ref text) from public;
+revoke all on function ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function ops.program6_browser_action_challenge_redemptions_immutable() from public;
 revoke all on function ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) from public;
@@ -22930,10 +24003,12 @@ revoke all on function ops.propose_sourced_work_request_plan(p_work_request text
 revoke all on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) from public;
 revoke all on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) from public;
 revoke all on function ops.reap_expired_jobs() from public;
+revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
 revoke all on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
 revoke all on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
+revoke all on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) from public;
 revoke all on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) from public;
@@ -22942,6 +24017,9 @@ revoke all on function ops.redeem_program6_browser_action_challenge(p_token_dige
 revoke all on function ops.refuse_guidance_history_rewrite() from public;
 revoke all on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) from public;
 revoke all on function ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
+revoke all on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) from public;
+revoke all on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) from public;
+revoke all on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) from public;
 revoke all on function ops.select_provider_routes(p_requested text[]) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
@@ -22950,6 +24028,7 @@ revoke all on function ops.sourced_work_request_plan_digest(p_preimage jsonb) fr
 revoke all on function ops.sourced_work_request_plan_preimage(p_work_request_id uuid, p_scope_summary text, p_runbook_ref text, p_runbook_section_id uuid, p_runbook_revision_id uuid, p_runbook_content_hash text, p_dependency_refs jsonb, p_recovery_ref text, p_observability_ref text, p_caps jsonb) from public;
 revoke all on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) from public;
+revoke all on function ops.sync_system_rule_control_bindings() from public;
 revoke all on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) from public;
 revoke all on function ops.triage_sourced_work_request(p_work_request text, p_base_version integer, p_classification text, p_idempotency_key uuid) from public;
 revoke all on function ops.validate_guidance_authority_binding() from public;
@@ -23093,6 +24172,10 @@ grant select on table ops.rule_control_binding to carr_writer;
 grant select on table ops.rule_enforcement_point to carr_jobs;
 grant select on table ops.rule_enforcement_point to carr_reader;
 grant insert, select, update on table ops.rule_enforcement_point to carr_writer;
+grant select on table ops.rule_retirement_receipt to carr_authority;
+grant select on table ops.rule_retirement_receipt to carr_jobs;
+grant select on table ops.rule_retirement_receipt to carr_reader;
+grant select on table ops.rule_retirement_receipt to carr_writer;
 grant insert, select on table ops.run to carr_jobs;
 grant select on table ops.run to carr_reader;
 grant insert, select on table ops.run to carr_writer;
@@ -23551,6 +24634,7 @@ grant execute on function ops.accept_sourced_work_request_plan(p_work_request te
 grant execute on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) to carr_authority;
 grant execute on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
+grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_authority;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_jobs;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
@@ -23561,6 +24645,8 @@ grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
+grant execute on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
+grant execute on function ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
 grant execute on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) to carr_authority;
@@ -23586,16 +24672,21 @@ grant execute on function ops.propose_sourced_work_request_plan(p_work_request t
 grant execute on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
+grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
 grant execute on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
+grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
 grant execute on function ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
+grant execute on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
+grant execute on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
+grant execute on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) to carr_authority;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
@@ -23621,12 +24712,9 @@ grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timest
 grant carr_authority to neondb_owner;
 grant carr_device_evidence to neondb_owner;
 grant carr_exporter to neondb_owner;
-grant carr_exporter to neondb_owner;
 grant carr_jobs to neondb_owner;
 grant carr_reader to carr_exporter;
 grant carr_reader to neondb_owner;
-grant carr_reader to neondb_owner;
-grant carr_writer to neondb_owner;
 grant carr_writer to neondb_owner;
 --
 -- PostgreSQL database dump
@@ -23651,201 +24739,206 @@ SET row_security = off;
 --
 
 COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
-0002_seed.sql	1e1e10193569937cd55cae65a4cf5266123c26fe4a5ecf329458124f46189317	2026-07-30 16:38:47.602591+00
-0003_wave1_registry_columns.sql	5f3e85261ac5b193527d1b4726f6acb17821bbc800a953185a5df638549f6587	2026-07-30 16:50:32.216051+00
-0004_roles_views.sql	f7a7aa660e82a26f90a83aebc197054db68cf6d252edf6874d8f0c6008590cac	2026-07-30 16:50:32.41411+00
-0005_role_admin_grants.sql	e5dd8791977f103df20087ac73e28d310eea8f80ed91a451ad52d7d13de9eceb	2026-07-30 16:50:32.772307+00
-0006_exporter_role.sql	2ac146111970f41434056a8371fd298438e12c25dbc0a09ae13dbb40609fafb1	2026-07-30 19:19:14.747227+00
-0007_owner_columns.sql	2e8a4867dd0750d55ef008c52a8cb17716961e47eb3c6e9623f1f34f2c87aaeb	2026-07-30 19:31:51.770968+00
-0008_client_merged_into.sql	1eb56e4b518ffee5fe49a5140a3444cc639547675e3c1bd08c3c1ff2c9262284	2026-07-30 19:40:17.318972+00
-0009_fidelity_columns.sql	01c8dd79c74e20907ab9bc16b6189d36c82cb4e77551de8b7ef92b2c63a9b0ae	2026-07-30 19:45:24.023703+00
-0010_verbatim_labels.sql	73436b4640496414af84f0af212f1b7b65704d5fcf13b4ccd5c7634d99638246	2026-07-30 19:50:36.856831+00
-0011_roster_notes.sql	27d534cfb082deb4b5d61c1a7847eeb24f9f5a8fc97f0d952e20b4027a3ecbb7	2026-07-30 20:06:35.462919+00
-0012_specialty_label.sql	9a7b51d9f99c9bf6fb3b52c1c6547586713027443d8c167162efbd6c33c9756d	2026-07-30 20:18:06.960754+00
-0013_active_book_derived.sql	9a8730bb933ee1221eb6b0d22f2619ca84ce4b11b1583258a92206562f71ce53	2026-07-31 16:23:37.395658+00
-0014_active_flags_and_semantics.sql	2830a82f27b7ae76821a823eccfb14dad2e1001f7ad6cf6301023808209e1d31	2026-07-31 16:23:37.395658+00
-0015_compiled_rules_view.sql	0fa7152fcac1fd7ccbd8f43d3c528e1a704656941c1704bd530cc3c7ad3799e7	2026-07-31 16:23:37.395658+00
-0016_ref_index_resolver_view.sql	d821701d1b6eceaaea7005519b774ab73579b19ed6ca84ff7fefbcb63e001d2a	2026-07-31 16:23:37.395658+00
-0017_vocab_ref_tables.sql	714af9bfc3b0bba4943fc224e74435de84ca5ff8f5c64bb3517c81f9f05fbe0a	2026-07-31 16:23:49.074943+00
-0018_client_status_rationalization.sql	3ee4a58a4c41340d060558cd4becb5d194cd897262ffeb5c77cb9399cec0aaea	2026-07-31 17:33:03.520177+00
-0019_wave2_machinery_tables.sql	95de20717cecd1482cfff618f64da017fd8639c116e84760bf02ed600596c071	2026-07-31 18:09:16.884822+00
-0020_party_link_kind_vocabulary.sql	bfcfdc26f30f0556139f27d5a727f4a057c2c1c169e1c109a9d22a5c51845d4d	2026-07-31 19:22:18.658623+00
-0021_jobs_role_and_cadence_inputs.sql	447d36c4058ced54a45cdcc1a8b85c42774c8dc9e90590ca0cb597a987dea5a2	2026-07-31 20:51:47.490444+00
-0022_purchase_price_basis.sql	356c15b8920b45b85d845865a41d5852e0ad3bf3081578fa88e52ebe1120e312	2026-08-01 00:00:04.371229+00
-0023_prospect_pool.sql	22d5f8577f310c6373dc2d4789d63b30bb8cd71bc50e713adad38e843e477ea3	2026-08-01 00:35:39.405736+00
-0024_loop_item.sql	590f1e9bbe67f6d973eb50fd8079bcaec73d866996f1ee0691a15ceef43fd9b2	2026-08-01 01:17:34.325834+00
-0025_exporter_grants_pool_all.sql	f1742ee05d20ca4ea534c8bcbe3d82c295845ca4512250013cc8e4f9c252a81a	2026-08-01 01:21:36.25126+00
-0026_counterparty_and_attribution_views.sql	89f8d843bcf0974a15c25a0ba8cff95a1d38c0118be868b1c344010eaee39155	2026-08-01 03:06:04.71739+00
-0027_review_fixes_graph_views.sql	33ec2d144e84a14ed8e8683a85f99aac25dd4f664a4f1cff874f50a529b9d91e	2026-08-01 03:26:52.90654+00
-0028_dossier_analysis.sql	47191484c11885b31cc099ab365f72f6ebe58d8f94c82244f3d10ef3061fa482	2026-08-01 15:13:04.526926+00
-0029_compiled_rules_scope.sql	5492ce8287fa6b866a22232f70e0cfc87e2a5df0de3d74edaa5640894ddc09cb	2026-08-01 15:13:04.667501+00
-0030_md_ledger_render.sql	c01f2f50314658d4fd7abce2b8f4ab3dc712863620d115a1649124cf3e6af6f4	2026-08-01 15:13:05.006783+00
-0031_decision_events_and_idea_loops.sql	595be5d13f1c60af0ee268e709bc700612318cdd5be65126929a406b15d9b717	2026-08-01 16:18:58.308797+00
-0032_audit_repairs.sql	774e2c39ba1ad2a90d5ec174347a48b3a5a65d86d35610275a563970296bce9a	2026-08-02 03:41:09.549698+00
-0033_deal_inherits_client_touch.sql	437ae5c1f8b65a1e6eb120b16f76c04eebdf039e3cb366eced725fc0e2ae26db	2026-08-02 14:02:10.36658+00
-0034_coverage_and_denominators.sql	2e23a8fa416bef2726a5acd1f8e4bdae941b4e2a6fde54a8931a476dc489c452	2026-08-02 14:02:10.567596+00
-0035_phase_order_legal_before_dd.sql	dc30d8840d49e65c0a95ce1ddb4c14644498762ba174c39efd53b819f69bf3a0	2026-08-02 14:02:10.714312+00
-0036_sonography_lead_owner_dell.sql	b14c93dc12e2eab4dd782cb6b40b7204fa442add60a24a1cb2acec843c84a064	2026-08-02 14:16:13.382326+00
-0037_write_provenance.sql	591ec419b0ae401bb001ff53d0039dabb766b52986965b6fc1103eb237c3b86a	2026-08-02 14:43:05.268362+00
-0038_loop_domain.sql	a813c2da68e02b3759683e56cd4f19664d33cdbe22c5e03adeb7907bb3a587bb	2026-08-02 15:31:09.302516+00
-0039_loop_domain_six.sql	5e982489d3e5f281a83bd27328b00d3ad80809122ee64817c6d85376d41d96c8	2026-08-02 16:00:00.588915+00
-0040_loop_domain_intro_rule.sql	33a27592fafafeb1f645bbcd8f08c70b3ea5f54430ce55e7bc0c14894d6e879d	2026-08-02 16:07:15.567276+00
-0041_classify_loops.sql	485d9bc2310d702391f882d159a7cef18d16d165d9ae35297bf9112a004117d2	2026-08-02 16:28:04.97472+00
-0042_export_loops_domain.sql	4a34ca1cc23e34401f16d671072e7172674c6561c9b736e001703ea0f4e75b07	2026-08-02 16:31:54.432914+00
-0043_loop_prose_cap.sql	f68b85a77bf4f58d966840f1ea041b8295f9ddc1ac8b899dee313e08c284f055	2026-08-02 16:36:31.994004+00
-0044_fix_registry_pointers.sql	13ada7eafe4620feb8fc145fa1f5ac5ec509f843289cff3dbd1462a538587732	2026-08-02 16:48:19.001992+00
-0045_drip_conflict.sql	41fd3d423d3adb19700a3b2337b7b569d0ec1e7a60cd9975c5c0b6731670b45a	2026-08-02 16:50:27.050842+00
-0046_party_identity.sql	5daf0c3d626de9f09d30a16e8c7808e102fb0f954af93eee6446b971748b14d4	2026-08-02 17:49:57.383312+00
-0047_vendor_relationship.sql	ee52249a33d8c557a7a3659c8a2d3d283733a47619e528431fa883113ea880d6	2026-08-02 17:53:12.389283+00
-0048_candidate_pool.sql	378a56d12dd4f19e10c6c7a60e5fa7ecbef12ec3fa950a6655371fa16c627f54	2026-08-02 17:56:14.540881+00
-0049_deprecation_register.sql	bc36b68f84e5fe8a24ac440b6ea268aa149f1de10e6942e80c1345ff853278f8	2026-08-02 17:57:46.981675+00
-0050_vendor_category.sql	973501637dd4e0897b8002d2386820f59bca8565c4fa1fba1e4267ff6ec1babc	2026-08-02 18:23:24.52409+00
-0051_intro_graph.sql	6ebe5196706477fd1b68fd2debd505cba311ad2e02fe2b016585a223fa49559e	2026-08-02 18:24:56.163485+00
-0052_vendor_level_triggers.sql	f55455977ffc90370654ddf7272f19e4dd2377e763cff0b58c0a278d72d1a68d	2026-08-02 18:31:50.131704+00
-0053_activity_connected.sql	a64deacfde0964e54bc634959713b47c10d382a4590d5e5e140be1c501ad655f	2026-08-02 18:34:01.184753+00
-0054_contact_type.sql	789e1773363281fb73bbfdadd5dd97b54713206e68590a4546a6c7d881954745	2026-08-02 18:42:38.570376+00
-0055_repair_orphaned_roles.sql	4035dad033bb35f0d2378d3ed3fbe8a4c2192608a9cd78724b68cf5343180269	2026-08-02 18:51:40.524982+00
-0056_ref_index_party_branch.sql	1600d3ac8f27fa7ce1956be2da718a256d28d7a4d30a0c231788d5e65603f0a9	2026-08-02 21:44:29.525586+00
-0057_role_timeouts.sql	d704ad6febe6f39418366d024a82561bcb2de306f73fb2d2ce45219b658188d4	2026-08-02 22:13:57.002024+00
-0058_assert_view_disjoint.sql	81bbb6a3b2ef92cdfb420539c62d4fc2cc02a4a559cfe3dae66160b102353fc6	2026-08-02 22:13:57.234313+00
-0059_org_identity.sql	bbef263245261b51d3a42d2504e96af8772310503abfe41eaa8d4d22c69f8616	2026-08-02 22:13:57.669688+00
-0060_participant_sides.sql	8b8893ab869987c4c140b516ec2cfb1de8f476d6292e1e0466c1c2a8d68d4f13	2026-08-03 00:50:25.051853+00
-0061_national_account.sql	0e2feea603aa5f2dc2c02a059ebace36388ef201d79988ae43a5f24b88cde4ea	2026-08-03 00:50:25.540324+00
-0062_orphaned_edge.sql	64421fbd3cee3063f0d0944038e046366c0cf22df9965b0b4b2ad889e822825d	2026-08-03 00:50:25.846843+00
-0063_counterparty_observation.sql	8da6c18fd91f92627fb5ce851c8c4b5fe4c9c0d3186bb7d3dd2b2e99bc5470fa	2026-08-03 00:50:26.209565+00
-0064_counterparty_scorecard.sql	a8e0dbcbaf9743ca54e2ad43c1115f58dbee4bc24efef253916ab919c919af24	2026-08-03 00:50:26.585964+00
-0065_vendor_level_evidence.sql	370b9717d24b4267b5fba34ef7882cc34dfc57ce655a499cb71f8ee2490b9e5d	2026-08-03 00:50:26.90426+00
-0066_marketing_campaign_and_measurement.sql	893eb737693d179074f4008f74011b1a347c0de69c79ca8fcd9717a335e1ffca	2026-08-03 01:49:48.256599+00
-0067_compiled_rules_id.sql	d4a3248f499b9b77a554c654ab02cf16e1a5fb878fc7accbf7e0c38308ac9442	2026-08-03 01:59:11.939517+00
-0068_rule_version.sql	eb16d1a3d52a9728ef0ca41bccc937e0eab4e170fa020a248a17ecbd5fafac76	2026-08-03 02:21:33.141098+00
-0001_init.sql	877284179e1bd77fd6f008b1c764016f5a43218267256efa061a6cf700df5a48	2026-07-30 16:38:46.9876+00
-0069_enrichment_write_gap.sql	35d8a0cd2072ac7657fb15287b6d2795ea816cc3c15d54d20c2e31ed7b365a1e	2026-08-06 14:59:07.124217+00
-0070_source_capture.sql	af7d146327bde5369893e575670eddc9e37c4b7ff47127bad7aa0002c120cd5c	2026-08-07 02:50:23.605478+00
-0071_forgetting_policy.sql	8d4db137309f6003f40e4ec97eba1758da350ee93e4527cbde3281cebd9cdd12	2026-08-07 02:50:23.998651+00
-0072_vendor_category_grant.sql	c035fd52a553b4671f05068d472a7179723c6627783224c21e632746dbbd731e	2026-08-07 03:03:44.919859+00
-0073_wave1_research.sql	5ca1332c955ab056dd2150934e533c5632421318ec2b585d3f5a6ad3c42e2eec	2026-08-07 03:54:34.794921+00
-0074_deal_city_lane.sql	785b3ea5992b18698563d792e64de8cdcb7251b5be3b16af5064f66c8b612c72	2026-08-08 03:10:19.081899+00
-0075_doctrine_store.sql	72f32794d245317cc3ba5d6e6303e574ca4a59d7c6b963ad7caac055fd00bbee	2026-08-08 03:20:20.951425+00
-0076_doctrine_grants.sql	b5385df6eac2c7d6a1e55e3571629f748ed0d91e50da6bf4b2ba9973b49da4d5	2026-08-08 03:57:15.212545+00
-0077_reader_actor_columns.sql	d81eaec56ad603c5e62c737efe98fac4ca6ba8606b7da3bada7f4b8e70fd0dfe	2026-08-08 04:18:00.288267+00
-0078_writer_participant_role_grant.sql	d566b86309130bbcf3faf422d5d8704a8c639a8f87a64cd2a9b2302c6b25474d	2026-08-08 04:25:55.120546+00
-0078_exporter_doctrine_select.sql	92afb9da32a85c347f86b17f010b5e8acad653d543c8ee61de732ab5b9c0a0fc	2026-08-08 04:42:32.092009+00
-0079_review_clock_backfill.sql	21b85ace1be20bb1f9f8273407d1d58a40f393e62eeced513571644dc682df8c	2026-08-08 04:56:09.289671+00
-0080_reader_briefing_grants.sql	780e66787c186887466f795ab78c73184bb25055fa1552eb0aa5df39dc7559ba	2026-08-08 05:10:01.202221+00
-0079_deal_room_api.sql	3bc8e46d6022c3cf74ccc7878ab2d6fd227b814fca5105bbffc06fadcc0ef0ba	2026-08-08 16:48:36.768348+00
-0080_deal_room_board_view.sql	5c4a9fa12838a114a4d5742c4dfd307c26d3cefe0966ff4719a08e8b7d336b22	2026-08-08 17:30:59.868641+00
-0081_capture_bridge.sql	e31f98b982d7ad2edadd7379bd81188245eb9cf2e047afef3266c31ab6a2a05b	2026-08-08 19:57:53.27764+00
-0081_loop_blocker.sql	828b40c3186b39a675d7563884d1667fee384789a28cc38e1ba1e7b399470daf	2026-08-09 21:53:14.585775+00
-0074_outside_model_actors.sql	35d4eb1c2d31b536cfbe2964b36c3c6e1a5551801fb7d8d2f8c3740ecf4a86e4	2026-08-09 21:55:40.214353+00
-0082_timeline_event_summary.sql	f78e5f4c72523a308d33195bfd76709211b1feabdc472ad8cc5d851933326a09	2026-08-09 22:11:20.593349+00
-0083_loop_gate_cutover.sql	0cdb8e568d8dd10488a8ba8e1c255f8cac938dee5c97e8a1187963e6b290e109	2026-08-09 22:22:46.5206+00
-0084_loop_proximity.sql	bb392636289594ef80d3c0a3734f9eb1911c886ae4cd0ce449689063d2070ce8	2026-08-10 01:49:32.406608+00
-0085_decision_price.sql	cc27d55dbe53ce67689f56ff47334e0b408def583a84cd47d0d68d2cd1707da1	2026-08-10 01:54:26.802652+00
-0086_candidate_claim_card.sql	3b18009e794a950b04e36c8fae7086a2a95592fa5e6941561841b58503d47ebd	2026-08-10 03:53:59.90347+00
-0087_outreach_disposition.sql	6b9ca2513233f51c270d2d4e01b730555102cc22ca8d6487c9b098ee14c9b80f	2026-08-10 04:12:54.161538+00
-0088_triage_names_and_age.sql	b9421e343c703d9891a94a6306ace7c039151119ef02dc01c86e68d0945c6eab	2026-08-10 05:24:01.897288+00
-0089_loop_owner_normalise.sql	d44309e7f64498971195fa8d5cc6f19cca4d4cbc98c4b94851983d559c58e96e	2026-08-10 06:03:23.414331+00
-0090_deal_room_workspaces.sql	6599fdf05e4e140bb0ea354993c1904d73a5dc0dc2f2bb197d32feb1c60df17d	2026-08-10 14:36:38.465436+00
-0091_deal_reconciliation_read.sql	0848d02b3e148e388b24ad052acc2cf85f4015b7fbedc3917c51a975aa88a16a	2026-08-10 16:56:18.889238+00
-0092_deal_operating_state.sql	879342c676627b0a4993d148a2e6e8fd3563c9a1653530155ebaf28ed5ad5fe9	2026-08-10 16:56:19.194134+00
-0093_deal_parking_shape_hardening.sql	2621d4e82c2fa3e9c18f23b63e7d8779cc8be70e96b26086bf56b8c3f94e45d5	2026-08-10 16:56:19.395025+00
-0094_call_mode_post_call.sql	8fce2faee082588ffd6705735b97dc6e8c3e98745ca4b2c0a0823ae4ccc2a6e4	2026-08-10 18:25:01.095849+00
-0095_sponsor_runtime_audit.sql	7cd301e7a199d6ea3842fe4578ef01fde45be2231780f20fb950fbb56903eaaf	2026-08-11 13:00:21.327955+00
-0095_vendor_lookup_grants.sql	52fd28050658a6f963e3f00297ef371a5730cbade0d02897fdb17f453d405cc3	2026-08-11 17:55:33.041028+00
-0096_loop_owner_legacy_repair.sql	325013b201f7eb9982dc0ef0786e3f025efdf3ba958b9da387bb1ed891107af3	2026-08-11 18:26:02.361992+00
-0097_doctrine_review_clock_backfill.sql	b008ac83d6fd82d8c618702991cdd442783bbb960103df0b1336eec78a03c79f	2026-08-11 18:42:35.927417+00
-0098_investigation_control_plane.sql	a449b98bb7112cf6635cb9050e378097d2edd09b8a344bed74ae532c0f03caba	2026-08-13 07:19:27.754741+00
-0099_deal_stagnation_routes.sql	3bb29568b7060afce56e9496d288b79ef1621f22fab1948fb739ee198d61eb16	2026-08-13 07:19:28.024532+00
-0100_doctrine_review_clock_batch_door.sql	4234503cea6b37efe16197e0595b431a4f774d773946980241040c935578f7a6	2026-08-13 07:19:28.228234+00
-0101_code_review_subject.sql	af695656bf9f8b2c17fe150c71b45c467de71460e7d98e3eb8dd23245188700c	2026-08-13 16:17:00.334346+00
-0102_lead_client_link.sql	166166376221f82182a78f7dbc4f9525bc2b35cc2fb419a891ba49d46a4500a6	2026-08-13 16:17:00.646625+00
-0103_defect_log.sql	11b8a6eaa981d9baab939b51dac517cd7b528aba45e37b270699aea377f93c0f	2026-08-13 16:23:34.163531+00
-0104_reverify_queue_supersession.sql	6cb855d81d5d6f13de72bc045da5d0f0fd8d0db21cc0f1b1c2a281a85518815c	2026-08-13 17:19:44.292634+00
-0105_placement_measurement_jobs_read.sql	8a741c5939be146d2b34ba4e2adaf5f4993507f9cd7d168d657307abb14a7057	2026-08-13 17:20:56.844752+00
-0106_precedent_and_point_in_time.sql	f268a02115913fabeeaeebc390f4af9cafce68232ee8e627f215ee01d04c38f3	2026-08-13 18:23:16.043471+00
-0107_loop_domain_grant.sql	6de7b079502b1d52024096a4bcccbb91fcc25f62baa2114df7c0f457bbaf2961	2026-08-13 18:50:27.092661+00
-0108_tool_read_call.sql	900992e4ce356ccdbd433b7e718a0b0789151d94f67ecf29d4ac7495e9cc307a	2026-08-13 19:23:34.340957+00
-0109_integrity_digest_unregistered_targets.sql	172db70b5cf452190ac9d43257bcb15077c3d687f595b49c1ced78fe8f73a1b5	2026-08-13 20:02:40.860688+00
-0110_decision_entry_occurred_at.sql	959da3c8137c9dabb1f1f0f170b2ff7f2bd8c12aab6b59878acaa42fa9b680a9	2026-08-13 20:24:27.946763+00
-0111_media_recommendation.sql	253418f110136039b00b14542d6d7770dcf9d0dc98ce4e930749c2144cd989d9	2026-08-13 20:24:28.17042+00
-0112_loop_number_unique_open.sql	88e6a043ecdd923b84f1118993a0351a0f7ee6100d28efc786575eb455c18ac9	2026-08-13 21:30:15.468462+00
-0113_schema_ledger_view.sql	6e496cd2b0f9ad33eb1c576a4d025cc9ac1426f96e4c7b0536b59f296a488a76	2026-08-13 21:30:15.682358+00
-0114_ops_schema_work_request.sql	a89e520d34ca3ade8f3f234d17684ddfa45c997dd17c3cbf8de61028ffbe5921	2026-08-13 21:34:54.264624+00
-0013a_historical_client_status_vocabulary.sql	efb2bdec24e9ed8ea9597a38e7bec5b06681a36bb95b4e305aa8cf59a5522ce6	2026-08-14 02:00:09.337726+00
-0115_ops_observability.sql	b4962c412c5de6c70002ea1b74a8d75f585cbf260a5622e8dd1bd41989c29478	2026-08-14 02:00:09.88795+00
-0116_incident_signature.sql	9267e4799295a3c888a053ce018607140bcca5115b9c38ab77d151f098743070	2026-08-14 11:07:52.632609+00
-0117_collector_incident_grants.sql	25f46a6ade52dbea6a2e6e13072cec0510b992cbfd68424f8f310d0db2bb0e07	2026-08-14 11:21:39.42866+00
-0118_settings_change.sql	062bcfbb196bcd131a185fd045cd4194846623b16e9650858eed2495b1fe8996	2026-08-14 13:08:24.514561+00
-0119_backup_role.sql	49494c9b14ea35a5896c33633fb94db39beeb3c69f2efccce8d804e66bfc3525	2026-08-14 14:26:48.084134+00
-0120_backup_role_sequences.sql	a8b20e5a2a8602394ded89852e976df3e8a644bedb8dcfe6c04001cd31ec3254	2026-08-14 16:14:27.222819+00
-0121_registry_writer_grants.sql	29940125bc7e286eb5bddef93edc4de5ec25205ae747891f9210f3b67b00f2c6	2026-08-14 19:50:27.228399+00
-0122_worker_trace.sql	e8f18df1ce59c92efb8433f8c6935b5592705aa1a2ff048411143642e2a6b7ce	2026-08-14 21:21:12.203596+00
-0123_trace_incident_recurrence.sql	e28e05fe17fa5e0524a5307b58d58520bcde7b57789e8930d18c9d95a585a1df	2026-08-14 21:48:49.951818+00
-0124_radar_lane_jobs_grants.sql	587e9c078e4066ca417383faaa19467984c3e2388325724667418d3c4cd0dd54	2026-08-14 21:52:41.207778+00
-0125_ai_capability_program.sql	74ede159e61be66d1bacd0af7608f364668c6b457260dcdf47da13a49214071e	2026-08-15 11:40:17.207121+00
-0126_capability_program_evidence.sql	33aa873ca8cfab56db5f9275a437da8f8df08ed4a12429f27a314fad8022b89c	2026-08-15 11:40:17.464538+00
-0127_capability_program_immutability.sql	d76aa548c88dd974fc29ac014c405c13c21ce23af4d7a1f0f7138963fd172a1a	2026-08-15 11:40:17.753994+00
-0128_capability_session_terminal_immutability.sql	0a74d4147ff296e32363c092cd284da3b952a884416a244eec2780e37d2b99b3	2026-08-15 11:40:17.95791+00
-0129_reprioritize_rag_benchmark.sql	91fc733a449db2c56acd7eb194058117b28f80cb5c669ff9a54a00bbabb3b155	2026-08-15 13:35:21.292805+00
-0130_compiled_rules_supersedes.sql	0e87df623ca11c39b9705b76d889266aac20cf35de4a508ce48179a36b0bbc73	2026-08-15 18:19:27.876698+00
-0131_ops_release.sql	3480ea037ee025ad3ffa5e86263ac95723bce2c3ab287a7c591df355edff31d5	2026-08-15 18:19:28.333313+00
-0132_work_shape_revision.sql	c08f63f665a84e31fde1317c79d5ce3addf36d30609abba39c040943f5b735c2	2026-08-15 18:19:28.649741+00
-0133_release_writer_grants.sql	85fce1968fa3598694113bd52c6729a98c7dfd3826f53daab072b541b2c6ef64	2026-08-16 00:33:51.969943+00
-0134_release_abandon_reason.sql	61c10b1eae104deb6a6f6719027946cf1fea82d6da9216c13d1c0e8895ea6289	2026-08-16 12:24:10.6226+00
-0135_situation_retrieval.sql	69a88f6b7553dc7ccf351c75ad0df96b03f01bd2adf67dc7ea9aa10914b25a3b	2026-08-16 14:49:59.579677+00
-0136_release_manifest_view_grant.sql	4c3bdabc57782b0a6b39cd69183b34479ef61da3e6a43f2b1ad160e78be4d401	2026-08-16 18:19:32.359021+00
-0148_control_plane_admission.sql	4038ab5279c1e7f3e057f3c4a4dc69e446773ea90910357f4eb5513bb61c8662	2026-08-16 18:19:32.627239+00
-0149_control_plane_jobs.sql	38ea0ce028b7e6dbf27d9ee51fbec8f26f6f27e4e843f49e307d0215cd6cc216	2026-08-16 18:19:32.989947+00
-0150_control_plane_job_fixes.sql	d3f3e9f0b053a0b14acc9876bc322ee643d4ea2f438a8e2da909985f9626076b	2026-08-16 18:19:33.19274+00
-0151_control_plane_admission_grants.sql	2b9d3133be9e8e84fbd0ecf22d6d9096696e29828da040ac10c91d77cb61a8d4	2026-08-16 18:19:33.488509+00
-0152_rule_writer_grants.sql	5bd11005d33da7bb523edd0137f548c23ae59de6dfe4ea451b2fcc830a2f3bf3	2026-08-16 18:19:33.758453+00
-0153_control_plane_resilience.sql	12b6558b6d2164f7c45caba254613fd4c3ef9bf20db9cc1b18e0f3fb10a66384	2026-08-16 18:19:34.120379+00
-0154_control_plane_cost_release.sql	50db3b2e6623f24d4c5bc70ba502f38a71d9c26f830de53e9be37e44fc8dcdfc	2026-08-16 18:19:34.416487+00
-0155_rule_applicability_wildcard.sql	80df630dcdd491db825e16f9e6ece4468df65fa2f4e4744531a605a012e5d2be	2026-08-16 18:19:34.625522+00
-0156_control_plane_input_grants.sql	7cafce43585512fd234c0d27032f13fc3d96fae46cd6036531d2b79e4dbf666c	2026-08-16 18:19:34.907795+00
-0157_control_plane_runtime_guards.sql	2a25fc4800d7bb995e995196a533e7821838ee0d4e800a1117bba12d99953392	2026-08-16 18:19:35.127222+00
-0158_job_timeout_receipts.sql	e26d19535dd647e48d39f87e73e371136bcf852853be7db0a3b633c281964485	2026-08-16 18:19:35.331802+00
-0159_control_plane_evidence_grants.sql	a4cde26b9f7ba67395d4dee97fcfb4a19d5241f80fba740fa29ef1a29b7df635	2026-08-16 18:19:35.710249+00
-0160_reap_expired_job_locking.sql	ed2da95090a21d31d2f6def789040924222337131e2b33fd25ba588d0ddb60b5	2026-08-16 18:19:36.018718+00
-0161_control_plane_authority_boundary.sql	ba712f824d5101382fc537378544ff74bbaaf3319748f1e3e29b31b1868c8956	2026-08-16 18:19:36.275971+00
-0162_control_plane_input_views.sql	f6695b371ed5fb1390507fc06cc3fa92b1e3d2211672a65998b63dd46c5121cb	2026-08-16 18:19:36.650669+00
-0163_control_plane_device_evidence.sql	613f4c125f98e18b3c1c678072f0a9dbdb86b43a673b9b09870338bc88206bd5	2026-08-16 18:19:36.890396+00
-0164_control_plane_ledger_retry_modes.sql	5ee51214c14c7523c0b21c253828ae1e874f777e49439166f2c979fafd043d33	2026-08-16 18:19:37.183964+00
-0165_control_plane_cost_refusals.sql	cb6c0959f39c7c032f277ecbd05d0754bcfb98ab0d89a2a39d3e5877d26207e4	2026-08-16 18:19:37.402741+00
-0166_correction_sweep_jobs_projection.sql	f4d25c1749206ca486a269a6f23b7e433de4dbf8c0ba61ad3520677cb9875b0c	2026-08-16 18:19:37.677495+00
-0167_control_plane_npi_device_evidence.sql	16bd62d1738afcdf7e40d2eceb02b63a7a1e5eee5a2e71fe2431dbe93373d753	2026-08-16 18:19:38.048509+00
-0168_guidance_registry.sql	72d6ac5cf33b13417c2f0b9fdee243ddc19711d4b3cb016c1d11716cf2c2337c	2026-08-16 18:19:38.398241+00
-0169_control_plane_canary_fencing.sql	dc1d3f6e0fd1e427e82c7da15c7457bfc5f7d4bde42f1c618bd8067fbd027b93	2026-08-16 18:20:49.94352+00
-0169_hermes_pilot_actor.sql	87e48e36d031c764617eb78a075fe9f47a2036678a4d3c060415da4737ed559b	2026-08-16 18:20:50.157956+00
-0169_program5_release_binding.sql	c8c66a479f6ae5cf92e3afe82d5f4ad6593f98bc75ddb469649f16b659a4be88	2026-08-19 00:16:34.453542+00
-0170_guidance_import_lifecycle.sql	81a06a6ac6286269367a6b79244b976fe6f234837b7e6053f14bdf402128b7c3	2026-08-19 00:16:34.830637+00
-0171_program5_provider_version.sql	6173c2eff74d3d358c9e185b1bf1aac8b41c1a00d764f508014eaab705b1ff68	2026-08-19 00:16:35.107426+00
-0172_program5_release_assurance.sql	ef873253cb10e07c5b8bf1c3e9d8fa3014f93a585b92a07c160e728a4824ab8a	2026-08-19 00:16:35.320689+00
-0173_control_plane_joe_canary_authority.sql	2e7a3719f9fd9ea7b79449b423c82313a75e56f42f96b19acd01d5eedece0092	2026-08-19 00:16:35.518445+00
-0174_program6_sourced_work_request_capture.sql	3849ab99e36c979ead87c50a5dacd36f437198d6d326c16c4d7ef469262e51aa	2026-08-19 00:16:35.902557+00
-0175_program6_human_sourced_triage.sql	4c531f1cd9d53787cae383d2eb62e38b53e6278182ca0986c579dd7108734888	2026-08-19 00:16:36.200165+00
-0176_legacy_schedule_disable_receipt.sql	4f09dac82961771a525ad06ea0901ba64182e5a347fe3929ebbb9420095cd9e1	2026-08-19 00:16:36.426431+00
-0177_program6_sourced_ready_plan.sql	8a0076c1f6b0591ed257c844fd8d73bd9a6b9d1b3c1a95c593c6b1e94d2079ea	2026-08-19 00:16:36.743812+00
-0179_program6_sourced_outcome_feedback.sql	b8581a6b9c85df36b7a5ba712d46d68b48e910779442b02827b8eba6f97f3dea	2026-08-19 00:16:36.982135+00
-0180_claude_scheduler_observation_receipt.sql	f3dbebfb573e4f3b19faa180b60575590831dbeaa6b8ced57b930faf180ac39c	2026-08-19 00:16:37.28634+00
-0181_program6_pending_outcome_feedback_readback.sql	d8617c4972dfba2dbeff88da48aa8a4aaec03e42c513c3d0ed435dc120600130	2026-08-19 00:16:37.582717+00
-0182_launchd_scheduler_observation_receipt.sql	1d33c6e8304bc917fcd989b90719f8d2074b8290aceef813669fb41638138c6a	2026-08-19 00:16:37.881367+00
-0183_program6_browser_action_challenge.sql	39b74d4933b4766d99ea2df253fb41f411647f6d067f0e9af0e4b206b2505a37	2026-08-19 00:16:38.090526+00
-0184_notes_duplicate_schedule_cutover.sql	638a208035d0ab6b3c2a1ef2a86737a88254576ab8006396fe9e917b3b91b074	2026-08-19 00:16:38.402038+00
-0188_applicable_rules_security_definer.sql	60d0ec6899a78c38aea2289c10301f3677595871b291c0eb306d74796a6a5ebf	2026-08-20 00:17:59.089864+00
-0189_social_pull_collector_views.sql	37463903086d136e453958ee4044011e50a67e0ed4cb75ea896e8c031b72e822	2026-08-20 00:17:59.373399+00
-0190_placement_id_returning_grant.sql	9b87b30a497686f7393aad7b6e3746183370c76ad64e40020f8e397cb59522b8	2026-08-20 00:29:38.28571+00
-0191_learning_feature_cell_view.sql	5d676e49491d5c5cabf4793ea1d6ae8d23074c308d8c0ed7f45c11dff27a4d11	2026-08-20 00:38:59.420452+00
-0192_partner_room.sql	fe681f9dd274b7b9f44b334a3dafbd0778bde41b502c4967c6135b80316790d7	2026-08-20 02:17:59.066682+00
-0193_session_work.sql	d2c4c868194cc5500bf9ee99ae749a505dac03bc607ed468b0e22f1c47c4e985	2026-08-20 15:09:00.711206+00
-0194_atomic_rule_approval.sql	14ab570195589b24baeb3706a21a93cabc523bc6e8e4dbb703b46d9dda3deeed	2026-08-20 15:09:02.331211+00
-0195_control_plane_cache_observations.sql	8a14afb37bc1f1d4d3cfb9f1e37f307e8db93452e85757e04da07c8dbd76c56f	2026-08-20 15:09:03.019187+00
+0002_seed.sql	1e1e10193569937cd55cae65a4cf5266123c26fe4a5ecf329458124f46189317	2026-07-30 11:38:47.602591-05
+0003_wave1_registry_columns.sql	5f3e85261ac5b193527d1b4726f6acb17821bbc800a953185a5df638549f6587	2026-07-30 11:50:32.216051-05
+0004_roles_views.sql	f7a7aa660e82a26f90a83aebc197054db68cf6d252edf6874d8f0c6008590cac	2026-07-30 11:50:32.41411-05
+0005_role_admin_grants.sql	e5dd8791977f103df20087ac73e28d310eea8f80ed91a451ad52d7d13de9eceb	2026-07-30 11:50:32.772307-05
+0006_exporter_role.sql	2ac146111970f41434056a8371fd298438e12c25dbc0a09ae13dbb40609fafb1	2026-07-30 14:19:14.747227-05
+0007_owner_columns.sql	2e8a4867dd0750d55ef008c52a8cb17716961e47eb3c6e9623f1f34f2c87aaeb	2026-07-30 14:31:51.770968-05
+0008_client_merged_into.sql	1eb56e4b518ffee5fe49a5140a3444cc639547675e3c1bd08c3c1ff2c9262284	2026-07-30 14:40:17.318972-05
+0009_fidelity_columns.sql	01c8dd79c74e20907ab9bc16b6189d36c82cb4e77551de8b7ef92b2c63a9b0ae	2026-07-30 14:45:24.023703-05
+0010_verbatim_labels.sql	73436b4640496414af84f0af212f1b7b65704d5fcf13b4ccd5c7634d99638246	2026-07-30 14:50:36.856831-05
+0011_roster_notes.sql	27d534cfb082deb4b5d61c1a7847eeb24f9f5a8fc97f0d952e20b4027a3ecbb7	2026-07-30 15:06:35.462919-05
+0012_specialty_label.sql	9a7b51d9f99c9bf6fb3b52c1c6547586713027443d8c167162efbd6c33c9756d	2026-07-30 15:18:06.960754-05
+0013_active_book_derived.sql	9a8730bb933ee1221eb6b0d22f2619ca84ce4b11b1583258a92206562f71ce53	2026-07-31 11:23:37.395658-05
+0014_active_flags_and_semantics.sql	2830a82f27b7ae76821a823eccfb14dad2e1001f7ad6cf6301023808209e1d31	2026-07-31 11:23:37.395658-05
+0015_compiled_rules_view.sql	0fa7152fcac1fd7ccbd8f43d3c528e1a704656941c1704bd530cc3c7ad3799e7	2026-07-31 11:23:37.395658-05
+0016_ref_index_resolver_view.sql	d821701d1b6eceaaea7005519b774ab73579b19ed6ca84ff7fefbcb63e001d2a	2026-07-31 11:23:37.395658-05
+0017_vocab_ref_tables.sql	714af9bfc3b0bba4943fc224e74435de84ca5ff8f5c64bb3517c81f9f05fbe0a	2026-07-31 11:23:49.074943-05
+0018_client_status_rationalization.sql	3ee4a58a4c41340d060558cd4becb5d194cd897262ffeb5c77cb9399cec0aaea	2026-07-31 12:33:03.520177-05
+0019_wave2_machinery_tables.sql	95de20717cecd1482cfff618f64da017fd8639c116e84760bf02ed600596c071	2026-07-31 13:09:16.884822-05
+0020_party_link_kind_vocabulary.sql	bfcfdc26f30f0556139f27d5a727f4a057c2c1c169e1c109a9d22a5c51845d4d	2026-07-31 14:22:18.658623-05
+0021_jobs_role_and_cadence_inputs.sql	447d36c4058ced54a45cdcc1a8b85c42774c8dc9e90590ca0cb597a987dea5a2	2026-07-31 15:51:47.490444-05
+0022_purchase_price_basis.sql	356c15b8920b45b85d845865a41d5852e0ad3bf3081578fa88e52ebe1120e312	2026-07-31 19:00:04.371229-05
+0023_prospect_pool.sql	22d5f8577f310c6373dc2d4789d63b30bb8cd71bc50e713adad38e843e477ea3	2026-07-31 19:35:39.405736-05
+0024_loop_item.sql	590f1e9bbe67f6d973eb50fd8079bcaec73d866996f1ee0691a15ceef43fd9b2	2026-07-31 20:17:34.325834-05
+0025_exporter_grants_pool_all.sql	f1742ee05d20ca4ea534c8bcbe3d82c295845ca4512250013cc8e4f9c252a81a	2026-07-31 20:21:36.25126-05
+0026_counterparty_and_attribution_views.sql	89f8d843bcf0974a15c25a0ba8cff95a1d38c0118be868b1c344010eaee39155	2026-07-31 22:06:04.71739-05
+0027_review_fixes_graph_views.sql	33ec2d144e84a14ed8e8683a85f99aac25dd4f664a4f1cff874f50a529b9d91e	2026-07-31 22:26:52.90654-05
+0028_dossier_analysis.sql	47191484c11885b31cc099ab365f72f6ebe58d8f94c82244f3d10ef3061fa482	2026-08-01 10:13:04.526926-05
+0029_compiled_rules_scope.sql	5492ce8287fa6b866a22232f70e0cfc87e2a5df0de3d74edaa5640894ddc09cb	2026-08-01 10:13:04.667501-05
+0030_md_ledger_render.sql	c01f2f50314658d4fd7abce2b8f4ab3dc712863620d115a1649124cf3e6af6f4	2026-08-01 10:13:05.006783-05
+0031_decision_events_and_idea_loops.sql	595be5d13f1c60af0ee268e709bc700612318cdd5be65126929a406b15d9b717	2026-08-01 11:18:58.308797-05
+0032_audit_repairs.sql	774e2c39ba1ad2a90d5ec174347a48b3a5a65d86d35610275a563970296bce9a	2026-08-01 22:41:09.549698-05
+0033_deal_inherits_client_touch.sql	437ae5c1f8b65a1e6eb120b16f76c04eebdf039e3cb366eced725fc0e2ae26db	2026-08-02 09:02:10.36658-05
+0034_coverage_and_denominators.sql	2e23a8fa416bef2726a5acd1f8e4bdae941b4e2a6fde54a8931a476dc489c452	2026-08-02 09:02:10.567596-05
+0035_phase_order_legal_before_dd.sql	dc30d8840d49e65c0a95ce1ddb4c14644498762ba174c39efd53b819f69bf3a0	2026-08-02 09:02:10.714312-05
+0036_sonography_lead_owner_dell.sql	b14c93dc12e2eab4dd782cb6b40b7204fa442add60a24a1cb2acec843c84a064	2026-08-02 09:16:13.382326-05
+0037_write_provenance.sql	591ec419b0ae401bb001ff53d0039dabb766b52986965b6fc1103eb237c3b86a	2026-08-02 09:43:05.268362-05
+0038_loop_domain.sql	a813c2da68e02b3759683e56cd4f19664d33cdbe22c5e03adeb7907bb3a587bb	2026-08-02 10:31:09.302516-05
+0039_loop_domain_six.sql	5e982489d3e5f281a83bd27328b00d3ad80809122ee64817c6d85376d41d96c8	2026-08-02 11:00:00.588915-05
+0040_loop_domain_intro_rule.sql	33a27592fafafeb1f645bbcd8f08c70b3ea5f54430ce55e7bc0c14894d6e879d	2026-08-02 11:07:15.567276-05
+0041_classify_loops.sql	485d9bc2310d702391f882d159a7cef18d16d165d9ae35297bf9112a004117d2	2026-08-02 11:28:04.97472-05
+0042_export_loops_domain.sql	4a34ca1cc23e34401f16d671072e7172674c6561c9b736e001703ea0f4e75b07	2026-08-02 11:31:54.432914-05
+0043_loop_prose_cap.sql	f68b85a77bf4f58d966840f1ea041b8295f9ddc1ac8b899dee313e08c284f055	2026-08-02 11:36:31.994004-05
+0044_fix_registry_pointers.sql	13ada7eafe4620feb8fc145fa1f5ac5ec509f843289cff3dbd1462a538587732	2026-08-02 11:48:19.001992-05
+0045_drip_conflict.sql	41fd3d423d3adb19700a3b2337b7b569d0ec1e7a60cd9975c5c0b6731670b45a	2026-08-02 11:50:27.050842-05
+0046_party_identity.sql	5daf0c3d626de9f09d30a16e8c7808e102fb0f954af93eee6446b971748b14d4	2026-08-02 12:49:57.383312-05
+0047_vendor_relationship.sql	ee52249a33d8c557a7a3659c8a2d3d283733a47619e528431fa883113ea880d6	2026-08-02 12:53:12.389283-05
+0048_candidate_pool.sql	378a56d12dd4f19e10c6c7a60e5fa7ecbef12ec3fa950a6655371fa16c627f54	2026-08-02 12:56:14.540881-05
+0049_deprecation_register.sql	bc36b68f84e5fe8a24ac440b6ea268aa149f1de10e6942e80c1345ff853278f8	2026-08-02 12:57:46.981675-05
+0050_vendor_category.sql	973501637dd4e0897b8002d2386820f59bca8565c4fa1fba1e4267ff6ec1babc	2026-08-02 13:23:24.52409-05
+0051_intro_graph.sql	6ebe5196706477fd1b68fd2debd505cba311ad2e02fe2b016585a223fa49559e	2026-08-02 13:24:56.163485-05
+0052_vendor_level_triggers.sql	f55455977ffc90370654ddf7272f19e4dd2377e763cff0b58c0a278d72d1a68d	2026-08-02 13:31:50.131704-05
+0053_activity_connected.sql	a64deacfde0964e54bc634959713b47c10d382a4590d5e5e140be1c501ad655f	2026-08-02 13:34:01.184753-05
+0054_contact_type.sql	789e1773363281fb73bbfdadd5dd97b54713206e68590a4546a6c7d881954745	2026-08-02 13:42:38.570376-05
+0055_repair_orphaned_roles.sql	4035dad033bb35f0d2378d3ed3fbe8a4c2192608a9cd78724b68cf5343180269	2026-08-02 13:51:40.524982-05
+0056_ref_index_party_branch.sql	1600d3ac8f27fa7ce1956be2da718a256d28d7a4d30a0c231788d5e65603f0a9	2026-08-02 16:44:29.525586-05
+0057_role_timeouts.sql	d704ad6febe6f39418366d024a82561bcb2de306f73fb2d2ce45219b658188d4	2026-08-02 17:13:57.002024-05
+0058_assert_view_disjoint.sql	81bbb6a3b2ef92cdfb420539c62d4fc2cc02a4a559cfe3dae66160b102353fc6	2026-08-02 17:13:57.234313-05
+0059_org_identity.sql	bbef263245261b51d3a42d2504e96af8772310503abfe41eaa8d4d22c69f8616	2026-08-02 17:13:57.669688-05
+0060_participant_sides.sql	8b8893ab869987c4c140b516ec2cfb1de8f476d6292e1e0466c1c2a8d68d4f13	2026-08-02 19:50:25.051853-05
+0061_national_account.sql	0e2feea603aa5f2dc2c02a059ebace36388ef201d79988ae43a5f24b88cde4ea	2026-08-02 19:50:25.540324-05
+0062_orphaned_edge.sql	64421fbd3cee3063f0d0944038e046366c0cf22df9965b0b4b2ad889e822825d	2026-08-02 19:50:25.846843-05
+0063_counterparty_observation.sql	8da6c18fd91f92627fb5ce851c8c4b5fe4c9c0d3186bb7d3dd2b2e99bc5470fa	2026-08-02 19:50:26.209565-05
+0064_counterparty_scorecard.sql	a8e0dbcbaf9743ca54e2ad43c1115f58dbee4bc24efef253916ab919c919af24	2026-08-02 19:50:26.585964-05
+0065_vendor_level_evidence.sql	370b9717d24b4267b5fba34ef7882cc34dfc57ce655a499cb71f8ee2490b9e5d	2026-08-02 19:50:26.90426-05
+0066_marketing_campaign_and_measurement.sql	893eb737693d179074f4008f74011b1a347c0de69c79ca8fcd9717a335e1ffca	2026-08-02 20:49:48.256599-05
+0067_compiled_rules_id.sql	d4a3248f499b9b77a554c654ab02cf16e1a5fb878fc7accbf7e0c38308ac9442	2026-08-02 20:59:11.939517-05
+0068_rule_version.sql	eb16d1a3d52a9728ef0ca41bccc937e0eab4e170fa020a248a17ecbd5fafac76	2026-08-02 21:21:33.141098-05
+0001_init.sql	877284179e1bd77fd6f008b1c764016f5a43218267256efa061a6cf700df5a48	2026-07-30 11:38:46.9876-05
+0069_enrichment_write_gap.sql	35d8a0cd2072ac7657fb15287b6d2795ea816cc3c15d54d20c2e31ed7b365a1e	2026-08-06 09:59:07.124217-05
+0070_source_capture.sql	af7d146327bde5369893e575670eddc9e37c4b7ff47127bad7aa0002c120cd5c	2026-08-06 21:50:23.605478-05
+0071_forgetting_policy.sql	8d4db137309f6003f40e4ec97eba1758da350ee93e4527cbde3281cebd9cdd12	2026-08-06 21:50:23.998651-05
+0072_vendor_category_grant.sql	c035fd52a553b4671f05068d472a7179723c6627783224c21e632746dbbd731e	2026-08-06 22:03:44.919859-05
+0073_wave1_research.sql	5ca1332c955ab056dd2150934e533c5632421318ec2b585d3f5a6ad3c42e2eec	2026-08-06 22:54:34.794921-05
+0074_deal_city_lane.sql	785b3ea5992b18698563d792e64de8cdcb7251b5be3b16af5064f66c8b612c72	2026-08-07 22:10:19.081899-05
+0075_doctrine_store.sql	72f32794d245317cc3ba5d6e6303e574ca4a59d7c6b963ad7caac055fd00bbee	2026-08-07 22:20:20.951425-05
+0076_doctrine_grants.sql	b5385df6eac2c7d6a1e55e3571629f748ed0d91e50da6bf4b2ba9973b49da4d5	2026-08-07 22:57:15.212545-05
+0077_reader_actor_columns.sql	d81eaec56ad603c5e62c737efe98fac4ca6ba8606b7da3bada7f4b8e70fd0dfe	2026-08-07 23:18:00.288267-05
+0078_writer_participant_role_grant.sql	d566b86309130bbcf3faf422d5d8704a8c639a8f87a64cd2a9b2302c6b25474d	2026-08-07 23:25:55.120546-05
+0078_exporter_doctrine_select.sql	92afb9da32a85c347f86b17f010b5e8acad653d543c8ee61de732ab5b9c0a0fc	2026-08-07 23:42:32.092009-05
+0079_review_clock_backfill.sql	21b85ace1be20bb1f9f8273407d1d58a40f393e62eeced513571644dc682df8c	2026-08-07 23:56:09.289671-05
+0080_reader_briefing_grants.sql	780e66787c186887466f795ab78c73184bb25055fa1552eb0aa5df39dc7559ba	2026-08-08 00:10:01.202221-05
+0079_deal_room_api.sql	3bc8e46d6022c3cf74ccc7878ab2d6fd227b814fca5105bbffc06fadcc0ef0ba	2026-08-08 11:48:36.768348-05
+0080_deal_room_board_view.sql	5c4a9fa12838a114a4d5742c4dfd307c26d3cefe0966ff4719a08e8b7d336b22	2026-08-08 12:30:59.868641-05
+0081_capture_bridge.sql	e31f98b982d7ad2edadd7379bd81188245eb9cf2e047afef3266c31ab6a2a05b	2026-08-08 14:57:53.27764-05
+0081_loop_blocker.sql	828b40c3186b39a675d7563884d1667fee384789a28cc38e1ba1e7b399470daf	2026-08-09 16:53:14.585775-05
+0074_outside_model_actors.sql	35d4eb1c2d31b536cfbe2964b36c3c6e1a5551801fb7d8d2f8c3740ecf4a86e4	2026-08-09 16:55:40.214353-05
+0082_timeline_event_summary.sql	f78e5f4c72523a308d33195bfd76709211b1feabdc472ad8cc5d851933326a09	2026-08-09 17:11:20.593349-05
+0083_loop_gate_cutover.sql	0cdb8e568d8dd10488a8ba8e1c255f8cac938dee5c97e8a1187963e6b290e109	2026-08-09 17:22:46.5206-05
+0084_loop_proximity.sql	bb392636289594ef80d3c0a3734f9eb1911c886ae4cd0ce449689063d2070ce8	2026-08-09 20:49:32.406608-05
+0085_decision_price.sql	cc27d55dbe53ce67689f56ff47334e0b408def583a84cd47d0d68d2cd1707da1	2026-08-09 20:54:26.802652-05
+0086_candidate_claim_card.sql	3b18009e794a950b04e36c8fae7086a2a95592fa5e6941561841b58503d47ebd	2026-08-09 22:53:59.90347-05
+0087_outreach_disposition.sql	6b9ca2513233f51c270d2d4e01b730555102cc22ca8d6487c9b098ee14c9b80f	2026-08-09 23:12:54.161538-05
+0088_triage_names_and_age.sql	b9421e343c703d9891a94a6306ace7c039151119ef02dc01c86e68d0945c6eab	2026-08-10 00:24:01.897288-05
+0089_loop_owner_normalise.sql	d44309e7f64498971195fa8d5cc6f19cca4d4cbc98c4b94851983d559c58e96e	2026-08-10 01:03:23.414331-05
+0090_deal_room_workspaces.sql	6599fdf05e4e140bb0ea354993c1904d73a5dc0dc2f2bb197d32feb1c60df17d	2026-08-10 09:36:38.465436-05
+0091_deal_reconciliation_read.sql	0848d02b3e148e388b24ad052acc2cf85f4015b7fbedc3917c51a975aa88a16a	2026-08-10 11:56:18.889238-05
+0092_deal_operating_state.sql	879342c676627b0a4993d148a2e6e8fd3563c9a1653530155ebaf28ed5ad5fe9	2026-08-10 11:56:19.194134-05
+0093_deal_parking_shape_hardening.sql	2621d4e82c2fa3e9c18f23b63e7d8779cc8be70e96b26086bf56b8c3f94e45d5	2026-08-10 11:56:19.395025-05
+0094_call_mode_post_call.sql	8fce2faee082588ffd6705735b97dc6e8c3e98745ca4b2c0a0823ae4ccc2a6e4	2026-08-10 13:25:01.095849-05
+0095_sponsor_runtime_audit.sql	7cd301e7a199d6ea3842fe4578ef01fde45be2231780f20fb950fbb56903eaaf	2026-08-11 08:00:21.327955-05
+0095_vendor_lookup_grants.sql	52fd28050658a6f963e3f00297ef371a5730cbade0d02897fdb17f453d405cc3	2026-08-11 12:55:33.041028-05
+0096_loop_owner_legacy_repair.sql	325013b201f7eb9982dc0ef0786e3f025efdf3ba958b9da387bb1ed891107af3	2026-08-11 13:26:02.361992-05
+0097_doctrine_review_clock_backfill.sql	b008ac83d6fd82d8c618702991cdd442783bbb960103df0b1336eec78a03c79f	2026-08-11 13:42:35.927417-05
+0098_investigation_control_plane.sql	a449b98bb7112cf6635cb9050e378097d2edd09b8a344bed74ae532c0f03caba	2026-08-13 02:19:27.754741-05
+0099_deal_stagnation_routes.sql	3bb29568b7060afce56e9496d288b79ef1621f22fab1948fb739ee198d61eb16	2026-08-13 02:19:28.024532-05
+0100_doctrine_review_clock_batch_door.sql	4234503cea6b37efe16197e0595b431a4f774d773946980241040c935578f7a6	2026-08-13 02:19:28.228234-05
+0101_code_review_subject.sql	af695656bf9f8b2c17fe150c71b45c467de71460e7d98e3eb8dd23245188700c	2026-08-13 11:17:00.334346-05
+0102_lead_client_link.sql	166166376221f82182a78f7dbc4f9525bc2b35cc2fb419a891ba49d46a4500a6	2026-08-13 11:17:00.646625-05
+0103_defect_log.sql	11b8a6eaa981d9baab939b51dac517cd7b528aba45e37b270699aea377f93c0f	2026-08-13 11:23:34.163531-05
+0104_reverify_queue_supersession.sql	6cb855d81d5d6f13de72bc045da5d0f0fd8d0db21cc0f1b1c2a281a85518815c	2026-08-13 12:19:44.292634-05
+0105_placement_measurement_jobs_read.sql	8a741c5939be146d2b34ba4e2adaf5f4993507f9cd7d168d657307abb14a7057	2026-08-13 12:20:56.844752-05
+0106_precedent_and_point_in_time.sql	f268a02115913fabeeaeebc390f4af9cafce68232ee8e627f215ee01d04c38f3	2026-08-13 13:23:16.043471-05
+0107_loop_domain_grant.sql	6de7b079502b1d52024096a4bcccbb91fcc25f62baa2114df7c0f457bbaf2961	2026-08-13 13:50:27.092661-05
+0108_tool_read_call.sql	900992e4ce356ccdbd433b7e718a0b0789151d94f67ecf29d4ac7495e9cc307a	2026-08-13 14:23:34.340957-05
+0109_integrity_digest_unregistered_targets.sql	172db70b5cf452190ac9d43257bcb15077c3d687f595b49c1ced78fe8f73a1b5	2026-08-13 15:02:40.860688-05
+0110_decision_entry_occurred_at.sql	959da3c8137c9dabb1f1f0f170b2ff7f2bd8c12aab6b59878acaa42fa9b680a9	2026-08-13 15:24:27.946763-05
+0111_media_recommendation.sql	253418f110136039b00b14542d6d7770dcf9d0dc98ce4e930749c2144cd989d9	2026-08-13 15:24:28.17042-05
+0112_loop_number_unique_open.sql	88e6a043ecdd923b84f1118993a0351a0f7ee6100d28efc786575eb455c18ac9	2026-08-13 16:30:15.468462-05
+0113_schema_ledger_view.sql	6e496cd2b0f9ad33eb1c576a4d025cc9ac1426f96e4c7b0536b59f296a488a76	2026-08-13 16:30:15.682358-05
+0114_ops_schema_work_request.sql	a89e520d34ca3ade8f3f234d17684ddfa45c997dd17c3cbf8de61028ffbe5921	2026-08-13 16:34:54.264624-05
+0013a_historical_client_status_vocabulary.sql	efb2bdec24e9ed8ea9597a38e7bec5b06681a36bb95b4e305aa8cf59a5522ce6	2026-08-13 21:00:09.337726-05
+0115_ops_observability.sql	b4962c412c5de6c70002ea1b74a8d75f585cbf260a5622e8dd1bd41989c29478	2026-08-13 21:00:09.88795-05
+0116_incident_signature.sql	9267e4799295a3c888a053ce018607140bcca5115b9c38ab77d151f098743070	2026-08-14 06:07:52.632609-05
+0117_collector_incident_grants.sql	25f46a6ade52dbea6a2e6e13072cec0510b992cbfd68424f8f310d0db2bb0e07	2026-08-14 06:21:39.42866-05
+0118_settings_change.sql	062bcfbb196bcd131a185fd045cd4194846623b16e9650858eed2495b1fe8996	2026-08-14 08:08:24.514561-05
+0119_backup_role.sql	49494c9b14ea35a5896c33633fb94db39beeb3c69f2efccce8d804e66bfc3525	2026-08-14 09:26:48.084134-05
+0120_backup_role_sequences.sql	a8b20e5a2a8602394ded89852e976df3e8a644bedb8dcfe6c04001cd31ec3254	2026-08-14 11:14:27.222819-05
+0121_registry_writer_grants.sql	29940125bc7e286eb5bddef93edc4de5ec25205ae747891f9210f3b67b00f2c6	2026-08-14 14:50:27.228399-05
+0122_worker_trace.sql	e8f18df1ce59c92efb8433f8c6935b5592705aa1a2ff048411143642e2a6b7ce	2026-08-14 16:21:12.203596-05
+0123_trace_incident_recurrence.sql	e28e05fe17fa5e0524a5307b58d58520bcde7b57789e8930d18c9d95a585a1df	2026-08-14 16:48:49.951818-05
+0124_radar_lane_jobs_grants.sql	587e9c078e4066ca417383faaa19467984c3e2388325724667418d3c4cd0dd54	2026-08-14 16:52:41.207778-05
+0125_ai_capability_program.sql	74ede159e61be66d1bacd0af7608f364668c6b457260dcdf47da13a49214071e	2026-08-15 06:40:17.207121-05
+0126_capability_program_evidence.sql	33aa873ca8cfab56db5f9275a437da8f8df08ed4a12429f27a314fad8022b89c	2026-08-15 06:40:17.464538-05
+0127_capability_program_immutability.sql	d76aa548c88dd974fc29ac014c405c13c21ce23af4d7a1f0f7138963fd172a1a	2026-08-15 06:40:17.753994-05
+0128_capability_session_terminal_immutability.sql	0a74d4147ff296e32363c092cd284da3b952a884416a244eec2780e37d2b99b3	2026-08-15 06:40:17.95791-05
+0129_reprioritize_rag_benchmark.sql	91fc733a449db2c56acd7eb194058117b28f80cb5c669ff9a54a00bbabb3b155	2026-08-15 08:35:21.292805-05
+0130_compiled_rules_supersedes.sql	0e87df623ca11c39b9705b76d889266aac20cf35de4a508ce48179a36b0bbc73	2026-08-15 13:19:27.876698-05
+0131_ops_release.sql	3480ea037ee025ad3ffa5e86263ac95723bce2c3ab287a7c591df355edff31d5	2026-08-15 13:19:28.333313-05
+0132_work_shape_revision.sql	c08f63f665a84e31fde1317c79d5ce3addf36d30609abba39c040943f5b735c2	2026-08-15 13:19:28.649741-05
+0133_release_writer_grants.sql	85fce1968fa3598694113bd52c6729a98c7dfd3826f53daab072b541b2c6ef64	2026-08-15 19:33:51.969943-05
+0134_release_abandon_reason.sql	61c10b1eae104deb6a6f6719027946cf1fea82d6da9216c13d1c0e8895ea6289	2026-08-16 07:24:10.6226-05
+0135_situation_retrieval.sql	69a88f6b7553dc7ccf351c75ad0df96b03f01bd2adf67dc7ea9aa10914b25a3b	2026-08-16 09:49:59.579677-05
+0136_release_manifest_view_grant.sql	4c3bdabc57782b0a6b39cd69183b34479ef61da3e6a43f2b1ad160e78be4d401	2026-08-16 13:19:32.359021-05
+0148_control_plane_admission.sql	4038ab5279c1e7f3e057f3c4a4dc69e446773ea90910357f4eb5513bb61c8662	2026-08-16 13:19:32.627239-05
+0149_control_plane_jobs.sql	38ea0ce028b7e6dbf27d9ee51fbec8f26f6f27e4e843f49e307d0215cd6cc216	2026-08-16 13:19:32.989947-05
+0150_control_plane_job_fixes.sql	d3f3e9f0b053a0b14acc9876bc322ee643d4ea2f438a8e2da909985f9626076b	2026-08-16 13:19:33.19274-05
+0151_control_plane_admission_grants.sql	2b9d3133be9e8e84fbd0ecf22d6d9096696e29828da040ac10c91d77cb61a8d4	2026-08-16 13:19:33.488509-05
+0152_rule_writer_grants.sql	5bd11005d33da7bb523edd0137f548c23ae59de6dfe4ea451b2fcc830a2f3bf3	2026-08-16 13:19:33.758453-05
+0153_control_plane_resilience.sql	12b6558b6d2164f7c45caba254613fd4c3ef9bf20db9cc1b18e0f3fb10a66384	2026-08-16 13:19:34.120379-05
+0154_control_plane_cost_release.sql	50db3b2e6623f24d4c5bc70ba502f38a71d9c26f830de53e9be37e44fc8dcdfc	2026-08-16 13:19:34.416487-05
+0155_rule_applicability_wildcard.sql	80df630dcdd491db825e16f9e6ece4468df65fa2f4e4744531a605a012e5d2be	2026-08-16 13:19:34.625522-05
+0156_control_plane_input_grants.sql	7cafce43585512fd234c0d27032f13fc3d96fae46cd6036531d2b79e4dbf666c	2026-08-16 13:19:34.907795-05
+0157_control_plane_runtime_guards.sql	2a25fc4800d7bb995e995196a533e7821838ee0d4e800a1117bba12d99953392	2026-08-16 13:19:35.127222-05
+0158_job_timeout_receipts.sql	e26d19535dd647e48d39f87e73e371136bcf852853be7db0a3b633c281964485	2026-08-16 13:19:35.331802-05
+0159_control_plane_evidence_grants.sql	a4cde26b9f7ba67395d4dee97fcfb4a19d5241f80fba740fa29ef1a29b7df635	2026-08-16 13:19:35.710249-05
+0160_reap_expired_job_locking.sql	ed2da95090a21d31d2f6def789040924222337131e2b33fd25ba588d0ddb60b5	2026-08-16 13:19:36.018718-05
+0161_control_plane_authority_boundary.sql	ba712f824d5101382fc537378544ff74bbaaf3319748f1e3e29b31b1868c8956	2026-08-16 13:19:36.275971-05
+0162_control_plane_input_views.sql	f6695b371ed5fb1390507fc06cc3fa92b1e3d2211672a65998b63dd46c5121cb	2026-08-16 13:19:36.650669-05
+0163_control_plane_device_evidence.sql	613f4c125f98e18b3c1c678072f0a9dbdb86b43a673b9b09870338bc88206bd5	2026-08-16 13:19:36.890396-05
+0164_control_plane_ledger_retry_modes.sql	5ee51214c14c7523c0b21c253828ae1e874f777e49439166f2c979fafd043d33	2026-08-16 13:19:37.183964-05
+0165_control_plane_cost_refusals.sql	cb6c0959f39c7c032f277ecbd05d0754bcfb98ab0d89a2a39d3e5877d26207e4	2026-08-16 13:19:37.402741-05
+0166_correction_sweep_jobs_projection.sql	f4d25c1749206ca486a269a6f23b7e433de4dbf8c0ba61ad3520677cb9875b0c	2026-08-16 13:19:37.677495-05
+0167_control_plane_npi_device_evidence.sql	16bd62d1738afcdf7e40d2eceb02b63a7a1e5eee5a2e71fe2431dbe93373d753	2026-08-16 13:19:38.048509-05
+0168_guidance_registry.sql	72d6ac5cf33b13417c2f0b9fdee243ddc19711d4b3cb016c1d11716cf2c2337c	2026-08-16 13:19:38.398241-05
+0169_control_plane_canary_fencing.sql	dc1d3f6e0fd1e427e82c7da15c7457bfc5f7d4bde42f1c618bd8067fbd027b93	2026-08-16 13:20:49.94352-05
+0169_hermes_pilot_actor.sql	87e48e36d031c764617eb78a075fe9f47a2036678a4d3c060415da4737ed559b	2026-08-16 13:20:50.157956-05
+0169_program5_release_binding.sql	c8c66a479f6ae5cf92e3afe82d5f4ad6593f98bc75ddb469649f16b659a4be88	2026-08-18 19:16:34.453542-05
+0170_guidance_import_lifecycle.sql	81a06a6ac6286269367a6b79244b976fe6f234837b7e6053f14bdf402128b7c3	2026-08-18 19:16:34.830637-05
+0171_program5_provider_version.sql	6173c2eff74d3d358c9e185b1bf1aac8b41c1a00d764f508014eaab705b1ff68	2026-08-18 19:16:35.107426-05
+0172_program5_release_assurance.sql	ef873253cb10e07c5b8bf1c3e9d8fa3014f93a585b92a07c160e728a4824ab8a	2026-08-18 19:16:35.320689-05
+0173_control_plane_joe_canary_authority.sql	2e7a3719f9fd9ea7b79449b423c82313a75e56f42f96b19acd01d5eedece0092	2026-08-18 19:16:35.518445-05
+0174_program6_sourced_work_request_capture.sql	3849ab99e36c979ead87c50a5dacd36f437198d6d326c16c4d7ef469262e51aa	2026-08-18 19:16:35.902557-05
+0175_program6_human_sourced_triage.sql	4c531f1cd9d53787cae383d2eb62e38b53e6278182ca0986c579dd7108734888	2026-08-18 19:16:36.200165-05
+0176_legacy_schedule_disable_receipt.sql	4f09dac82961771a525ad06ea0901ba64182e5a347fe3929ebbb9420095cd9e1	2026-08-18 19:16:36.426431-05
+0177_program6_sourced_ready_plan.sql	8a0076c1f6b0591ed257c844fd8d73bd9a6b9d1b3c1a95c593c6b1e94d2079ea	2026-08-18 19:16:36.743812-05
+0179_program6_sourced_outcome_feedback.sql	b8581a6b9c85df36b7a5ba712d46d68b48e910779442b02827b8eba6f97f3dea	2026-08-18 19:16:36.982135-05
+0180_claude_scheduler_observation_receipt.sql	f3dbebfb573e4f3b19faa180b60575590831dbeaa6b8ced57b930faf180ac39c	2026-08-18 19:16:37.28634-05
+0181_program6_pending_outcome_feedback_readback.sql	d8617c4972dfba2dbeff88da48aa8a4aaec03e42c513c3d0ed435dc120600130	2026-08-18 19:16:37.582717-05
+0182_launchd_scheduler_observation_receipt.sql	1d33c6e8304bc917fcd989b90719f8d2074b8290aceef813669fb41638138c6a	2026-08-18 19:16:37.881367-05
+0183_program6_browser_action_challenge.sql	39b74d4933b4766d99ea2df253fb41f411647f6d067f0e9af0e4b206b2505a37	2026-08-18 19:16:38.090526-05
+0184_notes_duplicate_schedule_cutover.sql	638a208035d0ab6b3c2a1ef2a86737a88254576ab8006396fe9e917b3b91b074	2026-08-18 19:16:38.402038-05
+0188_applicable_rules_security_definer.sql	60d0ec6899a78c38aea2289c10301f3677595871b291c0eb306d74796a6a5ebf	2026-08-19 19:17:59.089864-05
+0189_social_pull_collector_views.sql	37463903086d136e453958ee4044011e50a67e0ed4cb75ea896e8c031b72e822	2026-08-19 19:17:59.373399-05
+0190_placement_id_returning_grant.sql	9b87b30a497686f7393aad7b6e3746183370c76ad64e40020f8e397cb59522b8	2026-08-19 19:29:38.28571-05
+0191_learning_feature_cell_view.sql	5d676e49491d5c5cabf4793ea1d6ae8d23074c308d8c0ed7f45c11dff27a4d11	2026-08-19 19:38:59.420452-05
+0192_partner_room.sql	fe681f9dd274b7b9f44b334a3dafbd0778bde41b502c4967c6135b80316790d7	2026-08-19 21:17:59.066682-05
+0193_session_work.sql	d2c4c868194cc5500bf9ee99ae749a505dac03bc607ed468b0e22f1c47c4e985	2026-08-20 10:09:00.711206-05
+0194_atomic_rule_approval.sql	14ab570195589b24baeb3706a21a93cabc523bc6e8e4dbb703b46d9dda3deeed	2026-08-20 10:09:02.331211-05
+0195_control_plane_cache_observations.sql	8a14afb37bc1f1d4d3cfb9f1e37f307e8db93452e85757e04da07c8dbd76c56f	2026-08-20 10:09:03.019187-05
+0199_guidance_standing_context_boundary.sql	76bb5327079abbdba667c22ac643a0ddadd0110dcdc46f1393c375304d59dff1	2026-08-20 19:14:25.039306-05
+0200_calendar_canary_record_layer.sql	22b740eca07045241f5d48c44131442eac354e6f0df664f35271f6caa19e8594	2026-08-20 19:14:25.046609-05
+0201_nightly_availability_canary_record_layer.sql	53fedf7d84b7b5fdc42f27dbbe9e701fa65e7238e35882100cc8f6a8da1a1cb8	2026-08-20 19:14:25.051737-05
+0203_atomic_rule_lifecycle_forward_upgrade.sql	1a277029b99abe0ea07c9e9cc7b46586de8bed4fe076f74bfe98cbc77b9848c3	2026-08-20 19:14:25.06736-05
 \.
 
 
 --
 -- PostgreSQL database dump complete
 --
+
 
 --
 -- PostgreSQL database dump
@@ -23891,7 +24984,7 @@ e6d681d4-ceac-43ed-a830-d86749e64814	hermes-pilot	automation	Hermes Agent (R0 ev
 --
 
 COPY ops.guidance_registry (id, singleton, created_by, created_at) FROM stdin;
-67aa96b6-3cf8-45ce-b73c-6965d36a664c	t	b6c38b27-d006-4fad-9c38-49edf3130a07	2026-08-16 18:19:38.132972+00
+67aa96b6-3cf8-45ce-b73c-6965d36a664c	t	b6c38b27-d006-4fad-9c38-49edf3130a07	2026-08-16 13:19:38.132972-05
 \.
 
 
@@ -24005,9 +25098,9 @@ other	Other	100
 --
 
 COPY public.diagnostic_route (route_key, signal_kind, from_kind, relation, to_kind, test_verb, input_contract, minimum_effect, active, created_by, created_at) FROM stdin;
-deal_stagnation.next_action_gap	deal_stagnation	deal_stagnation	may_be_explained_by	next_action_gap	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["next_actions", "next_step", "next_date"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 07:19:27.907776+00
-deal_stagnation.relationship_inactivity	deal_stagnation	deal_stagnation	may_be_explained_by	relationship_inactivity	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["last_touch", "activity", "participants"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 07:19:27.907776+00
-deal_stagnation.critical_date_pressure	deal_stagnation	deal_stagnation	may_be_explained_by	critical_date_pressure	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["critical_dates", "documents", "phase"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 07:19:27.907776+00
+deal_stagnation.next_action_gap	deal_stagnation	deal_stagnation	may_be_explained_by	next_action_gap	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["next_actions", "next_step", "next_date"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 02:19:27.907776-05
+deal_stagnation.relationship_inactivity	deal_stagnation	deal_stagnation	may_be_explained_by	relationship_inactivity	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["last_touch", "activity", "participants"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 02:19:27.907776-05
+deal_stagnation.critical_date_pressure	deal_stagnation	deal_stagnation	may_be_explained_by	critical_date_pressure	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["critical_dates", "documents", "phase"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 02:19:27.907776-05
 \.
 
 
@@ -24131,16 +25224,16 @@ referred	Referred (business sent)	60
 --
 
 COPY public.retrieval_proposal (id, proposal_type, payload, reason, proposer_id, status, reviewer_id, resulting_row_ids, idempotency_key, version, created_at, reviewed_at) FROM stdin;
-b4188a13-123f-4897-bbe0-c45dfcec2602	concept	{"label": "Record layer outage diagnosis", "definition": "Diagnosing an unavailable or failing CARR record layer before attempting repair.", "concept_key": "record-layer-outage-diagnosis"}	RET-002 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000001	1	2026-08-16 14:49:59.066172+00	\N
-b9d066b1-c5e3-447b-a12e-fa256ef04965	phrase	{"phrase": "record layer outage diagnosis runbook", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-002", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000002	1	2026-08-16 14:49:59.066172+00	\N
-d26c9779-33fa-4ac1-a49a-304926dd48b9	phrase	{"phrase": "database service unavailable troubleshooting steps", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000003	1	2026-08-16 14:49:59.066172+00	\N
-d5f92043-e10b-435d-bbaa-ab3d8c393657	phrase	{"phrase": "review cycle after a record layer outage diagnosis", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-AMB-001 explicit outage-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000009	1	2026-08-16 14:49:59.066172+00	\N
-4546a581-b8a5-4a62-8a50-1716a615f8e4	mapping	{"role": "governs", "weight": 1, "rationale": "This current runbook section is the ordered diagnosis procedure.", "concept_key": "record-layer-outage-diagnosis", "section_address": "runbook#diagnosis-checklist-in-order-2-minutes"}	RET-002 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000004	1	2026-08-16 14:49:59.066172+00	\N
-1bd30896-b82b-4444-9f1d-2c6e7b3ecd39	concept	{"label": "Playbook self-improvement review", "definition": "Reviewing operating evidence so the playbook learns from mistakes and improves.", "concept_key": "playbook-self-improvement-review"}	RET-003 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000005	1	2026-08-16 14:49:59.066172+00	\N
-10814895-c50b-49e7-9687-8e76d50416e1	phrase	{"phrase": "playbook self improvement review cycle", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-003", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000006	1	2026-08-16 14:49:59.066172+00	\N
-7edd92a9-a803-4bff-a543-bda5a6ef2416	phrase	{"phrase": "how the operating playbook learns from mistakes", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-002", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000007	1	2026-08-16 14:49:59.066172+00	\N
-b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a record layer outage playbook", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-AMB-001 explicit review-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000010	1	2026-08-16 14:49:59.066172+00	\N
-6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000008	1	2026-08-16 14:49:59.066172+00	\N
+b4188a13-123f-4897-bbe0-c45dfcec2602	concept	{"label": "Record layer outage diagnosis", "definition": "Diagnosing an unavailable or failing CARR record layer before attempting repair.", "concept_key": "record-layer-outage-diagnosis"}	RET-002 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000001	1	2026-08-16 09:49:59.066172-05	\N
+b9d066b1-c5e3-447b-a12e-fa256ef04965	phrase	{"phrase": "record layer outage diagnosis runbook", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-002", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000002	1	2026-08-16 09:49:59.066172-05	\N
+d26c9779-33fa-4ac1-a49a-304926dd48b9	phrase	{"phrase": "database service unavailable troubleshooting steps", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000003	1	2026-08-16 09:49:59.066172-05	\N
+d5f92043-e10b-435d-bbaa-ab3d8c393657	phrase	{"phrase": "review cycle after a record layer outage diagnosis", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-AMB-001 explicit outage-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000009	1	2026-08-16 09:49:59.066172-05	\N
+4546a581-b8a5-4a62-8a50-1716a615f8e4	mapping	{"role": "governs", "weight": 1, "rationale": "This current runbook section is the ordered diagnosis procedure.", "concept_key": "record-layer-outage-diagnosis", "section_address": "runbook#diagnosis-checklist-in-order-2-minutes"}	RET-002 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000004	1	2026-08-16 09:49:59.066172-05	\N
+1bd30896-b82b-4444-9f1d-2c6e7b3ecd39	concept	{"label": "Playbook self-improvement review", "definition": "Reviewing operating evidence so the playbook learns from mistakes and improves.", "concept_key": "playbook-self-improvement-review"}	RET-003 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000005	1	2026-08-16 09:49:59.066172-05	\N
+10814895-c50b-49e7-9687-8e76d50416e1	phrase	{"phrase": "playbook self improvement review cycle", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-003", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000006	1	2026-08-16 09:49:59.066172-05	\N
+7edd92a9-a803-4bff-a543-bda5a6ef2416	phrase	{"phrase": "how the operating playbook learns from mistakes", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-002", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000007	1	2026-08-16 09:49:59.066172-05	\N
+b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a record layer outage playbook", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-AMB-001 explicit review-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000010	1	2026-08-16 09:49:59.066172-05	\N
+6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000008	1	2026-08-16 09:49:59.066172-05	\N
 \.
 
 
@@ -24149,8 +25242,8 @@ b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a rec
 --
 
 COPY public.retrieval_ranking_policy (policy_id, version, formula, config, golden_suite_digest, status, is_default, created_at, approved_at) FROM stdin;
-lexical-dominant-v1	1	weighted_sum	{"concept_weight": 0.25, "lexical_weight": 0.75, "concept_enabled": true}	b1a5a61945c5e5fc5f7c74f45c3403f2c5df3e61db29e58f281d49015f63dae3	candidate	f	2026-08-16 14:49:59.066172+00	\N
-coequal-normalized-v1	1	coequal_normalized	{"concept_enabled": true, "dual_evidence_bonus": 0.15}	b1a5a61945c5e5fc5f7c74f45c3403f2c5df3e61db29e58f281d49015f63dae3	active	t	2026-08-16 14:49:59.066172+00	2026-08-16 14:49:59.066172+00
+lexical-dominant-v1	1	weighted_sum	{"concept_weight": 0.25, "lexical_weight": 0.75, "concept_enabled": true}	b1a5a61945c5e5fc5f7c74f45c3403f2c5df3e61db29e58f281d49015f63dae3	candidate	f	2026-08-16 09:49:59.066172-05	\N
+coequal-normalized-v1	1	coequal_normalized	{"concept_enabled": true, "dual_evidence_bonus": 0.15}	b1a5a61945c5e5fc5f7c74f45c3403f2c5df3e61db29e58f281d49015f63dae3	active	t	2026-08-16 09:49:59.066172-05	2026-08-16 09:49:59.066172-05
 \.
 
 
@@ -24217,3 +25310,11 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
+
+
+-- CARR REVIEWED CONTROL CATALOG (bin/schema-snapshot.sh) — exact two-row seed.
+-- Verified against the source immediately before this block is written. The
+-- following safely quoted rows preserve the source verification and update
+-- timestamps; never dump arbitrary ops.enforcement_control_catalog rows.
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('human_authority_runtime','migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js','mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py','transactional_schema','t','2026-08-21T00:14:25.052097Z'::timestamptz,'2026-08-21T00:14:25.052097Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('platform_metering_pre_dispatch','lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py','ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py','deny_gate','t','2026-08-21T00:14:25.052097Z'::timestamptz,'2026-08-21T00:14:25.052097Z'::timestamptz) on conflict (control_key) do nothing;
