@@ -246,17 +246,107 @@ def loose_work(repo=None):
             f"may hold another session's work.")
 
 
+def _seed_evidence_rows(repo=None):
+    """Parse Work Request refs, states, and evidence paths from the seed migration.
+
+    Fail-soft fallback when the exporter DB is down: the migration SQL is the
+    canonical seed, and it carries the same project_context.evidence lists the
+    store does. This cannot confirm live state, but it can confirm that code
+    exists on disk — which is the whole point of the latch. A store outage
+    cannot hide landed work through this path.
+    """
+    import json as _json
+    import re
+    repo = os.path.expanduser("~/carr-system") if repo is None else repo
+    migration = os.path.join(repo, "migrations", "0125_ai_capability_program.sql")
+    if not os.path.exists(migration):
+        return []
+    sql = open(migration, encoding="utf-8").read()
+    # The seed rows look like:
+    # (N, 'carr-ai-engineering-suite-v1', 'WR-AI-00X', 'Title', 'build', ...,
+    #  '{"scope":"...","evidence":["path/a","path/b"],...}'::jsonb, 'joe', 'joe')
+    pattern = re.compile(
+        r"\(\s*\d+\s*,\s*'carr-ai-engineering-suite-v1'\s*,\s*"
+        r"'(WR-AI-\d+)'\s*,\s*'[^']*'\s*,\s*"
+        r"'(build|extend|adopt|decline)'"
+        r"[\s\S]*?'(\{[^']+\})'::jsonb"
+    )
+    rows = []
+    for m in pattern.finditer(sql):
+        ref = m.group(1)
+        ctx_json = m.group(3)
+        try:
+            ctx = _json.loads(ctx_json)
+        except Exception:
+            continue
+        ev = ctx.get("evidence", [])
+        if not isinstance(ev, list):
+            ev = []
+        rows.append({"ref": ref, "state": "ready", "evidence": ev})
+    return rows
+
+
+def built_unclosed_brief(repo=None):
+    """The CLOSE-BEFORE-BUILD line when built work is unclosed, else ''.
+
+    Added 2026-08-21. capability-program reports completed=N (confirmed_closed
+    count), which is attestation truth — a Work Request can have code on main
+    and still sit at state != confirmed_closed because nobody ran
+    prepare/attest/complete. 24 times a session read "0/51" as "nothing is
+    built" and started a rebuild of work that already landed.
+
+    This is the local half of the latch: the Worker cannot stat the repo, but
+    this hook can. When built_unclosed is non-empty, the brief MUST begin with a
+    hard line so a session cannot start a new build while built work is unclosed.
+
+    FAIL-SOFT: when the exporter DB is down, fall back to the seed migration's
+    evidence paths checked against the repo. A store outage cannot hide landed
+    work through this path. The seed says state='ready' for all rows, which is
+    the conservative worst case — it over-reports rather than under-reports.
+    """
+    repo = os.path.expanduser("~/carr-system") if repo is None else repo
+    # Import the detector from the repo's ops/ directory
+    sys.path.insert(0, os.path.join(repo, "ops"))
+    try:
+        import built_unclosed as _bu
+    except Exception:
+        return ""
+    rows = _bu.load_live_rows()
+    if rows is None:
+        # DB down or not configured — fall back to the seed migration
+        rows = _seed_evidence_rows(repo)
+    if not rows:
+        return ""
+    unclosed = _bu.detect_built_unclosed(rows, repo)
+    if not unclosed:
+        return ""
+    refs = ", ".join(r.get("ref", "?") for r in unclosed[:10])
+    suffix = f" … +{len(unclosed) - 10}" if len(unclosed) > 10 else ""
+    return (f"\nCLOSE-BEFORE-BUILD: {len(unclosed)} work request(s) have code on disk "
+            f"and are not confirmed_closed: {refs}{suffix}. "
+            f"Do not start a new build, roadmap, or side quest. Close or park those first. "
+            f"Run ops/built_unclosed.py for details.")
+
+
 def main():
     try:
         json.load(sys.stdin)          # hook payload; nothing needed from it
     except Exception:
         pass
     extra = ""
+    # CLOSE-BEFORE-BUILD goes FIRST — before any other extra line, so a session
+    # that skims the top of the brief cannot miss it.
+    try:
+        cbb = built_unclosed_brief()
+        if cbb:
+            extra = cbb
+    except Exception:
+        pass                          # the brief must never fail on this
     try:
         sys.path.insert(0, os.path.expanduser("~/carr-system/.venv/lib"))
-        extra = dynamic_counts()
+        extra += dynamic_counts()
     except Exception:
-        extra = (" (store unreachable at session start — STOP AND SAY SO "
+        extra += (" (store unreachable at session start — STOP AND SAY SO "
                  "before doing anything that would normally need it)")
     try:
         extra += nightly_verdict()

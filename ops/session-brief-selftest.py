@@ -284,6 +284,85 @@ def _(assert_):
             f"reported, got {out!r}")
 
 
+# ── built_unclosed_brief(): the CLOSE-BEFORE-BUILD line ────────────────────
+# Added 2026-08-21. The brief must begin with a hard CLOSE-BEFORE-BUILD line
+# when built work is unclosed, and must NOT bloat when it is empty.
+
+@case("built_unclosed_brief returns a CLOSE-BEFORE-BUILD line when evidence exists on disk")
+def _(assert_):
+    root = tempfile.mkdtemp()
+    ops_dir = os.path.join(root, "ops")
+    os.makedirs(ops_dir, exist_ok=True)
+    import shutil
+    shutil.copy(os.path.join(HERE, "built_unclosed.py"), os.path.join(ops_dir, "built_unclosed.py"))
+    # Create evidence files that exist on disk
+    for p in ["ops/ai_eval.py", "evals/ai/model-boundary.v1.json"]:
+        full = os.path.join(root, p)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        open(full, "w").write("x")
+    # Monkeypatch load_live_rows to return rows with evidence that exists
+    sys.path.insert(0, ops_dir)
+    import built_unclosed as _bu_local
+    _saved = _bu_local.load_live_rows
+    _bu_local.load_live_rows = lambda: [
+        {"ref": "WR-AI-006", "state": "ready",
+         "evidence": ["ops/ai_eval.py", "evals/ai/model-boundary.v1.json"]}
+    ]
+    try:
+        out = sb.built_unclosed_brief(repo=root)
+        assert_("CLOSE-BEFORE-BUILD" in out,
+                f"the brief must say CLOSE-BEFORE-BUILD when built work is unclosed: {out!r}")
+        assert_("not confirmed_closed" in out,
+                f"the line must name the problem: {out!r}")
+        assert_("WR-AI-006" in out,
+                f"the line must name the work request ref: {out!r}")
+    finally:
+        _bu_local.load_live_rows = _saved
+
+
+@case("built_unclosed_brief is empty when no evidence paths exist on disk")
+def _(assert_):
+    root = tempfile.mkdtemp()
+    ops_dir = os.path.join(root, "ops")
+    os.makedirs(ops_dir, exist_ok=True)
+    import shutil
+    shutil.copy(os.path.join(HERE, "built_unclosed.py"), os.path.join(ops_dir, "built_unclosed.py"))
+    out = sb.built_unclosed_brief(repo=root)
+    # No evidence files exist => no rows pass detection (DB won't be reachable
+    # from a temp dir, and the seed migration won't be there either)
+    assert_(out == "",
+            f"empty brief when no built work is detected: {out!r}")
+
+
+@case("built_unclosed_brief does not bloat when built_unclosed is empty")
+def _(assert_):
+    root = tempfile.mkdtemp()
+    ops_dir = os.path.join(root, "ops")
+    os.makedirs(ops_dir, exist_ok=True)
+    import shutil
+    shutil.copy(os.path.join(HERE, "built_unclosed.py"), os.path.join(ops_dir, "built_unclosed.py"))
+    # Create the evidence so the detector can find them, but mark all as confirmed_closed
+    for p in ["ops/ai_eval.py"]:
+        full = os.path.join(root, p)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        open(full, "w").write("x")
+    # Monkeypatch load_live_rows to return confirmed_closed rows
+    original = sb.built_unclosed_brief
+    import importlib
+    sys.path.insert(0, ops_dir)
+    import built_unclosed as _bu_local
+    _saved = _bu_local.load_live_rows
+    _bu_local.load_live_rows = lambda: [
+        {"ref": "WR-AI-001", "state": "confirmed_closed", "evidence": ["ops/ai_eval.py"]}
+    ]
+    try:
+        out = sb.built_unclosed_brief(repo=root)
+        assert_(out == "",
+                f"confirmed_closed rows must not produce a CLOSE-BEFORE-BUILD line: {out!r}")
+    finally:
+        _bu_local.load_live_rows = _saved
+
+
 def main():
     failures = []
     for name, fn in CASES:
