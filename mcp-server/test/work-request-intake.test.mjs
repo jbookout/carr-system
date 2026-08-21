@@ -52,6 +52,11 @@ class IntakeFake {
       doctrine_section_id: "30000000-0000-0000-0000-000000000001",
       doctrine_revision_id: "40000000-0000-0000-0000-000000000001",
     }] };
+    if (sql.includes("work-request-intake:current")) return { rows: [{
+      ref: "WR-0002", title: "Review source freshness", state: "triaged",
+      source_label: "control-room#evidence", source_freshness: "current",
+      next_human_action: "Prepare or review bounded plan",
+    }] };
     if (sql.startsWith("insert into tool_call")) {
       this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
       return { rows: [] };
@@ -70,6 +75,18 @@ test("report-problem is registered as a narrow additive write and work-request-c
   assert.equal(TOOLS["report-problem"].inputSchema.additionalProperties, false);
   assert.equal(TOOLS["work-request-card"].inputSchema.additionalProperties, false);
   assert.match(TOOLS["work-request-card"].inputSchema.properties.work_request.pattern, /^\^WR-/);
+  assert.equal(TOOLS["current-work-requests"].write, false);
+  assert.deepEqual(TOOLS["current-work-requests"].inputSchema, { type: "object", additionalProperties: false, properties: {} });
+});
+
+test("current-work-requests derives tenant server-side and returns only the typed bounded projection", async () => {
+  const db = new IntakeFake();
+  const result = await executeRegisteredTool(db, { ...ACTOR }, "current-work-requests", {});
+  assert.deepEqual(result, { ok: true, items: [{ human_ref: "WR-0002", title: "Review source freshness", state: "triaged", source: { label: "control-room#evidence", freshness: "current" }, next_human_action: "Prepare or review bounded plan" }] });
+  const read = db.calls.find(call => call.sql.includes("work-request-intake:current"));
+  assert.deepEqual(read.params, ["carr-internal"]);
+  const rejectedArgs = await rejected(() => executeRegisteredTool(new IntakeFake(), { ...ACTOR }, "current-work-requests", { state: "ready" }));
+  assert.equal(rejectedArgs.error, "invalid_current_work_requests_fields");
 });
 
 test("report-problem retrieves deterministically then captures exactly the top current visible source", async () => {
