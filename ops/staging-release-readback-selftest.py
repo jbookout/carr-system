@@ -238,6 +238,15 @@ for forbidden in (
 ):
     assert forbidden not in migration, forbidden
 
+completion_grant = (ROOT / "migrations" / "0215_program5_completion_hash_grant.sql").read_text()
+assert "grant execute on function ops.program5_migration_set_sha256(text[]) to carr_jobs" in completion_grant
+for role in ("public", "carr_reader", "carr_writer", "carr_authority"):
+    assert role in completion_grant
+
+db_gate = (ROOT / "ops" / "staging-release-readback-gate.py").read_text()
+assert "carr_jobs completes an approved release through the exact assurance trigger" in db_gate
+assert "program5_migration_set_sha256(text[])" in db_gate
+
 wrapper = (ROOT / "bin" / "deploy-worker.sh").read_text()
 for marker in (
     "staging-target",
