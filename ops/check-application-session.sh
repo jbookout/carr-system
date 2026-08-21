@@ -64,6 +64,11 @@ MIGRATION_RETIRE="$REPO/migrations/0243_drive_retirement.sql"
 # own first run. It applies AFTER 0237 because it rewrites 0237's retirement
 # trigger as well as 0235's and 0236's functions.
 MIGRATION_SPLIT="$REPO/migrations/0244_receipt_digest_split.sql"
+# 0246 takes the Drive retirement DENOMINATOR away from the runtime. 0237 granted
+# carr_writer INSERT on ops.drive_dependency and nothing in the repository ever
+# populated it, so the count readiness divides by was whatever the guarded party
+# had written. It applies last because it replaces 0238's readiness function.
+MIGRATION_INVENTORY="$REPO/migrations/0246_drive_inventory_is_not_the_runtime_s_to_declare.sql"
 SUITE="$REPO/mcp-server/test/db/application_session_contract.py"
 export LC_ALL=C LANG=C
 export CARR_DISPOSABLE_PG_DIR="${CARR_DISPOSABLE_PG_DIR:-${TMPDIR:-/tmp}/carr-appsession-check}"
@@ -97,6 +102,8 @@ psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_RETIRE"
 echo "migration 0243 applied (retirement needs two proven receipts and authority)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SPLIT"
 echo "migration 0244 applied (the call digest and the material claim are two columns)"
+psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_INVENTORY"
+echo "migration 0246 applied (the inventory is declared, not written by the runtime)"
 
 # THE PRODUCER, AGAINST A REAL DATABASE, before the contract suite runs. Its own
 # unit test drives a hand-written fake client, and an audit showed that fake

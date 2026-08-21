@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import re
 import subprocess
@@ -343,6 +344,77 @@ def matches(entry: dict[str, Any], reference: Reference) -> bool:
     return False
 
 
+# ---------------------------------------------------------------- manifest
+#
+# THE OTHER HALF OF MIGRATION 0246. ops.drive_retirement_readiness() used to
+# divide by `select count(*) from ops.drive_dependency where operational`, a
+# table carr_writer could insert into and nothing in this repository ever
+# populated -- so the denominator of the Drive-retirement completion test was
+# supplied by the party being tested. 0246 requires readiness to find a manifest
+# whose digest equals ops.drive_dependency_digest() over the rows actually
+# present. This is where that digest is computed from the REPOSITORY, so the two
+# sides are independent and can only agree by actually describing the same rows.
+#
+# THE LINE FORMAT IS A CONTRACT WITH SQL, character for character:
+#
+#     source_path|reference|classification|t      (operational)
+#     source_path|reference|classification|f      (not)
+#
+# sorted ascending, joined with a single newline, sha256, lowercase hex. Sorting
+# is by Python's str order, which is code point order; SQL sorts the same lines
+# with `collate "C"`, which is byte order; for UTF-8 those are the same order.
+# An empty inventory hashes the empty string on both sides.
+CANONICAL_SEPARATOR = "|"
+
+
+def canonical_rows(refs: list[Reference], entries: list[dict[str, Any]]) -> list[tuple[str, str, str, bool]]:
+    """One canonical row per classified reference, deduplicated and ordered.
+
+    A reference whose classification is ambiguous or absent never reaches here:
+    audit() reports those as MULTIPLE/UNCOVERED and main() fails before emitting
+    a manifest. Emitting a digest over a partially classified tree would be the
+    same defect as the one 0246 closes, moved into this file.
+    """
+    rows: dict[tuple[str, str], tuple[str, bool]] = {}
+    for ref in refs:
+        ids = [entry for entry in entries if matches(entry, ref)]
+        if len(ids) != 1:
+            raise InventoryError(
+                f"{ref.ref}: {len(ids)} classifications match; a manifest cannot "
+                f"be emitted over an ambiguously classified tree")
+        classification = str(ids[0]["class"])
+        operational = classification in OPERATIONAL_CLASSES
+        key = (ref.ref, ref.resolved_path)
+        existing = rows.get(key)
+        if existing is not None and existing != (classification, operational):
+            # ops.drive_dependency has a unique (source_path, reference) key, so
+            # a collision here would be refused by the database rather than
+            # silently taking one of the two. Name it in the tool instead.
+            raise InventoryError(
+                f"{ref.ref}: the same source and reference are classified both "
+                f"{existing[0]!r} and {classification!r}")
+        rows[key] = (classification, operational)
+    for value in (CANONICAL_SEPARATOR, "\n"):
+        for (source_path, reference), (classification, _op) in rows.items():
+            if value in source_path or value in reference or value in classification:
+                raise InventoryError(
+                    f"{source_path}: a canonical field contains {value!r}, which "
+                    f"would make the manifest digest ambiguous")
+    return sorted((source_path, reference, classification, operational)
+                  for (source_path, reference), (classification, operational) in rows.items())
+
+
+def canonical_line(row: tuple[str, str, str, bool]) -> str:
+    source_path, reference, classification, operational = row
+    return CANONICAL_SEPARATOR.join(
+        (source_path, reference, classification, "t" if operational else "f"))
+
+
+def manifest_digest(rows: list[tuple[str, str, str, bool]]) -> str:
+    body = "\n".join(sorted(canonical_line(row) for row in rows))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
 def audit(root: Path, registry: dict[str, Any]) -> tuple[list[Reference], list[Reference], list[tuple[Reference, list[str]]]]:
     entries = validate_registry(registry, schema=_read_json(_schema_path(root)))
     refs = scan(root, list(registry["binary_exclusions"]))
@@ -362,7 +434,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--registry", type=Path)
     parser.add_argument("--audit-only", action="store_true", help="print references without failing uncovered rows")
+    parser.add_argument("--emit-manifest", action="store_true",
+                        help="print the JSON manifest migration 0246 binds retirement to")
     args = parser.parse_args(argv)
+    if args.emit_manifest and args.audit_only:
+        print("drive-dependency-inventory FAILED: --emit-manifest cannot be combined "
+              "with --audit-only; a manifest over an unaudited tree is exactly the "
+              "unchecked denominator 0246 exists to remove", file=sys.stderr)
+        return 2
     root = args.root.resolve()
     registry_path = args.registry or root / DEFAULT_REGISTRY
     try:
@@ -383,6 +462,23 @@ def main(argv: list[str] | None = None) -> int:
     if uncovered or multiple:
         print(f"drive-dependency-inventory FAILED: refs={len(refs)} uncovered={len(uncovered)} multiple={len(multiple)}", file=sys.stderr)
         return 1
+    if args.emit_manifest:
+        try:
+            entries = validate_registry(_read_json(registry_path),
+                                        schema=_read_json(_schema_path(root)))
+            rows = canonical_rows(refs, entries)
+        except InventoryError as exc:
+            print(f"drive-dependency-inventory FAILED: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps({
+            "contract": "drive-dependency-manifest",
+            "schema_version": 1,
+            "inventory_digest": manifest_digest(rows),
+            "operational_count": sum(1 for row in rows if row[3]),
+            "rows": [{"source_path": r[0], "reference": r[1],
+                      "classification": r[2], "operational": r[3]} for r in rows],
+        }, indent=2, sort_keys=True))
+        return 0
     print(f"drive-dependency-inventory passed: {len(refs)} references exactly classified")
     return 0
 

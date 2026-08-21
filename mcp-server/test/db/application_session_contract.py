@@ -34,6 +34,7 @@ Usage:
     ops/disposable-pg.sh stop
 """
 import contextlib
+import pathlib
 import sys
 import threading
 import time
@@ -194,6 +195,32 @@ def mint(conn, actor, expires="now() + interval '1 hour'", sponsor="joe", tenant
     sid = uuid.uuid4()
     with conn.cursor() as cur:
         cur.execute(MINT.format(expires=expires), (sid, actor, tenant, sponsor))
+    conn.commit()
+    return sid
+
+
+def declare_inventory_manifest(conn, actor, note="contract suite: these rows"):
+    """Declare a 0246 inventory manifest describing the rows that exist NOW.
+
+    0246 made ops.drive_retirement_readiness()'s `ready` require a manifest
+    whose digest matches ops.drive_dependency_digest() over this database's own
+    drive_dependency rows, because before it the retirement DENOMINATOR was
+    whatever carr_writer had inserted. Every contract below that asserts `ready
+    is True` therefore has to declare one first.
+
+    IT IS DELIBERATELY NOT CALLED ONCE AT SETUP. Any later contract that records
+    a dependency changes the digest and un-binds the manifest -- which is the
+    guarantee, not a nuisance -- so this is called immediately before each
+    assertion that needs a bound inventory, and never hoisted.
+    """
+    sid = mint(conn, actor)
+    with conn.cursor() as cur:
+        cur.execute(
+            """insert into ops.drive_inventory_manifest
+                 (id, inventory_digest, application_session_id, declared_by_actor_id,
+                  organization_tenant_id, note)
+               values (%s, ops.drive_dependency_digest(), %s, %s, %s, %s)""",
+            (uuid.uuid4(), sid, actor, TENANT, note))
     conn.commit()
     return sid
 
@@ -2911,16 +2938,29 @@ def main(dsn):  # noqa: C901
         against a contract that quietly tests nothing."""
         with conn.cursor() as cur:
             cur.execute("""select operational_total, retired_total, remaining,
-                                  has_authority, ready
+                                  has_authority, declared_digest, observed_digest,
+                                  inventory_bound, ready
                              from ops.drive_retirement_readiness()""")
-            total, retired, remaining, has_authority, ready = cur.fetchone()
+            (total, retired, remaining, has_authority, declared, observed,
+             bound, ready) = cur.fetchone()
 
-        expected_ready = (total > 0) and (remaining == 0) and bool(has_authority)
+        # 0246 ADDED A FOURTH TERM, and it belongs in this rule rather than
+        # beside it. The whole point of this contract is that the formula is
+        # checked from readiness's OWN outputs, so a term the function computes
+        # and this assertion ignores would be a term nothing checks.
+        expected_ready = ((total > 0) and (remaining == 0)
+                          and bool(has_authority) and bool(bound))
         assert ready == expected_ready, (
             f"readiness disagreed with the rule it claims to compute: "
             f"ready={ready} but (operational_total={total} > 0 and "
-            f"remaining={remaining} == 0 and has_authority={has_authority}) "
-            f"= {expected_ready}")
+            f"remaining={remaining} == 0 and has_authority={has_authority} "
+            f"and inventory_bound={bound}) = {expected_ready}")
+        # AND inventory_bound MUST BE THE DIGEST COMPARISON IT CLAIMS TO BE.
+        # Without this, a mutant hardcoding inventory_bound to the value the
+        # rest of the suite happens to need would satisfy every line above.
+        assert bound == (declared is not None and declared == observed), (
+            f"inventory_bound={bound} does not match its own inputs "
+            f"(declared={declared!r}, observed={observed!r})")
         assert remaining == total - retired, (
             f"remaining ({remaining}) must equal operational_total ({total}) "
             f"minus retired_total ({retired})")
@@ -3626,6 +3666,9 @@ def main(dsn):  # noqa: C901
         # a drive_dependency having already closed it out honestly (every one
         # of them now does, via complete_honest_retirement or its own honest
         # pair) -- otherwise remaining would never reach 0 here at all.
+        # 0246: and on the inventory being BOUND, which file_retirement above
+        # just un-bound by recording a new dependency.
+        declare_inventory_manifest(conn, joe, "rule 8 withdrawal contract: before")
         _tot0, _ret0, remaining_before, has_auth_before, ready_before = readiness()
         assert remaining_before == 0, (
             f"expected every operational dependency retired before the "
@@ -3664,6 +3707,9 @@ def main(dsn):  # noqa: C901
         file_retirement("second", base=material_after_first)
         assert retired_count() == 1, (
             "the dependency could not be retired again after its withdrawal")
+        # 0246: ready also needs the inventory bound, and this contract created
+        # a dependency since any earlier manifest was declared.
+        declare_inventory_manifest(conn, joe, "rule 8 withdrawal contract")
         _tot2, _ret2, remaining_final, _ha2, ready_final = readiness()
         assert remaining_final == remaining_before, (
             f"remaining must return to {remaining_before} once the dependency "
@@ -4264,6 +4310,316 @@ def main(dsn):  # noqa: C901
             assert not flags, f"a stored completion flag appeared: {flags}"
     check("scope: all three surfaces exist, each gated, and none of them is a flag",
           phase4_surface_exists_and_is_gated)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ITEMS 5-9 — the adversarial review's remaining findings.
+    #
+    # Appended as ONE contiguous block, deliberately: a second session is adding
+    # its own block for items 1-4 to this same file, and an append merges where
+    # an interleave conflicts.
+    # ══════════════════════════════════════════════════════════════════════
+
+    @contextlib.contextmanager
+    def as_role(role):
+        """Execute with exactly one role's privileges. as_writer, generalised.
+
+        carr_authority is a real credential in this substrate -- 0236 put
+        accept_phase4 on it and 0246 puts the Drive inventory there -- and
+        nothing here could reach it before.
+        """
+        with conn.cursor() as cur:
+            cur.execute(f"set role {role}")
+        try:
+            yield
+        finally:
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            with contextlib.suppress(Exception), conn.cursor() as cur:
+                cur.execute("reset role")
+                conn.commit()
+
+    DEP_INSERT = """insert into ops.drive_dependency
+                      (source_path, reference, classification, operational)
+                    values (%s, %s, %s, true)"""
+    MANIFEST_INSERT = """insert into ops.drive_inventory_manifest
+                           (id, inventory_digest, application_session_id,
+                            declared_by_actor_id, organization_tenant_id, note)
+                         values (%s, %s, %s, %s, %s, %s)"""
+
+    def observed_digest():
+        with conn.cursor() as cur:
+            cur.execute("select ops.drive_dependency_digest()")
+            return cur.fetchone()[0]
+
+    def bound_and_ready():
+        with conn.cursor() as cur:
+            cur.execute("""select inventory_bound, ready, declared_digest, observed_digest
+                             from ops.drive_retirement_readiness()""")
+            return cur.fetchone()
+
+    # ---- item 5: the retirement denominator is not the runtime's to write ----
+
+    def writer_cannot_record_a_drive_dependency():
+        """0246. THE HOLE THIS CLOSES, restated as a test.
+
+        ops.drive_retirement_readiness() divides by the count of operational
+        ops.drive_dependency rows. 0237 granted carr_writer INSERT on that
+        table and NOTHING in the repository ever populated it, so the runtime
+        supplied its own denominator: record one dependency you invented,
+        retire it with two receipts you can legitimately prove, and the gate
+        reports every operational Drive dependency retired.
+
+        THE PRIVILEGE ERROR *IS* THE POINT HERE, which is why this passes
+        privilege_is_the_point. Everywhere else in this suite a 42501 means the
+        guard went unproven; here the absence of the privilege is the guard.
+        """
+        refuses(conn, DEP_INSERT,
+                (f"runtime/{uuid.uuid4()}.py:1", "{{VAULT}}", "vault-path"),
+                role="carr_writer", privilege_is_the_point=True,
+                because="carr_writer must not be able to write the denominator "
+                        "its own retirement work is measured against")
+    check("item 5: carr_writer cannot record a Drive dependency — the retirement "
+          "denominator is not the runtime's to write",
+          writer_cannot_record_a_drive_dependency)
+
+    def writer_cannot_declare_an_inventory_manifest():
+        refuses(conn, MANIFEST_INSERT,
+                (uuid.uuid4(), "0" * 64, uuid.uuid4(), joe, TENANT, "writer says so"),
+                role="carr_writer", privilege_is_the_point=True,
+                because="declaring what the Drive inventory IS belongs to the "
+                        "authority identity, like accept_phase4")
+    check("item 5: carr_writer cannot declare an inventory manifest",
+          writer_cannot_declare_an_inventory_manifest)
+
+    def authority_can_record_and_declare():
+        """AND THE HAPPY PATH MUST BE REACHABLE. A binding that can only ever
+        say no is indistinguishable from one that is broken, and every refusal
+        above would pass just as happily against a table nobody can write."""
+        marker = f"authority/{uuid.uuid4()}.py:1"
+        with as_role("carr_authority"), conn.cursor() as cur:
+            cur.execute(DEP_INSERT + " returning id", (marker, "{{VAULT}}", "vault-path"))
+            assert cur.rowcount == 1, "carr_authority could not record a dependency"
+            dep = cur.fetchone()[0]
+            conn.commit()
+        sid = mint(conn, joe)
+        with as_role("carr_authority"), conn.cursor() as cur:
+            cur.execute("select ops.drive_dependency_digest()")
+            digest = cur.fetchone()[0]
+            cur.execute(MANIFEST_INSERT,
+                        (uuid.uuid4(), digest, sid, joe, TENANT,
+                         "item 5: authority happy path"))
+            assert cur.rowcount == 1, "carr_authority could not declare a manifest"
+            conn.commit()
+        bound, _ready, declared, observed = bound_and_ready()
+        assert bound is True, (
+            f"a manifest declared over these exact rows did not bind "
+            f"(declared={declared!r}, observed={observed!r})")
+        # RESIDUE, per this file's own rule. An operational-but-unretired
+        # dependency is global state that survives into the suite's second pass
+        # and breaks the withdrawal contract's remaining==0 precondition. Found
+        # exactly that way: pass one green, pass two red.
+        retire_dependency_from_readiness_count(dep)
+    check("item 5: carr_authority CAN record a dependency and declare a manifest "
+          "that binds", authority_can_record_and_declare)
+
+    def a_manifest_for_other_rows_does_not_bind():
+        """THE CLAUSE THAT MAKES THE PRIVILEGE WORTH ANYTHING. Moving INSERT to
+        carr_authority only moves the question: an authority that declares a
+        digest for an inventory it did not load gets the same false READY. The
+        digest comparison is what refuses that, and it is checked here on its
+        own rather than inferred from `ready`, which has three other terms."""
+        sid = mint(conn, joe)
+        with conn.cursor() as cur:
+            cur.execute("select encode(sha256(convert_to(%s,'UTF8')),'hex')",
+                        (f"some other inventory {uuid.uuid4()}",))
+            elsewhere = cur.fetchone()[0]
+            cur.execute(MANIFEST_INSERT,
+                        (uuid.uuid4(), elsewhere, sid, joe, TENANT,
+                         "item 5: a manifest for rows that are not here"))
+        conn.commit()
+        bound, ready, declared, observed = bound_and_ready()
+        assert bound is False, (
+            f"a manifest whose digest describes OTHER rows reported BOUND "
+            f"(declared={declared!r}, observed={observed!r})")
+        assert ready is False, "readiness said yes over an unbound inventory"
+    check("item 5: a manifest describing rows that are not in this database does "
+          "not bind, and readiness says no",
+          a_manifest_for_other_rows_does_not_bind)
+
+    def recording_a_dependency_unbinds_the_manifest():
+        """THE DRIFT CASE. Declare honestly, then change the rows. Without this
+        the binding would be a one-time handshake rather than a live check, and
+        the denominator could be edited immediately after being blessed."""
+        sid = mint(conn, joe)
+        with conn.cursor() as cur:
+            cur.execute(MANIFEST_INSERT,
+                        (uuid.uuid4(), observed_digest(), sid, joe, TENANT,
+                         "item 5: honest, before the drift"))
+        conn.commit()
+        assert bound_and_ready()[0] is True, "the honest manifest did not bind"
+        with as_role("carr_authority"), conn.cursor() as cur:
+            cur.execute(DEP_INSERT + " returning id",
+                        (f"drift/{uuid.uuid4()}.py:1", "{{VAULT}}", "vault-path"))
+            drifted = cur.fetchone()[0]
+            conn.commit()
+        bound, ready, _d, _o = bound_and_ready()
+        assert bound is False, (
+            "a dependency was recorded after the manifest was declared and the "
+            "binding still reported a match")
+        assert ready is False, "readiness said yes over a drifted inventory"
+        retire_dependency_from_readiness_count(drifted)
+    check("item 5: recording a dependency after a manifest was declared un-binds "
+          "it — the binding is a live check, not a one-time blessing",
+          recording_a_dependency_unbinds_the_manifest)
+
+    def the_newest_manifest_wins():
+        """A wrong manifest is corrected by declaring another, never by editing
+        one. That only works if 'current' means the newest -- and it must mean
+        newest by SEQ, not by declared_at, which is clock_timestamp() and ties."""
+        sid = mint(conn, joe)
+        good = observed_digest()
+        with conn.cursor() as cur:
+            cur.execute(MANIFEST_INSERT,
+                        (uuid.uuid4(), good, sid, joe, TENANT, "item 5: correct"))
+            conn.commit()
+            assert bound_and_ready()[0] is True, "the correct manifest did not bind"
+            cur.execute("select encode(sha256(convert_to(%s,'UTF8')),'hex')",
+                        (f"superseding junk {uuid.uuid4()}",))
+            cur.execute(MANIFEST_INSERT,
+                        (uuid.uuid4(), "1" * 64, sid, joe, TENANT,
+                         "item 5: superseding, and wrong"))
+            conn.commit()
+        bound, _ready, declared, _observed = bound_and_ready()
+        assert bound is False, (
+            "a later manifest did not supersede an earlier one; readiness is "
+            "reading a manifest that is no longer current")
+        assert declared == "1" * 64, (
+            f"the current manifest is not the most recently declared one "
+            f"(got {declared!r})")
+        # Put it back, so later contracts in this block start from a bound state.
+        with conn.cursor() as cur:
+            cur.execute(MANIFEST_INSERT,
+                        (uuid.uuid4(), observed_digest(), sid, joe, TENANT,
+                         "item 5: restored after the supersede check"))
+            conn.commit()
+    check("item 5: the newest manifest by seq is the current one — a correction "
+          "supersedes rather than edits", the_newest_manifest_wins)
+
+    def manifests_are_immutable():
+        sid = mint(conn, joe)
+        mid = uuid.uuid4()
+        with conn.cursor() as cur:
+            cur.execute(MANIFEST_INSERT,
+                        (mid, observed_digest(), sid, joe, TENANT,
+                         "item 5: immutability subject"))
+            conn.commit()
+        refuses(conn, "update ops.drive_inventory_manifest set note='rewritten' where id=%s",
+                (mid,), expect_message="cannot be rewritten",
+                because="a manifest is superseded, never edited")
+        refuses(conn, "delete from ops.drive_inventory_manifest where id=%s", (mid,),
+                expect_message="cannot be deleted",
+                because="what we believed on Tuesday must stay answerable")
+    check("item 5: an inventory manifest cannot be rewritten or deleted",
+          manifests_are_immutable)
+
+    def manifest_needs_a_live_session():
+        """0246's own copy of the session guard. Written here rather than
+        assumed: three other tables in this substrate carry this guard and the
+        review found two of them unproven, so a fourth uncovered copy would be
+        the same finding again."""
+        revoked = mint(conn, joe)
+        with conn.cursor() as cur:
+            cur.execute("select ops.revoke_application_session(%s,'item 5')", (revoked,))
+            conn.commit()
+        refuses(conn, MANIFEST_INSERT,
+                (uuid.uuid4(), observed_digest(), revoked, joe, TENANT, "revoked"),
+                expect_message="is revoked",
+                because="a revoked session must not be able to declare the inventory")
+        # 0231 refuses to mint a session that is already dead, so an expired one
+        # can only be produced the way time produces it.
+        expired = mint(conn, joe, expires="now() + interval '1 second'")
+        time.sleep(1.5)
+        refuses(conn, MANIFEST_INSERT,
+                (uuid.uuid4(), observed_digest(), expired, joe, TENANT, "expired"),
+                expect_message="is expired",
+                because="an expired session must not be able to declare the inventory")
+        refuses(conn, MANIFEST_INSERT,
+                (uuid.uuid4(), observed_digest(), uuid.uuid4(), joe, TENANT, "unknown"),
+                expect_message="unknown application session",
+                because="a manifest must name a session that exists")
+        live = mint(conn, joe)
+        refuses(conn, MANIFEST_INSERT,
+                (uuid.uuid4(), observed_digest(), live, dell, TENANT, "wrong actor"),
+                expect_message="different actor",
+                because="a manifest cannot be attributed to someone other than "
+                        "whoever authenticated the session")
+        refuses(conn, MANIFEST_INSERT,
+                (uuid.uuid4(), observed_digest(), live, joe, "someone-else", "wrong tenant"),
+                expect_message="different tenant",
+                because="a manifest cannot cross tenants")
+    check("item 5: a manifest needs a live session, and cannot misname its actor "
+          "or tenant", manifest_needs_a_live_session)
+
+    def manifest_digest_shape_is_enforced():
+        live = mint(conn, joe)
+        refuses(conn, MANIFEST_INSERT,
+                (uuid.uuid4(), "not-a-sha256", live, joe, TENANT, "malformed"),
+                expect_message="drive_inventory_manifest_digest_is_sha256",
+                because="a truncated or empty digest reads identically to one "
+                        "that simply never matches, and would fail silently forever")
+        refuses(conn, MANIFEST_INSERT,
+                (uuid.uuid4(), "A" * 64, live, joe, TENANT, "uppercase"),
+                expect_message="drive_inventory_manifest_digest_is_sha256",
+                because="encode(...,'hex') emits lowercase; an uppercase digest "
+                        "could never match and must be refused rather than stored")
+    check("item 5: a manifest digest must be a lowercase 64-character sha256",
+          manifest_digest_shape_is_enforced)
+
+    def sql_and_the_inventory_tool_compute_the_same_digest():
+        """THE ACTUAL BIND TO ops/drive-dependency-inventory.py.
+
+        Everything above proves the database is internally consistent. None of
+        it proves the digest carr_authority declares can be PRODUCED from the
+        repository -- and if the two sides disagree about the line format, the
+        separator or the sort order, readiness is unreachable by construction
+        and every contract above still passes.
+
+        THE SORT IS THE SUBTLE HALF. SQL orders with `collate "C"` (byte order);
+        Python's sorted() over str is code point order; for UTF-8 those agree.
+        Under the database's default collation on a non-C cluster they do not,
+        which is why 0246 pins the collation and why this test exists.
+        """
+        import importlib.util
+        root = pathlib.Path(__file__).resolve().parents[3]
+        tool = root / "ops" / "drive-dependency-inventory.py"
+        assert tool.exists(), f"the inventory tool is missing at {tool}"
+        spec = importlib.util.spec_from_file_location("drive_inventory_tool", tool)
+        module = importlib.util.module_from_spec(spec)
+        # Registered in sys.modules before exec: the module defines a
+        # @dataclass, and dataclasses resolve their own module by name.
+        sys.modules["drive_inventory_tool"] = module
+        spec.loader.exec_module(module)
+
+        with conn.cursor() as cur:
+            cur.execute("""select source_path, reference, classification, operational
+                             from ops.drive_dependency""")
+            rows = [(a, b, c, d) for a, b, c, d in cur.fetchall()]
+        assert rows, "no dependencies on record; this contract would prove nothing"
+        assert module.manifest_digest(rows) == observed_digest(), (
+            "ops.drive_dependency_digest() and the inventory tool's "
+            "manifest_digest() disagree over the SAME rows, so no digest the "
+            "tool emits could ever bind a manifest")
+
+        # AND THE AGREEMENT MUST BE ON CONTENT, not a coincidence of both sides
+        # hashing something constant. Flip one operational flag in the Python
+        # copy only; the two must now differ.
+        flipped = [(a, b, c, not d) for a, b, c, d in rows[:1]] + rows[1:]
+        assert module.manifest_digest(flipped) != observed_digest(), (
+            "changing a row on the Python side did not change its digest; the "
+            "two sides agree on a value that does not depend on the rows")
+    check("item 5: ops.drive_dependency_digest() and the inventory tool compute "
+          "the SAME digest over the same rows",
+          sql_and_the_inventory_tool_compute_the_same_digest)
 
     for c in CONNS:
         c.close()
