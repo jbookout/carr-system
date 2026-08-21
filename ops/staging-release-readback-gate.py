@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""Executable DB contract for Program 5 typed staging recovery evidence."""
+
+# ci: db-gate
+
+from __future__ import annotations
+
+import os
+import sys
+import threading
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+try:
+    import psycopg
+except ImportError:
+    sys.exit("staging-release-readback-gate: psycopg not installed")
+
+
+PASSES: list[str] = []
+FAILURES: list[str] = []
+CURRENT_SHA = "a" * 40
+PRIOR_SHA = "b" * 40
+CURRENT_PROVIDER_VERSION = "10000000-0000-4000-8000-000000000001"
+PRIOR_PROVIDER_VERSION = "20000000-0000-4000-8000-000000000002"
+PLAN_HASH = "sha256:" + "c" * 64
+ROLLBACK_PLAN = "runbooks/rollback-worker.md"
+SCHEMA_APPLIED_COUNT = 202
+SCHEMA_LEDGER_SHA256 = "sha256:" + "7" * 64
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    if condition:
+        PASSES.append(name)
+        print(f"  ok    {name}")
+    else:
+        FAILURES.append(name)
+        print(f"  FAIL  {name}" + (f" — {detail}" if detail else ""))
+
+
+def refuses(cur, sql: str, params: tuple = ()) -> bool:
+    cur.execute("savepoint p5_refusal")
+    try:
+        cur.execute(sql, params)
+    except psycopg.Error:
+        cur.execute("rollback to savepoint p5_refusal")
+        return True
+    cur.execute("rollback to savepoint p5_refusal")
+    return False
+
+
+def one(cur) -> tuple[Any, ...]:
+    row = cur.fetchone()
+    if row is None:
+        raise AssertionError("database returned no row")
+    return row
+
+
+def authority(cur, principal: str) -> None:
+    cur.execute(f"set session authorization {principal}")
+
+
+def owner(cur) -> None:
+    cur.execute("reset session authorization")
+
+
+def ensure_authority_roles(cur) -> None:
+    cur.execute("""do $$ begin
+      if not exists(select 1 from pg_roles where rolname='carr_authority_joe') then
+        create role carr_authority_joe login;
+      end if;
+      if not exists(select 1 from pg_roles where rolname='carr_authority_dell') then
+        create role carr_authority_dell login;
+      end if;
+    end $$""")
+    cur.execute("grant carr_authority to carr_authority_joe,carr_authority_dell")
+
+
+def seed_fixture(cur, prefix: str) -> dict:
+    now = datetime.now(timezone.utc)
+    service_key = f"p5-readback-{prefix}-{uuid.uuid4()}"
+    cur.execute("""insert into ops.service(key,name,family,criticality,owner_actor)
+                   values(%s,'P5 typed readback gate','Platform','critical','joe') returning id""",
+                (service_key,))
+    service_id = cur.fetchone()[0]
+    current_key = f"p5-current-{prefix}-{uuid.uuid4()}"
+    prior_key = f"p5-prior-{prefix}-{uuid.uuid4()}"
+
+    # The prior row represents already-completed historical Production truth.
+    # Disable triggers only while constructing that fixture in the disposable
+    # transaction; all checks remain active and the new runtime path is tested
+    # below with triggers enabled.
+    cur.execute("set local session_replication_role=replica")
+    cur.execute("""insert into ops.release(
+      correlation_id,release_key,service_id,environment,state,git_sha,provider,
+      provider_version_id,performance_budget_ref,performance_budget_ms,
+      recovery_strategy,artifact_digest,dependency_lock_digest,maker_actor,
+      maker_verification_ref,test_evidence_ref,security_evidence_ref,verifier_actor,
+      verifier_evidence_ref,rollback_ready,rollback_plan_ref,plan_hash,
+      migration_set,schema_highest_migration,schema_applied_count,schema_ledger_sha256,
+      approved_by_actor,approved_at,approval_expires_at,source_kind,source_ref,
+      observed_at,expires_at,ended_at)
+      values(%s,%s,%s,'production','complete',%s,'cloudflare-workers',%s,
+      'budget:prior',250,'rollback',%s,%s,'maker','maker-proof','tests','security',
+      'verifier','verify-proof',true,%s,%s,%s,%s,%s,%s,'joe',%s,%s,'wrapper','gate',%s,%s,%s)
+      returning id""",
+      (uuid.uuid4(),prior_key,service_id,PRIOR_SHA,PRIOR_PROVIDER_VERSION,
+       "sha256:"+"d"*64,"sha256:"+"e"*64,ROLLBACK_PLAN,"sha256:"+"f"*64,
+       ["0201_previous.sql"],"0201_previous.sql",SCHEMA_APPLIED_COUNT,SCHEMA_LEDGER_SHA256,
+       now-timedelta(days=2),now+timedelta(days=2),now-timedelta(days=2),
+       now+timedelta(days=20),now-timedelta(days=2)))
+    prior_id = cur.fetchone()[0]
+    cur.execute("""insert into ops.deployment(
+      correlation_id,service_id,environment,state,git_sha,provider,provider_version_id,
+      release_id,deployed_by_actor,verb_count,schema_highest_migration,
+      doctrine_generation,started_at,ended_at,read_back_at,
+      verification_evidence_ref,source_kind,source_ref,observed_at)
+      values(%s,%s,'production','complete',%s,'cloudflare-workers',%s,%s,
+      'historical',200,'0201_previous.sql',169,%s,%s,%s,'prior:/release',
+      'wrapper','gate',%s)""",
+      (uuid.uuid4(),service_id,PRIOR_SHA,PRIOR_PROVIDER_VERSION,prior_id,
+       now-timedelta(days=2),now-timedelta(days=2),now-timedelta(days=2),
+       now-timedelta(days=2)))
+    cur.execute("set local session_replication_role=origin")
+
+    cur.execute("""insert into ops.release(
+      correlation_id,release_key,service_id,environment,state,git_sha,provider,
+      provider_version_id,performance_budget_ref,performance_budget_ms,
+      recovery_strategy,artifact_digest,dependency_lock_digest,maker_actor,
+      maker_verification_ref,test_evidence_ref,security_evidence_ref,verifier_actor,
+      verifier_evidence_ref,rollback_ready,rollback_plan_ref,plan_hash,
+      migration_set,schema_highest_migration,schema_applied_count,schema_ledger_sha256,
+      source_kind,source_ref,observed_at,expires_at)
+      values(%s,%s,%s,'production','candidate',%s,'cloudflare-workers',%s,
+      'budget:current',250,'rollback',%s,%s,'maker','maker-proof','tests','security',
+      'verifier','verify-proof',true,%s,%s,%s,%s,%s,%s,'wrapper','gate',%s,%s) returning id""",
+      (uuid.uuid4(),current_key,service_id,CURRENT_SHA,CURRENT_PROVIDER_VERSION,
+       "sha256:"+"1"*64,"sha256:"+"2"*64,ROLLBACK_PLAN,PLAN_HASH,
+       ["0202_staging_release_readback_receipt.sql"],
+       "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,
+       SCHEMA_LEDGER_SHA256,now,
+       now+timedelta(days=2)))
+    current_id = cur.fetchone()[0]
+    return {"service_id":service_id,"current_id":current_id,"prior_id":prior_id,
+            "current_key":current_key,"prior_key":prior_key}
+
+
+def record_sql() -> str:
+    return """select ops.record_staging_release_readback(
+      %s::uuid,%s::uuid,%s,%s,%s,%s,%s)"""
+
+
+def prepare_sql() -> str:
+    return """select ops.prepare_staging_deployment_attempt(
+      %s::uuid,%s::uuid,%s,%s,%s::uuid,%s,%s)"""
+
+
+def claim_sql() -> str:
+    return "select ops.claim_staging_deployment_attempt(%s::uuid)"
+
+
+def record_params(fixture: dict, attempt: uuid.UUID, step: str, idem: uuid.UUID,
+                  version: uuid.UUID, *, verb_count: int = 211) -> tuple:
+    return (idem,version,f"carr-staging-{idem.hex}",verb_count,
+            "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170)
+
+
+def prepare_params(fixture: dict, attempt: uuid.UUID, step: str,
+                   idem: uuid.UUID) -> tuple:
+    sha = PRIOR_SHA if step == "prior" else CURRENT_SHA
+    return (idem,attempt,fixture["current_key"],fixture["prior_key"],attempt,step,sha)
+
+
+def prepare_and_claim(cur, fixture: dict, attempt: uuid.UUID,
+                      step: str, idem: uuid.UUID) -> None:
+    cur.execute(prepare_sql(), prepare_params(fixture, attempt, step, idem))
+    one(cur)
+    cur.execute(claim_sql(), (idem,))
+    claimed = one(cur)[0]
+    if claimed["deploy_allowed"] is not True:
+        raise AssertionError("new staging attempt was not exclusively claimed")
+
+
+def main() -> int:
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        sys.exit("staging-release-readback-gate: DATABASE_URL is not set")
+    with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        ensure_authority_roles(cur)
+        fixture = seed_fixture(cur, "main")
+        attempt = uuid.uuid4()
+        ids = [uuid.uuid4(),uuid.uuid4(),uuid.uuid4()]
+        versions = [uuid.uuid4(),uuid.uuid4(),uuid.uuid4()]
+
+        # SET ROLE is deliberately insufficient: a pooled owner connection may
+        # not impersonate the jobs writer. The authenticated session_user is the
+        # boundary, not current_user or caller actor text.
+        cur.execute("set local role carr_jobs")
+        check("pooled SET ROLE cannot prepare an attempt", refuses(cur, prepare_sql(),
+              prepare_params(fixture,attempt,"current_before",ids[0])))
+        cur.execute("reset role")
+
+        authority(cur,"carr_jobs")
+        results = []
+        for step, idem, version in zip(("current_before","prior","current_after"),ids,versions):
+            prepare_and_claim(cur,fixture,attempt,step,idem)
+            cur.execute(record_sql(),record_params(fixture,attempt,step,idem,version))
+            results.append(one(cur)[0])
+        check("current-prior-current creates one typed bundle and run",
+              results[-1]["bundle_id"] is not None and results[-1]["recovery_run_id"] is not None)
+        cur.execute(record_sql(),record_params(fixture,attempt,"current_after",ids[-1],versions[-1]))
+        replay = one(cur)[0]
+        check("exact replay returns the durable receipt", replay["replayed"] is True
+              and replay["receipt_id"]==results[-1]["receipt_id"])
+        cur.execute(prepare_sql(),prepare_params(fixture,attempt,"current_after",ids[-1]))
+        prepared_replay=one(cur)[0]
+        check("commit-response loss resumes from durable observed attempt",
+              prepared_replay["state"]=="observed"
+              and prepared_replay["receipt_ref"]==replay["receipt_ref"])
+        cur.execute(claim_sql(),(ids[-1],))
+        check("observed attempt can never authorize a redeploy",one(cur)[0]["deploy_allowed"] is False)
+        check("mutated replay is refused", refuses(cur,record_sql(),
+              record_params(fixture,attempt,"current_after",ids[-1],versions[-1],verb_count=212)))
+        owner(cur)
+
+        crash_attempt=uuid.uuid4(); crash_id=uuid.uuid4(); crash_version=uuid.uuid4()
+        authority(cur,"carr_jobs")
+        prepare_and_claim(cur,fixture,crash_attempt,"current_before",crash_id)
+        cur.execute(prepare_sql(),prepare_params(fixture,crash_attempt,"current_before",crash_id))
+        crash_resume=one(cur)[0]
+        check("provider-success client-crash resumes a claimed prepared attempt",
+              crash_resume["state"]=="prepared" and crash_resume["deploy_claimed"] is True)
+        cur.execute(claim_sql(),(crash_id,))
+        check("claimed attempt refuses blind redeploy",one(cur)[0]["deploy_allowed"] is False)
+        cur.execute(record_sql(),record_params(fixture,crash_attempt,"current_before",crash_id,crash_version))
+        crash_receipt=one(cur)[0]
+        cur.execute(record_sql(),record_params(fixture,crash_attempt,"current_before",crash_id,crash_version))
+        check("provider-success recovery records then replays one receipt",
+              crash_receipt["replayed"] is False and one(cur)[0]["replayed"] is True)
+        changed_version=uuid.uuid4()
+        check("recreated tag with changed provider UUID is refused",refuses(cur,record_sql(),
+              record_params(fixture,crash_attempt,"current_before",crash_id,changed_version)))
+        owner(cur)
+
+        cur.execute("""select count(*),count(distinct deployment_id),count(distinct provider_version_id)
+                       from ops.staging_release_readback_receipt where recovery_attempt_id=%s""",(attempt,))
+        check("exactly three immutable deployment observations are retained",cur.fetchone()==(3,3,3))
+        cur.execute("""select count(*) from ops.run r join ops.staging_recovery_rehearsal_bundle b
+          on b.id=r.recovery_rehearsal_bundle_id where b.recovery_attempt_id=%s
+          and r.evidence_ref=b.evidence_ref and r.release_id=b.current_release_id""",(attempt,))
+        check("run resolves the exact bundle rather than free text",one(cur)[0]==1)
+
+        # Caller-forged free text cannot recreate or unlock the typed edge.
+        check("arbitrary succeeded recovery run is refused", refuses(cur,"""insert into ops.run(
+          correlation_id,kind,service_id,release_id,environment,run_key,state,
+          started_at,ended_at,source_kind,source_ref,evidence_ref,recovery_strategy,recovery_plan_ref)
+          values(%s,'check',%s,%s,'staging','recovery.rehearsal.forged','succeeded',
+          now(),now(),'operator','attacker','attacker:any','rollback',%s)""",
+          (uuid.uuid4(),fixture["service_id"],fixture["current_id"],ROLLBACK_PLAN)))
+
+        # Out-of-order observations can be retained as failed-attempt facts but
+        # can never be reduced into a successful bundle/run.
+        bad_attempt = uuid.uuid4(); bad_ids=[uuid.uuid4() for _ in range(3)]
+        bad_versions=[uuid.uuid4() for _ in range(3)]
+        authority(cur,"carr_jobs")
+        prepare_and_claim(cur,fixture,bad_attempt,"prior",bad_ids[0])
+        cur.execute(record_sql(),record_params(fixture,bad_attempt,"prior",bad_ids[0],bad_versions[0]))
+        prepare_and_claim(cur,fixture,bad_attempt,"current_before",bad_ids[1])
+        cur.execute(record_sql(),record_params(fixture,bad_attempt,"current_before",bad_ids[1],bad_versions[1]))
+        prepare_and_claim(cur,fixture,bad_attempt,"current_after",bad_ids[2])
+        check("out-of-order recovery cannot create a bundle",refuses(cur,record_sql(),
+              record_params(fixture,bad_attempt,"current_after",bad_ids[2],bad_versions[2])))
+        owner(cur)
+
+        cross_fixture=seed_fixture(cur,"cross")
+        cross_attempt=uuid.uuid4(); cross_ids=[uuid.uuid4() for _ in range(3)]
+        cross_versions=[uuid.uuid4() for _ in range(3)]
+        authority(cur,"carr_jobs")
+        prepare_and_claim(cur,fixture,cross_attempt,"current_before",cross_ids[0])
+        cur.execute(record_sql(),record_params(fixture,cross_attempt,"current_before",cross_ids[0],cross_versions[0]))
+        prepare_and_claim(cur,cross_fixture,cross_attempt,"prior",cross_ids[1])
+        cur.execute(record_sql(),record_params(cross_fixture,cross_attempt,"prior",cross_ids[1],cross_versions[1]))
+        prepare_and_claim(cur,fixture,cross_attempt,"current_after",cross_ids[2])
+        check("cross-release correlation reuse cannot create a bundle",refuses(cur,record_sql(),
+              record_params(fixture,cross_attempt,"current_after",cross_ids[2],cross_versions[2])))
+        owner(cur)
+
+        stale_attempt=uuid.uuid4(); stale_id=uuid.uuid4(); stale_version=uuid.uuid4()
+        authority(cur,"carr_jobs")
+        prepare_and_claim(cur,fixture,stale_attempt,"current_before",stale_id)
+        stale=list(record_params(fixture,stale_attempt,"current_before",stale_id,stale_version))
+        stale[4]="0201_stale_but_valid.sql"
+        check("valid-shaped stale schema is refused",refuses(cur,record_sql(),tuple(stale)))
+        stale_count=list(record_params(
+            fixture,stale_attempt,"current_before",stale_id,stale_version))
+        stale_count[5]=SCHEMA_APPLIED_COUNT-1
+        check("highest-correct valid-shaped stale applied count is refused",
+              refuses(cur,record_sql(),tuple(stale_count)))
+        owner(cur)
+
+        # Direct DML is absent and append-only triggers also protect owner paths.
+        for role in ("carr_jobs","carr_writer","carr_authority"):
+            for table in ("ops.staging_deployment_attempt","ops.staging_deployment_claim",
+                          "ops.staging_release_readback_receipt"):
+                cur.execute("select has_table_privilege(%s,%s,'insert,update,delete')",(role,table))
+                check(f"{role} has no direct {table} DML",one(cur)[0] is False)
+        check("receipt UPDATE is structurally refused",refuses(cur,
+              "update ops.staging_release_readback_receipt set verb_count=999 where recovery_attempt_id=%s",(attempt,)))
+        check("bundle DELETE is structurally refused",refuses(cur,
+              "delete from ops.staging_recovery_rehearsal_bundle where recovery_attempt_id=%s",(attempt,)))
+        check("source deployment rewrite is structurally refused",refuses(cur,"""update ops.deployment
+              set verification_evidence_ref='attacker' where id=(select deployment_id
+              from ops.staging_release_readback_receipt where recovery_attempt_id=%s limit 1)""",(attempt,)))
+        check("candidate cannot skip Joe approval into deploying",refuses(cur,
+              "update ops.release set state='deploying',approved_by_actor='joe',approved_at=now(),approval_expires_at=now()+interval '1 hour' where id=%s",
+              (fixture["current_id"],)))
+
+        # Build a deliberately stale-but-valid typed bundle fixture under the
+        # disposable owner and prove that even Joe cannot approve through it.
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("""update ops.staging_recovery_rehearsal_bundle
+          set declared_schema_highest_migration='0201_stale_but_valid.sql'
+          where recovery_attempt_id=%s""",(attempt,))
+        cur.execute("set local session_replication_role=origin")
+        authority(cur,"carr_authority_joe")
+        check("Joe approval rejects a typed bundle for a stale valid-shaped schema",refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,12)",
+              (fixture["current_key"],PLAN_HASH,uuid.uuid4())))
+        owner(cur)
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("""update ops.staging_recovery_rehearsal_bundle
+          set declared_schema_highest_migration='0202_staging_release_readback_receipt.sql',
+              declared_schema_applied_count=%s
+          where recovery_attempt_id=%s""",(SCHEMA_APPLIED_COUNT-1,attempt))
+        cur.execute("set local session_replication_role=origin")
+        authority(cur,"carr_authority_joe")
+        check("Joe approval rejects a typed bundle for a stale applied count",refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,12)",
+              (fixture["current_key"],PLAN_HASH,uuid.uuid4())))
+        owner(cur)
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("""update ops.staging_recovery_rehearsal_bundle
+          set declared_schema_applied_count=%s
+          where recovery_attempt_id=%s""",(SCHEMA_APPLIED_COUNT,attempt))
+        cur.execute("set local session_replication_role=origin")
+
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("""update ops.staging_recovery_rehearsal_bundle
+          set declared_schema_ledger_sha256=%s
+          where recovery_attempt_id=%s""",("sha256:"+"8"*64,attempt))
+        cur.execute("set local session_replication_role=origin")
+        authority(cur,"carr_authority_joe")
+        check("Joe approval rejects a typed bundle for a stale ledger digest",refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,12)",
+              (fixture["current_key"],PLAN_HASH,uuid.uuid4())))
+        owner(cur)
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("""update ops.staging_recovery_rehearsal_bundle
+          set declared_schema_ledger_sha256=%s
+          where recovery_attempt_id=%s""",(SCHEMA_LEDGER_SHA256,attempt))
+        cur.execute("set local session_replication_role=origin")
+
+        # Dell retains authority capability generally but is never an approval
+        # gate or substitute for Joe on this system promotion.
+        approval_idem=uuid.uuid4()
+        authority(cur,"carr_authority_dell")
+        check("Dell cannot replace Joe for Program 5 approval",refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,12)",
+              (fixture["current_key"],PLAN_HASH,approval_idem)))
+        owner(cur)
+        authority(cur,"carr_authority_joe")
+        cur.execute("select ops.approve_program5_release(%s,%s,%s::uuid,12)",
+                    (fixture["current_key"],PLAN_HASH,approval_idem))
+        approval=one(cur)[0]
+        owner(cur)
+        cur.execute("select state,approved_by_actor,approval_receipt_id from ops.release where id=%s",
+                    (fixture["current_id"],))
+        state,actor,approval_receipt_id=one(cur)
+        check("Joe approves atomically through a typed receipt",state=="approved" and actor=="joe"
+              and str(approval_receipt_id)==approval["approval_receipt_id"])
+        check("approved projection cannot be rewritten",refuses(cur,
+              "update ops.release set approval_expires_at=approval_expires_at+interval '1 minute' where id=%s",
+              (fixture["current_id"],)))
+        authority(cur,"carr_authority_joe")
+        cur.execute("select ops.approve_program5_release(%s,%s,%s::uuid,12)",
+                    (fixture["current_key"],PLAN_HASH,approval_idem))
+        check("Joe approval exact replay is idempotent",one(cur)[0]["replayed"] is True)
+        check("Joe approval key rejects a changed expiry",refuses(cur,
+              "select ops.approve_program5_release(%s,%s,%s::uuid,11)",
+              (fixture["current_key"],PLAN_HASH,approval_idem)))
+        owner(cur)
+
+        revised_plan="sha256:"+"9"*64
+        cur.execute("update ops.release set plan_hash=%s where id=%s",
+                    (revised_plan,fixture["current_id"]))
+        cur.execute("select state,approval_receipt_id from ops.release where id=%s",
+                    (fixture["current_id"],))
+        revised_state,revised_pointer=one(cur)
+        cur.execute("select count(*) from ops.release_approval_receipt where release_id=%s",
+                    (fixture["current_id"],))
+        check("plan revision clears only the current approval pointer",
+              revised_state=="candidate" and revised_pointer is None and one(cur)[0]==1)
+
+        check("routine writer cannot call Joe approval",not _has_function(cur,"carr_jobs",
+              "ops.approve_program5_release(text,text,uuid,integer)"))
+        conn.rollback()
+
+    concurrency_check(dsn)
+    print(f"\nstaging-release-readback-gate: {len(PASSES)} passed, {len(FAILURES)} failed")
+    if FAILURES:
+        print("  failed assertions: " + "; ".join(FAILURES))
+    return 1 if FAILURES else 0
+
+
+def _has_function(cur, role: str, signature: str) -> bool:
+    cur.execute("select has_function_privilege(%s,%s,'execute')",(role,signature))
+    return bool(one(cur)[0])
+
+
+def concurrency_check(dsn: str) -> None:
+    if os.environ.get("CARR_CI_DATABASE_URL") != dsn:
+        print("  skip  concurrent replay is restricted to the explicit disposable CI database")
+        return
+    with psycopg.connect(dsn,autocommit=False) as setup, setup.cursor() as cur:
+        ensure_authority_roles(cur)
+        fixture=seed_fixture(cur,"race")
+        mutation_fixture=seed_fixture(cur,"prepare-mutation")
+        setup.commit()
+    def race(statement: str, params: list[tuple]) -> tuple[list[dict[str,Any]],list[str]]:
+        barrier=threading.Barrier(2); results: list[dict[str,Any]]=[]; errors: list[str]=[]
+        def worker(call_params: tuple) -> None:
+            try:
+                with psycopg.connect(dsn,autocommit=False) as conn, conn.cursor() as cur:
+                    authority(cur,"carr_jobs")
+                    barrier.wait(timeout=10)
+                    cur.execute(statement,call_params)
+                    results.append(one(cur)[0])
+                    conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+        threads=[threading.Thread(target=worker,args=(call_params,)) for call_params in params]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=20)
+        return results,errors
+
+    attempt=uuid.uuid4(); idem=uuid.uuid4(); version=uuid.uuid4()
+    exact_prepare=prepare_params(fixture,attempt,"current_before",idem)
+    prepare_results,prepare_errors=race(prepare_sql(),[exact_prepare,exact_prepare])
+    check("concurrent exact preparation yields one insert and one replay",
+          not prepare_errors and len(prepare_results)==2
+          and sorted(x["replayed"] for x in prepare_results)==[False,True],
+          "; ".join(prepare_errors))
+    with psycopg.connect(dsn,autocommit=False) as conn, conn.cursor() as cur:
+        authority(cur,"carr_jobs")
+        cur.execute(claim_sql(),(idem,))
+        check("prepared concurrent attempt has one provider claim",
+              one(cur)[0]["deploy_allowed"] is True)
+        conn.commit()
+    exact_params=record_params(fixture,attempt,"current_before",idem,version)
+    results,errors=race(record_sql(),[exact_params,exact_params])
+    check("concurrent exact replay yields one insert and one replay",
+          not errors and len(results)==2 and sorted(x["replayed"] for x in results)==[False,True],
+          "; ".join(errors))
+    with psycopg.connect(dsn,autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from ops.staging_release_readback_receipt where idempotency_key=%s",(idem,))
+        check("concurrent exact replay leaves one durable receipt",one(cur)[0]==1)
+
+    prepare_mutation_idem=uuid.uuid4()
+    prepare_a=prepare_params(fixture,uuid.uuid4(),"current_before",prepare_mutation_idem)
+    prepare_b=prepare_params(mutation_fixture,uuid.uuid4(),"current_before",prepare_mutation_idem)
+    prepare_mutation_results,prepare_mutation_errors=race(prepare_sql(),[prepare_a,prepare_b])
+    check("concurrent changed preparation has one winner and one refusal",
+          len(prepare_mutation_results)==1 and len(prepare_mutation_errors)==1
+          and "changed input" in prepare_mutation_errors[0],
+          "; ".join(prepare_mutation_errors))
+
+    mutation_attempt=uuid.uuid4(); mutation_idem=uuid.uuid4(); mutation_version=uuid.uuid4()
+    mutation_a=record_params(fixture,mutation_attempt,"current_before",mutation_idem,mutation_version)
+    mutation_b=record_params(fixture,mutation_attempt,"current_before",mutation_idem,mutation_version,verb_count=212)
+    with psycopg.connect(dsn,autocommit=False) as conn, conn.cursor() as cur:
+        authority(cur,"carr_jobs")
+        prepare_and_claim(cur,fixture,mutation_attempt,"current_before",mutation_idem)
+        conn.commit()
+    mutation_results,mutation_errors=race(record_sql(),[mutation_a,mutation_b])
+    check("concurrent changed-input replay has one winner and one refusal",
+          len(mutation_results)==1 and len(mutation_errors)==1 and "changed input" in mutation_errors[0],
+          "; ".join(mutation_errors))
+    with psycopg.connect(dsn,autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from ops.staging_release_readback_receipt where idempotency_key=%s",
+                    (mutation_idem,))
+        check("concurrent changed-input replay leaves one durable receipt",one(cur)[0]==1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

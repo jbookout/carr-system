@@ -107,6 +107,11 @@ PERFORMANCE_BUDGET_REF=""
 PERFORMANCE_BUDGET_MS=""
 RECOVERY_STRATEGY=""
 ROLLBACK_PLAN_REF=""
+REQUESTED_RELEASE_KEY=""
+RECOVERY_ATTEMPT_ID=""
+RECOVERY_STEP="standalone"
+RECOVERY_PRIOR_RELEASE_KEY=""
+STAGING_RECEIPT_KEY=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check)         CHECK_ONLY=1 ;;
@@ -133,6 +138,21 @@ while [ "$#" -gt 0 ]; do
       PINNED_RELEASE="$2"
       shift
       ;;
+    --release-key)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --release-key needs a canonical key" >&2; exit 64; }
+      REQUESTED_RELEASE_KEY="$2"; shift ;;
+    --recovery-attempt-id)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-attempt-id needs a UUID" >&2; exit 64; }
+      RECOVERY_ATTEMPT_ID="$2"; shift ;;
+    --recovery-step)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-step needs current_before|prior|current_after" >&2; exit 64; }
+      RECOVERY_STEP="$2"; shift ;;
+    --recovery-prior-release-key)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-prior-release-key needs a key" >&2; exit 64; }
+      RECOVERY_PRIOR_RELEASE_KEY="$2"; shift ;;
+    --staging-receipt-idempotency-key)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --staging-receipt-idempotency-key needs a UUID" >&2; exit 64; }
+      STAGING_RECEIPT_KEY="$2"; shift ;;
     --upload-version)
       [ "$VERSION_MODE" = "ordinary" ] \
         || { echo "deploy-worker: --upload-version and --promote-version are mutually exclusive" >&2; exit 64; }
@@ -156,6 +176,22 @@ fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 if [ "$VERSION_MODE" != "ordinary" ] && [ "$TARGET_ENV" != "production" ]; then
   fail "provider-version operations are Production-only; staging is a source rehearsal and receives its own build."
 fi
+case "$RECOVERY_STEP" in
+  standalone)
+    [ -z "$RECOVERY_ATTEMPT_ID$RECOVERY_PRIOR_RELEASE_KEY" ] \
+      || fail "standalone staging deploy cannot carry recovery attempt/prior fields."
+    ;;
+  current_before|prior|current_after)
+    [ "$TARGET_ENV" = "staging" ] && [ -n "$RECOVERY_ATTEMPT_ID" ] \
+      && [ -n "$RECOVERY_PRIOR_RELEASE_KEY" ] && [ -n "$REQUESTED_RELEASE_KEY" ] \
+      || fail "recovery deploy requires staging plus --release-key, --recovery-attempt-id, --recovery-prior-release-key and --recovery-step."
+    printf '%s\n' "$RECOVERY_ATTEMPT_ID" | grep -Eq \
+      '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' \
+      || fail "--recovery-attempt-id must be an exact UUID."
+    RECOVERY_ATTEMPT_ID="$(printf '%s' "$RECOVERY_ATTEMPT_ID" | tr 'A-F' 'a-f')"
+    ;;
+  *) fail "--recovery-step must be standalone|current_before|prior|current_after." ;;
+esac
 if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "production" ]; then
   fail "Production source deploy is disabled. Upload an immutable candidate with
   --upload-version, bind that provider version to an approved release, then use
@@ -456,7 +492,7 @@ record_deployment() {
 # wrapper that refused on the database's behalf would be claiming a protection
 # the database is not providing, and any other deploy path would bypass it
 # anyway. Silence is the only outcome ruled out.
-RELEASE_KEY=""
+RELEASE_KEY="$REQUESTED_RELEASE_KEY"
 RELEASE_PLAN_HASH=""
 RELEASE_MANIFEST=""
 if [ "$VERSION_MODE" = "promote" ]; then
@@ -518,6 +554,12 @@ if [ "$VERSION_MODE" = "promote" ]; then
   [ "$RECONFIRMED_BINDING" = "$RELEASE_BINDING" ] \
     || fail "release binding changed between UUID resolution and final approval check."
   echo "  recomputed plan: $RELEASE_PLAN_HASH"
+elif [ "$RECOVERY_STEP" != "standalone" ]; then
+  echo ""
+  echo "== preflight: typed recovery release truth =="
+  echo "  candidate release: $RELEASE_KEY"
+  echo "  prior release: $RECOVERY_PRIOR_RELEASE_KEY"
+  echo "  recovery attempt/step: $RECOVERY_ATTEMPT_ID / $RECOVERY_STEP"
 elif [ -f "$REPO/tools/release-manifest.py" ]; then
   echo ""
   echo "== preflight: release truth =="
@@ -627,7 +669,122 @@ else
   # this file solely through upload followed by exact immutable promotion.
   [ "$TARGET_ENV" != "production" ] \
     || fail "Production cannot rebuild source during promotion."
-  "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"
+  if [ "$TARGET_ENV" = "staging" ]; then
+    STAGING_TARGET_HOST="$("$PY" "$REPO/tools/ops-record.py" staging-target --field host)" \
+      || fail "checked-in staging target config is not exact."
+    [ -n "$STAGING_RECEIPT_KEY" ] \
+      || STAGING_RECEIPT_KEY="$(uuidgen | tr 'A-Z' 'a-z')"
+    printf '%s\n' "$STAGING_RECEIPT_KEY" | grep -Eq \
+      '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+      || fail "--staging-receipt-idempotency-key must be a lowercase canonical UUID."
+    if [ "$RECOVERY_STEP" = "standalone" ]; then
+      CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+    else
+      [ -z "${CARR_CORRELATION_ID:-}" ] || [ "$CARR_CORRELATION_ID" = "$RECOVERY_ATTEMPT_ID" ] \
+        || fail "ambient CARR_CORRELATION_ID differs from the recovery attempt."
+      CARR_CORRELATION_ID="$RECOVERY_ATTEMPT_ID"
+    fi
+    export CARR_CORRELATION_ID
+
+    staging_attempt() {
+      attempt_action="$1"; shift
+      if [ "$RECOVERY_STEP" = "standalone" ]; then
+        "$PY" "$REPO/tools/ops-record.py" staging-attempt "$attempt_action" \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
+          --recovery-step standalone --git-sha "$HEAD_SHA" \
+          --correlation "$CARR_CORRELATION_ID" "$@"
+      else
+        "$PY" "$REPO/tools/ops-record.py" staging-attempt "$attempt_action" \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
+          --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+          --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
+          --recovery-step "$RECOVERY_STEP" --git-sha "$HEAD_SHA" \
+          --correlation "$CARR_CORRELATION_ID" "$@"
+      fi
+    }
+    DEPLOY_TAG="$(staging_attempt prepare --field expected_provider_tag)" \
+      || fail "the exact staging deployment attempt was not durably prepared."
+    [ -n "$DEPLOY_TAG" ] || fail "the prepared staging attempt returned no provider tag."
+    ATTEMPT_DEPLOY_CLAIMED="$(staging_attempt prepare --field deploy_claimed)" \
+      || fail "the prepared staging attempt claim state could not be read."
+
+    verify_staging_receipt_file() {
+      receipt_file="$1"
+      live_provider_version="$("$PY" "$REPO/tools/ops-record.py" \
+        staging-readback-verify --file "$receipt_file" --git-sha "$HEAD_SHA" \
+        --provider-tag "$DEPLOY_TAG" --field provider_version_id)" || return 1
+      provider_versions="$(mktemp "${TMPDIR:-/tmp}/carr-staging-versions.XXXXXX")" \
+        || return 1
+      chmod 600 "$provider_versions"
+      if ! "$WRANGLER" versions list --env "$TARGET_ENV" --json > "$provider_versions" 2>/dev/null; then
+        rm -f "$provider_versions"
+        return 1
+      fi
+      if ! "$PY" "$REPO/tools/ops-record.py" staging-provider-version \
+          --file "$provider_versions" --provider-tag "$DEPLOY_TAG" \
+          --live-version-id "$live_provider_version" >/dev/null; then
+        rm -f "$provider_versions"
+        return 1
+      fi
+      rm -f "$provider_versions"
+    }
+
+    record_staging_receipt_file() {
+      receipt_file="$1"
+      verify_staging_receipt_file "$receipt_file" || return 1
+      if [ "$RECOVERY_STEP" = "standalone" ]; then
+        "$PY" "$REPO/tools/ops-record.py" deployment --service carr-mcp \
+          --environment staging --state complete --git-sha "$HEAD_SHA" \
+          --correlation "$CARR_CORRELATION_ID" --source-kind wrapper \
+          --source-ref bin/deploy-worker.sh --read-back-at now \
+          --release-key "$RELEASE_KEY" --idempotency-key "$STAGING_RECEIPT_KEY" \
+          --expected-provider-tag "$DEPLOY_TAG" --recovery-step standalone \
+          --staging-readback-file "$receipt_file"
+      else
+        "$PY" "$REPO/tools/ops-record.py" deployment --service carr-mcp \
+          --environment staging --state complete --git-sha "$HEAD_SHA" \
+          --correlation "$CARR_CORRELATION_ID" --source-kind wrapper \
+          --source-ref bin/deploy-worker.sh --read-back-at now \
+          --release-key "$RELEASE_KEY" --idempotency-key "$STAGING_RECEIPT_KEY" \
+          --expected-provider-tag "$DEPLOY_TAG" --recovery-step "$RECOVERY_STEP" \
+          --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
+          --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+          --staging-readback-file "$receipt_file"
+      fi
+    }
+
+    # Resume before provider mutation. If a prior process reached Cloudflare but
+    # lost its client/DB response, the exact serving tag+UUID is recorded/replayed
+    # and Wrangler is never called again. A claimed attempt whose tag is not
+    # serving is deliberately stuck for operator recovery; automatic redeploy
+    # would turn an ambiguous crash into a second provider mutation.
+    STAGING_DEPLOY_RECOVERED=0
+    RECOVERY_READBACK="$(mktemp "${TMPDIR:-/tmp}/carr-staging-resume.XXXXXX")"
+    chmod 600 "$RECOVERY_READBACK"
+    if curl --fail --silent --show-error --max-time 30 --max-filesize 65536 \
+         "https://$STAGING_TARGET_HOST/release" > "$RECOVERY_READBACK" 2>/dev/null; then
+      if [ "$ATTEMPT_DEPLOY_CLAIMED" = "true" ] && \
+         record_staging_receipt_file "$RECOVERY_READBACK" >/dev/null 2>&1; then
+        STAGING_DEPLOY_RECOVERED=1
+      elif [ "$ATTEMPT_DEPLOY_CLAIMED" = "false" ] && \
+           verify_staging_receipt_file "$RECOVERY_READBACK" >/dev/null 2>&1; then
+        rm -f "$RECOVERY_READBACK"
+        fail "the unclaimed deterministic provider tag already exists; refusing tag recreation"
+      fi
+    fi
+    rm -f "$RECOVERY_READBACK"
+    if [ "$STAGING_DEPLOY_RECOVERED" = 1 ]; then
+      echo "  recovered exact serving staging tag; provider deploy skipped"
+    else
+      DEPLOY_ALLOWED="$(staging_attempt claim --field deploy_allowed)" \
+        || fail "the prepared staging attempt could not be claimed."
+      [ "$DEPLOY_ALLOWED" = "true" ] \
+        || fail "deployment already claimed but its exact tag is not serving; refusing redeploy"
+      "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" --tag "$DEPLOY_TAG"
+    fi
+  else
+    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"
+  fi
 fi
 
 # Production promotion is not verified by Wrangler accepting the command. Read
@@ -973,13 +1130,43 @@ fi
 # staging read-back so this could honestly say `complete` is Program 5 work
 # (production read-back is one of its bullets) and is deliberately not smuggled
 # in here.
-if [ "$TARGET_ENV" != "production" ]; then
+if [ "$TARGET_ENV" = "staging" ]; then
   echo ""
   echo "== postflight: deployment ledger =="
   CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
   export CARR_CORRELATION_ID
   echo "  correlation $CARR_CORRELATION_ID"
-  echo "  the golden suite does not run against $TARGET_ENV, so this deploy is"
-  echo "  recorded as VERIFYING — shipped, not yet proven by a suite."
+  # The host, account and Worker name are resolved together from checked-in
+  # semantic config. The response is capped and only typed scalar fields cross
+  # into the database-owned receipt writer.
+  STAGING_HOST="${STAGING_TARGET_HOST:-$("$PY" "$REPO/tools/ops-record.py" staging-target --field host)}" \
+    || fail "checked-in staging target config is not exact."
+  STAGING_RECEIPT="$(mktemp "${TMPDIR:-/tmp}/carr-staging-release.XXXXXX")"
+  chmod 600 "$STAGING_RECEIPT"
+  trap 'rm -f "$STAGING_RECEIPT"' EXIT INT TERM
+  STAGING_OK=0
+  record_staging_receipt() {
+    record_staging_receipt_file "$STAGING_RECEIPT" >/dev/null
+  }
+  for _ in 1 2 3; do
+    if [ -n "$STAGING_HOST" ] && curl --fail --silent --show-error --max-time 30 --max-filesize 65536 \
+         "https://$STAGING_HOST/release" > "$STAGING_RECEIPT" 2>/dev/null && \
+       record_staging_receipt; then
+      STAGING_OK=1; break
+    fi
+    sleep 5
+  done
+  rm -f "$STAGING_RECEIPT"
+  trap - EXIT INT TERM
+  if [ "$STAGING_OK" = 1 ]; then
+    echo "  recorded immutable staging /release receipt for $CARR_CORRELATION_ID"
+  else
+    echo "  staging /release identity was not durably verified; recording VERIFYING only." >&2
+    record_deployment verifying "$CARR_CORRELATION_ID"
+    exit 1
+  fi
+elif [ "$TARGET_ENV" != "production" ]; then
+  CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+  export CARR_CORRELATION_ID
   record_deployment verifying "$CARR_CORRELATION_ID"
 fi

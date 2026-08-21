@@ -171,6 +171,12 @@ def main() -> int:
 
     now = datetime.now(timezone.utc)
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        cur.execute("select to_regclass('ops.staging_recovery_rehearsal_bundle')")
+        if fetch_one(cur)[0] is not None:
+            conn.rollback()
+            print("program5-promotion-gate: legacy free-text recovery fixtures are superseded")
+            print("  see ops/staging-release-readback-gate.py for the typed 0202 promotion contract")
+            return 0
         cur.execute(
             """insert into ops.service (key, name, family, criticality, owner_actor)
                values (%s, 'Program 5 promotion gate probe', 'Platform', 'critical', 'joe')
