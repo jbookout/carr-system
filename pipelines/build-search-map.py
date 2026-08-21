@@ -170,7 +170,15 @@ def geocode(addr, city, cache):
         # Exact only when the full-address query came back carrying the house number.
         # Anything else is a road, and a road is approximate however confidently the
         # geocoder phrased it.
-        exact = n == 0 and bool(number) and number in matched
+        #
+        # The number must be a WHOLE comma-delimited token, not a substring. Nominatim
+        # formats a rooftop as "4635, Gulfstarr Drive, Destin, ..., 32541" and sometimes
+        # leads with a POI name, "Southern Vacation Rentals, 4608, Opa-Locka Lane, ...".
+        # A substring test passes "2 Industrial Park Lane" against a match that carries
+        # no house number at all, because the 2 is sitting inside the zip code 32540,
+        # and a road centre then prints as an exact pin. Short house numbers are common.
+        parts = {seg.strip() for seg in matched.split(",")}
+        exact = n == 0 and bool(number) and number in parts
         out = {"lat": float(hit["lat"]), "lon": float(hit["lon"]),
                "matched": matched, "approx": not exact, "query": q}
         break

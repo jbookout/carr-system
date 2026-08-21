@@ -152,8 +152,17 @@ def check(path, max_accent_run):
                          f"({sample.group(0).strip()!r})" if sample else
                          f"p{pno}: {n_em} em dash(es)")
 
-        if not page.get_text().strip() and not page.get_images():
+        # A page can be a defect without being empty. The Hughes pre-tour map orphaned a
+        # single paragraph onto its own sheet, which the blank-page test passed because
+        # the sheet was not blank. A page carrying no image and almost no text is a
+        # widow: something above it should have been made to fit.
+        body = page.get_text().strip()
+        if not body and not page.get_images():
             fails.append(f"p{pno}: blank page")
+        elif not page.get_images() and 0 < len(body) < 400:
+            fails.append(f"p{pno}: near-empty page, {len(body)} characters and no image "
+                         f"({' '.join(body.split())[:60]!r}). Make it fit on the page "
+                         f"before, or give it something to sit with.")
 
     print(f"{path}\n  {doc.page_count} pages")
     print("  faces: " + ", ".join(f"{f} x{n}" for f, n in faces.most_common()))
