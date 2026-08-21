@@ -125,15 +125,70 @@ def _git(cwd, *args):
                           text=True, timeout=30)
 
 
-def _repo(path):
-    """A throwaway git repo with an identity, so commits work on any machine."""
-    os.makedirs(path, exist_ok=True)
-    _git(path, "init", "-q", "-b", "main")
+def _must(res, what):
+    """Raise with git's own stderr when a setup step fails.
+
+    These cases used to swallow setup failures and quietly pass. That hid a
+    real one: a bare CI runner has no global git identity, so the commit INSIDE
+    the submodule failed, the gitlink never moved, and the assertion failed on
+    the runner while passing on a laptop that had a global user.email. A setup
+    step that cannot run must say which one and why, not skip.
+    """
+    if res.returncode != 0:
+        raise AssertionError(
+            f"setup step failed ({what}): rc={res.returncode} "
+            f"stderr={res.stderr.strip()!r} stdout={res.stdout.strip()!r}")
+    return res
+
+
+def _ident(path):
+    """Give a repo its own identity — never inherited from the machine.
+
+    Applied to the submodule work tree too, not just the outer repos: a commit
+    made inside vendor/dep runs in ITS repo, with ITS config, and a CI runner
+    has no global fallback to borrow.
+    """
     _git(path, "config", "user.email", "selftest@carr.local")
     _git(path, "config", "user.name", "selftest")
     _git(path, "config", "commit.gpgsign", "false")
     _git(path, "config", "protocol.file.allow", "always")
     return path
+
+
+def _repo(path):
+    """A throwaway git repo with an identity, so commits work on any machine."""
+    os.makedirs(path, exist_ok=True)
+    _must(_git(path, "init", "-q", "-b", "main"), f"git init {path}")
+    return _ident(path)
+
+
+def _seed_parent_with_submodule(base):
+    """upstream repo + parent repo with it vendored at vendor/dep.
+
+    Returns (parent, submodule_path), or (None, None) when this git cannot add
+    a file-path submodule at all — the one environment difference worth
+    tolerating, and it is reported rather than silently passed.
+    """
+    up = _repo(os.path.join(base, "upstream"))
+    with open(os.path.join(up, "vendored.txt"), "w") as fh:
+        fh.write("original\n")
+    _must(_git(up, "add", "-A"), "stage upstream")
+    _must(_git(up, "commit", "-qm", "seed"), "commit upstream")
+
+    parent = _repo(os.path.join(base, "parent"))
+    with open(os.path.join(parent, "README"), "w") as fh:
+        fh.write("parent\n")
+    _must(_git(parent, "add", "-A"), "stage parent")
+    _must(_git(parent, "commit", "-qm", "seed"), "commit parent")
+
+    add = _git(parent, "-c", "protocol.file.allow=always", "submodule", "add",
+               "-q", up, "vendor/dep")
+    if add.returncode != 0:
+        return None, None
+    _must(_git(parent, "commit", "-qm", "vendor dep"), "commit gitlink")
+    sub = os.path.join(parent, "vendor", "dep")
+    _ident(sub)                      # the submodule commits with its OWN config
+    return parent, sub
 
 
 @case("newest mtime of a DIRECTORY comes from the files inside, not the directory itself")
@@ -170,32 +225,22 @@ def _(assert_):
 
 @case("a submodule that is only DIRTY INSIDE is not reported as stranded work")
 def _(assert_):
-    base = tempfile.mkdtemp()
-    up = _repo(os.path.join(base, "upstream"))
-    with open(os.path.join(up, "vendored.txt"), "w") as fh:
-        fh.write("original\n")
-    _git(up, "add", "-A")
-    _git(up, "commit", "-qm", "seed")
-
-    parent = _repo(os.path.join(base, "parent"))
-    with open(os.path.join(parent, "README"), "w") as fh:
-        fh.write("parent\n")
-    _git(parent, "add", "-A")
-    _git(parent, "commit", "-qm", "seed")
-    add = _git(parent, "-c", "protocol.file.allow=always", "submodule", "add",
-               "-q", up, "vendor/dep")
-    if add.returncode != 0:
-        assert_(True, "")            # submodules unavailable here; nothing to prove
+    parent, sub = _seed_parent_with_submodule(tempfile.mkdtemp())
+    if parent is None:
+        print("      (skipped: this git cannot add a file-path submodule)")
         return
-    _git(parent, "commit", "-qm", "vendor dep")
 
     # Dirty the submodule's WORK TREE only — the recorded commit does not move.
     # This is the applied-patch steady state the dictation rig lives in.
-    edited = os.path.join(parent, "vendor", "dep", "vendored.txt")
-    with open(edited, "w") as fh:
+    with open(os.path.join(sub, "vendored.txt"), "w") as fh:
         fh.write("patched by the build\n")
     ancient = 1_000_000.0             # make the gitlink DIRECTORY look 300h+ old
-    os.utime(os.path.join(parent, "vendor", "dep"), (ancient, ancient))
+    os.utime(sub, (ancient, ancient))
+
+    porcelain = _git(parent, "status", "--porcelain").stdout
+    assert_(porcelain.strip() != "",
+            "precondition: plain git status should see the dirty submodule, "
+            f"got {porcelain!r} — the case would prove nothing")
 
     out = sb.loose_work(repo=parent)
     assert_(out == "",
@@ -205,33 +250,19 @@ def _(assert_):
 
 @case("a submodule whose RECORDED COMMIT moved is still reported")
 def _(assert_):
-    base = tempfile.mkdtemp()
-    up = _repo(os.path.join(base, "upstream"))
-    with open(os.path.join(up, "vendored.txt"), "w") as fh:
-        fh.write("original\n")
-    _git(up, "add", "-A")
-    _git(up, "commit", "-qm", "seed")
-
-    parent = _repo(os.path.join(base, "parent"))
-    with open(os.path.join(parent, "README"), "w") as fh:
-        fh.write("parent\n")
-    _git(parent, "add", "-A")
-    _git(parent, "commit", "-qm", "seed")
-    add = _git(parent, "-c", "protocol.file.allow=always", "submodule", "add",
-               "-q", up, "vendor/dep")
-    if add.returncode != 0:
-        assert_(True, "")
+    parent, sub = _seed_parent_with_submodule(tempfile.mkdtemp())
+    if parent is None:
+        print("      (skipped: this git cannot add a file-path submodule)")
         return
-    _git(parent, "commit", "-qm", "vendor dep")
 
-    # A real second commit inside the submodule, then move the pointer to it.
-    sub = os.path.join(parent, "vendor", "dep")
+    # A real second commit inside the submodule, then leave the parent's
+    # gitlink pointing at the old one — a MOVED POINTER, not work-tree dirt.
     with open(os.path.join(sub, "vendored.txt"), "w") as fh:
         fh.write("v2\n")
-    _git(sub, "add", "-A")
-    _git(sub, "commit", "-qm", "v2")
+    _must(_git(sub, "add", "-A"), "stage inside submodule")
+    _must(_git(sub, "commit", "-qm", "v2"), "commit inside submodule")
 
-    stale = 1_000_000.0               # 12h clock must still see this as old
+    stale = 1_000_000.0               # the 12h clock must still see this as old
     for root, dirs, files in os.walk(sub):
         dirs[:] = [d for d in dirs if d != ".git"]
         for name in files:
@@ -240,6 +271,12 @@ def _(assert_):
             except OSError:
                 pass
     os.utime(sub, (stale, stale))
+
+    ignored = _git(parent, "status", "--porcelain",
+                   "--ignore-submodules=dirty").stdout
+    assert_(ignored.strip() != "",
+            "precondition: a MOVED gitlink must survive --ignore-submodules=dirty, "
+            f"got {ignored!r} — if this is empty the pointer never moved")
 
     out = sb.loose_work(repo=parent)
     assert_("uncommitted" in out,
