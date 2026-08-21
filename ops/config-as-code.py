@@ -273,6 +273,51 @@ DEFINITION_ONLY = {
 SECONDARY_SCHEDULED_TASKS: set[str] = set()
 
 
+# EPHEMERAL SCAFFOLDING IS NOT CONFIGURATION, and treating it as such made this
+# check chronically red — the exact failure the comment in cmd_check() warns
+# about, arriving from a direction nobody anticipated.
+#
+# Sessions legitimately create throwaway scheduled tasks: handoff continuations,
+# one-time catch-up runs, drills. On 2026-08-21 two of them blocked unrelated
+# pushes within one hour. The second was created BY a session whose own
+# description read "clear the config drift blocking the push" — it was stuck
+# behind this gate and its attempt to hand the problem on became the next
+# instance of the problem. No session could resolve either one correctly:
+# capturing a throwaway into the repository pollutes it permanently and then
+# inverts into MISSING drift the moment the task is removed, while moving or
+# deleting it takes another live session's work.
+#
+# tracked_scheduled_task_paths() already states the governing rule in its own
+# docstring: a task in Claude's user-owned directory that CARR does not own is
+# personal, and must not "make CARR health falsely red for it". This is that
+# rule applied to the drift comparison, which had never honoured it.
+#
+# A MARKER, NOT A HEURISTIC. Guessing from the name would be silently wrong in
+# both directions. The task itself declares what it is, so a genuine CARR task
+# that someone forgot to commit still shows up as drift — which is the part of
+# this check worth keeping.
+EPHEMERAL_MARKERS = ("ephemeral: true", "ephemeral:true")
+
+
+def is_ephemeral_scheduled_task(text):
+    """True when a task's own frontmatter declares it session scaffolding.
+
+    Only the frontmatter block is read, so the phrase appearing in prose lower
+    down the file cannot exempt a real task by accident.
+    """
+    if not text:
+        return False
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return False
+        if line.strip().lower().replace(" ", "") == "ephemeral:true":
+            return True
+    return False
+
+
 def scheduled_task_allowed(name):
     """Whether this machine may host the named CARR scheduled task.
 
@@ -646,6 +691,8 @@ def pairs():
     for name in sorted(os.listdir(TASKS_SRC)) if os.path.isdir(TASKS_SRC) else []:
         skill = os.path.join(TASKS_SRC, name, "SKILL.md")
         if os.path.isfile(skill) and scheduled_task_allowed(name):
+            if is_ephemeral_scheduled_task(read(skill)):
+                continue
             seen.add(f"{name}.SKILL.md")
             out.append((f"scheduled-task {name}", portable(read(skill)),
                         os.path.join(TASKS_REPO, f"{name}.SKILL.md")))
