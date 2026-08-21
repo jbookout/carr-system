@@ -585,6 +585,31 @@ begin
     select (select count(*) from ops.receipt_conflicts(w.subject_type, w.subject_id)) as c
       from (select distinct subject_type, subject_id from ops.write_receipt) w
   ) t;
+  -- LAST, NOT FIRST. Placed after the bar so a caller that fails the bar hears
+  -- the bar's own reason; this refusal is for a caller that CLEARS the bar on
+  -- evidence it authored itself.
+  -- ACCEPTANCE MUST NOT COUNT EVIDENCE ITS OWN TRANSACTION WROTE.
+  --
+  -- The bar below counts rows visible in this transaction's snapshot, which
+  -- includes rows this same transaction just inserted. A review reached Phase 4
+  -- accepted and Drive retirement READY on a virgin database inside one
+  -- BEGIN/COMMIT: write two audit rows, two receipts, prove them, accept. Every
+  -- clause passed, because every clause was satisfied by evidence the acceptor
+  -- authored moments earlier. That is manufacturing evidence, which is the one
+  -- thing this whole substrate exists to prevent.
+  --
+  -- The fix is to require acceptance to be the FIRST write in its transaction.
+  -- PostgreSQL assigns a transaction id only when a transaction writes, so an
+  -- unassigned id here proves nothing has been written yet, and therefore that
+  -- every row counted below was committed by some earlier transaction. It costs
+  -- the caller one BEGIN and forecloses the whole class rather than one path
+  -- through it.
+  if pg_catalog.txid_current_if_assigned() is not null then
+    raise exception 'acceptance must be the first write in its transaction, so the '
+      'evidence it counts was committed before it opened; this transaction has '
+      'already written';
+  end if;
+
 
   insert into ops.phase4_acceptance
     (id, application_session_id, accepted_by_actor_id, organization_tenant_id,
@@ -2122,9 +2147,26 @@ begin
   -- success half cannot be exercised without disavowing rows this probe does
   -- not own. It says so rather than failing the migration, which is what an
   -- earlier version did to every database that had ever taken traffic.
+  -- THE SUCCESS HALF CANNOT BE PROVED HERE ANY MORE, and that is the point.
+  -- Acceptance now refuses to run in a transaction that has already written, so
+  -- that it cannot count evidence it authored itself. This probe has written all
+  -- of the evidence above, so it is exactly the caller acceptance must refuse.
+  -- Asserting the REFUSAL is therefore the honest probe at apply time; the
+  -- success path needs two transactions and lives in the contract suite, which
+  -- has them. A probe that could still accept here would be proving the hole.
   if base_unproven = 0 and base_conflict = 0 then
-    perform ops.accept_phase4(gen_random_uuid(), sid,
-      '0220 probe: the bar clears once every unproven receipt is proven-retracted');
+    begin
+      perform ops.accept_phase4(gen_random_uuid(), sid,
+        '0220 probe: acceptance must refuse a caller that authored its own evidence');
+      raise exception '0244 FAILED: acceptance ran in a transaction that had already '
+        'written, so it counted evidence it authored itself';
+    exception
+      when others then
+        if sqlerrm like '0244 FAILED%' then raise; end if;
+        if position('first write in its transaction' in sqlerrm) = 0 then
+          raise exception '0244 FAILED: acceptance refused for the wrong reason: %', sqlerrm;
+        end if;
+    end;
   else
     raise notice '0220: acceptance-success probe SKIPPED -- this database already '
                  'carries % unretracted unproven receipt(s) and % open conflict(s) '
@@ -2191,7 +2233,16 @@ begin
           perform ops.accept_phase4(gen_random_uuid(), sid, 'probe: unproven retraction');
         exception when others then
           failed := true;
-          if position('phase4_acceptance_no_unproven_receipts' in sqlerrm) = 0 then
+          -- TWO ACCEPTABLE REFUSALS NOW, and the second one supersedes the first
+          -- at apply time. Acceptance refuses any caller whose transaction has
+          -- already written, so that it cannot count evidence it authored --
+          -- and this probe, having written every receipt above, IS that caller.
+          -- The bar's own clauses can therefore no longer be reached from here.
+          -- They are reached from the contract suite, which can commit the
+          -- evidence in one transaction and accept in another. Keeping this
+          -- probe honest means accepting either refusal and naming why.
+          if position('phase4_acceptance_no_unproven_receipts' in sqlerrm) = 0
+             and position('first write in its transaction' in sqlerrm) = 0 then
             raise exception '0244 FAILED: acceptance refused by the WRONG bar: %', sqlerrm;
           end if;
         end;

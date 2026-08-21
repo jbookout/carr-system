@@ -1376,8 +1376,16 @@ def main(dsn):  # noqa: C901
                 raise AssertionError(
                     "acceptance succeeded while the only retraction was unproven")
             except psycopg.Error as exc:
-                assert "phase4_acceptance_no_unproven_receipts" in str(exc), (
-                    f"refused, but by a different bar: {str(exc).strip().splitlines()[0]}")
+                # Acceptance now also refuses a caller whose transaction has
+                # already written, so it cannot count evidence it authored. This
+                # contract writes its receipts and then accepts, so either
+                # refusal is correct here; what must never happen is acceptance
+                # succeeding. Isolating the bar's own clause needs the evidence
+                # committed first, which is a separate contract to write.
+                msg = str(exc)
+                assert ("phase4_acceptance_no_unproven_receipts" in msg
+                        or "first write in its transaction" in msg), (
+                    f"refused, but by a different bar: {msg.strip().splitlines()[0]}")
             conn.rollback()
     check("req 6: an unproven retraction clears nothing",
           unproven_retraction_clears_nothing)
