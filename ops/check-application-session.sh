@@ -49,6 +49,9 @@ MIGRATION_SLUG_MINT="$REPO/migrations/0210_mint_session_by_actor_slug.sql"
 # 0211 adds write receipts: a session, a claimed digest, and a readback the
 # DATABASE computes from the frozen evidence row rather than accepting.
 MIGRATION_RECEIPT="$REPO/migrations/0211_write_receipt.sql"
+# 0213 introduces the reducer and the acceptance surface — deliberately, and
+# only after receipts can prove themselves.
+MIGRATION_ACCEPT="$REPO/migrations/0213_continuity_reducer_and_acceptance.sql"
 SUITE="$REPO/mcp-server/test/db/application_session_contract.py"
 export LC_ALL=C LANG=C
 export CARR_DISPOSABLE_PG_DIR="${CARR_DISPOSABLE_PG_DIR:-${TMPDIR:-/tmp}/carr-appsession-check}"
@@ -76,6 +79,8 @@ psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SLUG_MINT"
 echo "migration 0210 applied (the door can mint without an actor id)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_RECEIPT"
 echo "migration 0211 applied (receipts bind a session and prove by readback)"
+psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_ACCEPT"
+echo "migration 0213 applied (the reducer folds, and acceptance is gated)"
 
 # Run TWICE. The suite must be re-runnable; a contract that only passes against
 # a virgin database is testing ordering, not the substrate.

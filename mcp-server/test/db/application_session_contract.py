@@ -1085,6 +1085,28 @@ def main(dsn):  # noqa: C901
                 "two receipts in sequence — the second built on what the first "
                 "produced — must not be reported as conflicting")
 
+        # A CONFLICT MUST BE CLOSABLE. Receipts are immutable, so a definition
+        # under which a conflict can never close makes the acceptance bar
+        # unreachable forever in any database that ever had one. Reversing one
+        # side closes it, and reversal is the operation whose exactness the
+        # database already checks.
+        with conn.cursor() as cur:
+            cur.execute("select prior_digest, claimed_digest from ops.write_receipt where id=%s", (b,))
+            b_prior, b_claimed = cur.fetchone()
+        rev = """insert into ops.write_receipt
+            (id, application_session_id, actor_id, organization_tenant_id, verb,
+             subject_type, subject_id, tool_call_idempotency_key, claimed_digest,
+             prior_digest, reverses_receipt_id)
+            values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,%s,%s)"""
+        writer_runs(conn, rev,
+                    (uuid.uuid4(), sid, joe, subject, key, b_prior, b_claimed, b),
+                    because="an exact reversal of one side reconciles the divergence")
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)", (subject,))
+            assert cur.fetchone()[0] == 0, (
+                "a conflict whose losing side was exactly reversed must CLOSE; "
+                "a bar nothing can clear is a wall, not a bar")
+
         # a subject with one receipt is not a conflict
         lone = uuid.uuid4()
         writer_runs(conn, RECEIPT_INSERT,
@@ -1106,6 +1128,253 @@ def main(dsn):  # noqa: C901
                 role="carr_writer", expect_message="permission denied",
                 privilege_is_the_point=True)
     check("req 6: carr_writer cannot delete a receipt", receipts_are_frozen)
+
+    # ------------------------- 0213: the reducer and Phase 4 acceptance ----
+    def reducer_reports_the_worst_thing_it_finds():
+        """A fold, not a flag. The state is derived from the causal chain every
+        time it is asked, so it cannot drift from the evidence — and it reports
+        the WORST thing present, because a reducer that reported the best would
+        call a damaged chain healthy the moment one receipt in it was fine."""
+        subject = uuid.uuid4()
+        with conn.cursor() as cur:
+            cur.execute("select state from ops.continuity_reducer('deal', %s)", (subject,))
+            assert cur.fetchone()[0] == "empty", "no receipts must reduce to empty"
+
+        sid, key, digest = receipt_fixture()
+        r1 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (r1, sid, joe, subject, key, digest, "origin"),
+                    because="setup")
+        with conn.cursor() as cur:
+            cur.execute("select state, unproven_count from ops.continuity_reducer('deal', %s)",
+                        (subject,))
+            state, unproven = cur.fetchone()
+        assert state == "unproven" and unproven == 1, \
+            f"an unproven receipt must reduce to unproven, got {state}/{unproven}"
+
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("select state, head_digest from ops.continuity_reducer('deal', %s)",
+                        (subject,))
+            state, head = cur.fetchone()
+        assert state == "continuous", f"a proven chain must reduce to continuous, got {state}"
+        assert head == digest, "the head must be the last claimed digest"
+    check("req 6: the reducer folds receipts into a state derived from the chain",
+          reducer_reports_the_worst_thing_it_finds)
+
+    def reducer_names_where_the_chain_broke():
+        """A gap is not merely reported, it is located. 'Something is wrong with
+        this subject' is not actionable; 'the chain broke at this receipt' is."""
+        subject = uuid.uuid4()
+        sid, key, digest = receipt_fixture()
+        a, b = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (a, sid, joe, subject, key, digest, "origin"),
+                    because="setup: first link")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (b, sid, joe, subject, key, "second-state", "a-state-nobody-produced"),
+                    because="setup: a link that built on nothing the first produced")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (a,))
+            cur.execute("select ops.prove_write_receipt(%s)", (b,))
+            conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("select state, break_at from ops.continuity_reducer('deal', %s)",
+                        (subject,))
+            state, break_at = cur.fetchone()
+        assert state == "broken", f"a chain with a gap must reduce to broken, got {state}"
+        assert break_at == b, "the reducer must name the receipt where continuity failed"
+    check("req 6: a broken chain is located, not just reported",
+          reducer_names_where_the_chain_broke)
+
+    def reducer_prefers_conflict_over_break():
+        """Precedence is asserted, because a reducer that returned whichever
+        problem it noticed first would be non-deterministic in exactly the cases
+        that matter most."""
+        subject = uuid.uuid4()
+        sid, key, digest = receipt_fixture()
+        # two receipts on the same prior state with different results: a conflict
+        writer_runs(conn, RECEIPT_INSERT,
+                    (uuid.uuid4(), sid, joe, subject, key, digest, "shared"),
+                    because="setup")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (uuid.uuid4(), sid, joe, subject, key, "other-result", "shared"),
+                    because="setup: divergence")
+        # and a third that also breaks continuity
+        writer_runs(conn, RECEIPT_INSERT,
+                    (uuid.uuid4(), sid, joe, subject, key, "third", "unrelated"),
+                    because="setup: a gap as well")
+        with conn.cursor() as cur:
+            cur.execute("select state from ops.continuity_reducer('deal', %s)", (subject,))
+            assert cur.fetchone()[0] == "conflicted", \
+                "a conflict must outrank a mere break; both are present here"
+        # RECONCILE BEFORE LEAVING. Acceptance counts open conflicts across the
+        # whole database, so a contract that manufactures one and walks away
+        # blocks every later contract that asks whether acceptance is reachable.
+        # Leaving the store as it was found is part of the contract, not tidying.
+        with conn.cursor() as cur:
+            cur.execute("""select left_receipt, right_receipt
+                             from ops.receipt_conflicts('deal', %s)""", (subject,))
+            pairs = cur.fetchall()
+        rev = """insert into ops.write_receipt
+            (id, application_session_id, actor_id, organization_tenant_id, verb,
+             subject_type, subject_id, tool_call_idempotency_key, claimed_digest,
+             prior_digest, reverses_receipt_id)
+            select %s,%s,%s,'carr-internal','log-activity','deal',%s,%s,
+                   w.prior_digest, w.claimed_digest, w.id
+              from ops.write_receipt w where w.id = %s"""
+        for _left, right in pairs:
+            writer_runs(conn, rev, (uuid.uuid4(), sid, joe, subject, key, right),
+                        because="reconcile the conflict this contract created")
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)", (subject,))
+            assert cur.fetchone()[0] == 0, "this contract must not leave an open conflict"
+    check("req 6: conflict outranks a break in the reduced state",
+          reducer_prefers_conflict_over_break)
+
+    def acceptance_is_not_the_runtime_s_to_make():
+        """Accepting a phase is irreversible, and irreversible calls belong to
+        the authority identity rather than to the credential every verb holds."""
+        sid = mint(conn, joe)
+        refuses(conn, "select ops.accept_phase4(%s,%s,%s)",
+                (uuid.uuid4(), sid, "runtime should not be able to do this"),
+                because="the runtime write credential must not be able to declare a "
+                        "phase complete",
+                role="carr_writer", expect_message="permission denied",
+                privilege_is_the_point=True)
+    check("req 6: carr_writer cannot accept Phase 4",
+          acceptance_is_not_the_runtime_s_to_make)
+
+    def acceptance_refuses_without_evidence():
+        """The bar is a table constraint rather than a judgement call, so it
+        fails the INSERT instead of producing 'accepted, with reservations'."""
+        sid, key, digest = receipt_fixture()
+        subject = uuid.uuid4()
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "origin"),
+                    because="setup: a receipt left deliberately UNPROVEN")
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select ops.accept_phase4(%s,%s,%s)",
+                            (uuid.uuid4(), sid, "premature"))
+            conn.rollback()
+            raise AssertionError(
+                "Phase 4 was accepted while an unproven receipt existed")
+        except psycopg.Error as exc:
+            conn.rollback()
+            assert getattr(exc, "sqlstate", None) not in ABSENCE_SQLSTATES, \
+                "the substrate is absent, not refusing"
+            assert "phase4_acceptance_no_unproven_receipts" in str(exc), (
+                f"refused, but by a DIFFERENT bar than the one under test. Each "
+                f"acceptance condition is its own named constraint precisely so "
+                f"this can be told apart: "
+                f"{str(exc).strip().splitlines()[0]}")
+    check("req 6: acceptance refuses while any receipt is unproven",
+          acceptance_refuses_without_evidence)
+
+    def acceptance_counts_are_computed_not_supplied():
+        """The difference between a measurement and a claim. There is no
+        parameter through which any count can be passed, and the row cannot be
+        written directly."""
+        with conn.cursor() as cur:
+            cur.execute("""select count(*) from information_schema.parameters
+                            where specific_schema='ops'
+                              and specific_name like 'accept_phase4%'
+                              and parameter_name is not null""")
+            n = cur.fetchone()[0]
+        assert n == 3, (
+            f"ops.accept_phase4 takes {n} parameters; it must take exactly three "
+            f"(id, session, note) so no count can ride in")
+        refuses(conn, """insert into ops.phase4_acceptance
+                  (id, application_session_id, accepted_by_actor_id, organization_tenant_id,
+                   qualifying_tool_calls, qualifying_events, qualifying_read_calls,
+                   proven_receipts, unproven_receipts, open_conflicts, note)
+                  values (gen_random_uuid(), gen_random_uuid(), %s, 'carr-internal',
+                          999, 999, 999, 999, 0, 0, 'forged')""", (joe,),
+                because="a caller that can write the row directly can write any counts it likes",
+                role="carr_writer", expect_message="permission denied",
+                privilege_is_the_point=True)
+    check("req 6: acceptance counts cannot be supplied by a caller",
+          acceptance_counts_are_computed_not_supplied)
+
+    def acceptance_requires_a_human():
+        """A machine identity cannot accept a phase on a partner's behalf."""
+        with conn.cursor() as cur:
+            cur.execute("select id from actor where kind='automation' order by slug limit 1")
+            machine = cur.fetchone()[0]
+            cur.execute("""insert into ops.application_session
+                (id, actor_id, organization_tenant_id, sponsoring_human_slug, via,
+                 auth_issuer, authorization_class, verified_subject, expires_at)
+                values (gen_random_uuid(), %s, 'carr-internal', 'joe', 'probe',
+                        'probe-issuer', 'sponsored_agent', 'probe',
+                        now() + interval '1 hour') returning id""", (machine,))
+            machine_sid = cur.fetchone()[0]
+            conn.commit()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""insert into ops.phase4_acceptance
+                    (id, application_session_id, accepted_by_actor_id, organization_tenant_id,
+                     qualifying_tool_calls, qualifying_events, qualifying_read_calls,
+                     proven_receipts, unproven_receipts, open_conflicts, note)
+                    values (gen_random_uuid(), %s, %s, 'carr-internal',
+                            1, 1, 1, 1, 0, 0, 'machine acceptance')""",
+                            (machine_sid, machine))
+            conn.rollback()
+            raise AssertionError("a machine identity accepted a phase")
+        except psycopg.Error as exc:
+            conn.rollback()
+            assert "requires a human actor" in str(exc), (
+                f"refused by a different guard: {str(exc).strip().splitlines()[0]}")
+    check("req 6: a machine identity cannot accept a phase", acceptance_requires_a_human)
+
+    def acceptance_is_immutable():
+        with conn.cursor() as cur:
+            cur.execute("""select count(*) from information_schema.table_privileges
+                            where table_schema='ops' and table_name='phase4_acceptance'
+                              and grantee='carr_writer'
+                              and privilege_type in ('INSERT','UPDATE','DELETE')""")
+            assert cur.fetchone()[0] == 0, \
+                "carr_writer holds a write privilege on phase4_acceptance"
+    check("req 6: the runtime holds no write privilege on acceptance",
+          acceptance_is_immutable)
+
+    def acceptance_cannot_be_rewritten_even_by_the_owner():
+        """The privilege above keeps the RUNTIME out. This keeps everyone out.
+        Exercised as the owner deliberately: carr_writer cannot reach the
+        trigger at all, so testing only as the writer left the trigger itself
+        unexercised, and a mutant that turned it into `return new` survived."""
+        with conn.cursor() as cur:
+            cur.execute("select id from actor where kind='human' order by slug limit 1")
+            human = cur.fetchone()[0]
+            cur.execute("""insert into ops.application_session
+                (id, actor_id, organization_tenant_id, sponsoring_human_slug, via,
+                 auth_issuer, authorization_class, verified_subject, expires_at)
+                values (gen_random_uuid(), %s, 'carr-internal', 'joe', 'probe',
+                        'probe-issuer', 'verified_partner', 'probe',
+                        now() + interval '1 hour') returning id""", (human,))
+            acc_sid = cur.fetchone()[0]
+            aid = uuid.uuid4()
+            cur.execute("""insert into ops.phase4_acceptance
+                (id, application_session_id, accepted_by_actor_id, organization_tenant_id,
+                 qualifying_tool_calls, qualifying_events, qualifying_read_calls,
+                 proven_receipts, unproven_receipts, open_conflicts, note)
+                values (%s,%s,%s,'carr-internal',1,1,1,1,0,0,'contract probe')""",
+                        (aid, acc_sid, human))
+            conn.commit()
+        for stmt, label in (("update ops.phase4_acceptance set note='rewritten' where id=%s",
+                             "rewritten"),
+                            ("delete from ops.phase4_acceptance where id=%s", "deleted")):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(stmt, (aid,))
+                conn.rollback()
+                raise AssertionError(f"a phase acceptance was {label} by the owner")
+            except psycopg.Error as exc:
+                conn.rollback()
+                assert "cannot be" in str(exc).lower(), (
+                    f"refused by a different guard: {str(exc).strip().splitlines()[0]}")
+    check("req 6: a phase acceptance cannot be rewritten or deleted by anyone",
+          acceptance_cannot_be_rewritten_even_by_the_owner)
 
     def triggers_enable_always():
         with conn.cursor() as cur:
@@ -1281,16 +1550,36 @@ def main(dsn):  # noqa: C901
                     because="Dell must retain authorized business functionality")
     check("req 9: Dell retains authorized business use", dell_keeps_business_use)
 
-    def no_phase4_surface_introduced():
-        forbidden = ("continuity_reducer", "phase4_acceptance", "drive_retirement")
+    def phase4_surface_exists_and_is_gated():
+        """THIS CONTRACT USED TO ASSERT THE OPPOSITE, and the reversal is the
+        point rather than a loosening.
+
+        Every slice before this one ran under an assertion that no reducer, no
+        acceptance state and no completion claim existed anywhere. That was not
+        bureaucracy: a system that can declare itself finished before it can
+        prove anything will do exactly that, and the declaration is what
+        everyone downstream trusts. 0213 introduces the surface deliberately,
+        and only after receipts could prove themselves.
+
+        So the contract flips from "this must not exist" to "this exists and is
+        gated", because an absent assertion would leave the surface unguarded at
+        precisely the moment it started to matter."""
         with conn.cursor() as cur:
+            cur.execute("""select count(*) from pg_proc p
+                             join pg_namespace n on n.oid = p.pronamespace
+                            where n.nspname='ops' and p.proname='continuity_reducer'""")
+            assert cur.fetchone()[0] == 1, "the reducer must exist by this slice"
+            cur.execute("""select count(*) from information_schema.tables
+                            where table_schema='ops' and table_name='phase4_acceptance'""")
+            assert cur.fetchone()[0] == 1, "the acceptance surface must exist by this slice"
+            # Drive retirement is a LATER slice and must still be absent here.
             cur.execute("""select table_name from information_schema.tables
-                           where table_schema in ('ops','public')""")
-            names = {r[0] for r in cur.fetchall()}
-        hit = [f for f in forbidden if any(f in n for n in names)]
-        assert not hit, f"this slice introduced out-of-scope Phase 4 surface: {hit}"
-    check("scope: no reducer, acceptance, or retirement surface added",
-          no_phase4_surface_introduced)
+                            where table_schema in ('ops','public')
+                              and table_name like '%drive_retirement%'""")
+            rows = [r[0] for r in cur.fetchall()]
+            assert not rows, f"drive retirement surface arrived early: {rows}"
+    check("scope: the reducer and acceptance exist; retirement is still a later slice",
+          phase4_surface_exists_and_is_gated)
 
     for c in CONNS:
         c.close()
