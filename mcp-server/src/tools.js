@@ -2558,7 +2558,12 @@ export const TOOLS = {
       });
       const deals = await section(async () => {
         const value = await TOOLS["deal-room-board"].handler(c, actor, { workspace: "all" });
-        return { items: value.deals.filter(ownOrShared), accounts: value.accounts };
+        // deal-room-board is shared by design; the personal morning composite is
+        // not.  Account ownership is therefore filtered from authenticated
+        // sponsor scope exactly as deal ownership is, never from caller input.
+        return { items: value.deals.filter(ownOrShared),
+          accounts: value.accounts.filter((row) => !row?.account_owner
+            || String(row.account_owner).toLowerCase() === scope.sponsor) };
       });
       const loops = await section(async () => {
         const value = await TOOLS["loop-board"].handler(c, actor,
@@ -2568,7 +2573,12 @@ export const TOOLS = {
       const renewals = await section(async () => {
         const status = await c.query(
           "select t1_candidate_count, source_observed_at, freshness_state from v_renewal_decision_queue_status");
-        if (status.rows.length !== 1 || status.rows[0].freshness_state !== "fresh")
+        if (status.rows.length !== 1)
+          return { state: "unavailable", reason: "source_unavailable", items: [] };
+        if (status.rows[0].freshness_state === "empty")
+          return { state: "empty", items: [], t1_candidate_count: 0,
+            source_observed_at: status.rows[0].source_observed_at, freshness_state: "empty" };
+        if (status.rows[0].freshness_state !== "ready")
           return { state: "unavailable", reason: "source_unavailable", items: [] };
         const rows = await c.query(
           `select display_name, org_name, vertical, city, county, state, est_lease_event,
@@ -2581,9 +2591,9 @@ export const TOOLS = {
           source_observed_at: status.rows[0].source_observed_at,
           freshness_state: status.rows[0].freshness_state };
       });
-      // A stale status is already deliberately shaped as unavailable above. Do
-      // not let section() derive ready/empty over that value.
-      if (renewals.state !== "unavailable" && renewals.freshness_state !== "fresh") {
+      // Only the immutable source-run states may reach section().  Do not let
+      // section() derive ready/empty from a stale or altered source.
+      if (renewals.state !== "unavailable" && !["ready", "empty"].includes(renewals.freshness_state)) {
         renewals.state = "unavailable";
         renewals.reason = "source_unavailable";
         renewals.items = [];
