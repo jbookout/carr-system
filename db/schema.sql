@@ -23,14 +23,15 @@
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
 --
--- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
--- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- All privilege bundles whose creating migrations are in the snapshot ledger
+-- are created here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
 -- widening a pattern.
--- carr_reader, carr_writer, carr_exporter, carr_authority and
--- carr_device_evidence are privilege bundles, so they stay NOLOGIN. carr_jobs is
+-- carr_reader, carr_writer, carr_exporter, carr_authority,
+-- carr_device_evidence, and the four calendar-prebrief roles are privilege
+-- bundles, so they stay NOLOGIN. carr_jobs is
 -- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
@@ -43,7 +44,11 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
+  foreach r in array array[
+    'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
+    'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
+    'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver'
+  ] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -1204,6 +1209,66 @@ begin
 end $$;
 
 
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: job; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.job (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    definition_key text CONSTRAINT job_definition_key_not_null1 NOT NULL,
+    definition_version integer CONSTRAINT job_definition_version_not_null1 NOT NULL,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key text NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    mode text DEFAULT 'live'::text NOT NULL,
+    state text DEFAULT 'queued'::text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    attempt integer DEFAULT 0 NOT NULL,
+    max_attempts integer NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_owner text,
+    lease_token uuid,
+    leased_until timestamp with time zone,
+    timeout_seconds integer NOT NULL,
+    last_failure_class text,
+    last_failure_detail text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone,
+    ended_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
+    CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
+    CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
+    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
+    CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
+    CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
+    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
+);
+
+
+--
+-- Name: calendar_canary_live_job(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.calendar_canary_live_job(p_job_id uuid, p_lease uuid) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; k text;
+begin
+ if session_user<>'carr_jobs' then raise exception using errcode='42501',message='calendar canary requires carr_jobs identity'; end if;
+ select * into j from ops.job where id=p_job_id for update;
+ select execution_kind into k from ops.job_definition where key=j.definition_key and version=j.definition_version;
+ if not found or j.state<>'running' or j.lease_token<>p_lease or j.leased_until<now() then raise exception using errcode='55000',message='calendar canary requires current live job lease'; end if;
+ if j.definition_key<>'calendar-fetch-daily' or j.definition_version<>5 or j.mode<>'canary' or k<>'deterministic' then raise exception using errcode='22023',message='job is not calendar-fetch-daily v5 deterministic canary'; end if;
+ return j;
+end $$;
+
+
 --
 -- Name: capability_agent_session_guard(); Type: FUNCTION; Schema: ops; Owner: -
 --
@@ -1627,6 +1692,68 @@ end $$;
 
 
 --
+-- Name: create_calendar_canary_source_snapshot(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) RETURNS TABLE(id uuid, snapshot_digest text, contact_count integer, snapshot_text text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;s jsonb;r ops.calendar_canary_source_snapshot%rowtype;
+begin
+ j:=ops.calendar_canary_live_job(p_job_id,p_lease);
+ select coalesce(jsonb_agg(x order by source_rank,x->>'email',x->>'ref'),'[]') into s from(
+  select jsonb_build_object('email',lower(btrim("Email")),'ref',"Client ID",'name',"Name",'org',"Practice / Entity") x,1 source_rank from v_export_clients where "Email" is not null and position('@' in btrim("Email"))>1
+  union all select jsonb_build_object('email',lower(btrim("Email")),'ref',"Lead ID",'name',"Contact Name",'org',"Practice"),2 from v_export_leads where "Email" is not null and position('@' in btrim("Email"))>1)q;
+ if jsonb_array_length(s)=0 then raise exception using errcode='22023',message='calendar canary source snapshot is empty'; end if;
+ insert into ops.calendar_canary_source_snapshot(job_id,attempt,workflow_version,snapshot,snapshot_digest,contact_count)
+ values(j.id,j.attempt,5,s,encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex'),jsonb_array_length(s)) on conflict(job_id,attempt) do nothing returning * into r;
+ if not found then
+  select * into r from ops.calendar_canary_source_snapshot where job_id=j.id and attempt=j.attempt;
+  if r.snapshot_digest<>encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex') or r.contact_count<>jsonb_array_length(s) then raise exception using errcode='23505',message='calendar canary source snapshot replay conflicts with canonical contacts'; end if;
+ end if;
+ return query select r.id,r.snapshot_digest,r.contact_count,r.snapshot::text;
+end $$;
+
+
+--
+-- Name: create_nightly_availability_canary_source_snapshot(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) RETURNS TABLE(id uuid, snapshot_digest text, availability_count integer, open_search_count integer, snapshot_text text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;s jsonb;r ops.nightly_availability_canary_source_snapshot%rowtype;
+begin
+ j:=ops.nightly_availability_canary_live_job(p_job_id,p_lease);
+ select jsonb_build_object(
+   'availabilities',coalesce((select jsonb_agg(x order by x->>'id') from (
+      select jsonb_build_object('id',av.id::text,'status',av.status,'rate_norm',av.rate_norm_sf_yr,
+        'owed',av.norm_owed,'available_on',av.available_on,'observed',av.observed_at::date,
+        'source',av.source,'area',sp.area_amount,'suite',sp.suite,'city',b.city,'state',b.state,
+        'sub_type',b.sub_type,'address',b.address,'bname',b.name) x
+        from (select distinct on (av.space_id) av.* from availability av
+               order by av.space_id,av.observed_at desc,av.id desc) av
+        join space sp on sp.id=av.space_id join building b on b.id=sp.building_id)q),'[]'::jsonb),
+   'searches',coalesce((select jsonb_agg(x order by x->>'ref',x->>'id') from (
+      select jsonb_build_object('id',s.id::text,'spec',s.spec,'ref',coalesce(c.roster_ref,''),'name',p.name) x
+        from space_search s join client c on c.id=s.client_id join party p on p.id=c.party_id where s.status='open')q),'[]'::jsonb)) into s;
+ if jsonb_array_length(s->'availabilities')=0 or jsonb_array_length(s->'searches')=0 then
+   raise exception using errcode='22023',message='nightly availability canary source must contain availability and open-search evidence';
+ end if;
+ insert into ops.nightly_availability_canary_source_snapshot(job_id,attempt,workflow_version,snapshot,snapshot_digest,availability_count,open_search_count)
+ values(j.id,j.attempt,3,s,encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex'),jsonb_array_length(s->'availabilities'),jsonb_array_length(s->'searches'))
+ on conflict(job_id,attempt) do nothing returning * into r;
+ if not found then
+  select * into r from ops.nightly_availability_canary_source_snapshot where job_id=j.id and attempt=j.attempt;
+  if r.snapshot_digest<>encode(digest(convert_to(s::text,'UTF8'),'sha256'),'hex') or r.availability_count<>jsonb_array_length(s->'availabilities') or r.open_search_count<>jsonb_array_length(s->'searches') then raise exception using errcode='23505',message='nightly availability canary source replay conflicts with canonical snapshot'; end if;
+ end if;
+ return query select r.id,r.snapshot_digest,r.availability_count,r.open_search_count,r.snapshot::text;
+end $$;
+
+
+--
 -- Name: deactivate_guidance_registry(uuid, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -2042,47 +2169,6 @@ begin
 end $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
---
--- Name: job; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.job (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    definition_key text NOT NULL,
-    definition_version integer NOT NULL,
-    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    idempotency_key text NOT NULL,
-    scheduled_for timestamp with time zone NOT NULL,
-    mode text DEFAULT 'live'::text NOT NULL,
-    state text DEFAULT 'queued'::text NOT NULL,
-    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
-    attempt integer DEFAULT 0 NOT NULL,
-    max_attempts integer NOT NULL,
-    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
-    lease_owner text,
-    lease_token uuid,
-    leased_until timestamp with time zone,
-    timeout_seconds integer NOT NULL,
-    last_failure_class text,
-    last_failure_detail text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    started_at timestamp with time zone,
-    ended_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
-    CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
-    CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
-    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
-    CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
-    CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
-    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
-);
-
-
 --
 -- Name: enqueue_job(text, integer, timestamp with time zone, jsonb, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
@@ -2451,6 +2537,25 @@ begin
     returning 1
   ) select count(*) into n from evidence;
   return n;
+end $$;
+
+
+--
+-- Name: nightly_availability_canary_live_job(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; k text;
+begin
+ if session_user<>'carr_jobs' then raise exception using errcode='42501',message='nightly availability canary requires carr_jobs identity'; end if;
+ select * into j from ops.job where id=p_job_id for update;
+ select execution_kind into k from ops.job_definition where key=j.definition_key and version=j.definition_version;
+ if not found or j.state<>'running' or j.lease_token<>p_lease or j.leased_until<now() then raise exception using errcode='55000',message='nightly availability canary requires current live job lease'; end if;
+ if j.definition_key<>'nightly-record-layer' or j.definition_version<>3 or j.mode<>'canary' or k<>'deterministic' then raise exception using errcode='22023',message='job is not nightly-record-layer v3 deterministic canary'; end if;
+ return j;
 end $$;
 
 
@@ -3182,6 +3287,49 @@ end $$;
 
 
 --
+-- Name: calendar_canary_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.calendar_canary_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    source_snapshot_id uuid NOT NULL,
+    source_snapshot_digest text NOT NULL,
+    source_contact_count integer NOT NULL,
+    output_digest text NOT NULL,
+    exact_count integer NOT NULL,
+    domain_count integer NOT NULL,
+    unknown_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT calendar_canary_receipt_domain_count_check CHECK ((domain_count >= 0)),
+    CONSTRAINT calendar_canary_receipt_exact_count_check CHECK ((exact_count >= 0)),
+    CONSTRAINT calendar_canary_receipt_output_digest_check CHECK ((output_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT calendar_canary_receipt_unknown_count_check CHECK ((unknown_count >= 0))
+);
+
+
+--
+-- Name: record_calendar_canary_receipt(uuid, uuid, uuid, text, integer, integer, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) RETURNS ops.calendar_canary_receipt
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare j ops.job%rowtype;s ops.calendar_canary_source_snapshot%rowtype;r ops.calendar_canary_receipt%rowtype;e ops.calendar_canary_receipt%rowtype;
+begin
+ j:=ops.calendar_canary_live_job(p_job_id,p_lease); select * into s from ops.calendar_canary_source_snapshot where id=p_source_snapshot_id and job_id=j.id and attempt=j.attempt;
+ if not found then raise exception using errcode='22023',message='source snapshot is not bound to this job attempt'; end if;
+ if p_output_digest!~'^[0-9a-f]{64}$' or p_exact<0 or p_domain<0 or p_unknown<0 then raise exception using errcode='22023',message='invalid calendar canary aggregate'; end if;
+ insert into ops.calendar_canary_receipt(job_id,attempt,source_snapshot_id,source_snapshot_digest,source_contact_count,output_digest,exact_count,domain_count,unknown_count)
+ values(j.id,j.attempt,s.id,s.snapshot_digest,s.contact_count,p_output_digest,p_exact,p_domain,p_unknown) on conflict(job_id,attempt) do nothing returning * into r;
+ if found then return r; end if; select * into e from ops.calendar_canary_receipt where job_id=j.id and attempt=j.attempt;
+ if e.source_snapshot_id<>s.id or e.output_digest<>p_output_digest or e.exact_count<>p_exact or e.domain_count<>p_domain or e.unknown_count<>p_unknown then raise exception using errcode='23505',message='calendar canary receipt replay conflicts with immutable attempt'; end if; return e;
+end $_$;
+
+
+--
 -- Name: record_claude_scheduler_observation(text, text, text, text, boolean, text, text, text, timestamp with time zone, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3518,6 +3666,52 @@ begin
      contract.plist_sha256,p_launchctl_revision,p_source_fingerprint,p_observed_at,
      principal.device_id);
   return ref;
+end $_$;
+
+
+--
+-- Name: nightly_availability_canary_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.nightly_availability_canary_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    source_snapshot_id uuid NOT NULL,
+    source_snapshot_digest text CONSTRAINT nightly_availability_canary_rec_source_snapshot_digest_not_null NOT NULL,
+    availability_count integer NOT NULL,
+    open_search_count integer NOT NULL,
+    match_count integer NOT NULL,
+    output_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT nightly_availability_canary_receipt_availability_count_check CHECK ((availability_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_match_count_check CHECK ((match_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_open_search_count_check CHECK ((open_search_count >= 0)),
+    CONSTRAINT nightly_availability_canary_receipt_output_digest_check CHECK ((output_digest ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: record_nightly_availability_canary_receipt(uuid, uuid, uuid, text, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) RETURNS ops.nightly_availability_canary_receipt
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare j ops.job%rowtype;s ops.nightly_availability_canary_source_snapshot%rowtype;r ops.nightly_availability_canary_receipt%rowtype;e ops.nightly_availability_canary_receipt%rowtype;
+begin
+ j:=ops.nightly_availability_canary_live_job(p_job_id,p_lease);
+ select * into s from ops.nightly_availability_canary_source_snapshot where id=p_source_snapshot_id and job_id=j.id and attempt=j.attempt;
+ if not found then raise exception using errcode='22023',message='nightly availability source snapshot is not bound to this job attempt'; end if;
+ if p_output_digest!~'^[0-9a-f]{64}$' or p_match_count<0 then raise exception using errcode='22023',message='invalid nightly availability canary aggregate'; end if;
+ insert into ops.nightly_availability_canary_receipt(job_id,attempt,source_snapshot_id,source_snapshot_digest,availability_count,open_search_count,match_count,output_digest)
+ values(j.id,j.attempt,s.id,s.snapshot_digest,s.availability_count,s.open_search_count,p_match_count,p_output_digest)
+ on conflict(job_id,attempt) do nothing returning * into r;
+ if found then return r; end if;
+ select * into e from ops.nightly_availability_canary_receipt where job_id=j.id and attempt=j.attempt;
+ if e.source_snapshot_id<>s.id or e.output_digest<>p_output_digest or e.match_count<>p_match_count then raise exception using errcode='23505',message='nightly availability canary receipt replay conflicts with immutable attempt'; end if;
+ return e;
 end $_$;
 
 
@@ -4015,6 +4209,28 @@ begin raise exception 'staging release approval evidence is append-only'; end $$
 
 
 --
+-- Name: reject_fabricated_drill_row(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.reject_fabricated_drill_row() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if new.source_ref in ('bin/key-recovery-test.sh','bin/restore-rehearse.sh')
+     and (   new.detail like '%carr-20260101%'
+          or new.detail like '%carr-20260201%'
+          or new.detail like '%carr-20260301%'
+          or new.detail like '%(999B%'
+          or new.detail like '%(123456B%') then
+    raise exception
+      'ops.run refused a fabricated backup-drill row: detail names a dump or size only a selftest fixture produces (%). A selftest reached the production ledger — the checkout running it predates the PR #340 credential belts; rebase it onto main. See migration 0225.',
+      left(new.detail, 120);
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: release_approval_requires_recovery_rehearsal(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -4312,6 +4528,28 @@ begin
   returning id into rid;
   return rid;
 end $$;
+
+
+--
+-- Name: resolve_calendar_canary_receipt(uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) RETURNS SETOF ops.calendar_canary_receipt
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$select * from ops.calendar_canary_receipt where job_id=p_job_id and attempt=p_attempt$$;
+
+
+--
+-- Name: resolve_nightly_availability_canary_receipt(uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) RETURNS SETOF ops.nightly_availability_canary_receipt
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+ select * from ops.nightly_availability_canary_receipt where job_id=p_job_id and attempt=p_attempt
+$$;
 
 
 --
@@ -5684,6 +5922,29 @@ $$;
 
 
 --
+-- Name: log_retrieval_query(text, integer, uuid[], jsonb, text, bigint, boolean, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.log_retrieval_query(p_query text, p_result_count integer, p_section_ids uuid[], p_score_bands jsonb, p_policy_id text, p_policy_version bigint, p_explicit_hit boolean, p_scope_ref text DEFAULT 'carr-internal'::text) RETURNS uuid
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+  insert into retrieval_query_log
+    (normalized_hash, result_count, score_bands, selected_row_ids,
+     policy_id, policy_version, explicit_hit, scope_ref)
+  values (
+    encode(digest(convert_to(normalize_retrieval_phrase(p_query), 'UTF8'), 'sha256'), 'hex'),
+    greatest(coalesce(p_result_count, 0), 0),
+    coalesce(p_score_bands, jsonb_build_object('high', 0, 'medium', 0, 'low', 0)),
+    coalesce(p_section_ids, '{}'),
+    p_policy_id, p_policy_version,
+    coalesce(p_explicit_hit, false),
+    coalesce(p_scope_ref, 'carr-internal'))
+  returning id
+$$;
+
+
+--
 -- Name: mark_retrieval_mappings_for_repair(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5902,11 +6163,24 @@ end $$;
 
 
 --
+-- Name: retrieval_visibility_actor_id(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.retrieval_visibility_actor_id(p_sponsor_slug text) RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+  select id from actor
+   where slug = p_sponsor_slug and kind = 'human' and active = true
+$$;
+
+
+--
 -- Name: search_doctrine_situations(text, uuid, text[], integer, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20, p_policy_id text DEFAULT NULL::text) RETURNS TABLE(section_id uuid, section_key text, title text, doc_slug text, content_class text, rank double precision, snippet text, lexical_score double precision, concept_score double precision, final_score double precision, provenance jsonb)
-    LANGUAGE sql SECURITY DEFINER
+    LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
 with
@@ -6010,24 +6284,6 @@ with
      where final_score > 0
      order by final_score desc, concept_score desc, lexical_score desc, section_key asc
      limit greatest(1, least(coalesce(p_limit, 20), 100))
-  ),
-  log_write as (
-    insert into retrieval_query_log
-      (normalized_hash, result_count, score_bands, selected_row_ids,
-       policy_id, policy_version, explicit_hit, scope_ref)
-    select encode(digest(convert_to((select q from normalized), 'UTF8'), 'sha256'), 'hex'),
-           count(l.section_id)::integer,
-           jsonb_build_object(
-             'high', count(*) filter (where final_score >= .75),
-             'medium', count(*) filter (where final_score >= .25 and final_score < .75),
-             'low', count(*) filter (where final_score < .25)),
-           coalesce(array_agg(section_id order by final_score desc, concept_score desc,
-                              lexical_score desc, section_key asc)
-                    filter (where section_id is not null), '{}'),
-           p.policy_id, p.version, count(l.section_id) > 0, 'carr-internal'
-      from policy p left join limited l on true
-     group by p.policy_id, p.version
-    returning id
   )
 select l.section_id, l.section_key, l.section_title, l.doc_slug, l.content_class,
        l.final_score as rank,
@@ -6038,7 +6294,7 @@ select l.section_id, l.section_key, l.section_title, l.doc_slug, l.content_class
          'lexical_score', l.lexical_score, 'concept_score', l.concept_score,
          'final_score', l.final_score, 'phrase_ids', to_jsonb(l.phrase_ids),
          'concept_ids', to_jsonb(l.concept_ids), 'mapping_ids', to_jsonb(l.mapping_ids))
-  from limited l cross join (select count(*) from log_write) logged
+  from limited l
  order by l.final_score desc, l.concept_score desc, l.lexical_score desc, l.section_key asc
 $$;
 
@@ -6329,6 +6585,25 @@ CREATE TABLE ops.authority_receipt (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT authority_receipt_kind_check CHECK ((kind = ANY (ARRAY['admission'::text, 'activation'::text, 'rejection'::text, 'override'::text, 'amendment'::text]))),
     CONSTRAINT authority_receipt_subject_type_check CHECK ((subject_type = ANY (ARRAY['rule'::text, 'guidance'::text, 'policy'::text])))
+);
+
+
+--
+-- Name: calendar_canary_source_snapshot; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.calendar_canary_source_snapshot (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    workflow_version integer NOT NULL,
+    snapshot jsonb NOT NULL,
+    snapshot_digest text NOT NULL,
+    contact_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT calendar_canary_source_snapshot_contact_count_check CHECK ((contact_count >= 0)),
+    CONSTRAINT calendar_canary_source_snapshot_snapshot_digest_check CHECK ((snapshot_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT calendar_canary_source_snapshot_workflow_version_check CHECK ((workflow_version = 5))
 );
 
 
@@ -7181,8 +7456,8 @@ CREATE TABLE ops.job_receipt (
 --
 
 CREATE TABLE ops.legacy_prior_staging_readback_allowlist (
-    idempotency_key uuid NOT NULL,
-    deployment_attempt_id uuid NOT NULL,
+    idempotency_key uuid CONSTRAINT legacy_prior_staging_readback_allowlis_idempotency_key_not_null NOT NULL,
+    deployment_attempt_id uuid CONSTRAINT legacy_prior_staging_readback_al_deployment_attempt_id_not_null NOT NULL,
     captured_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
 );
 
@@ -7307,6 +7582,27 @@ CREATE TABLE ops.legacy_schedule_surface_registry (
 
 
 --
+-- Name: nightly_availability_canary_source_snapshot; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.nightly_availability_canary_source_snapshot (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    workflow_version integer CONSTRAINT nightly_availability_canary_source_sn_workflow_version_not_null NOT NULL,
+    snapshot jsonb NOT NULL,
+    snapshot_digest text CONSTRAINT nightly_availability_canary_source_sna_snapshot_digest_not_null NOT NULL,
+    availability_count integer CONSTRAINT nightly_availability_canary_source__availability_count_not_null NOT NULL,
+    open_search_count integer CONSTRAINT nightly_availability_canary_source_s_open_search_count_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT nightly_availability_canary_source_sna_availability_count_check CHECK ((availability_count >= 0)),
+    CONSTRAINT nightly_availability_canary_source_snap_open_search_count_check CHECK ((open_search_count >= 0)),
+    CONSTRAINT nightly_availability_canary_source_snaps_workflow_version_check CHECK ((workflow_version = 3)),
+    CONSTRAINT nightly_availability_canary_source_snapsh_snapshot_digest_check CHECK ((snapshot_digest ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
 -- Name: npi_device_evidence_receipt; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -7341,13 +7637,13 @@ CREATE TABLE ops.npi_device_evidence_receipt (
 
 CREATE TABLE ops.program6_browser_action_challenge_redemption (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token_digest text NOT NULL,
-    session_digest text NOT NULL,
+    token_digest text CONSTRAINT program6_browser_action_challenge_redempt_token_digest_not_null NOT NULL,
+    session_digest text CONSTRAINT program6_browser_action_challenge_redem_session_digest_not_null NOT NULL,
     action text NOT NULL,
-    material_digest text NOT NULL,
-    idempotency_key uuid NOT NULL,
-    redeemed_by_actor_id uuid NOT NULL,
-    redeemed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    material_digest text CONSTRAINT program6_browser_action_challenge_rede_material_digest_not_null NOT NULL,
+    idempotency_key uuid CONSTRAINT program6_browser_action_challenge_rede_idempotency_key_not_null NOT NULL,
+    redeemed_by_actor_id uuid CONSTRAINT program6_browser_action_challenge_redeemed_by_actor_id_not_null NOT NULL,
+    redeemed_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT program6_browser_action_challenge_redempti_redeemed_at_not_null NOT NULL,
     CONSTRAINT program6_browser_action_challenge_redempt_material_digest_check CHECK ((material_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redempti_session_digest_check CHECK ((session_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redemption_action_check CHECK ((action = ANY (ARRAY['accept-ready-plan'::text, 'accept-outcome-feedback'::text]))),
@@ -7825,19 +8121,19 @@ CREATE TABLE ops.sourced_work_request_outcome_feedback (
     work_request_id uuid NOT NULL,
     feedback_version integer NOT NULL,
     idempotency_key uuid NOT NULL,
-    work_request_version integer NOT NULL,
+    work_request_version integer CONSTRAINT sourced_work_request_outcome_feed_work_request_version_not_null NOT NULL,
     plan_id uuid NOT NULL,
-    plan_acceptance_receipt_id uuid NOT NULL,
+    plan_acceptance_receipt_id uuid CONSTRAINT sourced_work_request_outcom_plan_acceptance_receipt_id_not_null NOT NULL,
     preimage jsonb NOT NULL,
-    criterion_results jsonb NOT NULL,
+    criterion_results jsonb CONSTRAINT sourced_work_request_outcome_feedbac_criterion_results_not_null NOT NULL,
     evidence_refs jsonb NOT NULL,
     outcome text NOT NULL,
     blocker_code text NOT NULL,
     result_summary text NOT NULL,
     observed_minutes integer NOT NULL,
-    interaction_surface text NOT NULL,
-    heavy_session_used boolean NOT NULL,
-    manual_context_transfers integer NOT NULL,
+    interaction_surface text CONSTRAINT sourced_work_request_outcome_feedb_interaction_surface_not_null NOT NULL,
+    heavy_session_used boolean CONSTRAINT sourced_work_request_outcome_feedba_heavy_session_used_not_null NOT NULL,
+    manual_context_transfers integer CONSTRAINT sourced_work_request_outcome__manual_context_transfers_not_null NOT NULL,
     feedback_hash text NOT NULL,
     feedback_ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -7869,15 +8165,15 @@ COMMENT ON TABLE ops.sourced_work_request_outcome_feedback IS 'Append-only bound
 --
 
 CREATE TABLE ops.sourced_work_request_outcome_feedback_acceptance_receipt (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid NOT NULL,
-    feedback_id uuid NOT NULL,
-    idempotency_key uuid NOT NULL,
-    base_version integer NOT NULL,
-    feedback_hash text NOT NULL,
-    accepted_by_actor_id uuid NOT NULL,
-    accepted_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    result_version integer NOT NULL,
+    id uuid DEFAULT gen_random_uuid() CONSTRAINT sourced_work_request_outcome_feedback_acceptance_re_id_not_null NOT NULL,
+    work_request_id uuid CONSTRAINT sourced_work_request_outcome_feedback__work_request_id_not_null NOT NULL,
+    feedback_id uuid CONSTRAINT sourced_work_request_outcome_feedback_acce_feedback_id_not_null NOT NULL,
+    idempotency_key uuid CONSTRAINT sourced_work_request_outcome_feedback__idempotency_key_not_null NOT NULL,
+    base_version integer CONSTRAINT sourced_work_request_outcome_feedback_acc_base_version_not_null NOT NULL,
+    feedback_hash text CONSTRAINT sourced_work_request_outcome_feedback_ac_feedback_hash_not_null NOT NULL,
+    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_outcome_feed_accepted_by_actor_id_not_null NOT NULL,
+    accepted_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT sourced_work_request_outcome_feedback_acce_accepted_at_not_null NOT NULL,
+    result_version integer CONSTRAINT sourced_work_request_outcome_feedback_a_result_version_not_null NOT NULL,
     CONSTRAINT sourced_work_request_outcome_feedback_acce_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_outcome_feedback_accep_feedback_hash_check CHECK ((feedback_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT sourced_work_request_outcome_feedback_accept_base_version_check CHECK ((base_version > 0))
@@ -7942,16 +8238,16 @@ COMMENT ON TABLE ops.sourced_work_request_plan IS 'Append-only Program 6 plan pr
 
 CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid NOT NULL,
+    work_request_id uuid CONSTRAINT sourced_work_request_plan_acceptance_r_work_request_id_not_null NOT NULL,
     plan_id uuid NOT NULL,
-    idempotency_key uuid NOT NULL,
-    base_version integer NOT NULL,
+    idempotency_key uuid CONSTRAINT sourced_work_request_plan_acceptance_r_idempotency_key_not_null NOT NULL,
+    base_version integer CONSTRAINT sourced_work_request_plan_acceptance_rece_base_version_not_null NOT NULL,
     plan_hash text NOT NULL,
-    accepted_by_actor_id uuid NOT NULL,
-    accepted_at timestamp with time zone DEFAULT now() NOT NULL,
-    result_version integer NOT NULL,
-    shape_fixed_surface_ref text NOT NULL,
-    shape_rationale text NOT NULL,
+    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_plan_accepta_accepted_by_actor_id_not_null NOT NULL,
+    accepted_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_plan_acceptance_recei_accepted_at_not_null NOT NULL,
+    result_version integer CONSTRAINT sourced_work_request_plan_acceptance_re_result_version_not_null NOT NULL,
+    shape_fixed_surface_ref text CONSTRAINT sourced_work_request_plan_acce_shape_fixed_surface_ref_not_null NOT NULL,
+    shape_rationale text CONSTRAINT sourced_work_request_plan_acceptance_r_shape_rationale_not_null NOT NULL,
     CONSTRAINT sourced_work_request_plan_acceptance_recei_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_base_version_check CHECK ((base_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_plan_hash_check CHECK ((plan_hash ~ '^sha256:[0-9a-f]{64}$'::text))
@@ -7983,11 +8279,11 @@ CREATE TABLE ops.staging_deployment_attempt (
     git_sha text NOT NULL,
     provider text NOT NULL,
     expected_provider_tag text NOT NULL,
-    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_deployment_attempt_declared_migration_set_sha2_not_null NOT NULL,
     declared_migration_count integer NOT NULL,
-    declared_schema_highest_migration text NOT NULL,
-    declared_schema_applied_count integer NOT NULL,
-    declared_schema_ledger_sha256 text NOT NULL,
+    declared_schema_highest_migration text CONSTRAINT staging_deployment_attempt_declared_schema_highest_mig_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_deployment_attempt_declared_schema_applied_cou_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_deployment_attempt_declared_schema_ledger_sha2_not_null NOT NULL,
     prepared_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     writer_session_user text NOT NULL,
     CONSTRAINT staging_attempt_recovery_shape CHECK ((((recovery_step = 'standalone'::text) AND (recovery_attempt_id IS NULL) AND (prior_release_id IS NULL)) OR ((recovery_step <> 'standalone'::text) AND (recovery_attempt_id IS NOT NULL) AND (prior_release_id IS NOT NULL) AND (correlation_id = recovery_attempt_id)))),
@@ -8029,17 +8325,17 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     prior_release_id uuid NOT NULL,
     service_id uuid NOT NULL,
     environment text NOT NULL,
-    current_before_receipt_id uuid NOT NULL,
-    prior_after_rollback_receipt_id uuid NOT NULL,
-    current_after_restore_receipt_id uuid NOT NULL,
+    current_before_receipt_id uuid CONSTRAINT staging_recovery_rehearsal_b_current_before_receipt_id_not_null NOT NULL,
+    prior_after_rollback_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__prior_after_rollback_recei_not_null NOT NULL,
+    current_after_restore_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__current_after_restore_rece_not_null NOT NULL,
     recovery_strategy text NOT NULL,
     recovery_plan_ref text NOT NULL,
     plan_hash text NOT NULL,
-    declared_migration_set_sha256 text NOT NULL,
-    declared_migration_count integer NOT NULL,
-    declared_schema_highest_migration text NOT NULL,
-    declared_schema_applied_count integer NOT NULL,
-    declared_schema_ledger_sha256 text NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_recovery_rehearsal__declared_migration_set_sha_not_null NOT NULL,
+    declared_migration_count integer CONSTRAINT staging_recovery_rehearsal_bu_declared_migration_count_not_null NOT NULL,
+    declared_schema_highest_migration text CONSTRAINT staging_recovery_rehearsal__declared_schema_highest_mi_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_recovery_rehearsal__declared_schema_applied_co_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_recovery_rehearsal__declared_schema_ledger_sha_not_null NOT NULL,
     bundle_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
     completed_at timestamp with time zone NOT NULL,
@@ -8106,12 +8402,12 @@ CREATE TABLE ops.staging_release_readback_receipt (
     provider_version_id uuid NOT NULL,
     provider_tag text NOT NULL,
     verb_count integer NOT NULL,
-    schema_highest_migration text NOT NULL,
+    schema_highest_migration text CONSTRAINT staging_release_readback_rece_schema_highest_migration_not_null NOT NULL,
     schema_applied_count integer NOT NULL,
-    declared_migration_set_sha256 text NOT NULL,
-    declared_migration_count integer NOT NULL,
-    declared_schema_applied_count integer NOT NULL,
-    declared_schema_ledger_sha256 text NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_release_readback_re_declared_migration_set_sha_not_null NOT NULL,
+    declared_migration_count integer CONSTRAINT staging_release_readback_rece_declared_migration_count_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_release_readback_re_declared_schema_applied_co_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_release_readback_re_declared_schema_ledger_sha_not_null NOT NULL,
     doctrine_generation bigint NOT NULL,
     projection_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
@@ -10081,12 +10377,12 @@ COMMENT ON COLUMN public.campaign.coverage_at_scoring IS 'The measurement covera
 --
 
 CREATE TABLE public.candidate_pool (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    source text NOT NULL,
-    source_key text NOT NULL,
+    id uuid DEFAULT gen_random_uuid() CONSTRAINT prospect_pool_id_not_null NOT NULL,
+    source text CONSTRAINT prospect_pool_source_not_null NOT NULL,
+    source_key text CONSTRAINT prospect_pool_source_key_not_null NOT NULL,
     source_seq integer,
-    source_row jsonb NOT NULL,
-    name text NOT NULL,
+    source_row jsonb CONSTRAINT prospect_pool_source_row_not_null NOT NULL,
+    name text CONSTRAINT prospect_pool_name_not_null NOT NULL,
     org_name text,
     vertical text,
     address text,
@@ -10101,19 +10397,19 @@ CREATE TABLE public.candidate_pool (
     score_basis text,
     est_lease_event date,
     est_basis text,
-    status text DEFAULT 'pool'::text NOT NULL,
+    status text DEFAULT 'pool'::text CONSTRAINT prospect_pool_status_not_null NOT NULL,
     promoted_lead_id uuid,
     dup_tier text,
     dup_subject_type text,
     dup_subject_id uuid,
     dup_ref text,
     dup_basis text,
-    dup_do_not_contact boolean DEFAULT false NOT NULL,
-    version integer DEFAULT 1 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_by uuid NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_by uuid NOT NULL,
+    dup_do_not_contact boolean DEFAULT false CONSTRAINT prospect_pool_dup_do_not_contact_not_null NOT NULL,
+    version integer DEFAULT 1 CONSTRAINT prospect_pool_version_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_created_at_not_null NOT NULL,
+    created_by uuid CONSTRAINT prospect_pool_created_by_not_null NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_updated_at_not_null NOT NULL,
+    updated_by uuid CONSTRAINT prospect_pool_updated_by_not_null NOT NULL,
     declined_at timestamp with time zone,
     declined_by uuid,
     decline_reason text,
@@ -12950,16 +13246,16 @@ CREATE VIEW public.v_capture_coverage AS
            FROM public.deal d
           WHERE ((d.outcome IS NULL) AND (d.phase <> 'closed'::text))
         UNION ALL
-         SELECT 'client'::text AS text,
+         SELECT 'client'::text,
             c.id
            FROM public.client c
           WHERE (c.merged_into IS NULL)
         UNION ALL
-         SELECT 'lead'::text AS text,
+         SELECT 'lead'::text,
             l.id
            FROM public.lead l
         UNION ALL
-         SELECT 'vendor'::text AS text,
+         SELECT 'vendor'::text,
             v.id
            FROM public.vendor v
         )
@@ -15218,7 +15514,7 @@ CREATE VIEW public.v_export_dossier_analysis AS
           WHERE (c.notes_path IS NOT NULL)
         UNION ALL
          SELECT l.id,
-            'lead'::text AS text,
+            'lead'::text,
             ('DNA/Clients/prospects/'::text || regexp_replace(l.notes_path, '^.*/'::text, ''::text))
            FROM public.lead l
           WHERE (l.notes_path IS NOT NULL)
@@ -16921,6 +17217,46 @@ ALTER TABLE ONLY ops.authority_receipt
 
 
 --
+-- Name: calendar_canary_receipt calendar_canary_receipt_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapsh_id_snapshot_digest_contact_co_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapsh_id_snapshot_digest_contact_co_key UNIQUE (id, snapshot_digest, contact_count);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: capability_agent_session capability_agent_session_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -17550,6 +17886,46 @@ ALTER TABLE ONLY ops.legacy_schedule_surface_registry
 
 ALTER TABLE ONLY ops.legacy_schedule_surface_registry
     ADD CONSTRAINT legacy_schedule_surface_registry_surface_id_key UNIQUE (surface_id);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_s_id_snapshot_digest_availabili_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_s_id_snapshot_digest_availabili_key UNIQUE (id, snapshot_digest, availability_count, open_search_count);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_pkey PRIMARY KEY (id);
 
 
 --
@@ -20665,6 +21041,20 @@ CREATE TRIGGER authority_receipt_append_only BEFORE DELETE OR UPDATE ON ops.auth
 
 
 --
+-- Name: calendar_canary_receipt calendar_canary_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER calendar_canary_receipt_append_only BEFORE DELETE OR UPDATE ON ops.calendar_canary_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER calendar_canary_source_snapshot_append_only BEFORE DELETE OR UPDATE ON ops.calendar_canary_source_snapshot FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
 -- Name: capability_agent_session capability_agent_session_guard_before_write; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -20896,6 +21286,20 @@ CREATE TRIGGER legacy_schedule_observation_receipt_append_only BEFORE DELETE OR 
 
 
 --
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER nightly_availability_canary_receipt_append_only BEFORE DELETE OR UPDATE ON ops.nightly_availability_canary_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER nightly_availability_canary_source_append_only BEFORE DELETE OR UPDATE ON ops.nightly_availability_canary_source_snapshot FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
 -- Name: npi_device_evidence_receipt npi_device_evidence_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -20942,6 +21346,13 @@ CREATE TRIGGER protect_staging_readback_deployment BEFORE DELETE OR UPDATE ON op
 --
 
 CREATE TRIGGER provider_observation_append_only BEFORE DELETE OR UPDATE ON ops.provider_observation FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: run reject_fabricated_drill_row; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER reject_fabricated_drill_row BEFORE INSERT ON ops.run FOR EACH ROW EXECUTE FUNCTION ops.reject_fabricated_drill_row();
 
 
 --
@@ -21355,6 +21766,38 @@ ALTER TABLE ONLY neon_auth.session
 
 ALTER TABLE ONLY ops.authority_receipt
     ADD CONSTRAINT authority_receipt_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_source_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_source_snapshot_id_fkey FOREIGN KEY (source_snapshot_id) REFERENCES ops.calendar_canary_source_snapshot(id);
+
+
+--
+-- Name: calendar_canary_receipt calendar_canary_receipt_source_snapshot_id_source_snapshot_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_receipt
+    ADD CONSTRAINT calendar_canary_receipt_source_snapshot_id_source_snapshot_fkey FOREIGN KEY (source_snapshot_id, source_snapshot_digest, source_contact_count) REFERENCES ops.calendar_canary_source_snapshot(id, snapshot_digest, contact_count);
+
+
+--
+-- Name: calendar_canary_source_snapshot calendar_canary_source_snapshot_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_canary_source_snapshot
+    ADD CONSTRAINT calendar_canary_source_snapshot_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
 
 
 --
@@ -21915,6 +22358,38 @@ ALTER TABLE ONLY ops.legacy_schedule_provider_contract
 
 ALTER TABLE ONLY ops.legacy_schedule_surface_registry
     ADD CONSTRAINT legacy_schedule_surface_regis_workflow_key_workflow_versio_fkey FOREIGN KEY (workflow_key, workflow_version) REFERENCES ops.job_definition(key, version);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_r_source_snapshot_id_source_sn_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_r_source_snapshot_id_source_sn_fkey FOREIGN KEY (source_snapshot_id, source_snapshot_digest, availability_count, open_search_count) REFERENCES ops.nightly_availability_canary_source_snapshot(id, snapshot_digest, availability_count, open_search_count);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
+
+
+--
+-- Name: nightly_availability_canary_receipt nightly_availability_canary_receipt_source_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_receipt
+    ADD CONSTRAINT nightly_availability_canary_receipt_source_snapshot_id_fkey FOREIGN KEY (source_snapshot_id) REFERENCES ops.nightly_availability_canary_source_snapshot(id);
+
+
+--
+-- Name: nightly_availability_canary_source_snapshot nightly_availability_canary_source_snapshot_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.nightly_availability_canary_source_snapshot
+    ADD CONSTRAINT nightly_availability_canary_source_snapshot_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id);
 
 
 --
@@ -24427,11 +24902,14 @@ revoke all on function ops.assert_guidance_import_inventory(p_batch_id uuid) fro
 revoke all on function ops.assert_guidance_import_materialization(p_batch_id uuid) from public;
 revoke all on function ops.assert_guidance_registry_coverage() from public;
 revoke all on function ops.authority_actor_slug() from public;
+revoke all on function ops.calendar_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
 revoke all on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) from public;
+revoke all on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
+revoke all on function ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
@@ -24447,6 +24925,7 @@ revoke all on function ops.guidance_revision_contract_hash(p_revision_id uuid) f
 revoke all on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) from public;
 revoke all on function ops.invalidate_cognition_cache(p_dependency_ref text) from public;
 revoke all on function ops.invalidate_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_dependency_ref text) from public;
+revoke all on function ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) from public;
 revoke all on function ops.program5_migration_set_sha256(p_migration_set text[]) from public;
@@ -24457,10 +24936,12 @@ revoke all on function ops.propose_sourced_work_request_plan(p_work_request text
 revoke all on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) from public;
 revoke all on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) from public;
 revoke all on function ops.reap_expired_jobs() from public;
+revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
 revoke all on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
 revoke all on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
+revoke all on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) from public;
 revoke all on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
@@ -24472,6 +24953,8 @@ revoke all on function ops.redeem_program6_browser_action_challenge(p_token_dige
 revoke all on function ops.refuse_guidance_history_rewrite() from public;
 revoke all on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) from public;
 revoke all on function ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
+revoke all on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) from public;
+revoke all on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) from public;
 revoke all on function ops.select_provider_routes(p_requested text[]) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
@@ -24490,8 +24973,10 @@ revoke all on function ops.validate_guidance_situation_mapping() from public;
 revoke all on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function public.assert_situation_retrieval_golden(p_suite_digest text) from public;
 revoke all on function public.capture_call_context(requested_deal_ids uuid[]) from public;
+revoke all on function public.log_retrieval_query(p_query text, p_result_count integer, p_section_ids uuid[], p_score_bands jsonb, p_policy_id text, p_policy_version bigint, p_explicit_hit boolean, p_scope_ref text) from public;
 revoke all on function public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) from public;
 revoke all on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) from public;
+revoke all on function public.retrieval_visibility_actor_id(p_sponsor_slug text) from public;
 revoke all on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) from public;
 grant usage on schema ops to carr_authority;
 grant usage on schema ops to carr_device_evidence;
@@ -25109,8 +25594,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
@@ -25119,6 +25604,8 @@ grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
+grant execute on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
+grant execute on function ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
 grant execute on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) to carr_authority;
@@ -25146,18 +25633,22 @@ grant execute on function ops.propose_sourced_work_request_plan(p_work_request t
 grant execute on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
+grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
 grant execute on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
+grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
 grant execute on function ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
+grant execute on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
+grant execute on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
@@ -25172,9 +25663,12 @@ grant execute on function public.capture_call_context(requested_deal_ids uuid[])
 grant execute on function public.capture_call_context(requested_deal_ids uuid[]) to carr_writer;
 grant execute on function public.current_retrievable_doctrine(p_actor_id uuid, p_content_classes text[]) to carr_reader;
 grant execute on function public.current_retrievable_doctrine(p_actor_id uuid, p_content_classes text[]) to carr_writer;
+grant execute on function public.log_retrieval_query(p_query text, p_result_count integer, p_section_ids uuid[], p_score_bands jsonb, p_policy_id text, p_policy_version bigint, p_explicit_hit boolean, p_scope_ref text) to carr_writer;
 grant execute on function public.normalize_retrieval_phrase(value text) to carr_writer;
 grant execute on function public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) to carr_writer;
 grant execute on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) to carr_writer;
+grant execute on function public.retrieval_visibility_actor_id(p_sponsor_slug text) to carr_reader;
+grant execute on function public.retrieval_visibility_actor_id(p_sponsor_slug text) to carr_writer;
 grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_reader;
 grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_writer;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_exporter;
@@ -25404,9 +25898,13 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0205_program5_approval_verifier.sql	02cb742f7be2c2d278704e9a58fa9626abc00323901adca9f2da5b539bfbd38a	2026-08-21 03:12:09.011429+00
 0212_doctrine_meta_singleton.sql	673545077c5e1bbe37676425a1addfb224acb5ef99921a736ce111fab4c4e8ab	2026-08-21 03:47:57.328664+00
 0215_program5_completion_hash_grant.sql	3fa71fc333056161670342c10d012216f1eab7fb83786afbbb8c131570c4344e	2026-08-21 10:27:38.693707+00
-0218_staging_readback_program6_posture.sql	28ee19228e1616a93a1287463cce2ac156c73bfc4a4040331fbd05be26e7ec3e	2026-08-21 11:14:51.880231+00
-0219_staging_release_approval_receipt.sql	5850057c0644d86a29353948367917021ef4eba54e011661857af7f549c6f5e8	2026-08-21 11:53:12.825284+00
-0222_legacy_prior_staging_readback.sql	cf953d7860aa08968052803e551e58c4ff9aa1d0318629335d4388ed5f0d468c	2026-08-21 12:39:44.592643+00
+0218_staging_readback_program6_posture.sql	28ee19228e1616a93a1287463cce2ac156c73bfc4a4040331fbd05be26e7ec3e	2026-08-21 12:14:49.485259+00
+0219_staging_release_approval_receipt.sql	5850057c0644d86a29353948367917021ef4eba54e011661857af7f549c6f5e8	2026-08-21 12:14:50.115296+00
+0222_legacy_prior_staging_readback.sql	cf953d7860aa08968052803e551e58c4ff9aa1d0318629335d4388ed5f0d468c	2026-08-21 12:59:12.909125+00
+0223_doctrine_search_reads_without_writing_or_reading_actor.sql	5c19f5e84e95aa3beab2de53f6f676e614d34ba8f9086fc712a6b2b6fe750f74	2026-08-21 21:01:11.929385+00
+0225_ops_run_fixture_row_guard.sql	dbbb2962abb0c1a2953a87e4db77f393b01e4399a39c4fbf15e033c4e2c8c9c0	2026-08-21 21:01:12.315344+00
+0226_calendar_canary_record_layer.sql	8bf2d1e6f27278512057e18307e8f33458d4a5cb77887aa2a107b2d3b7f68211	2026-08-21 21:01:12.688689+00
+0227_nightly_availability_canary_record_layer.sql	9711e90bfe315b05bd55376eb039c0e915a35384470ae55eb92bf6d0b4015ddf	2026-08-21 21:01:12.933021+00
 \.
 
 
@@ -25787,6 +26285,12 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 
 
+-- CARR REVIEWED CONTROL CATALOG (bin/schema-snapshot.sh) — exact two-row seed.
+-- Verified against the source immediately before this block is written. The
+-- following safely quoted rows preserve the source verification and update
+-- timestamps; never dump arbitrary ops.enforcement_control_catalog rows.
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('human_authority_runtime','migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js','mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py','transactional_schema','t','2026-08-20T15:09:01.704306Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('platform_metering_pre_dispatch','lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py','ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py','deny_gate','t','2026-08-20T15:09:01.704306Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
 --
 -- CARR DOCTRINE META BOOTSTRAP (bin/schema-snapshot.sh) — canonical, not
 -- production data.  A snapshot rebuild starts generation at zero.

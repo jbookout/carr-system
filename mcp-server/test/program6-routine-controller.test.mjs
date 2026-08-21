@@ -38,6 +38,19 @@ test("read endpoint is exact and returns registered durable card readback", asyn
   assert.deepEqual(calls, [{ actor: ACTOR, name: "work-request-card", args: { work_request: REF }, profile: "full" }]);
 });
 
+test("current endpoint is a fixed authenticated collection read with no browser filters", async () => {
+  const { controller, calls } = subject({ callToolFn: async (_env, actor, name, args, profile) => {
+    calls.push({ actor, name, args, profile });
+    return { ok: true, items: [{ human_ref: REF, state: "captured", source: { freshness: "current" } }] };
+  } });
+  const response = await controller.fetch(request("/api/system-work/current"), {}, {}, ACTOR, SESSION);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, data: { ok: true, items: [{ human_ref: REF, state: "captured", source: { freshness: "current" } }] } });
+  assert.deepEqual(calls, [{ actor: ACTOR, name: "current-work-requests", args: {}, profile: "full" }]);
+  const withQuery = await controller.fetch(request("/api/system-work/current?state=ready"), {}, {}, ACTOR, SESSION);
+  assert.equal(withQuery.status, 200, "query parameters cannot select collection scope");
+});
+
 test("report route admits only the capture material and never a caller-selected verb or authority", async () => {
   const { controller, calls, authorizations } = subject();
   const body = { idempotency_key: "10000000-0000-0000-0000-000000000001", situation: "stale intake", title: "Source refresh", desired_outcome: "Current source", acceptance_criteria: [{ id: "SOURCE", text: "source is current" }] };
