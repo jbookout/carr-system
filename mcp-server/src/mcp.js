@@ -15,6 +15,7 @@ import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
+import { sessionForAccessToken } from "./session.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -340,11 +341,12 @@ export function readCallInsertSQL(actor, verb, ok, errorKind) {
   const identity = auditIdentity(actor);
   return {
     text: `insert into tool_read_call (verb, actor_slug, actor_id, ok, error_kind, via, client_id,
-             organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
-           values ($1, $2, (select id from actor where slug=$2), $3, $4, $5, $6, $7, $8, $9, $10)`,
+             organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class,
+             application_session_id)
+           values ($1, $2, (select id from actor where slug=$2), $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     params: [verb, actor.slug || null, ok, errorKind || null, actor.via || null, actor.client_id || null,
              identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
-             identity.authorization_class],
+             identity.authorization_class, identity.application_session_id],
   };
 }
 
@@ -656,6 +658,26 @@ export const mcpApiHandler = {
       });
       return json({ error: "unauthorized" }, 401);
     }
-    return dispatch(request, env, ctx, actor);
+    // THE ONLY DOOR THAT MINTS (migration 0204/0206), and it mints HERE rather
+    // than in dispatch() because dispatch is shared by every door. The bearer
+    // doors reach dispatch too, and they authenticate against a static secret
+    // map with no issuance instant, no expiry and no revocation state — so a
+    // session minted for one would be a fiction. Keeping the mint at the door
+    // means "which doors may qualify" is answered by which code path runs, not
+    // by a condition someone could later widen by accident.
+    //
+    // The session is attached to the actor the same way correlation_id is
+    // below in dispatch(): every write verb then picks it up through
+    // auditIdentity(actor) in tools.js with no change to any verb.
+    //
+    // A null result is normal, not an error — see session.js. It means this
+    // request records legacy, non-qualifying evidence, exactly as every
+    // request did before the substrate existed.
+    const sessionId = await sessionForAccessToken(request, env, actor, {
+      mintFn: env.DATABASE_URL_SESSION_ISSUER
+        ? (text, params) => neon(env.DATABASE_URL_SESSION_ISSUER).query(text, params)
+        : null,
+    });
+    return dispatch(request, env, ctx, sessionId ? { ...actor, application_session_id: sessionId } : actor);
   },
 };
