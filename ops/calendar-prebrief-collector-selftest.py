@@ -66,7 +66,7 @@ class EKEventStore:
     environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(fake), "CARR_CALENDAR_PREBRIEF_ALLOWLIST": str(allowlist), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY": str(key), "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION": "fixture-1"}
     run = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(contract()), text=True, capture_output=True, env=environment, check=False)
     envelope = json.loads(run.stdout) if run.returncode == 0 else {}
-    check("real collector subprocess signs DB-bound EventKit capture", run.returncode == 0 and envelope.get("challenge_id") == contract()["challenge_id"] and envelope.get("raw_payload_count") == 1 and envelope.get("signature"))
+    check("real collector subprocess signs DB-bound EventKit capture", bool(run.returncode == 0 and envelope.get("challenge_id") == contract()["challenge_id"] and envelope.get("raw_payload_count") == 1 and envelope.get("signature")))
     check("raw attendee appears only in the allowed collector stdout pipe", "raw.attendee@example.test" not in run.stderr and "raw.attendee@example.test" in run.stdout)
     changed = contract(); changed["calendar_keys"] = ["a" * 64]
     mismatch = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(changed), text=True, capture_output=True, env=environment, check=False)

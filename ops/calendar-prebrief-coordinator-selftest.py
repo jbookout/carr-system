@@ -131,7 +131,7 @@ with tempfile.TemporaryDirectory() as raw:
     claim = root / "claim.py"
 
     def dsn(user: str) -> str:
-        return f"postgresql://{user}:fixture@db.example/carr"
+        return f"postgresql://{user}:fixture@db.example/carr"  # ci-secret-scan: allow — fixture
 
     def run_e2e(mode: str) -> subprocess.CompletedProcess[str]:
         job_id = live_job if mode == "live" else canary_job

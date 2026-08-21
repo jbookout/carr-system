@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location("activation",ROOT/"tools/calendar-prebrief-activation.py"); assert spec and spec.loader
 mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-bad=[]
+bad: list[str] = []
 def check(name, ok):
  print(("  ok " if ok else "  FAIL ")+name); bad.extend([] if ok else [name])
 def refuses(fn):
@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory() as raw:
   def cursor(self): return PreflightCur(self.user)
   def __enter__(self): return self
   def __exit__(self,*_): return False
- probes=[]
+ probes: list[str] = []
  def connect_preflight(value):
   probes.append(value)
   user=value.split("://",1)[1].split(":",1)[0]
@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory() as raw:
  env.chmod(0o644); check("insecure env permissions refuse",refuses(lambda:mod.load_scoped_env(env,{}))); env.chmod(0o600)
  link=root/"link.env"; link.symlink_to(env); check("symlink env refuses",refuses(lambda:mod.load_scoped_env(link,{})))
  allow=root/"joe.json"; allow.write_text('{"version":1,"calendars":[{"identifier":"raw-id","sponsor":"joe"}]}'); allow.chmod(0o600)
- calls=[]
+ calls: list[tuple[object, object]] = []
  class Cur:
   def execute(self,q,p=None): calls.append((q,p))
   def fetchone(self): return ("carr_authority_joe","carr_authority_joe") if len(calls)==1 else ({"sponsor":"joe","configuration_digest":"d"*64,"active_revision_id":"r"},)

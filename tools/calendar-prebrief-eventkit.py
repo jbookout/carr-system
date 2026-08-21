@@ -310,15 +310,15 @@ def capture_raw_snapshot(
     events: list[dict[str, Any]] = []
     for event in store.eventsMatchingPredicate_(predicate) or []:
         calendar_id = _identifier(_event_calendar(event), "calendarIdentifier")
-        entry = entry_by_id.get(calendar_id)
-        if entry is None:
+        matched_entry = entry_by_id.get(calendar_id)
+        if matched_entry is None:
             raise Refusal("EventKit returned event outside configured calendar coverage")
         event_start, event_end = _utc(event.startDate()), _utc(event.endDate())
         if event_end <= event_start or event_start < start or event_start >= end:
             raise Refusal("EventKit returned event outside requested bounded window")
         start_text = event_start.isoformat().replace("+00:00", "Z")
         events.append({
-            "sponsor": entry["sponsor"],
+            "sponsor": matched_entry["sponsor"],
             "calendar_key": opaque_key("calendar", calendar_id),
             "event_key": opaque_key("event", calendar_id, _identifier(event, "eventIdentifier")),
             "occurrence_key": opaque_key("occurrence", calendar_id, _identifier(event, "eventIdentifier"), start_text),

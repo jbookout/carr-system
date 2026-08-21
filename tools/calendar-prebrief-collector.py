@@ -173,7 +173,14 @@ def _eventkit_capture(contract: Mapping[str, Any], allowlist_path: Path) -> dict
     if snapshot.get("window") != {"starts_at": contract["window_starts_at"], "ends_at": contract["window_ends_at"]}:
         raise Refusal("EventKit did not preserve the DB-issued capture window")
     observed = snapshot.get("observed_calendars")
-    if not isinstance(observed, list) or sorted(item.get("calendar_key") for item in observed if isinstance(item, dict)) != contract["calendar_keys"]:
+    observed_keys: list[str] = []
+    if isinstance(observed, list):
+        for item in observed:
+            key = item.get("calendar_key") if isinstance(item, dict) else None
+            if not isinstance(key, str):
+                raise Refusal("EventKit returned invalid calendar coverage")
+            observed_keys.append(key)
+    if not isinstance(observed, list) or sorted(observed_keys) != contract["calendar_keys"]:
         raise Refusal("EventKit did not preserve the DB-issued calendar coverage")
     return snapshot
 
