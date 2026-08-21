@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-check-brand.py — read a finished PDF back and check EVERY page against CARR brand.
+check-brand.py, read a finished PDF back and check EVERY page against CARR brand.
 
 Dell's standing instruction, 2026-08-20: check the whole document, all pages, before
 anything is delivered. This exists because the first River Bank tour packet was
@@ -20,7 +20,7 @@ Exit 0 clean, 1 if anything failed. Findings name the page.
 
 WHAT THIS CANNOT SEE, so nobody over-trusts a clean run: Chrome subsets the inlined
 webfonts and emits them as unnamed Type3, so this confirms that no UNEXPECTED face
-appears — it cannot confirm the embedded outlines really are Oswald and Montserrat.
+appears, it cannot confirm the embedded outlines really are Oswald and Montserrat.
 That holds by construction, since build-space-search.py inlines them from the brand
 asset folder. It also does not judge composition: whether a photo is the right photo,
 whether a page is well balanced, whether the words are true. Read the pages too.
@@ -28,6 +28,7 @@ whether a page is well balanced, whether the words are true. Read the pages too.
 
 import argparse
 import collections
+import os
 import re
 import sys
 
@@ -43,7 +44,7 @@ ORANGE_INK = (0xB4, 0x55, 0x0F)
 # Anything else that carries real text is a colour nobody chose on purpose.
 APPROVED = [NAVY, NAVY_DEEP, ORANGE, ORANGE_INK, (0, 0, 0), (0xFF, 0xFF, 0xFF)]
 
-# CARR's greys are BLUE-greys — #5C6B7C has a 32-point channel spread, so a flat
+# CARR's greys are BLUE-greys, #5C6B7C has a 32-point channel spread, so a flat
 # "r≈g≈b" test calls the muted print colour off-brand and buries the real findings.
 # Saturation separates them cleanly: the blue-greys sit around 0.26, navy and orange
 # above 0.8. Measured, not guessed.
@@ -55,7 +56,7 @@ BRAND_FACES = ("Oswald", "Montserrat")
 # is checked instead, once, and these names are skipped per-span.
 OPAQUE_FACES = ("Unnamed", "T3")
 # Tabular figures in a spec grid are a deliberate typographic choice, not a brand
-# violation — but they are only correct for SHORT values.
+# violation, but they are only correct for SHORT values.
 MONO_FACES = ("Mono", "Menlo", "Consolas", "Courier")
 
 # An accent run longer than this is body text wearing the accent colour, which is the
@@ -89,6 +90,9 @@ def check(path, max_accent_run):
     fails, warns = [], []
     faces = collections.Counter()
 
+    if "—" in os.path.basename(path):
+        fails.append(f"filename: em dash in {os.path.basename(path)!r}")
+
     for pno, page in enumerate(doc, 1):
         # Accumulate consecutive same-colour text so an accent RUN is measured across
         # the spans it is split into, rather than per span.
@@ -121,7 +125,7 @@ def check(path, max_accent_run):
                         run_len += len(text)
                         if run_len > max_accent_run and not run_page_reported:
                             fails.append(
-                                f"p{pno}: {run_len} characters of accent-orange text — "
+                                f"p{pno}: {run_len} characters of accent-orange text, "
                                 f"orange is an accent, never body text "
                                 f"(near {text.strip()[:44]!r})")
                             run_page_reported = True
@@ -132,9 +136,21 @@ def check(path, max_accent_run):
                     # also the shape that blows out a spec grid.
                     if any(m in font for m in MONO_FACES) and len(text.strip()) > 48:
                         fails.append(
-                            f"p{pno}: {len(text.strip())} characters set in {font!r} — "
+                            f"p{pno}: {len(text.strip())} characters set in {font!r}, "
                             f"tabular figures are for short values, not prose "
                             f"({text.strip()[:44]!r})")
+
+        # Em dashes are banned outright on every CARR surface, Dell 2026-08-20, after
+        # repeated corrections that kept not sticking. Checked here rather than trusted
+        # to memory, because memory is what failed. The filename is checked too: the
+        # first River Bank packet shipped with two of them in its own name.
+        page_text = page.get_text()
+        n_em = page_text.count("—")
+        if n_em:
+            sample = re.search(r".{0,40}—.{0,40}", page_text)
+            fails.append(f"p{pno}: {n_em} em dash(es), banned on every CARR surface "
+                         f"({sample.group(0).strip()!r})" if sample else
+                         f"p{pno}: {n_em} em dash(es)")
 
         if not page.get_text().strip() and not page.get_images():
             fails.append(f"p{pno}: blank page")

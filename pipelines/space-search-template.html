@@ -308,8 +308,8 @@
   .foot .who{ font-family:"CARR Display","Oswald",sans-serif; font-size:20px; font-weight:600;
               letter-spacing:.03em; text-transform:uppercase; color:var(--ink); margin-bottom:5px; }
   .foot a{ color:var(--accent-ink); }
-  /* Body face, not tabular figures. The stamp reads as a colophon — dates, source
-     names, an area — and only the numbers in it are numbers. A source list set in
+  /* Body face, not tabular figures. The stamp reads as a colophon, dates, source
+     names, an area, and only the numbers in it are numbers. A source list set in
      Menlo is prose wearing a spreadsheet's clothes, and CARR's body face is
      Montserrat. Caught by check-brand.py on the first River Bank packet. */
   .stamp{ font-size:11px; color:var(--muted); line-height:1.8; letter-spacing:.01em; }
@@ -371,7 +371,7 @@
   .agent b{ color:var(--body); font-weight:600; }
 
   /* The occupancy note: prose, so body face and body colour. It used to be rendered
-     into a spec cell, which is tabular figures and — with `em` — orange. Brand
+     into a spec cell, which is tabular figures and, with `em`, orange. Brand
      doctrine: orange is an accent, never body text. */
   .onote{ font-size:13.5px; color:var(--muted); margin:11px 0 0; max-width:68ch; }
 
@@ -404,7 +404,7 @@
   .plansrc{ font-size:12px; color:var(--muted); margin:18px 0 0; letter-spacing:.03em; }
 
   @media print{
-    /* On paper the TOUR candidates print in full — those are the ones being walked.
+    /* On paper the TOUR candidates print in full, those are the ones being walked.
        Lower tiers stay collapsed: printing every panel pushed the packet to 12 pages
        with spec grids orphaned at the top of pages. Screen keeps all of them openable. */
     .more summary{ display:none; }
@@ -592,9 +592,9 @@
     /* ---- PACKET MODE: one listing to a sheet ----------------------------------
        A report gets READ, so it prints every detail panel expanded. A packet gets
        CARRIED, and a property whose page turns mid-spec is useless standing in the
-       car park. In packet mode the reference grid — building class, storeys, floor,
+       car park. In packet mode the reference grid, building class, storeys, floor,
        divisibility, operating expenses, all of it already on screen and most of it
-       already in the headline specs — drops out, and what stays is what someone
+       already in the headline specs, drops out, and what stays is what someone
        actually uses on site: the photo, the reasoning, the headline numbers, the
        things to check, who to expect, and room to write.
        Report mode is untouched and remains the default. */
@@ -611,11 +611,15 @@
     :root[data-print="packet"] .tier1 .prop{ padding:9pt 11pt; margin-bottom:0; }
     /* "About the building" is background: true, useful sitting at a desk, and the
        first thing to go when the constraint is one sheet. What replaces it is the
-       page itself — you are standing in the building. The open questions stay,
+       page itself, you are standing in the building. The open questions stay,
        because those are the reason anyone brought paper. */
     :root[data-print="packet"] .sub.about{ display:none; }
-    :root[data-print="packet"] .shot{ max-height:1.85in; margin-top:7pt; }
-    :root[data-print="packet"] .shot img{ max-height:1.85in; }
+    /* Width comes from the photo's own pixels (the generator sets it inline). Height is
+       capped only so a 4:3 shot at full width cannot eat the sheet and push the card
+       onto a second page, the crop is centred, and a photo whose natural height is
+       already under the cap is never touched, which is every small source here. */
+    :root[data-print="packet"] .shot{ margin-top:7pt; max-height:2.75in; }
+    :root[data-print="packet"] .shot img{ max-height:2.75in; object-fit:cover; }
     :root[data-print="packet"] .specs{ margin-top:7pt; padding-top:6pt; gap:6pt 12pt; }
     :root[data-print="packet"] .agent{ margin-top:7pt; }
     :root[data-print="packet"] .notes{ margin-top:8pt; padding-top:7pt; }

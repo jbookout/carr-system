@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build-space-search.py — CARR client-facing space-search report generator.
+build-space-search.py, CARR client-facing space-search report generator.
 
 Reads a normalized properties.json (schema v1, see DNA/Deal Management/space-search-sop.md)
 and emits ONE self-contained HTML file: CARR brand fonts, logo, and photos all inlined as
@@ -13,7 +13,7 @@ four different MLS PDF formats together.
 
 HARD RULE: no listing-agent or brokerage contact information EVER reaches a client-facing
 report (Joe, 2026-07-22). Broker data lives in the internal xlsx only. This generator has no
-code path that renders it — the normalized schema simply has no field for it.
+code path that renders it, the normalized schema simply has no field for it.
 
 Usage:
     python3 build-space-search.py <search-folder>
@@ -72,10 +72,40 @@ def sf(n):
 
 NOT_PUBLISHED = '<span class="np">Not published</span>'
 
+# The floor a printed photograph has to clear to look like a photograph. Listing
+# sources cap out at wildly different sizes -- a CBRE memorandum carries 4500px
+# originals, CoStar 650, and an MLS quick report only a 300px thumbnail -- and the
+# report used to stretch every one of them across the full column regardless. A 300px
+# image over a 7in column is 43 DPI, which is what "blurry" means. Photos are sized
+# from their own pixels now: a small one prints small and SHARP rather than big and
+# soft. Varying widths down the packet are the honest signal that the sources vary.
+MIN_PHOTO_DPI = 150
+
+
+def jpeg_size(path):
+    """Pixel dimensions from the JPEG header. Deliberately no Pillow import: this
+    generator has never needed an imaging dependency and should not grow one to read
+    four bytes."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    i = 2
+    while i < len(data) - 9:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        # SOF0..SOF15, excluding the non-frame markers DHT/JPG/DAC
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            h = int.from_bytes(data[i + 5:i + 7], "big")
+            w = int.from_bytes(data[i + 7:i + 9], "big")
+            return w, h
+        i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    return None, None
+
 
 def val(v, fmt=str):
     """Render a value, or a visible 'Not published' when the source did not carry it.
-    Gaps must stay visible — a blank cell reads as an oversight, a labelled gap reads
+    Gaps must stay visible, a blank cell reads as an oversight, a labelled gap reads
     as a known open item and becomes a question for the landlord."""
     return NOT_PUBLISHED if v in (None, "") else fmt(v)
 
@@ -236,7 +266,7 @@ def agent_line(p):
         if _CONTACT.search(value):
             raise ContactLeak(
                 f'{p["address"]}: listing_agent.{label} contains contact detail '
-                f'({value!r}). Names and firms only — no phone, email, or web address.')
+                f'({value!r}). Names and firms only, no phone, email, or web address.')
     if not (name or firm):
         return ""
     # Where only the brokerage is published, "Listing agent: Somers & Company" names a
@@ -247,7 +277,7 @@ def agent_line(p):
     at = f'{who}, {esc(firm)}' if firm else who
     # Name and firm, full stop. The line used to end "Contact details are in the
     # internal sheet, not here", which announced to the client that we were withholding
-    # something — drawing attention to an omission they had no reason to notice and
+    # something, drawing attention to an omission they had no reason to notice and
     # would never have asked about. (Dell, 2026-08-20.) The withholding itself is
     # unchanged and still enforced above; it just does not narrate itself on the page.
     return f'<p class="agent">Listing agent: {at}</p>'
@@ -266,7 +296,7 @@ def build_plans_sheet(p, plans):
     """A second sheet for one option, carrying the drawings we hold for it.
 
     Each plan names what the drawing IS and where it came from, because an
-    undated drawing of unknown provenance is not evidence — several of these
+    undated drawing of unknown provenance is not evidence, several of these
     are twenty-year-old construction documents and the packet has to say so.
     """
     items = []
@@ -300,7 +330,7 @@ def build_plans_sheet(p, plans):
       </article>"""
 
 
-def build_tour_card(p, photos, minis=None):
+def build_tour_card(p, photos, minis=None, photo_px=None):
     """Tier 1 and 2: a full card with photo, reasoning, specs, and an expandable detail panel.
 
     NO loading="lazy" on these images (removed 2026-07-29, Joe's go). Every byte is already
@@ -311,7 +341,11 @@ def build_tour_card(p, photos, minis=None):
     """
     img = ""
     if p.get("photo") and p["photo"] in photos:
-        img = (f'<div class="shot"><img src="data:image/jpeg;base64,{photos[p["photo"]]}" '
+        # Cap the printed width at what this photograph's own pixels can carry. Without
+        # it a 300px MLS thumbnail is stretched to the full column and prints at 43 DPI.
+        px = photo_px.get(p["photo"], (None, None))[0] if photo_px else None
+        cap = f' style="max-width:{px / MIN_PHOTO_DPI:.2f}in"' if px else ""
+        img = (f'<div class="shot"{cap}><img src="data:image/jpeg;base64,{photos[p["photo"]]}" '
                f'alt="{esc(p["address"])}"></div>')
 
     # A locator cut centred on this property. The pin sits dead centre because the
@@ -334,7 +368,7 @@ def build_tour_card(p, photos, minis=None):
 
     # The occupancy note is PROSE and belongs in body type under the grid, not inside a
     # spec cell. A spec cell is a short value in tabular figures, and `em` paints it
-    # orange — so a 40-word sentence landed as a wall of orange monospace that blew out
+    # orange, so a 40-word sentence landed as a wall of orange monospace that blew out
     # the row height and pushed the rest of the grid sideways. Brand doctrine is
     # explicit that orange is an accent and never body text, and this was body text.
     # Nine of the eleven River Bank pages looked broken because of it.
@@ -543,12 +577,13 @@ def main():
         print(f"STOP: {exc}", file=sys.stderr)
         return 2
 
-    photos = {}
+    photos, photo_px = {}, {}
     pdir = os.path.join(folder, "photos")
     if os.path.isdir(pdir):
         for fn in os.listdir(pdir):
             if fn.lower().endswith((".jpg", ".jpeg")):
                 photos[fn] = b64(os.path.join(pdir, fn))
+                photo_px[fn] = jpeg_size(os.path.join(pdir, fn))
 
     # Plans are PNG rather than JPEG on purpose: these are line drawings, and JPEG
     # ringing around thin black linework is exactly what makes a floor plan unreadable
@@ -597,10 +632,10 @@ def main():
         # Asking PRICE range across the tour set only, same rule as the rent span:
         # quoting the full search range mixes buildings we would never put him in.
         prices = [p["sale"]["price"] for p in tour if p.get("sale") and p["sale"].get("price")]
-        rate_span = (f'${min(prices):,.0f}&ndash;{max(prices):,.0f}' if prices else "&mdash;")
+        rate_span = (f'${min(prices):,.0f}&ndash;{max(prices):,.0f}' if prices else "n/a")
     else:
         rates = [p["rate"]["min"] for p in tour if p.get("rate") and p["rate"].get("min")]
-        rate_span = f'${min(rates):,.0f}&ndash;{max(rates):,.0f}' if rates else "&mdash;"
+        rate_span = f'${min(rates):,.0f}&ndash;{max(rates):,.0f}' if rates else "n/a"
 
     tpl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "space-search-template.html")
     with open(tpl_path, encoding="utf-8") as fh:
@@ -627,7 +662,7 @@ def main():
         # "packet" prints one listing to a sheet; anything else keeps the full report
         # print, which is the default and what every prior search rendered.
         # The empty-tier attributes ride along so print CSS can drop a section that has
-        # no rows. On screen the authored empty state still shows — "nothing was ruled
+        # no rows. On screen the authored empty state still shows, "nothing was ruled
         # out" is a real finding to a reader. On paper, in a packet, three boxes
         # explaining that three lists are empty is just three sheets to carry.
         "__PRINT_MODE__": (f' data-print="packet" data-look="{len(look)}" data-out="{len(out)}"'
@@ -672,13 +707,13 @@ def main():
         "__STANDFIRST__": standfirst,
         # A plans sheet follows the card it belongs to, so the drawings sit behind
         # that property in the packet rather than in an appendix nobody turns to.
-        "__TOUR_CARDS__": ("".join(build_tour_card(p, photos, minis) + build_plans_sheet(p, plans)
+        "__TOUR_CARDS__": ("".join(build_tour_card(p, photos, minis, photo_px) + build_plans_sheet(p, plans)
                                    for p in tour) or empty_state(
             "Nothing clears the bar yet",
             "Every available space in this size range has a disqualifying problem right now. That is a real "
             "finding rather than a gap in the search, and it usually means the right move is to wait for the "
             "next listing or approach an owner who is not marketing. Joe will explain which.")),
-        "__LOOK_CARDS__": ("".join(build_tour_card(p, photos, minis) for p in look) or empty_state(
+        "__LOOK_CARDS__": ("".join(build_tour_card(p, photos, minis, photo_px) for p in look) or empty_state(
             "No borderline options",
             "Nothing in this search sits on the fence. Every space either fits or clearly does not.")),
         "__OUT_ROWS__": ("".join(build_out_row(p) for p in out) or empty_state(
