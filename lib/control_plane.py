@@ -27,6 +27,7 @@ BACKOFFS = {"constant", "linear", "exponential"}
 # into a canary.
 CANARY_ISOLATION_GUARDS: frozenset[str] = frozenset({
     "calendar-fetch-daily.canary.v1", "notes-sweep-hourly.canary.v1",
+    "nightly-record-layer.availability-matcher.canary.v1",
 })
 DECISION_FIELDS = ("routing", "filtering", "validation", "completion")
 INVENTORY_FIELDS = {

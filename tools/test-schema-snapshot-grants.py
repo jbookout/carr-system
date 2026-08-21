@@ -61,6 +61,15 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # age out of the snapshot. This list and the preamble in bin/schema-snapshot.sh
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
+#
+# carr_calendar_prebrief_jobs, carr_calendar_prebrief_attestors, and
+# carr_calendar_prebrief_email_resolver are known here while 0229 remains pending. The
+# generator deliberately excludes it from its active catalog query and role
+# preamble so the current snapshot cannot leak a 0229 artifact.
+# Move it into APP_ROLES and the generator together on the snapshot refresh
+# that records 0229 as applied.
+PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
+                        "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver"]
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
@@ -85,6 +94,13 @@ def main():
         return 1
     sql = open(SNAPSHOT).read()
     lines = sql.split("\n")
+
+    executable_lines = [line for line in lines
+                        if line.strip() and not line.lstrip().startswith("--")]
+    for role in PENDING_ROLE_BUNDLES:
+        check(f"pending role {role} is absent from executable snapshot SQL",
+              not any(role in line for line in executable_lines),
+              "pending migration roles must not leak into the applied-only baseline")
 
     check("the snapshot carries a CARR GRANTS section",
           "CARR GRANTS" in sql)

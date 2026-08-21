@@ -175,21 +175,34 @@ def activate_enforced_rule_fixture(cur: psycopg.Cursor[Any], rule_id: Any,
                 'transactional_schema',true,now())""", (rule_id, control_key))
     cur.execute("""with approved as (
           select r.id,r.version,encode(digest(r.statement,'sha256'),'hex') statement_hash,
-                 jsonb_build_object('fixture','guidance-registry-db-gate') contract
+                 jsonb_build_object(
+                   'fixture','guidance-registry-db-gate',
+                   'binding_moment','database acceptance',
+                   'applicability','{}'::jsonb,
+                   'projection','{}'::jsonb,
+                   'reachability','{}'::jsonb,
+                   'input_contract','{}'::jsonb) contract
             from rule r where r.id=%s
         )
         insert into ops.rule_approval_receipt
           (idempotency_key,rule_id,rule_version,statement_hash,actor_id,policy_kind,
            enforcement_status,requested_control_keys,installed_control_keys,reason,
            normalized_contract,contract_hash,evidence_refs)
-        select %s,id,version,statement_hash,%s,'machine_enforceable','hard_enforced',
+        select %s,id,version+1,statement_hash,%s,'machine_enforceable','hard_enforced',
                array[%s],array[%s],'rollback-only enforced activation fixture',contract,
                encode(digest(contract::text,'sha256'),'hex'),
                array['ops/guidance-registry-db-gate.py']
           from approved""",
         (rule_id, f"guidance-db-gate-approval:{rule_id}", actor_id,
          control_key, control_key))
-    cur.execute("""update rule set status='active',activated_by=%s,activated_at=now()
+    cur.execute("""insert into ops.authority_receipt
+        (idempotency_key,kind,subject_type,subject_id,actor_id,decision,
+         contract_hash,evidence_refs)
+        select 'approval:'||idempotency_key,'activation','rule',rule_id,actor_id,
+               'rollback-only exact guidance fixture',contract_hash,evidence_refs
+          from ops.rule_approval_receipt where rule_id=%s""", (rule_id,))
+    cur.execute("""update rule set status='active',activated_by=%s,activated_at=now(),
+        enforcement='gate'
         where id=%s""", (actor_id, rule_id))
 
 
@@ -229,17 +242,17 @@ def revision(cur: psycopg.Cursor[Any], item_id: Any, actor_id: Any, kind: str = 
         }[kind]
     }
     if kind == "constraint":
-        control_key = f"guidance-db-gate-{uuid.uuid4()}"
-        implementation_ref = "migrations/0168_guidance_registry.sql"
-        test_ref = "ops/guidance-registry-db-gate.py"
         source_rule_id = one(
             cur, "select source_rule_id from ops.guidance_item where id=%s", (item_id,))
         if source_rule_id is None:
             fail("constraint fixture requires a rule-backed guidance item")
-        cur.execute("""insert into ops.rule_enforcement_point
-            (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed)
-            values (%s,%s,%s,%s,'transactional_schema',true)""",
-                    (source_rule_id, control_key, implementation_ref, test_ref))
+        cur.execute("""select control_key,implementation_ref,test_ref
+            from ops.rule_enforcement_point
+            where rule_id=%s and installed order by control_key limit 1""", (source_rule_id,))
+        control_row = cur.fetchone()
+        if control_row is None:
+            fail("constraint fixture requires its enforcement point before approval")
+        control_key, implementation_ref, test_ref = control_row
         delivery.update({
             "enforcement_control": control_key,
             "evidence": [implementation_ref],

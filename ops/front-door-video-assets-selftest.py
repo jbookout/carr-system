@@ -39,8 +39,8 @@ assert second.returncode == 0 and hashlib.sha256(page.read_bytes()).hexdigest() 
 html = page.read_text()
 for forbidden in ("&folder=", "CloudStorage", "GoogleDrive", "/poison/ambient-drive", "DNA%2F", "00_Context%2F"):
     assert forbidden not in html, forbidden
-assert html.count("claude://cowork/new?q=") == 32
-assert html.count("Use%20the%20CARR%20record-layer%20verbs") == 32
+assert html.count("claude://cowork/new?q=") == 33
+assert html.count("Use%20the%20CARR%20record-layer%20verbs") == 33
 assert "DNA/" not in html and "00_Context/" not in html
 
 tile_prompts: dict[str, str] = {}
@@ -88,6 +88,7 @@ assert "pending seam: exact installed control contract unavailable" in tile_prom
 assert "allocate the next" not in tile_prompts["New Prospect"] and "live sheet" not in tile_prompts["New Vendor"]
 assert "comp-ingress seam as unavailable" in tile_prompts["File a Comp"]
 assert "prepare-conversation" in tile_prompts["Prep for a Meeting"]
+assert "morning-brief" in tile_prompts["Open Morning Brief"]
 assert all(verb in tile_prompts["Open the Dashboard"] for verb in ("today-triage", "deal-room-board", "loop-board"))
 for misleading in ("write the row", "write a sheet", "confirm the filename", "save it to DNA", "fall back to"):
     assert all(misleading not in prompt.lower() for prompt in tile_prompts.values()), misleading

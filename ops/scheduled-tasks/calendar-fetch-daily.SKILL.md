@@ -1,42 +1,41 @@
 ---
 name: calendar-fetch-daily
-description: Weekday calendar feed fetch, then push into the record layer: runs ~/carr-local/fetch-calendar.sh (replaces the launchd job us.carr.fetchcalendar) and then posts the normalized events to the ingest socket (ORDER 12 lane c)
+description: Weekday local EventKit calendar capture into the CARR record layer.
 ---
 
-STORE-FIRST (added 2026-08-09, loop #289): the doctrine STORE is the source of truth for every governing doc named below. Before reading any `.md` path in the vault, try `read-doctrine` with that file's stem as the document slug; if a store doc exists, IT WINS and the vault file may be a stale duplicate. Two such duplicates were found on 2026-08-09 and this routine's sibling had been reading a three-week-old SOP because its pointer named the file instead of the slug. Do not edit the vault copy either way: hand-authored vault markdown is closed by record-home-gate.py (rule 14181e60).
+Run the registered weekday calendar capture through the local macOS EventKit
+access bundle. This task reads the local Calendar store, matches attendees only
+through the governed record-layer path, and records its result through the
+control plane.
 
-Run the CARR calendar feed fetch, then push the events into the record layer. Two steps, in that order — the push reads the file the fetch just wrote.
+## Registered operation
 
-## Step 1 — fetch the feed
+The native launchd surface owns the weekday 07:20 America/Chicago cadence. Do
+not create a duplicate scheduler or substitute a published-feed reader.
 
-Execute exactly this via Bash:
+When executing the registered operation manually for an approved recovery or
+readback, use the exact manifest entrypoint and arguments:
 
-bash "{{HOME}}/carr-local/fetch-calendar.sh"
+```sh
+cd "{{REPO}}" && bin/calendar-eventkit-capture.sh --days 7
+```
 
-Then verify success: the last line of "{{VAULT}}/DNA/Team/calendar-fetch.log" must be a fresh timestamp with "OK". If it shows an error or the file was not touched in this run, report the failure plainly (name the error line) — do not retry more than once, do not modify the script, do not create any other task.
+The access bundle must have macOS Calendar permission. If permission is denied,
+the bundle or its protected output is unavailable, or the command emits a
+`calendar-capture: FAIL` or `calendar-capture: REFUSE` line, report that result
+plainly and leave the record layer unchanged. Do not work around the failure by
+reading another calendar source or by creating a new task.
 
-## Step 2 — push the events to the ingest socket
+## Verify the bounded result
 
-Execute EXACTLY this via Bash, VERBATIM, character for character — do not paraphrase it, do not add flags, do not substitute paths, do not re-quote it. Permission approval matches the exact command string, and a reworded command is an unapproved command (2026-07-31: an unapproved command in a scheduled session sat unexecuted for nearly six hours while its schedule record claimed the run had happened):
+Successful live output is the finite aggregate marker:
 
-cd ~/carr-system && ./bin/pull-gmail-calendar.py
+`calendar-capture: source=eventkit mode=live scanned=N exact=N domain=N unknown=N writes=N failed=0`
 
-**Run it even if step 1 failed.** The push reads whatever .ics files are on disk; a stale feed still carries real meetings, and skipping the push because the fetch broke loses a day of capture for no gain.
+Treat a nonzero `failed` count or a missing marker as a failed run. Report only
+the aggregate marker or failure line; do not place attendee addresses, calendar
+prose, event identifiers, tokens, or protected snapshots in task output.
 
-Verify by OUTPUT, not by the exit code and not by the fact that the task ran (protocol rule 28). The script prints one line per feed plus a summary:
-
-`calendar-pull: source=calendar window=<from>..<to> posted=N duplicate=M failed=K unparseable=S`
-
-- `failed=0` → success. Report the summary line as-is. **A high `duplicate` count is the healthy steady state**, not a problem: the socket is unique on (source, external_id), so every unchanged meeting in the window dedups on every run. `posted` is only ever new or newly-moved meetings.
-- `failed` above zero → quote the FAIL lines from `~/carr-system/out/capture-lanes.log` and report them. Do not retry more than once.
-- Exit code **78** means the ingest token is not configured yet (`~/.config/carr/ingest.env` missing, or no `CARR_INGEST_TOKEN_CALENDAR`). That is Joe's `wrangler secret put` step, documented in `DNA/Deal Management/record-layer/ingest-tokens-setup.md`. Report it as a pending human step; it is not a failure of this task, and nothing is lost — the next run after the token lands posts the same window.
-
-Never hand-write a curl for this (the token must not enter a transcript or `ps` output — that is why the script exists), never edit the script, and never create another scheduled task.
-
-## Context (for you, not to be re-litigated)
-
-Step 1 replaced the launchd job us.carr.fetchcalendar on 2026-07-22 because launchd background processes get "Operation not permitted" writing to the Google Drive CloudStorage path; the Claude harness has that access. Weekdays-only matches the system's weekend stand-down. The script writes calendar-latest.ics (JOE ONLY) plus the log line.
-
-Dell's feed is NOT this task's job and never has been. calendar-latest-dell.ics is written by Dell's own Mac ("CARR Calendar Fetch - Dell" Shortcuts automation, daily 7:55am, live since 2026-07-28) and reaches Joe's Mac by Google Drive sync. Since this task fires at ~7:09, a Dell file still dated yesterday is EXPECTED at run time — do not report it as a failure or as a fault in fetch-calendar.sh. Only flag Dell's feed if it is still older than ~26 hours well after 8:00am. Both feeds are read by the daily heartbeat (8:06) and the Monday brief.
-
-Step 2 was added 2026-07-31 under ORDER 12 lane (c), binding design `DNA/Deal Management/record-layer/wave2-design-2026-07-31.md` §2b. It posts BOTH partners' feeds, and it reads Dell's file at whatever age it happens to be — at 7:09 that is normally yesterday's copy, which is fine: the window runs a day back and two weeks forward, so a one-day-old Dell feed still covers nearly all of it, and the next morning's run picks up anything that changed. The script never fetches a feed itself; one fetcher, one job, and a network failure stays in the fetcher's log where it already gets read.
+The built-in retry policy is the registered control-plane policy. Do not add a
+manual retry loop, bypass the registered mode, or claim completion from the
+launch alone. There is no synced-file fallback on the normal path.

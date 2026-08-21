@@ -25,7 +25,7 @@ Knowledge lives as markdown in the Google Drive vault (`My Drive/CARR AI/`) fore
 
 ## Execution model (phase 2 live, 2026-07-24)
 
-**On both partner Macs this repo is the code runtime.** Joe's primary machine runs the scheduled pipelines; Dell's migrated secondary has no CARR AI vault mounted and runs no primary-only scheduled tasks. SOPs on the primary call `./run.sh deal-room|lead-board|renewal-feed|all`, which runs the repo generators against the vault (override the vault path with `CARR_VAULT`).
+**On both partner Macs this repo is the code runtime.** Joe's primary machine runs the scheduled pipelines; Dell's migrated secondary has no CARR AI vault mounted and runs no primary-only scheduled tasks. Normal `./run.sh deal-room|lead-board|all` paths use canonical record inputs and fail closed when they are unavailable. `renewal-feed` remains an explicit recovery-only MLS-file command until canonical MLS ingress exists; Drive use requires `--recovery --reason WHY` (and optional `--vault PATH`), while normal mode ignores ambient `CARR_VAULT`.
 
 **The vault copies are no longer Dell's Mac runtime.** They remain a cloud-only delivery/runtime fallback until that separate surface has verified replacement or retirement. The 2026-08-11 Dell migration does not by itself authorize deleting them. Until their own retirement gate passes, keep them synchronized with the repo. Change flow:
 

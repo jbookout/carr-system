@@ -8,13 +8,16 @@ import subprocess
 import tempfile
 import threading
 import json
+import hashlib
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 REPO = Path(__file__).resolve().parents[1]
 CALENDAR = REPO / "bin" / "pull-gmail-calendar.py"
 NOTES = REPO / "bin" / "notes-sweep-post.sh"
+LEASED_NOTES_RUN_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def main() -> int:
@@ -47,6 +50,8 @@ def main() -> int:
                 "CARR_CALENDAR_CANARY_ENV": str(config), "CARR_NOTES_CANARY_ENV": str(notes_config),
                 "CARR_CALENDAR_CANARY_ROOT": str(root / "calendar"),
                 "CARR_NOTES_CANARY_ROOT": str(root / "notes"),
+                "CARR_NOTES_CANARY_RUN_ID": LEASED_NOTES_RUN_ID,
+                "CARR_NOTES_CANARY_ATTEMPT": "1",
                 "CARR_VAULT": str(tmp / "empty-vault"),
                 "CARR_INGEST_URL": "https://live.invalid/ingest"}
 
@@ -62,7 +67,21 @@ def main() -> int:
             after = list(root.rglob("*")) if root.exists() else []
             check(label, result.returncode == 78 and before == after)
 
-        def configs(url: str, destination: str = "canary-destination") -> None:
+        def destination_for(url: str) -> str:
+            if len(url) >= 2 and url[0] == url[-1] and url[0] in {"'", '"'}:
+                url = url[1:-1]
+            parsed = urlsplit(url)
+            scheme = parsed.scheme.lower()
+            host = parsed.hostname.lower() if parsed.hostname else ""
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            port = parsed.port
+            authority = host if port is None or (scheme, port) in (("http", 80), ("https", 443)) else f"{host}:{port}"
+            normalized = urlunsplit((scheme, authority, parsed.path or "/", parsed.query, ""))
+            return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+        def configs(url: str, destination: str | None = None) -> None:
+            destination = destination_for(url) if destination is None else destination
             config.write_text(f"CARR_CANARY_INGEST_URL={url}\nCARR_CANARY_INGEST_TOKEN_CALENDAR=calendar-token\nCARR_CANARY_DESTINATION_ID={destination}\n")
             notes_config.write_text(f"CARR_CANARY_INGEST_URL={url}\nCARR_CANARY_INGEST_TOKEN_NOTES=notes-token\nCARR_CANARY_DESTINATION_ID={destination}\n")
             config.chmod(0o600); notes_config.chmod(0o600)
@@ -95,6 +114,10 @@ def main() -> int:
         configs("https://live.invalid/ingest", "isolated")
         rejected("calendar equal live URL refuses before network/local state", run_calendar)
         rejected("Notes equal live URL refuses before network/local state", lambda: run_notes("--status"))
+        configs("HTTPS://CANARY.INVALID:443")
+        old_base = base.copy(); base["CARR_INGEST_URL"] = "https://canary.invalid/"
+        rejected("Notes normalized scheme/default-port/root-path live equivalence refuses before writes", lambda: run_notes("--status"))
+        base.clear(); base.update(old_base)
 
         config.write_text("CARR_CANARY_INGEST_URL=$(bad)\n"); notes_config.write_text("CARR_CANARY_INGEST_URL=$(bad)\n"); config.chmod(0o600); notes_config.chmod(0o600)
         rejected("calendar malformed config refuses before network/local state", run_calendar)
@@ -110,6 +133,12 @@ def main() -> int:
         configs("https://canary.invalid/ingest"); config.write_text(config.read_text()+"CARR_CANARY_INGEST_URL=https://other.invalid\n"); notes_config.write_text(notes_config.read_text()+"CARR_CANARY_INGEST_URL=https://other.invalid\n")
         rejected("calendar duplicate config key refuses before writes", run_calendar)
         rejected("Notes duplicate config key refuses before writes", lambda: run_notes("--status"))
+        configs("https://canary.invalid/ingest")
+        notes_config.write_text(notes_config.read_text().replace(
+            "CARR_CANARY_INGEST_URL=https://canary.invalid/ingest",
+            "CARR_CANARY_INGEST_URL=https://repointed.invalid/ingest"))
+        notes_config.chmod(0o600)
+        rejected("Notes stale opaque destination digest refuses URL repoint before writes", lambda: run_notes("--status"))
 
         configs("https://canary.invalid/ingest?x=1&y=2")
         outside = tmp / "not-isolated"
@@ -130,12 +159,13 @@ def main() -> int:
         rejected("calendar unsafe destination refuses before writes", run_calendar)
         rejected("Notes unsafe destination refuses before writes", lambda: run_notes("--status"))
         configs("'https://canary.invalid/ingest?x=1&y=2'")
+        opaque_destination = destination_for("https://canary.invalid/ingest?x=1&y=2")
         calendar = run_calendar()
-        check("calendar valid canary has redacted identity marker", calendar.returncode == 0 and "mode=canary destination=canary-destination" in calendar.stdout and "calendar-token" not in calendar.stdout and "https://canary.invalid" not in calendar.stdout)
+        check("calendar valid canary has redacted identity marker", calendar.returncode == 0 and f"mode=canary destination={opaque_destination}" in calendar.stdout and "calendar-token" not in calendar.stdout and "https://canary.invalid" not in calendar.stdout)
         check("calendar valid canary creates only isolated log state", (root / "calendar" / "calendar-pull.log").is_file())
         notes = run_notes("--status")
         expected = {root / "notes" / "pending", root / "notes" / "sent", root / "notes" / "failed", root / "notes" / "swept-ids.txt", root / "notes" / "audio-only.txt"}
-        check("Notes valid canary status has redacted identity marker", notes.returncode == 0 and "mode=canary destination=canary-destination" in notes.stdout and "notes-token" not in notes.stdout and "https://canary.invalid" not in notes.stdout)
+        check("Notes valid canary status is redacted non-evidence", notes.returncode == 0 and f"mode=canary destination={opaque_destination}" in notes.stdout and "notes-canary-result" not in notes.stdout and "notes-token" not in notes.stdout and "https://canary.invalid" not in notes.stdout)
         check("Notes valid canary writes queue and ledger state only under isolated root", all(path.exists() for path in expected))
         captured: list[tuple[str, str, dict]] = []
         class Handler(BaseHTTPRequestHandler):
@@ -159,7 +189,29 @@ def main() -> int:
             copied.write_text(copied_source.replace("/usr/bin/osascript", str(fake))); copied.chmod(0o700)
             fake.write_text("#!/bin/zsh\nif [ \"$2\" = ids ]; then print note-1; else d=\"$4\"; print -r -- Call > \"$d/1.name\"; print -r -- 2026-01-01 > \"$d/1.created\"; print -r -- 2026-01-01 > \"$d/1.modified\"; print -r -- $'Call\\nTranscript' > \"$d/1.text\"; print -r -- note-1 > \"$d/1.id\"; print 'OK 1'; fi\n"); fake.chmod(0o700)
             result = subprocess.run(["zsh", str(copied), "--canary"], env={**os.environ, **base}, text=True, capture_output=True)
-            check("Notes copied harness posts queued isolated payload", bool(result.returncode == 0 and len(captured) == 2 and captured[1][0] == "/canary" and captured[1][1] == "Bearer notes-token" and captured[1][2].get("external_id") == "note-1" and list((root / "notes" / "sent").glob("*.json")) and "failed=0" in result.stdout and "notes-token" not in result.stdout))
+            marker_lines = [line for line in result.stdout.splitlines() if "notes-canary-result" in line]
+            aggregate = json.loads(marker_lines[0].removeprefix("notes-sweep: notes-canary-result ")) if len(marker_lines) == 1 else {}
+            check("Notes copied harness posts queued isolated payload with one nonsecret aggregate", bool(
+                result.returncode == 0 and len(captured) == 2 and captured[1][0] == "/canary"
+                and captured[1][1] == "Bearer notes-token" and captured[1][2].get("external_id") == "note-1"
+                and list((root / "notes" / "sent").glob("*.json"))
+                and aggregate.get("destination_id") == destination_for(endpoint)
+                and aggregate.get("source_snapshot_id") == f"notes-sweep-hourly:{LEASED_NOTES_RUN_ID}:attempt:1"
+                and aggregate.get("receipt_identity") == f"job:{LEASED_NOTES_RUN_ID}:attempt:1"
+                and aggregate.get("source_digest_kind") == "note_id_set_sha256"
+                and aggregate.get("source_snapshot_digest") == hashlib.sha256(
+                    json.dumps(["note-1"], separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+                and aggregate.get("source_note_count") == 1 and aggregate.get("source_new_count") == 1
+                and aggregate.get("posted_count") == 1 and aggregate.get("failed_count") == 0
+                and "notes-token" not in result.stdout and endpoint not in result.stdout))
+            fake.write_text("#!/bin/zsh\nif [ \"$2\" = ids ]; then print note-1; print note-1; else exit 1; fi\n")
+            fake.chmod(0o700)
+            duplicate_source = subprocess.run(["zsh", str(copied), "--canary"],
+                env={**os.environ, **base}, text=True, capture_output=True)
+            check("Notes canary refuses a duplicate source identifier before emitting evidence",
+                  duplicate_source.returncode != 0
+                  and "source snapshot is malformed" in duplicate_source.stderr
+                  and "notes-canary-result" not in duplicate_source.stdout)
         finally:
             server.shutdown(); thread.join(); server.server_close()
         shutil.rmtree(root)

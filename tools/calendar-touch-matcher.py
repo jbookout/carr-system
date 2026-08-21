@@ -21,6 +21,7 @@ contact.
 """
 
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -41,11 +42,21 @@ INTERNAL_DOMAIN = "carr.us"
 FREEMAIL = {"gmail.com", "icloud.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com"}
 
 
-def load_record_contacts():
+def load_record_contacts(snapshot=None):
     """Return (email -> label) and (domain -> label) from the roster and registry."""
-    import openpyxl
-
     by_email, by_domain = {}, {}
+    if snapshot is not None:
+        if not isinstance(snapshot, list): raise ValueError("contact snapshot must be an array")
+        for row in snapshot:
+            if not isinstance(row, dict) or set(row) != {"email","ref","name","org"}: raise ValueError("contact snapshot row has invalid shape")
+            email=row["email"]
+            if not isinstance(email,str) or email!=email.lower() or "@" not in email: raise ValueError("contact snapshot email is invalid")
+            if not all(value is None or isinstance(value,str) for value in (row["ref"],row["name"],row["org"])): raise ValueError("contact snapshot identity is invalid")
+            label=" / ".join(x for x in (row["ref"],row["name"] or row["org"]) if x) or "(unnamed row)"
+            by_email.setdefault(email,label); dom=email.split("@",1)[1]
+            if dom not in FREEMAIL and dom!=INTERNAL_DOMAIN: by_domain.setdefault(dom,label)
+        return by_email,by_domain
+    import openpyxl
 
     def ingest(path, sheet, id_col, name_col, org_col, email_col):
         full = os.path.join(EXPORTS, path)
@@ -189,12 +200,22 @@ def main():
     argv = [a for a in sys.argv[1:] if a != "--json" and not a.startswith("--from-dump")]
     as_json = "--json" in sys.argv
     dump_path = None
+    snapshot_envelope = None
     for i, a in enumerate(sys.argv):
         if a == "--from-dump" and i + 1 < len(sys.argv):
             dump_path = sys.argv[i + 1]
             argv = [x for x in argv if x != dump_path]
+    if "--contact-snapshot-stdin" in sys.argv:
+        argv=[x for x in argv if x!="--contact-snapshot-stdin"]
+        envelope=json.load(sys.stdin); raw=envelope.get("snapshot_text") if isinstance(envelope,dict) else None
+        if not isinstance(envelope,dict) or set(envelope)!={"source_snapshot_id","snapshot_digest","contact_count","snapshot_text"} or not isinstance(raw,str) or not isinstance(envelope.get("source_snapshot_id"),str) or not isinstance(envelope.get("snapshot_digest"),str) or type(envelope.get("contact_count")) is not int:
+            raise ValueError("contact snapshot envelope has invalid shape")
+        if hashlib.sha256(raw.encode()).hexdigest()!=envelope["snapshot_digest"]: raise ValueError("contact snapshot digest mismatch")
+        snapshot=json.loads(raw)
+        if not isinstance(snapshot,list) or len(snapshot)!=envelope["contact_count"]: raise ValueError("contact snapshot count mismatch")
+        snapshot_envelope=envelope
     days = int(argv[0]) if argv else DEFAULT_DAYS
-    by_email, by_domain = load_record_contacts()
+    by_email, by_domain = load_record_contacts(snapshot if snapshot_envelope else None)
     # In --json mode stdout must be PARSEABLE and nothing else. This banner went
     # to stdout ahead of the payload and would have made json.load choke on the
     # first consumer — caught before shipping, not after.
@@ -231,7 +252,7 @@ def main():
         # match is evidence a named person was in the room. Domain matches say
         # "someone from that org" and must never become a dated touch on an
         # individual; they are reported for a human, never auto-logged.
-        json.dump({
+        payload={
             "ok": True, "days": days,
             "counts": {"emails": len(latest), "internal": len(internal),
                        "exact": len(exact), "domain": len(domain),
@@ -247,8 +268,9 @@ def main():
                       for e in exact],
             "domain": [{"email": e, "org": str(domain[e]), "last_seen": latest[e]} for e in domain],
             "unknown": [{"email": e, "domain": d, "last_seen": latest[e]}
-                        for e, d in unknown.items()],
-        }, sys.stdout, indent=1, default=str)
+                        for e, d in unknown.items()]}
+        if snapshot_envelope: payload["_canary_source"]={k:snapshot_envelope[k] for k in ("source_snapshot_id","snapshot_digest","contact_count")}
+        json.dump(payload, sys.stdout, indent=1, default=str)
         print()
         return 0
 

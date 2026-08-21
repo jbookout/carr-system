@@ -49,14 +49,13 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_env import scrubbed_env  # noqa: E402
 
-# WHY scrubbed_env AND NOT fixture_env. The git calls below act on REPO ON
-# PURPOSE — this file seeds a real defect into the real tree to prove CI catches
-# it. What it must never do is act on somewhere ELSE: GIT_DIR outranks cwd and
-# every git hook exports it, and ops/githooks/pre-push runs ops/ci.sh which runs
-# this file. Without the scrub, `git add -N` and `git rm --cached` below would
-# stage and unstage in whatever repository invoked the push. scrubbed_env keeps
-# the caller's identity, which a real repo operation wants. See ops/git_env.py.
-# Loop #371.
+# WHY scrubbed_env AND NOT fixture_env. The Git read and scanner subprocess
+# below must act on REPO ON PURPOSE — this file seeds a real defect into the
+# real tree to prove CI catches it. What they must never do is inspect somewhere
+# ELSE: GIT_DIR outranks cwd and every git hook exports it, and ops/githooks/
+# pre-push runs ops/ci.sh which runs this file. scrubbed_env makes the scanner's
+# internal `git ls-files` and our visibility check address this worktree. See
+# ops/git_env.py. Loop #371.
 CI = REPO / "ops" / "ci.sh"
 
 # Assembled at runtime so this source file does not itself contain a
@@ -396,25 +395,36 @@ def test_tracked_scripts_are_executable_in_git():
 # ---------------------------------------------------------------- 5. the scanners
 def test_secret_scanner_catches_and_respects_allow():
     scan = [sys.executable, str(REPO / "ops" / "ci-secret-scan.py")]
-    rc, _ = subprocess.run(scan, cwd=REPO, capture_output=True, text=True).returncode, None
+    rc, _ = subprocess.run(scan, cwd=REPO, env=scrubbed_env(), capture_output=True, text=True).returncode, None
     check("the tree is currently clean of shaped credentials", rc == 0, f"rc={rc}")
 
-    seeded = REPO / "_ci_selftest_seed.env"
-    with seeded_paths("_ci_selftest_seed.env"):
+    # The scanner only visits `git ls-files`, so seed a file that is already
+    # tracked instead of changing the index. This dedicated fixture has no
+    # operational consumer; the journal records its original bytes before the
+    # write and restores them on ordinary exit, signals, or stale-journal
+    # recovery on the next independent run.
+    seeded_rel = "ops/ci-secret-scan-fixture.txt"
+    seeded = REPO / seeded_rel
+    listed = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", seeded_rel],
+        cwd=REPO, env=scrubbed_env(), capture_output=True,
+    )
+    tracked = listed.returncode == 0
+    check("the credential fixture path is tracked for the scan", tracked,
+          f"git ls-files rc={listed.returncode}")
+    with seeded_paths(seeded_rel):
         seeded.write_text(SEED_DSN + "\n")
-        subprocess.run(["git", "add", "-N", str(seeded)], cwd=REPO, env=scrubbed_env(), capture_output=True)
-        p = subprocess.run(scan, cwd=REPO, capture_output=True, text=True)
-        check("a seeded credential is caught", p.returncode == 1)
+        p = subprocess.run(scan, cwd=REPO, env=scrubbed_env(), capture_output=True, text=True)
+        check("a seeded credential is caught", tracked and p.returncode == 1,
+              "credential fixture was not tracked" if not tracked else f"rc={p.returncode}")
         check("the finding never prints the credential value",
-              "hunter2" + "hunter2" not in (p.stdout + p.stderr))
+              tracked and "hunter2" + "hunter2" not in (p.stdout + p.stderr))
 
         seeded.write_text(SEED_DSN + "  # ci-secret-scan" + ": allow — selftest fixture\n")
-        p = subprocess.run(scan, cwd=REPO, capture_output=True, text=True)
-        check("an inline allow marker on the same line suppresses it", p.returncode == 0)
-        # The index entry is this test's own doing and is not content, so it is
-        # dropped here rather than by the journal, which restores file bytes.
-        subprocess.run(["git", "rm", "--cached", "-q", "--force", str(seeded)],
-                       cwd=REPO, env=scrubbed_env(), capture_output=True)
+        p = subprocess.run(scan, cwd=REPO, env=scrubbed_env(), capture_output=True, text=True)
+        check("an inline allow marker on the same line suppresses it",
+              tracked and p.returncode == 0,
+              "credential fixture was not tracked" if not tracked else f"rc={p.returncode}")
 
 
 def test_dep_check_detects_a_stale_lock():

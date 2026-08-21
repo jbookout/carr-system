@@ -750,46 +750,13 @@ WATCH = [
     # `--only compiled-rules`, so the hourly refresh reaches it as well.
     ("GEN rules intro",     "DNA/Network/introduction-rules.md",         26/24, [],
      "nightly chain (bin/nightly.sh) + hourly bin/refresh-rules.sh"),
-    # --- the Wave 2 job reports (added 2026-07-31 with ORDER 19a) ---------------
-    # These five live in the REPO's out/, not the vault, so their patterns are
-    # absolute — os.path.join returns an absolute second argument unchanged.
-    # 26h each, per the ORDER 19 ruling: the two digests ride the nightly chain
-    # (7 days), and the brief pack plus the queue are rebuilt by the heartbeat.
-    # WHAT A FAILURE HERE MEANS, so nobody debugs the wrong end: cadence and
-    # matcher going stale means the nightly chain SKIPPED them, which until Joe's
-    # role tap lands is the DESIGNED state (exit 78, not a fault).
-    #
-    # CORRECTED TWICE ON 2026-08-04, and the second correction is the one to read.
-    #
-    # This comment first said these rows going stale "is the weekends-off rule
-    # showing through, since the heartbeat stands down Sat/Sun". That was never
-    # the mechanism: Monday 2026-08-03 was a full business day, npi-sweep-weekly
-    # fired at 12:31Z and the vault took writes that morning, while brief-pack
-    # and review-queue did not. Their last write was an ad-hoc session run, Sun
-    # 2026-08-02 15:18, which is not the heartbeat's ~08:00 CT slot.
-    #
-    # The replacement text then claimed THE HEARTBEAT HAS NO SCHEDULE AT ALL,
-    # having checked the Claude scheduler, launchd and cron. Joe corrected that
-    # the same day: the heartbeat is scheduled in COWORK, which a local Claude
-    # Code session cannot enumerate. Both the subagent and the main session named
-    # Cowork as unreachable and then wrote the negative anyway — rule 2b889e80
-    # says an unreachable collection makes a finding partial BY DEFINITION.
-    #
-    # SO THE STATE IS: the trigger fires every morning and these two jobs do not
-    # run. Leading hypothesis, UNTESTED — a Cowork session cannot reach
-    # ~/carr-system, so it cannot execute `run.sh brief-pack` at all. Do not
-    # re-explain these rows as a weekend artifact, and do not assert a cause
-    # until someone reads the Cowork task's own run history. Tracked as loop 181.
-    #
-    # The Monday brief (monday-brief-task.md) is unscheduled by the same gap and
-    # has NO row here at all, so it fails silently — the one failure mode with no
-    # detector. Tracked as an open loop; do not re-explain these rows as a
-    # weekend artifact until a schedule actually exists.
-    ("JOB brief-pack",    os.path.expanduser("~/carr-system/out/brief-pack/brief-pack-latest.md"), 26/24, [],
-     "run.sh brief-pack (heartbeat JOB 4b)"),
-    ("JOB monday-agenda", os.path.expanduser("~/carr-system/out/brief-pack/monday-agenda.md"), 26/24, [],
-     "run.sh brief-pack — the Monday brief's own input, watched separately because "
-     "it has its own consumer"),
+    # --- the remaining repo-local job reports ----------------------------------
+    # The review queue is still refreshed by the weekday local schedule. Legacy
+    # brief-pack and Monday-agenda files are intentionally absent from this
+    # dead-man list: normal delivery is the on-demand record-native
+    # `morning-brief` composite, whose sections expose ready/empty/unavailable
+    # source state instead of borrowing a local file mtime.
+    # Cadence and matcher remain credential-gated nightly diagnostics.
     ("JOB review-queue",  os.path.expanduser("~/carr-system/out/review-queue/review-queue.html"), 26/24, [],
      "run.sh review-queue (heartbeat JOB 4b)"),
     ("JOB matcher",       os.path.expanduser("~/carr-system/out/availability-matches.md"), 26/24, [],
