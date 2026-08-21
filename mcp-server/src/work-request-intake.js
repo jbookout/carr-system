@@ -125,6 +125,23 @@ function validateOutcomeAcceptance(args, ToolError) {
 
 export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) {
   return {
+    "current-work-requests": {
+      write: false,
+      description: "Read at most 20 current, shared, sourced Program 6 Work Requests that still admit a bounded human next action. It never accepts a caller-selected tenant, filter, state, source, or database identifier.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      handler: async (c, actor, args) => {
+        if (Object.keys(args).length) throw new ToolError({ error: "invalid_current_work_requests_fields" });
+        const tenant = organizationTenantForActor(actor);
+        const result = await c.query(
+          `select * from ops.current_sourced_work_requests($1::text)
+             /* work-request-intake:current */`, [tenant]);
+        return { ok: true, items: result.rows.map(row => ({
+          human_ref: row.ref, title: row.title, state: row.state,
+          source: { label: row.source_label, freshness: row.source_freshness },
+          next_human_action: row.next_human_action,
+        })) };
+      },
+    },
     "report-problem": {
       write: true,
       description: "Capture one operational problem from the current deterministic situation source. It only creates a captured Work Request; it never triages, assigns, dispatches, approves, executes, or changes an existing request.",

@@ -62,16 +62,14 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
 #
-# carr_calendar_prebrief_jobs, carr_calendar_prebrief_attestors, and
-# carr_calendar_prebrief_email_resolver are known here while 0229 remains pending. The
-# generator deliberately excludes it from its active catalog query and role
-# preamble so the current snapshot cannot leak a 0229 artifact.
-# Move it into APP_ROLES and the generator together on the snapshot refresh
-# that records 0229 as applied.
-PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
-                        "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver"]
+# The four calendar-prebrief bundles joined when the snapshot ledger absorbed
+# 0229. They must be carried by both the role preamble and the generated ACL
+# section because that migration no longer replays on a rebuilt database.
+PENDING_ROLE_BUNDLES: list[str] = []
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
-             "carr_authority", "carr_device_evidence"]
+             "carr_authority", "carr_device_evidence",
+             "carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
+             "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
 failures: list[str] = []
@@ -182,6 +180,12 @@ def main():
               for _, ln in grant_lines))
 
     generator = open(GENERATOR).read()
+    check("function ACL renderer uses a qualification-neutral search path",
+          re.search(r"cat > \"\$GRANTS_SQL\" <<'GRANTSQL'\n.*?set search_path = '';",
+                    generator, re.S) is not None)
+    check("composite function arguments stay schema-qualified in ACL statements",
+          "ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool)" in sql
+          and "ops.renewal_decision_candidate_digest(p_candidate candidate_pool)" not in sql)
     membership_query = re.search(
         r"select distinct format\('grant %s to %s;', gr\.rolname, mem\.rolname\)"
         r".*?from pg_auth_members m.*?order by 1;",
