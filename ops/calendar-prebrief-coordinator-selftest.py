@@ -35,6 +35,20 @@ def refuses(fn) -> bool:
     return False
 
 
+def sign(private: Path, payload: bytes) -> bytes:
+    # Linux OpenSSL requires seekable one-shot Ed25519 input. TemporaryFile is
+    # unnamed/unlinked, so fixture payload bytes never gain a durable path.
+    with tempfile.TemporaryFile() as raw_input:
+        raw_input.write(payload)
+        raw_input.flush()
+        raw_input.seek(0)
+        return subprocess.run(
+            ["openssl", "pkeyutl", "-sign", "-inkey", str(private), "-rawin",
+             "-in", f"/dev/fd/{raw_input.fileno()}"],
+            capture_output=True, check=True, pass_fds=(raw_input.fileno(),),
+        ).stdout
+
+
 def contract() -> dict[str, object]:
     return {"challenge_id": "00000000-0000-4000-8000-000000000003", "sponsor": "joe",
             "job_id": "00000000-0000-4000-8000-000000000001", "attempt": 2,
@@ -52,10 +66,22 @@ with tempfile.TemporaryDirectory() as raw:
     subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(public)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     raw_payload = {"version": 1, "window": {"starts_at": "2026-08-13T06:30:00Z", "ends_at": "2026-10-04T06:30:00Z"}, "observed_calendars": [{"sponsor": "joe", "calendar_key": "a" * 64}], "events": [{"sponsor": "joe", "calendar_key": "a" * 64, "event_key": "b" * 64, "occurrence_key": "c" * 64, "starts_at": "2026-08-20T08:00:00Z", "ends_at": "2026-08-20T09:00:00Z", "title": "Meeting", "location": None, "attendee_emails": ["raw.attendee@example.test"]}]}
     envelope = contract() | {"raw_payload": raw_payload, "raw_payload_digest": hashlib.sha256(coordinator._canonical(raw_payload)).hexdigest(), "raw_payload_count": 1, "collector_version": "fixture-1", "key_fingerprint": hashlib.sha256(public.read_bytes()).hexdigest()}
-    signature = subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(private), "-rawin", "-in", "/dev/stdin"], input=coordinator._canonical(envelope), capture_output=True, check=True).stdout
+    signature = sign(private, coordinator._canonical(envelope))
     envelope["signature"] = base64.b64encode(signature).decode("ascii")
     got_raw, evidence = coordinator.verify_envelope(envelope, public, contract())
     check("exact DB contract signed envelope verifies", got_raw == raw_payload and evidence["signature_sha256"] == hashlib.sha256(signature).hexdigest())
+    if not hasattr(coordinator.os, "memfd_create"):
+        def fixture_memfd(_name: str) -> int:
+            with tempfile.TemporaryFile() as anonymous:
+                return os.dup(anonymous.fileno())
+        coordinator.os.memfd_create = fixture_memfd
+        try:
+            portable_raw, _ = coordinator.verify_envelope(envelope, public, contract())
+        finally:
+            delattr(coordinator.os, "memfd_create")
+    else:
+        portable_raw, _ = coordinator.verify_envelope(envelope, public, contract())
+    check("anonymous seekable verification input is portable", portable_raw == raw_payload)
     for name, key, value in (("cross-job replay", "job_id", "00000000-0000-4000-8000-000000000010"), ("altered scheduled window", "window_starts_at", "2026-08-12T06:30:00Z"), ("altered destination", "destination", "calendar-prebrief-canary-joe"), ("altered allowlist revision", "allowlist_revision_id", "00000000-0000-4000-8000-000000000010"), ("altered challenge", "challenge_id", "00000000-0000-4000-8000-000000000010")):
         changed = dict(envelope)
         changed[key] = value

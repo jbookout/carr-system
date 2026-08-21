@@ -117,13 +117,33 @@ def _secure_private_key(path: Path) -> None:
 def _openssl_with_key(path: Path, args: list[str], payload: bytes, *, key_flag: str = "-inkey") -> bytes:
     _secure_private_key(path)
     fd = os.open(path, os.O_RDONLY)
+    payload_fd = -1
     try:
+        input_data: bytes | None = payload
+        portable_args = list(args)
+        # OpenSSL's Linux Ed25519 provider requires a seekable one-shot input;
+        # macOS accepts the existing stdin pipe.  memfd keeps the raw capture
+        # RAM-only while giving Linux the seekable descriptor it requires.
+        if "/dev/stdin" in portable_args and hasattr(os, "memfd_create"):
+            payload_fd = os.memfd_create("carr-calendar-envelope")
+            remaining = memoryview(payload)
+            while remaining:
+                written = os.write(payload_fd, remaining)
+                if written < 1:
+                    raise Refusal("collector signing input could not be buffered")
+                remaining = remaining[written:]
+            os.lseek(payload_fd, 0, os.SEEK_SET)
+            portable_args = [f"/dev/fd/{payload_fd}" if item == "/dev/stdin" else item for item in portable_args]
+            input_data = None
         result = subprocess.run(
-            ["openssl", *args, key_flag, f"/dev/fd/{fd}"], input=payload,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=(fd,), timeout=10, check=False,
+            ["openssl", *portable_args, key_flag, f"/dev/fd/{fd}"], input=input_data,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            pass_fds=tuple(item for item in (fd, payload_fd) if item >= 0), timeout=10, check=False,
         )
     finally:
         os.close(fd)
+        if payload_fd >= 0:
+            os.close(payload_fd)
     if result.returncode != 0:
         raise Refusal("collector signing key cannot perform the requested operation")
     return result.stdout

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -11,6 +12,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR = ROOT / "tools/calendar-prebrief-collector.py"
+spec = importlib.util.spec_from_file_location("calendar_prebrief_collector", COLLECTOR)
+assert spec and spec.loader
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
 bad: list[str] = []
 
 
@@ -63,6 +68,18 @@ class EKEventStore:
     key = root / "collector.pem"
     subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     key.chmod(0o600)
+    if not hasattr(collector.os, "memfd_create"):
+        def fixture_memfd(_name: str) -> int:
+            with tempfile.TemporaryFile() as anonymous:
+                return os.dup(anonymous.fileno())
+        collector.os.memfd_create = fixture_memfd
+        try:
+            portable_signature = collector.sign(key, b"portable fixture")
+        finally:
+            delattr(collector.os, "memfd_create")
+    else:
+        portable_signature = collector.sign(key, b"portable fixture")
+    check("anonymous seekable Ed25519 input is portable", bool(portable_signature))
     environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(fake), "CARR_CALENDAR_PREBRIEF_ALLOWLIST": str(allowlist), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY": str(key), "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION": "fixture-1"}
     run = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(contract()), text=True, capture_output=True, env=environment, check=False)
     envelope = json.loads(run.stdout) if run.returncode == 0 else {}

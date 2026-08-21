@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -130,7 +131,7 @@ check("manifest sync preserves exact sponsor owners across live and isolated def
 with tempfile.TemporaryDirectory() as raw:
     file = Path(raw) / "snapshot.json"; file.write_text(json.dumps(snapshot))
     with file.open() as stdin:
-        run = subprocess.run([str(ROOT / ".venv/bin/python"), str(ROOT / "tools/calendar-prebrief-ingest.py"), "--sponsor", "joe", "--job-id", "j", "--lease", "l"], stdin=stdin, text=True, capture_output=True)
+        run = subprocess.run([sys.executable, str(ROOT / "tools/calendar-prebrief-ingest.py"), "--sponsor", "joe", "--job-id", "j", "--lease", "l"], stdin=stdin, text=True, capture_output=True)
     check("regular-file snapshot stdin refuses", run.returncode == 78 and "process pipe" in run.stderr)
 
 print("OK all checks passed" if not failed else "FAIL " + ", ".join(failed))

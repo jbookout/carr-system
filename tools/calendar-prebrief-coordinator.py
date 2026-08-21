@@ -145,16 +145,40 @@ def verify_envelope(value: Mapping[str, Any], public_key: Path, contract: Mappin
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or not signature or len(signature) > 4096 or hashlib.sha256(key_bytes).hexdigest() != fingerprint:
         raise Refusal("collector public key or signature is invalid")
     read_fd, write_fd = os.pipe()
+    payload_fd = signature_fd = -1
     try:
-        os.write(write_fd, signature)
-        os.close(write_fd)
+        signature_path = f"/dev/fd/{read_fd}"
         signed = {key: value[key] for key in value if key != "signature"}
-        verified = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key), "-rawin", "-in", "/dev/stdin", "-sigfile", f"/dev/fd/{read_fd}"], input=_canonical(signed), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(read_fd,), check=False)
+        payload = _canonical(signed)
+        input_path = "/dev/stdin"
+        input_data: bytes | None = payload
+        if hasattr(os, "memfd_create"):
+            payload_fd = os.memfd_create("carr-calendar-envelope")
+            signature_fd = os.memfd_create("carr-calendar-signature")
+            remaining = memoryview(payload)
+            while remaining:
+                written = os.write(payload_fd, remaining)
+                if written < 1:
+                    raise Refusal("collector envelope could not be buffered")
+                remaining = remaining[written:]
+            os.lseek(payload_fd, 0, os.SEEK_SET)
+            os.write(signature_fd, signature)
+            os.lseek(signature_fd, 0, os.SEEK_SET)
+            input_path, input_data = f"/dev/fd/{payload_fd}", None
+            signature_path = f"/dev/fd/{signature_fd}"
+        else:
+            os.write(write_fd, signature)
+        os.close(write_fd)
+        verified = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key), "-rawin", "-in", input_path, "-sigfile", signature_path], input=input_data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=tuple(item for item in (read_fd, payload_fd, signature_fd) if item >= 0), check=False)
     finally:
         try: os.close(read_fd)
         except OSError: pass
         try: os.close(write_fd)
         except OSError: pass
+        for item in (payload_fd, signature_fd):
+            if item >= 0:
+                try: os.close(item)
+                except OSError: pass
     if verified.returncode != 0:
         raise Refusal("collector envelope signature verification failed")
     return raw, {"collector_key_fingerprint": fingerprint, "signature_sha256": hashlib.sha256(signature).hexdigest(), "collector_version": version}

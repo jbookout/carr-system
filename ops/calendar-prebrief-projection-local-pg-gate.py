@@ -129,8 +129,14 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("select current_database(),current_user,current_setting('data_directory'),(select rolsuper from pg_roles where rolname=current_user)")
     database_name, role_name, data_directory, is_superuser = required(cur, "local cluster identity")
     data_path = os.path.realpath(str(data_directory))
-    if database_name != "carr_ci" or role_name != "carr_ci" or is_superuser is not True or not os.path.isfile(os.path.join(data_path, "PG_VERSION")) or not os.path.basename(os.path.dirname(data_path)).startswith("carr-local-pg-ci."):
-        raise RuntimeError("calendar prebrief acceptance requires the disposable carr_ci local cluster data directory")
+    local_disposable = (os.path.isfile(os.path.join(data_path, "PG_VERSION"))
+                        and os.path.basename(os.path.dirname(data_path)).startswith("carr-local-pg-ci."))
+    hosted_disposable = (os.environ.get("GITHUB_ACTIONS") == "true"
+                         and os.environ.get("CARR_CI_PORTABLE_ONLY") == "1"
+                         and data_path == "/var/lib/postgresql/data"
+                         and os.path.isfile(os.path.join(data_path, "PG_VERSION")))
+    if database_name != "carr_ci" or role_name != "carr_ci" or is_superuser is not True or not (local_disposable or hosted_disposable):
+        raise RuntimeError("calendar prebrief acceptance requires a dedicated disposable carr_ci database")
     cur.execute("begin")
     cur.execute(
         """do $$ begin

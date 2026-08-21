@@ -53,9 +53,9 @@ source={'availabilities':[{'id':'00000000-0000-0000-0000-000000000011','status':
 digest=hashlib.sha256(json.dumps(source,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 payload={'source_snapshot_id':'00000000-0000-0000-0000-000000000001','snapshot_digest':digest,'snapshot_preimage':json.dumps(source,sort_keys=True,separators=(',',':'))}
 before=(ROOT/'out/availability-matches.md').read_bytes() if (ROOT/'out/availability-matches.md').exists() else None
-env={'PATH':'/Users/booko/carr-system/.venv/bin:'+os.environ.get('PATH','/usr/bin:/bin'),'HOME':os.environ.get('HOME','/tmp'),'CARR_CONTROL_PLANE_MODE':'canary','CARR_NIGHTLY_CANARY_ROOT':str(run)}
+env={'PATH':str(Path(sys.executable).parent)+':'+os.environ.get('PATH','/usr/bin:/bin'),'HOME':os.environ.get('HOME','/tmp'),'CARR_CONTROL_PLANE_MODE':'canary','CARR_NIGHTLY_CANARY_ROOT':str(run)}
 try:
-    result=subprocess.run(['/Users/booko/carr-system/.venv/bin/python',str(ROOT/'pipelines/availability_matcher.py'),'--canary'],cwd=ROOT,env=env,input=json.dumps(payload),text=True,capture_output=True,timeout=15)
+    result=subprocess.run([sys.executable,str(ROOT/'pipelines/availability_matcher.py'),'--canary'],cwd=ROOT,env=env,input=json.dumps(payload),text=True,capture_output=True,timeout=15)
     check('protected availability-matcher canary emits exactly one typed aggregate',result.returncode==0 and result.stdout.startswith('availability-matcher: canary-result ') and result.stdout.count('canary-result')==1)
     check('canary writes only its dedicated report root',run.is_dir() and (run/'availability-matches.json').is_file())
     after=(ROOT/'out/availability-matches.md').read_bytes() if (ROOT/'out/availability-matches.md').exists() else None
@@ -64,7 +64,7 @@ finally:
     shutil.rmtree(run,ignore_errors=True)
 tampered=base/('tampered-'+uuid.uuid4().hex)
 tampered_payload={**payload,'snapshot_preimage':payload['snapshot_preimage'].replace('"Mobile"','"Elsewhere"')}
-result=subprocess.run(['/Users/booko/carr-system/.venv/bin/python',str(ROOT/'pipelines/availability_matcher.py'),'--canary'],cwd=ROOT,env={**env,'CARR_NIGHTLY_CANARY_ROOT':str(tampered)},input=json.dumps(tampered_payload),text=True,capture_output=True,timeout=15)
+result=subprocess.run([sys.executable,str(ROOT/'pipelines/availability_matcher.py'),'--canary'],cwd=ROOT,env={**env,'CARR_NIGHTLY_CANARY_ROOT':str(tampered)},input=json.dumps(tampered_payload),text=True,capture_output=True,timeout=15)
 check('tampered protected snapshot bytes fail before output creation',result.returncode!=0 and 'protected snapshot bytes do not reconcile' in result.stderr and not tampered.exists())
 poisoned=('DATABASE_URL','PGHOST','PGHOSTADDR','PGPORT','PGDATABASE','PGUSER','PGPASSFILE','PGSERVICEFILE','PGOPTIONS','PGSSLCERT','PGSSLKEY','PGSSLROOTCERT','PGSSLCRL','PGSSLSNI','CARR_ONEDRIVE_DEALS','CARR_INGEST_URL','CARR_AI_ROUTE_PRIMARY_URL','CARR_GMAIL_APP_PASSWORD','CARR_AGE_IDENTITY')
 poison_results=[]; child_poison_results=[]
@@ -75,7 +75,7 @@ for key in poisoned:
     poison_results.append(result.returncode!=0 and f'refused ambient live capability: {key}' in result.stderr and not poison.exists())
     child_poison=base/('child-poison-'+key.lower()+'-'+uuid.uuid4().hex)
     child_env={**env,'CARR_NIGHTLY_CANARY_ROOT':str(child_poison),key:'poisoned-live-value'}
-    child_result=subprocess.run(['/Users/booko/carr-system/.venv/bin/python',str(ROOT/'pipelines/availability_matcher.py'),'--canary'],cwd=ROOT,env=child_env,input=json.dumps(payload),text=True,capture_output=True,timeout=15)
+    child_result=subprocess.run([sys.executable,str(ROOT/'pipelines/availability_matcher.py'),'--canary'],cwd=ROOT,env=child_env,input=json.dumps(payload),text=True,capture_output=True,timeout=15)
     child_poison_results.append(child_result.returncode!=0 and 'refused ambient live capability' in child_result.stderr and not child_poison.exists())
 check('poisoned database, provider, and Drive environment refuses in both layers before output creation',all(poison_results) and all(child_poison_results))
 print(f'nightly canary record selftest — {checks-len(failed)}/{checks} passed')

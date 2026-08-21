@@ -238,7 +238,8 @@ def run_local_ci(
         if exit_code:
             print("local-db-ci: canonical CI failed", file=sys.stderr)
         else:
-            acceptance_python = repo / ".venv/bin/python"
+            repo_python = repo / ".venv/bin/python"
+            acceptance_python = repo_python if repo_python.is_file() and os.access(repo_python, os.X_OK) else Path(sys.executable)
             acceptance_script = repo / "ops/atomic-rule-approval-local-pg-acceptance.py"
             if not acceptance_python.is_file() or not os.access(acceptance_python, os.X_OK):
                 print("local-db-ci: repository Python environment is unavailable", file=sys.stderr)

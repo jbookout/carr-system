@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -154,7 +155,7 @@ with tempfile.TemporaryDirectory() as raw:
     resolver_file = write_json(root / "resolver.json", resolver_data)
     with resolver_file.open("r") as raw_stdin:
         regular_input = subprocess.run(
-            [str(REPO / ".venv/bin/python"), str(SCRIPT), "--allowlist", str(joe_config), "--sponsor", "joe",
+            [sys.executable, str(SCRIPT), "--allowlist", str(joe_config), "--sponsor", "joe",
              "--resolver-map-stdin"], stdin=raw_stdin, text=True, capture_output=True)
     check("durable resolver-map file refuses", regular_input.returncode == 78
           and "process pipe" in regular_input.stderr)
