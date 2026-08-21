@@ -14,7 +14,7 @@ def refuses(fn):
  try: fn()
  except mod.Refusal: return True
  return False
-def dsn(user): return f"postgresql://{user}:fixture@db.example/carr?sslmode=require&channel_binding=require" # ci-secret-scan: allow
+def dsn(user): return f"postgresql://{user}:fixture@db.example/carr?sslmode=verify-full&sslrootcert=/etc/ssl/carr-root.pem&channel_binding=require" # ci-secret-scan: allow
 with tempfile.TemporaryDirectory() as raw:
  root=Path(raw); env=root/"prebrief.env"
  values={"CARR_DB_AUTHORITY_JOE_URL":dsn("carr_authority_joe"),"CARR_DB_AUTHORITY_DELL_URL":dsn("carr_authority_dell"),"CARR_DB_CALENDAR_PREBRIEF_DEVICE_JOE_URL":dsn("carr_calendar_prebrief_device_joe"),"CARR_DB_CALENDAR_PREBRIEF_DEVICE_DELL_URL":dsn("carr_calendar_prebrief_device_dell"),"CARR_DB_CALENDAR_PREBRIEF_JOE_URL":dsn("carr_calendar_prebrief_joe"),"CARR_DB_CALENDAR_PREBRIEF_DELL_URL":dsn("carr_calendar_prebrief_dell"),"CARR_DB_JOBS_URL":dsn("carr_jobs")}
@@ -32,8 +32,8 @@ with tempfile.TemporaryDirectory() as raw:
   def __enter__(self): return self
   def __exit__(self,*_): return False
  check("identity probe requires exact login and capability",mod.probe_scoped_identity("CARR_DB_CALENDAR_PREBRIEF_JOE_URL",values["CARR_DB_CALENDAR_PREBRIEF_JOE_URL"],lambda _:ProbeConn()))
- check("URI rejects host/query service override",not mod.strict_uri("postgresql://carr_jobs:x@db/carr?sslmode=require&host=evil", "carr_jobs")) # ci-secret-scan: allow
- check("URI requires canonical TLS",not mod.strict_uri("postgresql://carr_jobs:x@db/carr?sslmode=disable", "carr_jobs")) # ci-secret-scan: allow
+ check("URI rejects host/query service override",not mod.strict_uri("postgresql://carr_jobs:x@db/carr?sslmode=verify-full&sslrootcert=/etc/root&host=evil", "carr_jobs")) # ci-secret-scan: allow
+ check("URI requires verify-full and root trust",not mod.strict_uri("postgresql://carr_jobs:x@db/carr?sslmode=require&sslrootcert=/etc/root", "carr_jobs")) # ci-secret-scan: allow
  check("ambient broad credential refuses",refuses(lambda:mod.load_scoped_env(env,{"DATABASE_URL":"x"})))
  env.chmod(0o644); check("insecure env permissions refuse",refuses(lambda:mod.load_scoped_env(env,{}))); env.chmod(0o600)
  link=root/"link.env"; link.symlink_to(env); check("symlink env refuses",refuses(lambda:mod.load_scoped_env(link,{})))

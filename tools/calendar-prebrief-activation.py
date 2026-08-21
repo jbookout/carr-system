@@ -30,7 +30,7 @@ def strict_uri(value:str, user:str)->bool:
   p=urlsplit(value.strip()); items=parse_qsl(p.query,keep_blank_values=True,strict_parsing=True); port=p.port
  except (TypeError,ValueError): return False
  q=dict(items)
- return bool(p.scheme in {"postgres","postgresql"} and unquote(p.username or "")==user and p.password not in (None,"") and p.hostname and p.path not in ("","/") and p.fragment=="" and (port is None or 1<=port<=65535) and len(items)==len(q) and q.get("sslmode")=="require" and set(q) in ({"sslmode"},{"sslmode","channel_binding"}) and ("channel_binding" not in q or q["channel_binding"]=="require"))
+ return bool(p.scheme in {"postgres","postgresql"} and unquote(p.username or "")==user and p.password not in (None,"") and p.hostname and p.path not in ("","/") and p.fragment=="" and (port is None or 1<=port<=65535) and len(items)==len(q) and q.get("sslmode")=="verify-full" and isinstance(q.get("sslrootcert"),str) and q["sslrootcert"].startswith("/") and set(q) in ({"sslmode","sslrootcert"},{"sslmode","sslrootcert","channel_binding"}) and ("channel_binding" not in q or q["channel_binding"]=="require"))
 
 def load_scoped_env(path:Path,environ:Mapping[str,str]|None=None)->dict[str,str]:
  env=os.environ if environ is None else environ
