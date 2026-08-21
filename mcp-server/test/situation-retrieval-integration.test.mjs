@@ -137,3 +137,56 @@ test("the visibility resolver still constrains to an active human, in the migrat
   assert.doesNotMatch(migration, /grant\s+select\s+on\s+table\s+public\.actor\s+to\s+carr_reader/i,
     "the fix must not widen the read credential to the identity table");
 });
+
+
+// THE STANDING HAZARD, not the instance (added 2026-08-21 after this bug).
+//
+// carr_reader holds column SELECT on actor.id and actor.slug and NONE on kind
+// or active. Postgres refuses a predicate over a column you cannot read, so any
+// read verb that filters the actor table on kind or active dies with "permission
+// denied for table actor" — a driver error, flattened by mcp.js to a bare
+// "internal error" that names nothing. That is the most natural query anyone
+// would write, which is why it needs a contract rather than vigilance.
+//
+// This asserts the SHAPE. Every site that filters actor this way is listed with
+// the verb that owns it and why it is safe. A new one fails this test until
+// someone classifies it — and if it belongs to a READ verb, the answer is a
+// definer function like retrieval_visibility_actor_id, never a wider grant.
+//
+// NOTE the predicate forms: four of the five sites say bare `and active`, not
+// `active = true`. A scan for `active\s*=` alone would have missed every one.
+test("no read verb filters the actor table on a column carr_reader cannot read", () => {
+  const CLASSIFIED = {
+    "capability-program.js": "start-capability-project and siblings — write:true",
+    "investigation.js": "ownedOpenRun, reached only by investigation write verbs",
+    "tools.js": "set-national-account-owner, resolve-post-call-candidate, deal-room field update — all write:true",
+  };
+
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const srcDir = path.join(here, "../src");
+  const ACTOR = /\bfrom\s+actor\b/i;
+  const PREDICATE = /\bkind\s*(=|in\b)|\bactive\s*=|\band\s+active\b|\bwhere\s+active\b/i;
+
+  const found = [];
+  for (const name of fs.readdirSync(srcDir).filter(f => f.endsWith(".js")).sort()) {
+    const text = fs.readFileSync(path.join(srcDir, name), "utf8");
+    const lines = text.split("\n");
+    for (const m of text.matchAll(new RegExp(ACTOR, "gi"))) {
+      const lineNo = text.slice(0, m.index).split("\n").length;
+      const chunk = lines.slice(lineNo - 1, lineNo + 2).join("\n");
+      if (PREDICATE.test(chunk)) found.push({ name, lineNo, text: lines[lineNo - 1].trim() });
+    }
+  }
+
+  assert.ok(found.length > 0, "the scanner itself must still match something, or it has silently rotted");
+
+  const unclassified = found.filter(f => !CLASSIFIED[f.name]);
+  assert.deepEqual(unclassified, [],
+    `these filter the actor table on kind or active and are not classified as write-only paths. ` +
+    `If any belongs to a READ verb it is the outage of 2026-08-17 again: ` +
+    unclassified.map(f => `${f.name}:${f.lineNo} ${f.text}`).join(" | "));
+
+  // The read path specifically must never appear here at all.
+  assert.equal(found.some(f => f.name === "situation-retrieval.js"), false,
+    "doctrine search must resolve its sponsor through retrieval_visibility_actor_id, not the table");
+});
