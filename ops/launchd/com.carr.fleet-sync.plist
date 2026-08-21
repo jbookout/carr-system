@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.carr.fleet-sync — keep THIS Mac's checkout and installed gates current.
+
+  Installed on BOTH machines on purpose: it is the one job whose whole reason
+  for existing is that the second machine drifts silently. It is therefore
+  deliberately absent from PRIMARY_ONLY in ops/config-as-code.py.
+
+  Four times on the working day rather than hourly. The job is cheap, but each
+  run can re-render the settings block, and a machine that reconciles its own
+  enforcement every sixty minutes makes a session's startup banner unstable for
+  no gain. Drift here is measured in days, not minutes: the incident that
+  produced this job ran a full week.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.carr.fleet-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>fleet-sync</string>
+    <string>fleet.sync</string>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/fleet-sync.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>45</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>{{REPO}}/out/fleet-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{REPO}}/out/fleet-sync.log</string>
+</dict>
+</plist>

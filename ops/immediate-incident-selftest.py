@@ -21,6 +21,11 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         print(f"  FAIL  {name}" + (f" — {detail}" if detail else ""))
 
 
+# The day the fake server counts under. Any fixed value works — the point is
+# that it comes from the server's answer rather than from this process's clock.
+SERVER_DAY = "20260819"
+
+
 class FakeCursor:
     """Only the incident statements used by the focused helper."""
 
@@ -57,8 +62,12 @@ class FakeCursor:
             row = next((x for x in self.incidents if x["signature"] == signature), None)
             self._one = (row["id"],) if row else None
         elif "coalesce(max(substring(ref" in normalized:
+            # TWO values since 2026-08-18: the day and the sequence now come
+            # out of the same answer, so the label cannot disagree with the
+            # number it was counted against on a server that is not on UTC.
+            # See ops/incident-numbering-selftest.py.
             self.events.append("ref_allocate")
-            self._one = (len(self.incidents) + 1,)
+            self._one = (SERVER_DAY, len(self.incidents) + 1)
         elif normalized.startswith("insert into ops.incident "):
             incident_id = f"incident-{len(self.incidents) + 1}"
             self.incidents.append({

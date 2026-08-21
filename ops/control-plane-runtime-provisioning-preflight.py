@@ -28,6 +28,8 @@ DEFAULT_DB_ENV = Path.home() / ".config" / "carr" / "db.env"
 DEFAULT_PROVIDER_ENV = Path.home() / ".config" / "carr" / "control-plane.env"
 DEFAULT_AGE_KEY = Path.home() / ".config" / "carr" / "age-key.txt"
 DEFAULT_AGE_PUBLIC_KEY = REPO / "backups-public-key.txt"
+REQUIRED_SYSTEM_AUTHORITY_CREDENTIALS = ("joe",)
+OPTIONAL_AUTHORITY_CREDENTIALS = ("dell", "single_seat_fallback")
 
 
 class Cursor(Protocol):
@@ -208,7 +210,10 @@ def declared_external_prerequisites_present(result: Mapping[str, Any]) -> bool:
     """Presence only: this intentionally makes no authentication assertion."""
     provider_ok = all(item["url_present"] and item["token_present"]
                       for item in result["providers"]["routes"].values())
-    authority_credentials_ok = all(value["credential_present"] for value in result["authority"].values())
+    authority_credentials_ok = all(
+        result["authority"].get(actor, {}).get("credential_present") is True
+        for actor in REQUIRED_SYSTEM_AUTHORITY_CREDENTIALS
+    )
     backup_keys_ok = result["files"]["backup_age_key"]["secure"] and result["files"]["backup_age_public_key"]["secure"]
     return bool(
         result["static_contract_valid"] and result["files"]["db_env"]["secure"]
@@ -248,6 +253,10 @@ def collect_runtime(config: dict[str, Any], *, db_env: Path, provider_env: Path,
         "files": {"db_env": file_state(db_env), "provider_env": file_state(provider_env),
                   "backup_age_key": file_state(age_key), "backup_age_public_key": file_state(age_public_key, required_mode=0o644)},
         "authority": {actor: {"credential_present": key_present(name, db_keys, environ)} for actor, name in authority_env.items()},
+        "authority_readiness": {
+            "required_for_system_rollout": list(REQUIRED_SYSTEM_AUTHORITY_CREDENTIALS),
+            "optional_nonblocking": list(OPTIONAL_AUTHORITY_CREDENTIALS),
+        },
         "jobs": {"credential_present": key_present(jobs_env, db_keys, environ), "database": {"reachable": False}},
         "device_evidence": {"principals": {"observable_by_jobs": False, "active_count": None}, "immutable_receipt_counts": {}},
         "providers": {"selector_present": key_present(config["providers"]["file_selector_env"], provider_keys, environ),

@@ -29,17 +29,21 @@ import sys, os, re, json, glob, difflib
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.record_sources import (MODE_RECORDS, effective_mode, load_clients, load_deals_doc,
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+from lib.record_sources import (MODE_FILES, MODE_RECORDS, load_clients, load_deals_doc,
                                 load_leads, load_vendors, resolve_mode, source_note)
 
-MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
-MODE = effective_mode(MODE, "graph-health")
-
-args = [a for a in ARGS if not a.startswith("--")]
-VERBOSE = "--verbose" in sys.argv
-ROOT = args[0] if args else os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", ".."))
-GRAPH = os.path.join(ROOT, "Graph")
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "graph-health canonical record ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"graph-health: {exc}") from exc
+if any(arg != "--verbose" for arg in _RECOVERY.args):
+    raise SystemExit("graph-health: unexpected argument")
+VERBOSE = "--verbose" in _RECOVERY.args
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MODE = MODE_FILES if _RECOVERY.recovery else MODE_RECORDS
+ROOT = str(_RECOVERY.vault) if _RECOVERY.recovery else REPO
+GRAPH = os.path.join(REPO, "out", "recovery" if _RECOVERY.recovery else "", "Graph")
 
 def s(v): return str(v if v is not None else "").strip()
 

@@ -46,6 +46,9 @@ tools/ops-record.py with no database at all.
 import re
 import subprocess
 import sys
+import json
+import os
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -61,6 +64,37 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         FAILURES.append(name)
         print(f"  FAIL  {name}" + (f" — {detail}" if detail else ""))
+
+
+def completion_invocation(source: str) -> tuple[int, list[str]]:
+    """Run only the wrapper's completion branch with a fake recorder."""
+    start = source.index('  if [ "$rd_state" = "complete" ] && [ -n "$RELEASE_KEY" ]; then')
+    end = source.index("\n  return 0\n}", start)
+    close_branch = source[start:end]
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        call_log = tmp / "call.json"
+        fake_python = tmp / "python"
+        fake_python.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['CALL_LOG']).write_text(json.dumps(sys.argv[1:]))\n",
+            encoding="utf-8")
+        fake_python.chmod(0o755)
+        script = tmp / "run.sh"
+        script.write_text(
+            "#!/bin/sh\nset -eu\n"
+            + close_branch + "\n",
+            encoding="utf-8")
+        script.chmod(0o755)
+        done = subprocess.run(
+            ["sh", str(script)], capture_output=True, text=True,
+            env={**os.environ, "PY": str(fake_python), "REPO": str(REPO),
+                 "RELEASE_KEY": "approved-release", "TARGET_ENV": "production",
+                 "rd_state": "complete", "CALL_LOG": str(call_log)})
+        call = json.loads(call_log.read_text()) if call_log.exists() else []
+        return done.returncode, call
 
 
 def main() -> int:
@@ -96,11 +130,46 @@ def main() -> int:
           and "--read-back-at now" in source,
           "the read-back is not conditioned on complete or verified identity")
 
+    # 3d. THE PRODUCTION READ-BACK RETRIES BEFORE IT CONDEMNS A DEPLOY.
+    # It used to read /release once, the instant Wrangler returned, and write
+    # whatever it saw into the production ledger as a permanent verdict. A
+    # Cloudflare promotion is not globally consistent that instant, so a single
+    # early read can observe the PREVIOUS identity — which is exactly what
+    # happened to release.eed.prod.v3 on 2026-08-19 at 23:36:47Z, eleven seconds
+    # after Joe approved it. The deploy recorded state=failed while the Worker it
+    # had just promoted was serving the approved identity correctly.
+    #
+    # That row also froze ops/last-deployed-verb-count.py, which reads its
+    # baseline from the newest COMPLETE production row: it stayed at 130 verbs
+    # while production served 140, so a deploy shipping 131 would have passed the
+    # verb-loss guard while dropping nine live verbs.
+    #
+    # A settled mismatch must still fail, so this pins BOTH halves: the loop
+    # exists, and the failed record still happens when the loop gives up.
+    check("3d. the Production read-back retries before recording a mismatch",
+          "LIVE_READBACK_ATTEMPTS" in source
+          and "LIVE_RELEASE_OK" in source
+          and re.search(r'while \[ "\$LIVE_RELEASE_ATTEMPT" -lt "\$LIVE_READBACK_ATTEMPTS" \]',
+                        source) is not None
+          and 'if [ "$LIVE_RELEASE_OK" -ne 1 ]; then' in source,
+          "a single early read can condemn a healthy deploy, and did on 2026-08-19")
+
+    check("3e. exhausting the retries still records the failure",
+          re.search(r'if \[ "\$LIVE_RELEASE_OK" -ne 1 \]; then(?:.|\n)*?'
+                    r'record_deployment failed', source) is not None,
+          "retrying must not become a way to never fail")
+
     # 3c. a verified deploy CLOSES its release
     close_at = source.find("release complete --key")
     check("3c. a complete deploy closes the release, and only a complete one",
           close_at != -1 and '"$rd_state" = "complete" ] && [ -n "$RELEASE_KEY"' in source,
           "nothing advances the release past approved, so it and its deployment disagree")
+    close_rc, close_call = completion_invocation(source)
+    check("3c1. completion preserves the approval-bound verifier pair",
+          close_rc == 0
+          and close_call == [str(REPO / "tools" / "ops-record.py"), "release", "complete",
+                             "--key", "approved-release"],
+          f"rc={close_rc} call={close_call!r}")
 
     # 4. the failed path records before it exits
     failed_at = source.find("record_deployment failed")

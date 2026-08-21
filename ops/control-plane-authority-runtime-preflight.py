@@ -14,13 +14,15 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 
 AUTHORITY_ENVIRONMENTS = {
     "joe": ("CARR_DB_AUTHORITY_JOE_URL", "carr_authority_joe"),
     "dell": ("CARR_DB_AUTHORITY_DELL_URL", "carr_authority_dell"),
 }
+REQUIRED_AUTHORITY_ACTORS = ("joe",)
+OPTIONAL_AUTHORITY_ACTORS = ("dell",)
 
 # The authority principal is intentionally not a general read/write role.  It
 # reaches finite SECURITY DEFINER functions and the two audit-envelope inserts
@@ -39,6 +41,7 @@ ALLOWED_MUTATION_PRIVILEGES = {
     ("public.tool_call", "INSERT"),
 }
 REQUIRED_AUTHORITY_FUNCTIONS = (
+    "ops.approve_rule(uuid,text,text[],text,text)",
     "ops.authority_actor_slug()",
     "ops.record_workflow_acceptance(text,text,text,text)",
     "ops.record_guidance_decision(uuid,text,text,text)",
@@ -110,13 +113,24 @@ def is_direct_authority_uri(value: str, expected_user: str) -> bool:
         port = parsed.port
     except (TypeError, ValueError):
         return False
+    try:
+        query_items = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return False
+    query = dict(query_items)
+    canonical_neon_tls = (
+        len(query_items) == len(query)
+        and query.get("sslmode") == "require"
+        and set(query) in ({"sslmode"}, {"sslmode", "channel_binding"})
+        and ("channel_binding" not in query or query["channel_binding"] == "require")
+    )
     return bool(
         parsed.scheme.lower() in {"postgres", "postgresql"}
         and unquote(parsed.username or "") == expected_user
         and parsed.password not in (None, "")
         and parsed.hostname
         and parsed.path not in ("", "/")
-        and parsed.query == ""
+        and canonical_neon_tls
         and parsed.fragment == ""
         and (port is None or 1 <= port <= 65535)
     )
@@ -137,6 +151,10 @@ def _base_report() -> dict[str, Any]:
         "scope": "authority-runtime-identity-only; not phase exit, workflow acceptance, or human approval",
         "read_only": True,
         "phase_exit_authorized": False,
+        "required_authority_identities_verified": False,
+        "optional_authority_identities_verified": {
+            actor: False for actor in OPTIONAL_AUTHORITY_ACTORS
+        },
         "authority_runtime_identities_verified": False,
         "principals": {
             actor: {
@@ -263,13 +281,31 @@ def collect_runtime(environ: Mapping[str, str], connect: Connect) -> dict[str, A
                 "verified": False,
                 "error": "unavailable_or_not_authorized",
             }
+    required_verified = all(
+        report["principals"][actor].get("verified") is True
+        for actor in REQUIRED_AUTHORITY_ACTORS)
+    report["required_authority_identities_verified"] = required_verified
+    report["optional_authority_identities_verified"] = {
+        actor: report["principals"][actor].get("verified") is True
+        for actor in OPTIONAL_AUTHORITY_ACTORS
+    }
+    # Compatibility field retains its literal plural meaning: every declared
+    # partner identity verified. System rollout uses the separate REQUIRED
+    # result, so an absent optional Dell credential never becomes a quorum gate.
     report["authority_runtime_identities_verified"] = all(
-        report["principals"][actor].get("verified") is True for actor in AUTHORITY_ENVIRONMENTS)
+        report["principals"][actor].get("verified") is True
+        for actor in AUTHORITY_ENVIRONMENTS)
     return report
 
 
+def system_rollout_ready(report: Mapping[str, Any]) -> bool:
+    """Joe's verified authority is sufficient; optional seats never form quorum."""
+    return report.get("required_authority_identities_verified") is True
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="read-only Joe/Dell authority-runtime identity preflight")
+    parser = argparse.ArgumentParser(
+        description="read-only required-Joe and optional-Dell authority-runtime identity preflight")
     parser.add_argument("--runtime", action="store_true",
                         help="read partner-specific authority environment variables and query their databases read-only")
     args = parser.parse_args()
@@ -290,7 +326,7 @@ def main() -> int:
         print(json.dumps(report, sort_keys=True))
         return 1
     print(json.dumps(report, sort_keys=True))
-    return 0 if report["authority_runtime_identities_verified"] else 2
+    return 0 if system_rollout_ready(report) else 2
 
 
 if __name__ == "__main__":

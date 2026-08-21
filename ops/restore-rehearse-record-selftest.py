@@ -73,7 +73,14 @@ from pathlib import Path
 from typing import Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+
+from lib.loadpy import load_module_from_path  # noqa: E402
+
 SCRIPT = os.path.join(REPO, "bin", "restore-rehearse.sh")
+OPS_RECORD = load_module_from_path("restore_rehearse_ops_record",
+                                    os.path.join(REPO, "tools", "ops-record.py"))
+DEAD_DSN = "postgresql://carr_jobs:probe@127.0.0.1:1/nonexistent"
 ROUTINE_ENV_TMP = tempfile.TemporaryDirectory()
 ROUTINE_ENV_FILE = Path(ROUTINE_ENV_TMP.name) / "db.env"
 ROUTINE_ENV_FILE.write_text(
@@ -96,14 +103,39 @@ def check(label: str, cond: bool, detail: str = "") -> bool:
 
 def unreachable_env(extra: Optional[dict] = None) -> dict:
     """The environment a Mac has before its DB credential loads — port 1 on
-    loopback refuses instantly rather than hanging. The restore wrapper loads
-    this exact 0600 no-eval fixture through its production credential adapter,
-    so the test cannot fall through to a developer's real db.env.
+    loopback refuses instantly rather than hanging.
+
+    TWO BELTS, because the fixture file alone was not one. The restore wrapper
+    loads the 0600 no-eval fixture above through its production credential
+    adapter (bin/routine-credential-env.sh, which honours
+    CARR_ROUTINE_DB_ENV_FILE), and that much was always true. But
+    tools/ops-record.py does not read that variable: its own _load_db_env()
+    reads ~/.config/carr/db.env directly and fills any name still unset by
+    setdefault. Every path that reached the recorder WITHOUT going through the
+    adapter therefore fell through to the developer's real credential —
+    exactly what this docstring used to promise could not happen.
+
+    Not hypothetical. Measured 2026-08-19, this suite and
+    ops/key-recovery-test-selftest.py had written 206 fabricated rows into
+    PRODUCTION's ops.run against restore-rehearse-weekly, 66 of them carrying
+    this file's own source_ref. Unlike the tier-1 suites fixed on 2026-08-18,
+    whose carr-selftest-* keys production has never registered, this service IS
+    registered, so nothing refused them: its entire production health signal
+    was fixture exhaust, and an incident reading "restore.rehearsal failed" has
+    been open since 2026-08-17 against a rehearsal that never ran. Same shape
+    as open loop #450's radar-weekly finding. Nothing is deleted here; the
+    purge is that loop's ruling to make.
+
+    So: SET every name ops-record.py's own credential_names() lists to a dead
+    port, never delete one, and keep the fixture file for the adapter path. The
+    username stays carr_jobs so routine mode's credential-shape check passes
+    and what fails is the CONNECTION, not the credential's spelling.
     """
     env = dict(os.environ)
+    for name in OPS_RECORD.credential_names():
+        env[name] = DEAD_DSN
     env["CARR_ROUTINE_DB_ENV_FILE"] = str(ROUTINE_ENV_FILE)
-    for leak in ("CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL", "PGSERVICE"):
-        env.pop(leak, None)
+    env.pop("PGSERVICE", None)
     if extra:
         env.update(extra)
     return env
@@ -143,6 +175,25 @@ def tier1() -> None:
           os.access(SCRIPT, os.X_OK), SCRIPT)
     if not os.access(SCRIPT, os.X_OK):
         return
+    source = Path(SCRIPT).read_text(encoding="utf-8")
+    restore_filter = re.search(r"^RESTORE_FILTER='([^']+)'$", source, re.MULTILINE)
+    check("restore portability filter removes only the pre-created public schema",
+          restore_filter is not None
+          and "CREATE SCHEMA public;" in restore_filter.group(1)
+          and restore_filter.group(1).count("CREATE SCHEMA") == 1,
+          "the fresh target already has public; ops and every other schema must still restore")
+    extension_names = set(re.findall(
+        r"create extension if not exists ([a-z0-9_]+)", source.lower()
+    ))
+    migration_extensions = set()
+    for migration in (Path(REPO) / "migrations").glob("*.sql"):
+        migration_extensions.update(re.findall(
+            r"create extension if not exists ([a-z0-9_]+)",
+            migration.read_text(encoding="utf-8").lower(),
+        ))
+    check("restore bootstraps every extension prerequisite declared by migrations",
+          extension_names == migration_extensions == {"pg_trgm", "pgcrypto"},
+          f"restore={sorted(extension_names)} migrations={sorted(migration_extensions)}")
 
     # ── a good run: state=succeeded, no invented failure_class ──────────────
     proc = drive({

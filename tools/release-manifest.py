@@ -27,6 +27,7 @@ whether a release may ship. It computes evidence and compares evidence.
             any mismatch. THIS IS THE ACCEPTANCE TEST for the rebuild clause.
   bind-provider  Record the immutable provider version returned after upload,
             recompute the approval-plan hash, and print the updated manifest.
+  program6-posture  Print the exact reviewed Program 6 posture in a manifest.
   plan-hash Hash the fields an approver actually reads, so a changed plan is
             detectable by the database trigger that voids stale approvals.
 
@@ -45,6 +46,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -78,6 +80,8 @@ PLAN_FIELDS = (
     "dependency_lock_digest",
     "config_fingerprint",
     "schema_highest_migration",
+    "schema_applied_count",
+    "schema_ledger_sha256",
     "migration_set",
     "environment",
     "service",
@@ -97,6 +101,11 @@ RECOVERY_STRATEGIES = (
     "forward_fix",
 )
 REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{2,200}$")
+MIGRATION_FILENAME_RE = re.compile(r"^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$")
+MIGRATION_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SCHEMA_LEDGER_COPY = (
+    "COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;"
+)
 
 
 def git(*args: str) -> str:
@@ -176,6 +185,39 @@ def expand_config_paths(sha: str) -> tuple[str, ...]:
     return tuple(sorted(set(paths)))
 
 
+def program6_actions_at(sha: str, environment: str) -> dict[str, object]:
+    """Read the reviewed Program 6 posture from this manifest's git object."""
+    try:
+        config = tomllib.loads(git("show", f"{sha}:mcp-server/wrangler.toml"))
+    except (tomllib.TOMLDecodeError, SystemExit) as exc:
+        raise ValueError("Program 6 Wrangler configuration cannot be parsed") from exc
+    if environment == "production":
+        variables = config.get("vars")
+    else:
+        variables = (config.get("env") or {}).get(environment, {}).get("vars")
+    if not isinstance(variables, dict):
+        raise ValueError(f"Program 6 {environment} configuration has no vars table")
+    value = variables.get("DEALROOM_PROGRAM6_ACTIONS_ENABLED")
+    if value == "true":
+        return {"enabled": True, "posture": "enabled"}
+    if value == "false":
+        return {"enabled": False, "posture": "disabled"}
+    raise ValueError("DEALROOM_PROGRAM6_ACTIONS_ENABLED must be exactly true or false")
+
+
+def manifest_program6_posture(manifest: dict) -> str:
+    """Return the one reviewed posture a serving release must report."""
+    value = manifest.get("program6_actions")
+    if not isinstance(value, dict):
+        raise ValueError("manifest has no Program 6 posture")
+    enabled, posture = value.get("enabled"), value.get("posture")
+    if enabled is True and posture == "enabled":
+        return "enabled"
+    if enabled is False and posture == "disabled":
+        return "disabled"
+    raise ValueError("manifest Program 6 posture is invalid")
+
+
 def migration_set(sha: str, since: str | None = None) -> tuple[list[str], str]:
     """The migrations this release carries, and the basis that word is using.
 
@@ -198,6 +240,47 @@ def migration_set(sha: str, since: str | None = None) -> tuple[list[str], str]:
         return here, "full-set-at-sha (no previous release given)"
     before = set(at(resolve_sha(since)))
     return [m for m in here if m not in before], f"added-since {resolve_sha(since)[:12]}"
+
+
+def applied_schema_ledger(sha: str) -> tuple[int, str, str]:
+    """Read the candidate's immutable applied-ledger snapshot.
+
+    ``db/schema.sql`` is generated from the canonical ``schema_migrations``
+    ledger and committed with a release candidate.  This is deliberately not
+    derived from the migration directory: that directory says what source is
+    available, while this COPY block says the exact full ledger the candidate
+    expects to observe after rollout.  Applied timestamps are excluded from
+    the digest because they are not schema identity.
+    """
+    snapshot = git("show", f"{sha}:db/schema.sql")
+    if snapshot.count(SCHEMA_LEDGER_COPY) != 1:
+        sys.exit("release-manifest: db/schema.sql must contain exactly one "
+                 "schema_migrations COPY block")
+    _, ledger_and_tail = snapshot.split(SCHEMA_LEDGER_COPY, 1)
+    rows_text, separator, _ = ledger_and_tail.lstrip("\r\n").partition("\n\\.\n")
+    if not separator:
+        sys.exit("release-manifest: schema_migrations COPY block is unterminated")
+
+    rows: list[tuple[str, str]] = []
+    for line in rows_text.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3:
+            sys.exit("release-manifest: malformed schema_migrations COPY row")
+        filename, file_sha256, applied_at = fields
+        if (not MIGRATION_FILENAME_RE.fullmatch(filename)
+                or not MIGRATION_SHA256_RE.fullmatch(file_sha256)
+                or not applied_at.strip()):
+            sys.exit("release-manifest: invalid schema_migrations COPY row")
+        rows.append((filename, file_sha256))
+    if not rows:
+        sys.exit("release-manifest: applied schema ledger is empty")
+    if len({filename for filename, _ in rows}) != len(rows):
+        sys.exit("release-manifest: applied schema ledger filenames must be unique")
+    rows.sort()
+
+    material = "".join(f"{filename}\0{file_sha256}\n" for filename, file_sha256 in rows)
+    digest = "sha256:" + hashlib.sha256(material.encode()).hexdigest()
+    return len(rows), rows[-1][0], digest
 
 
 def performance_contract(budget_ref: object, budget_ms: object,
@@ -248,8 +331,14 @@ def build(sha_ref: str, service: str, environment: str,
         sys.exit(f"release-manifest: no files under {DEPLOYED_PATHS} at {sha} — "
                  "refusing to digest an empty artifact")
     migrations, basis = migration_set(sha, since)
-    all_migrations, _ = migration_set(sha)
+    schema_applied_count, schema_highest_migration, schema_ledger_sha256 = (
+        applied_schema_ledger(sha)
+    )
     config_paths = expand_config_paths(sha)
+    try:
+        program6_actions = program6_actions_at(sha, environment)
+    except ValueError as exc:
+        sys.exit(f"release-manifest: {exc}")
 
     manifest = {
         "manifest_version": 1,
@@ -271,6 +360,7 @@ def build(sha_ref: str, service: str, environment: str,
 
         "config_fingerprint": digest_files(sha, config_paths),
         "config_paths": list(config_paths),
+        "program6_actions": program6_actions,
 
         "migration_set": migrations,
         "migration_set_basis": basis,
@@ -278,7 +368,9 @@ def build(sha_ref: str, service: str, environment: str,
         # manifest built with --since would fail its own rebuild, which would be
         # the check reporting a defect it created itself.
         "migration_set_since": resolve_sha(since) if since else None,
-        "schema_highest_migration": all_migrations[-1] if all_migrations else None,
+        "schema_highest_migration": schema_highest_migration,
+        "schema_applied_count": schema_applied_count,
+        "schema_ledger_sha256": schema_ledger_sha256,
 
         "commit_subject": git("log", "-1", "--format=%s", sha).strip(),
         "commit_authored_at": git("log", "-1", "--format=%aI", sha).strip(),
@@ -364,9 +456,9 @@ def verify(manifest: dict) -> int:
                     manifest.get("performance_budget_ms"),
                     manifest.get("recovery_strategy"),
                     manifest.get("rollback_plan_ref"))
-    compared = ("artifact_digest", "dependency_lock_digest", "config_fingerprint",
-                "schema_highest_migration", "migration_set", "artifact_file_count",
-                )
+    compared = ("artifact_digest", "dependency_lock_digest", "config_fingerprint", "program6_actions",
+                "schema_highest_migration", "schema_applied_count",
+                "schema_ledger_sha256", "migration_set", "artifact_file_count")
 
     failures = []
     for field in compared:
@@ -431,6 +523,9 @@ def main() -> int:
     bp.add_argument("--provider", required=True)
     bp.add_argument("--provider-version-id", required=True)
 
+    pp = sub.add_parser("program6-posture", help="print the manifest-bound Program 6 posture")
+    pp.add_argument("--manifest", required=True)
+
     args = p.parse_args()
 
     if args.cmd == "build":
@@ -447,6 +542,13 @@ def main() -> int:
         try:
             print(json.dumps(bind_provider(manifest, args.provider,
                                            args.provider_version_id), indent=2))
+        except ValueError as exc:
+            print(f"release-manifest: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "program6-posture":
+        try:
+            print(manifest_program6_posture(manifest))
         except ValueError as exc:
             print(f"release-manifest: {exc}", file=sys.stderr)
             return 1

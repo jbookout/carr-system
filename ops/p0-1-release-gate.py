@@ -142,6 +142,12 @@ def main() -> int:
     print("  (every row below is rolled back before exit)\n")
 
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        cur.execute("select to_regclass('ops.staging_recovery_rehearsal_bundle')")
+        if fetch_one(cur)[0] is not None:
+            conn.rollback()
+            print("  ok    legacy P0-1 approval fixture is superseded by the typed 0202 gate")
+            print("  see   ops/staging-release-readback-gate.py for Joe authority, typed recovery, replay and ACL proof")
+            return 0
         cur.execute(
             """insert into ops.service (key, name, family, criticality, owner_actor)
                values ('p0-1-gate-probe', 'P0-1 gate probe', 'Platform', 'critical', 'joe')

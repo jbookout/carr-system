@@ -22,6 +22,10 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from lib.platform_metering import MeteringRefusal, authorize_metered_execution  # noqa: E402
+
 
 class PolicyError(ValueError):
     pass
@@ -705,6 +709,21 @@ def command_execute(args):
         raise PilotRefusal("base_sha_changed")
     if chosen.get("test_merge_sha") != args.independent_merge_sha:
         raise PilotRefusal("test_merge_sha_changed")
+
+    # This pilot must explicitly dispatch post-merge CI because merges written
+    # by GITHUB_TOKEN do not recursively start workflows.  Admit that paid run
+    # BEFORE merging so a budget refusal cannot strand a merged-but-unverified
+    # change.  The protected source-head check above is the local/remote green
+    # evidence for this exact candidate.
+    try:
+        authorize_metered_execution(
+            json.loads((REPO / "ops/config/platform-metering.v1.json").read_text(
+                encoding="utf-8")),
+            "github-actions-remote-ci",
+            {"candidate_sha": args.expected_head, "local_checks_green": True},
+        )
+    except (MeteringRefusal, ValueError, TypeError) as exc:
+        raise PilotRefusal(f"remote_ci_metering_refused:{exc}") from exc
 
     result = execute_conditional_merge(
         api, args.pr_number, args.expected_head, args.expected_base,

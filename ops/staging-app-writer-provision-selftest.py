@@ -55,13 +55,30 @@ def main() -> int:
         REPO / "db/schema.sql", REPO / "migrations", "carr_writer"
     )
     current_facts = set(snapshot.acl_facts(current_grants))
+    # THE LAST CLAUSE IS `>=`, NOT `>`, and that is the whole point of it. It used
+    # to demand that composing the pending migrations produce STRICTLY more ACL
+    # facts than the snapshot carries on its own — which is true only while at
+    # least one unapplied migration happens to grant carr_writer something new.
+    # That is a statement about how far behind db/schema.sql has drifted, not
+    # about whether the provisioner composes correctly, so it failed the moment
+    # the snapshot was refreshed to production's 0184 on 2026-08-19: pending
+    # narrowed to 0188, which grants carr_writer nothing, and 495 == 495 read as
+    # a regression. A test that goes red when the thing it guards is finally
+    # correct trains people to refresh the snapshot less often, which is the
+    # opposite of what the nightly drift check is asking for.
+    #
+    # The property actually worth pinning is that composition never LOSES the
+    # canonical set, which `>=` says. That composition applies pending GRANTs and
+    # REVOKEs in filename order is pinned properly a few lines below, by the
+    # synthetic three-migration fixture — deterministic, and independent of what
+    # the repo's real migration backlog happens to look like today.
     check("the current grant plan composes every post-snapshot migration",
           ("table", "ops.work_request", "insert", False) not in current_facts
           and ("table", "ops.work_request", "update", False) in current_facts
           and ("function",
                "ops.capture_sourced_work_request(text, text, text, jsonb, uuid, uuid, uuid)",
                "execute", False) in current_facts
-          and len(current_facts) > len(snapshot.acl_facts(extracted)))
+          and len(current_facts) >= len(snapshot.acl_facts(extracted)))
 
     synthetic_applied = "begin; commit;\n"
     synthetic_pending = """begin;
@@ -386,7 +403,8 @@ grant insert, select on table ops.work_request to carr_writer;
                 (profile.bundle_role,), (), (),
             ),
             bundle=provision.RoleAuthority(False, True, (), (), (), (), facts, ()),
-            creator_edges=((creator, True, False, False, creator),),
+            creator_edges=((creator, True, False, False,
+                            provision.BOOTSTRAP_SUPERUSER_OID),),
         )
 
     for label, profile in profiles.items():
@@ -401,26 +419,42 @@ grant insert, select on table ops.work_request to carr_writer;
         def fetchone(self): return self.row
     check("direct owner session/current identity is admitted",
           provision.require_direct_owner_identity(
-              IdentityCursor(("neondb_owner", "neondb_owner"))
+              IdentityCursor(("neondb_owner", "neondb_owner", False, True))
           ) == "neondb_owner")
-    for identity in (("app_writer", "app_writer"), ("neondb_owner", "app_writer"), None):
+    for identity in (
+        ("app_writer", "app_writer", False, True),
+        ("neondb_owner", "app_writer", False, True),
+        ("neondb_owner", "neondb_owner", True, True),
+        ("neondb_owner", "neondb_owner", False, False),
+        None,
+    ):
         try:
             provision.require_direct_owner_identity(IdentityCursor(identity))
         except provision.ProvisioningRefusal:
             pass
         else:
             raise AssertionError(f"unsafe owner identity accepted: {identity!r}")
-    check("SET ROLE and non-owner provisioning identities refuse", True)
-    try:
-        provision.validate_profile_closure(
-            dataclasses.replace(profile_closure(profiles["writer"]), creator_edges=()),
-            profiles["writer"], plans["writer"], exact=True,
-            expected_creator="neondb_owner",
-        )
-    except provision.ProvisioningRefusal:
-        check("missing or drifted creator ADMIN edge refuses", True)
-    else:
-        raise AssertionError("missing creator edge was accepted")
+    check("SET ROLE, superuser, non-CREATEROLE and non-owner identities refuse", True)
+    for creator_edges in (
+        (),
+        (("neondb_owner", True, False, False, 11),),
+        (("neondb_owner", True, True, False, provision.BOOTSTRAP_SUPERUSER_OID),),
+        (("neondb_owner", True, False, False, provision.BOOTSTRAP_SUPERUSER_OID),
+         ("other", True, False, False, provision.BOOTSTRAP_SUPERUSER_OID)),
+    ):
+        try:
+            provision.validate_profile_closure(
+                dataclasses.replace(
+                    profile_closure(profiles["writer"]), creator_edges=creator_edges,
+                ),
+                profiles["writer"], plans["writer"], exact=True,
+                expected_creator="neondb_owner",
+            )
+        except provision.ProvisioningRefusal:
+            pass
+        else:
+            raise AssertionError(f"missing or drifted creator edge accepted: {creator_edges!r}")
+    check("missing, extra, option-drifted or non-bootstrap creator edges refuse", True)
 
     expected_actions = {
         (False, "absent"): "prepare_create",
@@ -474,6 +508,8 @@ grant insert, select on table ops.work_request to carr_writer;
             self.statements.append(statement)
             if self.fail_secret:
                 raise RuntimeError("database rejected " + self.fail_secret)
+        def fetchone(self):
+            return ("",)
     class Connection:
         def __init__(self, fail_secret=None):
             self.cur = Cursor(fail_secret)
@@ -502,6 +538,19 @@ grant insert, select on table ops.work_request to carr_writer;
         )
         check("new SQL login profile creates, validates and commits once",
               created and success.commits == 1 and success.rollbacks == 0)
+        check("new SQL login relies on PostgreSQL's automatic creator ADMIN edge",
+              not any(
+                  "sql('grant ')" in repr(statement).lower()
+                  and "identifier('app_writer')" in repr(statement).lower()
+                  and "identifier('neondb_owner')" in repr(statement).lower()
+                  for statement in success.cur.statements
+              )
+              and [str(statement).lower() for statement in success.cur.statements].index(
+                  "set local createrole_self_grant = ''"
+              ) < next(
+                  index for index, statement in enumerate(success.cur.statements)
+                  if "create role" in repr(statement).lower()
+              ))
         secret = "leak-check-" + "z" * 48
         failed = Connection(secret)
         try:

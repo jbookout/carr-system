@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Hermetic proof that the scheduled-writer slice does not follow CARR_VAULT.
+
+Each normal path receives a poisoned CARR_VAULT path that would be a failure to
+open.  The child stubs record their arguments and environment, so this proves
+the invoked scheduler route rather than merely inspecting source text.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+POISON = "/DO-NOT-READ-OR-WRITE-DRIVE"
+FAILED: list[str] = []
+
+
+def check(label: str, condition: bool, detail: str = "") -> None:
+    print(("  ok    " if condition else "  FAIL  ") + label + (f" — {detail}" if detail else ""))
+    if not condition:
+        FAILED.append(label)
+
+
+def fake_python(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/usr/bin/python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['CAPTURE'], 'a', encoding='utf-8') as out:\n"
+        " out.write(json.dumps({'args': sys.argv[1:], 'env': dict(os.environ)}) + '\\n')\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+
+
+def run_learning(script_name: str, root: Path) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]]]:
+    script = root / "bin" / script_name
+    script.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "bin" / script_name, script)
+    fake_python(root / ".venv" / "bin" / "python")
+    home = root / "home"
+    db = home / ".config" / "carr" / "db.env"
+    db.parent.mkdir(parents=True)
+    db.write_text("CARR_DB_JOBS_URL=postgresql://jobs:fixture@db/carr\n", encoding="utf-8")  # ci-secret-scan: allow — fixture
+    capture = root / f"{script_name}.jsonl"
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "CARR_VAULT": POISON,
+           "CAPTURE": str(capture)}
+    result = subprocess.run(["/bin/zsh", str(script)], env=env, text=True, capture_output=True,
+                            check=False)
+    rows = [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()]
+    return result, rows
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        for name, expected in (
+            ("learning-weekly.sh", 2),
+            ("learning-monthly.sh", 2),  # monthly chain plus corrections sweep
+        ):
+            result, rows = run_learning(name, root / name)
+            all_text = json.dumps(rows)
+            check(f"{name} normal run completes with its canonical report output",
+                  result.returncode == 0 and len(rows) == expected,
+                  f"rc={result.returncode} rows={len(rows)} stderr={result.stderr!r}")
+            check(f"{name} children receive no poisoned Drive root", POISON not in all_text)
+            check(f"{name} reports target repo-local out/Learning",
+                  any(str(root / name / "out" / "Learning") in str(row["args"]) for row in rows))
+
+        calendar_root = root / "calendar"
+        (calendar_root / "bin").mkdir(parents=True)
+        capture = calendar_root / "calendar.json"
+        canonical = calendar_root / "bin" / "calendar-eventkit-capture.sh"
+        canonical.write_text(
+            "#!/bin/sh\n[ -z \"${CARR_VAULT+x}\" ] || exit 99\n: > \"$CAPTURE\"\n",
+            encoding="utf-8",
+        )
+        canonical.chmod(0o700)
+        env = {"PATH": "/usr/bin:/bin", "CARR_REPO": str(calendar_root), "CARR_VAULT": POISON,
+               "CAPTURE": str(capture)}
+        result = subprocess.run(["/bin/bash", str(ROOT / "bin" / "fetch-calendar.sh")],
+                                env=env, text=True, capture_output=True, check=False)
+        captured_env = capture.read_text(encoding="utf-8") if capture.exists() else ""
+        check("calendar normal run uses the EventKit-to-record seam", result.returncode == 0,
+              f"rc={result.returncode} stderr={result.stderr!r}")
+        check("calendar normal child receives no poisoned Drive root", POISON not in json.dumps(captured_env))
+
+        missing = subprocess.run(["/bin/bash", str(ROOT / "bin" / "fetch-calendar.sh")],
+                                 env={"PATH": "/usr/bin:/bin", "CARR_REPO": str(root / "missing"),
+                                      "CARR_VAULT": POISON}, text=True, capture_output=True, check=False)
+        check("calendar names a missing canonical seam rather than falling back to Drive",
+              missing.returncode == 78 and "MISSING_CANONICAL_SEAM" in missing.stderr and POISON not in missing.stderr)
+
+        dashboard_python = ROOT / ".venv" / "bin" / "python"
+        if not dashboard_python.exists():
+            dashboard_python = Path(sys.executable)
+        dashboard = subprocess.run([str(dashboard_python), str(ROOT / "generators" / "build-open-items-dashboard.py")],
+                                   env={"PATH": "/usr/bin:/bin", "CARR_VAULT": POISON},
+                                   text=True, capture_output=True, check=False)
+        check("dashboard normal mode refuses its missing canonical document seam",
+              dashboard.returncode != 0 and "MISSING_CANONICAL_SEAM" in dashboard.stderr and POISON not in dashboard.stderr,
+              dashboard.stdout + dashboard.stderr)
+
+        recovery = subprocess.run([str(dashboard_python), str(ROOT / "generators" / "build-open-items-dashboard.py"),
+                                   "--recovery"], env={"PATH": "/usr/bin:/bin"}, text=True,
+                                  capture_output=True, check=False)
+        check("dashboard recovery requires a nonblank reason", recovery.returncode != 0 and
+              "nonblank --reason" in recovery.stderr)
+
+        hard = subprocess.run(["/bin/sh", str(ROOT / "bin" / "routine-canonical-seam-refusal.sh"),
+                               "record-backed dashboard destination"], text=True, capture_output=True,
+                              check=False)
+        admin = subprocess.run(["/bin/sh", str(ROOT / "bin" / "routine-admin-refusal.sh"),
+                                "backup capability unavailable"], text=True, capture_output=True,
+                               check=False)
+        check("missing canonical seams are hard failures, distinct from admin skips",
+              hard.returncode == 69 and "MISSING_CANONICAL_SEAM" in hard.stderr
+              and admin.returncode == 78 and "routine capability refused" in admin.stderr)
+
+        nightly = (ROOT / "bin" / "nightly.sh").read_text(encoding="utf-8")
+        normal, _recovery = nightly.split('if [ "$RECOVERY" -eq 1 ]; then\n  export CARR_EXPORT_LIVE=1', 1)
+        check("nightly normal route clears ambient Drive before its first child",
+              "unset CARR_VAULT CARR_EXPORT_LIVE" in normal)
+        check("nightly Drive projections are routed through the recovery envelope",
+              nightly.count("drive_projection ") >= 12 and "RECOVERY NONCANONICAL" in nightly
+              and "routine-canonical-seam-refusal.sh" in nightly)
+
+    print(f"scheduled Drive writer selftest — {len(FAILED)} failure(s)")
+    return 1 if FAILED else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

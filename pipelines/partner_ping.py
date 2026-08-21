@@ -184,11 +184,65 @@ def fetch(conn, since, me, partner):
         return cur.fetchall()
 
 
+def in_buzz_window(now=None) -> tuple[bool, str]:
+    """Is there a partner who could act on a buzz right now?
+
+    Weekdays 07:00–19:00 local. Saturday and Sunday are off for both partners
+    by rule 236ca227 ("weekends are off for both partners"; hooks/weekend-
+    quiet-gate.py already refuses weekend sends outright), and at 3am neither
+    of them is reading notification centre — a buzz nobody sees is not a
+    faster interrupt, it is a wake-up for the database.
+
+    The window is one hour wider on each side than notes-sweep's 08–18,
+    deliberately: notes-sweep WRITES during its window, while this only reads
+    and buzzes, and both partners routinely start before 8.
+
+    `date +%u`'s convention, in Python: Monday is 1, Sunday is 7.
+    """
+    now = now or datetime.now()
+    weekday = now.isoweekday()
+    hour = now.hour
+    if weekday > 5:
+        return False, f"weekend (weekday={weekday} local) — rule 236ca227"
+    if hour < 7 or hour >= 19:
+        return False, f"outside 07:00–19:00 (hour={hour} local)"
+    return True, f"weekday {weekday}, hour {hour} local"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--since", help="ISO timestamp overriding the stored watermark")
+    # THE SCHEDULED PATH IS THE ONE THAT SLEEPS. Same shape as notes-sweep's
+    # own --scheduled flag and for the same stated reason: the business-hours
+    # rule lives in the script, not the plist, so the manual and automated
+    # paths stay one code path (rule a8c55a47) and a quiet run has a single
+    # unambiguous explanation in the log. A human running this by hand at
+    # 11pm still gets an answer.
+    ap.add_argument("--scheduled", action="store_true",
+                    help="launchd entry point: skip the query outside the "
+                         "weekday buzz window")
     args = ap.parse_args()
+
+    # WHY THIS GUARD EXISTS AT ALL (2026-08-18 cloud-usage audit). This job
+    # wakes every 120 seconds, and its query was the last thing holding the
+    # Neon compute awake around the clock: autosuspend needs five idle
+    # minutes and never got them, so the database was billed through every
+    # night and weekend to ask "anything for Joe?" on behalf of nobody awake.
+    # Skipping OUTSIDE the window keeps Joe's 2026-08-03 promise exactly
+    # where it was made — a partner waiting on the other during the workday
+    # is buzzed within two minutes, unchanged — and lets the database sleep
+    # roughly 14 hours a night plus the whole weekend.
+    #
+    # The check runs BEFORE psycopg connects, which is what makes it save
+    # anything: tools/db-tap.py derives the connection string from the Neon
+    # control-plane API and never opens a connection itself, so nothing has
+    # touched compute at this point.
+    if args.scheduled:
+        ok, why = in_buzz_window()
+        if not ok:
+            print(f"skip: no partner to buzz — {why}")
+            return
 
     url = os.environ.get("DATABASE_URL")
     if not url:

@@ -25,16 +25,51 @@
 # stand-down: Sat/Sun are not workdays for Joe or Dell and Monday absorbs.
 #
 # SKIP-not-FAIL on missing env, per house convention.
+#
+# NORMAL MODE writes only repo-local document outputs. Drive projection is an
+# explicit recovery act: pass --recovery and set CARR_RECOVERY_REASON. The
+# scheduled launchd path passes neither, so it can never silently write Drive.
 REPO="$HOME/carr-system"
 LOG="$REPO/out/local-briefs.log"
 [ -f "$HOME/.config/carr/db.env" ] || { echo "$(date -u +%FT%TZ) SKIP no db.env" >> "$LOG"; exit 0; }
 cd "$REPO" || exit 1
 
+RECOVERY=0
+if [ "${1:-}" = "--recovery" ]; then
+  RECOVERY=1
+  [ -n "${CARR_RECOVERY_REASON:-}" ] || {
+    echo "local-briefs: --recovery requires CARR_RECOVERY_REASON" >&2
+    exit 2
+  }
+elif [ -n "${1:-}" ]; then
+  echo "usage: bin/local-briefs.sh [--recovery]" >&2
+  exit 2
+fi
+
 rc=0
-if ./run.sh brief-pack --quiet >> "$LOG" 2>&1; then
-  echo "$(date -u +%FT%TZ) OK brief-pack" >> "$LOG"
+brief_ok=0
+if [ "$RECOVERY" -eq 1 ]; then
+  echo "$(date -u +%FT%TZ) RECOVERY brief-pack reason=${CARR_RECOVERY_REASON}" >> "$LOG"
+  if ./run.sh brief-pack --quiet --recovery >> "$LOG" 2>&1; then
+    echo "$(date -u +%FT%TZ) OK brief-pack recovery" >> "$LOG"
+    brief_ok=1
+  else
+    echo "$(date -u +%FT%TZ) FAIL brief-pack recovery rc=$?" >> "$LOG"; rc=1
+  fi
 else
-  echo "$(date -u +%FT%TZ) FAIL brief-pack rc=$?" >> "$LOG"; rc=1
+  # The weekday artifact consumes exactly these three canonical-safe sections.
+  # Do not ask for `all`: that includes prebriefs, whose only current source is
+  # the explicitly-recovery Drive ICS path and must keep refusing normal use.
+  brief_ok=1
+  for section in one-thing claim-card renewal-shortlist; do
+    if ./run.sh brief-pack --quiet --section "$section" >> "$LOG" 2>&1; then
+      echo "$(date -u +%FT%TZ) OK brief-pack section=$section" >> "$LOG"
+    else
+      echo "$(date -u +%FT%TZ) FAIL brief-pack section=$section rc=$?" >> "$LOG"
+      brief_ok=0
+      rc=1
+    fi
+  done
 fi
 
 if ./run.sh review-queue >> "$LOG" 2>&1; then
@@ -43,34 +78,29 @@ else
   echo "$(date -u +%FT%TZ) FAIL review-queue rc=$?" >> "$LOG"; rc=1
 fi
 
-# DELIVER THE CALL LIST TO A SURFACE JOE ACTUALLY OPENS. Added 2026-08-09 by the
-# system-design council: brief_pack writes one-thing.md and renewal-shortlist.md
-# into out/brief-pack/, and .gitignore line 5 excludes out/ entirely. Nothing
-# copied them anywhere, and grep found no consumer but health-check.py watching
-# the mtime — a freshness check on a file with no reader. Meanwhile the shortlist
-# named 15 Pensacola healthcare tenants with phone numbers and lease windows, and
-# THREE of those windows expired unread, each carrying its own auto-generated
-# "est window already past, verify before outreach" footnote. The file recorded
-# the opportunity it was losing.
+# today.md USED TO BE WRITTEN HERE, and the doctrine cutoff retired it on
+# 2026-08-20. The block concatenated three brief-pack sections into
+# 00_Context/today.md in the vault because out/ is gitignored and the call list
+# had no reader — three renewal windows had expired unread while the shortlist
+# sat in a folder nobody opened.
 #
-# Vault, not email: this deliberately does NOT depend on the handover channel,
-# which cannot run (~/.config/carr/gmail.env is absent) and is a separate fix.
-# 00_Context/ is a folder Joe already opens, so this needs no new habit.
-VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
-if [ -d "$VAULT/00_Context" ]; then
-  { echo "# Today, generated $(date -u +%FT%TZ). Do not hand-edit."
-    echo
-    cat "$REPO/out/brief-pack/one-thing.md" 2>/dev/null
-    echo
-    cat "$REPO/out/brief-pack/claim-card.md" 2>/dev/null
-    echo
-    cat "$REPO/out/brief-pack/renewal-shortlist.md" 2>/dev/null
-  } > "$VAULT/00_Context/today.md" \
-    && echo "$(date -u +%FT%TZ) OK today.md -> vault" >> "$LOG" \
-    || { echo "$(date -u +%FT%TZ) FAIL today.md -> vault" >> "$LOG"; rc=1; }
-else
-  echo "$(date -u +%FT%TZ) SKIP today.md — vault not mounted" >> "$LOG"
-fi
+# THAT PROBLEM IS SOLVED BY VERBS NOW, which is the only reason this is safe to
+# remove. All three sections are served live:
+#   the one thing        today-triage
+#   renewal windows      today-triage (the T-6 and T-3 lease-event rows)
+#   the claim card       claim-card, deployed to production 2026-08-20, 141 verbs
+#
+# The claim card is why this waited. promote-pool and decline-candidate each tell
+# the caller to read the row from v_claim_card first, and until claim-card
+# shipped, the markdown card was the only reader that existed anywhere — pulling
+# the file before the verb would have left both write verbs naming a surface
+# nothing could reach. Verified against the live Worker before this line was
+# deleted: claim-card returned the same 9,778 claimable and 388 needs-contact
+# totals this block used to print.
+#
+# The brief-pack sections still build into out/brief-pack/ above; what ends here
+# is the copy into the vault. health-check.py watches those files' mtime, so the
+# freshness signal is unaffected.
 
 # Known defect, tracked as loop #182: review-queue's touches lane reports 0 while
 # ingest_inbox holds real rows, because the read fails and the handler discards

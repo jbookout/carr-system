@@ -6,7 +6,36 @@
 
 set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
+PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY=python3
+DEFAULT_RECOVERY_VAULT="/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+RECOVERY=0
+REASON=""
+VAULT=""
+while (( $# )); do
+  case "$1" in
+    --recovery) RECOVERY=1; shift ;;
+    --reason) [ $# -ge 2 ] || { echo "smoke: --reason requires a value" >&2; exit 2; }
+              REASON="$2"; shift 2 ;;
+    --vault) [ $# -ge 2 ] || { echo "smoke: --vault requires a value" >&2; exit 2; }
+             VAULT="$2"; shift 2 ;;
+    *) echo "smoke: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+typeset -a RECOVERY_ARGS
+RECOVERY_ARGS=()
+if (( RECOVERY )); then
+  REASON="${REASON:-${CARR_RECOVERY_REASON:-}}"
+  [ -n "${REASON//[[:space:]]/}" ] || {
+    echo "smoke: --recovery requires a nonblank --reason" >&2; exit 2;
+  }
+  VAULT="${VAULT:-${CARR_VAULT:-$DEFAULT_RECOVERY_VAULT}}"
+  RECOVERY_ARGS=(--recovery --reason "$REASON" --vault "$VAULT")
+  export CARR_RECOVERY_REASON="$REASON"
+  echo "SMOKE RECOVERY MODE - NONCANONICAL Drive projections - reason: $REASON" >&2
+else
+  [ -z "$VAULT" ] || { echo "smoke: --vault is recovery-only; pass --recovery" >&2; exit 2; }
+  unset CARR_VAULT
+fi
 
 echo "== smoke: python compile (every .py in the repo) =="
 python3 - "$REPO" << 'EOF'
@@ -39,8 +68,9 @@ for f in "$REPO"/workflows/*.workflow.js; do
   echo "  OK  $(basename "$f")"
 done
 
-echo "== smoke: sheets.py schema contract against the LIVE workbooks =="
-CARR_VAULT="$VAULT" python3 - "$REPO" "$VAULT" << 'EOF'
+if (( RECOVERY )); then
+echo "== smoke: RECOVERY workbook schema projections =="
+python3 - "$REPO" "$VAULT" << 'EOF'
 import sys, glob, os
 repo, vault = sys.argv[1], sys.argv[2]
 sys.path.insert(0, os.path.join(repo, "lib"))
@@ -52,6 +82,13 @@ wb = openpyxl.load_workbook(os.path.join(vault, "DNA", "Leads", "lead-registry.x
 header_map(wb["Registry"], REGISTRY_REQUIRED, "registry"); wb.close()
 print("  OK  both workbook schemas validate")
 EOF
+else
+echo "== smoke: canonical registry schema contract =="
+"$PY" "$REPO/tools/registry-audit.py" >/dev/null || {
+  echo "  FAIL: canonical registry schema/integrity"; exit 1;
+}
+echo "  OK  v_export_leads schema and ids validate"
+fi
 
 echo "== smoke: report-card rubric validates =="
 # Loop #220 recorded this as already wired. It was not — smoke.sh had no
@@ -60,12 +97,17 @@ echo "== smoke: report-card rubric validates =="
 # promoting measurement_integrity off kind='gate', blanking its bound action, or
 # giving it a trend each exit 1.
 python3 "$REPO/tools/report-card.py" --validate > /dev/null || { echo "  FAIL: rubric validation"; exit 1; }
-echo "  OK  rubric-v2 validates"
+echo "  OK  report-card rubric validates"
 
 echo "== smoke: retrieval answers =="
-CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" -n 1 "monthly health audit procedure" | head -2
+if (( RECOVERY )); then
+  "$PY" "$REPO/tools/retrieve.py" --recovery --vault "$VAULT" -n 1 \
+    "monthly health audit procedure" | head -2
+else
+  "$PY" "$REPO/tools/retrieve.py" -n 1 "monthly health audit procedure" | head -2
+fi
 
 echo "== smoke: safety nets =="
-CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" || echo "  (health findings above are REAL findings, not smoke failures)"
-"$REPO/tools/check.sh" || { echo "  FAIL: drift check"; exit 1; }
+"$PY" "$REPO/tools/health-check.py" "${RECOVERY_ARGS[@]}" || echo "  (health findings above are REAL findings, not smoke failures)"
+"$REPO/tools/check.sh" "${RECOVERY_ARGS[@]}" || { echo "  FAIL: drift check"; exit 1; }
 echo "== smoke: ALL GREEN =="

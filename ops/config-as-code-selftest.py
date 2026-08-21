@@ -48,6 +48,25 @@ def commands(doc):
             for group in groups for hook in group.get("hooks", []) if isinstance(hook, dict)]
 
 
+PLIST_DIR = Path(__file__).resolve().parents[1] / "ops" / "launchd"
+
+
+def _plist_parses(path):
+    """True when Python can read the plist, not merely when plutil can.
+
+    launchd uses CoreFoundation's lenient parser and accepts files that
+    plistlib rejects.  Every repo tool that inspects these jobs uses plistlib,
+    so a file only launchd can read is a file the tooling silently skips.
+    """
+    try:
+        with open(path, "rb") as fh:
+            plistlib.load(fh)
+        return True
+    except Exception as exc:
+        print(f"  UNPARSEABLE  {path.name}: {type(exc).__name__} {exc}")
+        return False
+
+
 def main():
     merged = mod.merge_codex_carr_hooks(LIVE, DESIRED)
     names = commands(merged)
@@ -197,7 +216,17 @@ def main():
             secondary_bad_install_rc = mod.cmd_install(True)
         secondary_bad_output = secondary_bad_out.getvalue()
         modified_task_preserved = modified_task.read_text(encoding="utf-8") == "modified CARR task\n"
-        mod.IS_PRIMARY = original_primary
+        # PIN THE MACHINE ROLE FOR THE LAUNCHD CASES. This used to restore the
+        # real machine's role here, which silently made the three launchd
+        # assertions below mean different things on different Macs: the synthetic
+        # plists are primary-scope, so on a SECONDARY machine (Dell's, actor slug
+        # dell) they are never loaded, load_attempts stays empty, and two cases
+        # fail for a reason that has nothing to do with what they test. They pass
+        # on Joe's Mac and on the GitHub runner, both of which resolve primary, so
+        # the split stayed invisible until pre-push CI was run on the secondary.
+        # A selftest must assert the same thing everywhere; the real role is
+        # restored after the block instead.
+        mod.IS_PRIMARY = True
         definition_only_plist = {
             "Label": "com.carr.control-plane-tick",
             "ProgramArguments": ["/usr/bin/true"],
@@ -232,6 +261,7 @@ def main():
                 launchd_retry_rc = mod.cmd_install(True)
         finally:
             mod.subprocess.run = real_run
+        mod.IS_PRIMARY = original_primary
         launchd_dir_created = Path(mod.LAUNCHD_SRC).is_dir()
         definition_only_absent = not (
             Path(mod.LAUNCHD_SRC) / "com.carr.control-plane-tick.plist"
@@ -311,6 +341,17 @@ def main():
          and "SKIP  com.carr.control-plane-tick.plist (definition only:" in launchd_out.getvalue()),
         ("fresh install creates the LaunchAgents directory",
          launchd_dir_created),
+        # EVERY REPO PLIST MUST PARSE WITH plistlib, not merely with plutil.
+        # com.carr.partner-ping.plist named a flag literally inside an XML
+        # comment on 2026-08-18, and XML forbids the two-dash sequence there.
+        # plutil and launchd both accepted the file; Python's parser did not.
+        # The cost was silent: _missing_paths in ops/config-as-code.py catches
+        # the parse error and returns [] — "no missing paths" — so the check
+        # that stops a job installing when its program was never built did
+        # nothing at all for that job, and nothing said so. A text-only drift
+        # comparison cannot see this, which is why it needs its own case.
+        ("every repo launchd plist parses with plistlib, not just plutil",
+         all(_plist_parses(f) for f in sorted(PLIST_DIR.glob("*.plist")))),
     ]
     for label, passed in cases:
         print(f"{'PASS' if passed else 'FAIL'}  {label}")

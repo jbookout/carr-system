@@ -83,6 +83,24 @@ class Connection:
         return self._cursor
 
 
+class ApprovalCursor(Cursor):
+    """Minimal typed-approval cursor: records the exact CLI dispatch."""
+
+    def __init__(self):
+        super().__init__()
+        self.approval_sql = ""
+        self.approval_params = ()
+
+    def execute(self, sql: str, params=()) -> None:
+        normalized = " ".join(sql.split())
+        if normalized.startswith("select ops.approve_"):
+            self.approval_sql = normalized
+            self.approval_params = params
+            self.one = ({"replayed": False},)
+            return
+        super().execute(sql, params)
+
+
 def run_args(**changes):
     values = dict(
         service="carr-mcp", key="performance.release", state="succeeded",
@@ -92,6 +110,18 @@ def run_args(**changes):
         correlation="11111111-1111-4111-8111-111111111111",
         source_kind="wrapper", source_ref="bin/deploy-worker.sh",
         expires_in=None, evidence_ref="ops.run:performance-release", detail="999ms")
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def approval_args(**changes):
+    values = dict(
+        action="staging-approve", key="staging-release-key", environment="staging",
+        actor=None, manifest=None, plan_hash="sha256:" + "a" * 64,
+        idempotency_key="11111111-1111-4111-8111-111111111111",
+        expires_hours=12, verifier="independent-verifier",
+        verifier_evidence="evidence:staging-verify",
+    )
     values.update(changes)
     return SimpleNamespace(**values)
 
@@ -158,10 +188,88 @@ def main() -> int:
         check("6. Production candidate missing assurance is refused before DB",
               module.cmd_release(candidate) == 2)
 
+    # Staging approval is a distinct authority-only action.  These are
+    # executable command-boundary checks: the fake records both connection
+    # selection and the typed function/arguments without a database credential.
+    approval_cursor = ApprovalCursor()
+    connections: list[str] = []
+    def approval_connect(kind: str) -> Connection:
+        connections.append(kind)
+        return Connection(approval_cursor)
+    module.connect = approval_connect
+    staging = approval_args()
+    check("6a. staging approval uses the Joe authority connection",
+          module.cmd_release(staging) == 0 and connections == ["authority"])
+    check("6b. staging approval dispatches its exact typed function and evidence",
+          approval_cursor.approval_sql ==
+          "select ops.approve_staging_release(%s,%s,%s::uuid,%s,%s,%s)"
+          and approval_cursor.approval_params == (
+              staging.key, staging.plan_hash, staging.idempotency_key,
+              staging.expires_hours, staging.verifier, staging.verifier_evidence))
+
+    production = approval_args(action="approve", environment="production")
+    connections.clear()
+    approval_cursor.approval_sql = ""
+    approval_cursor.approval_params = ()
+    check("6c. Production approve retains its Program 5 typed function",
+          module.cmd_release(production) == 0 and connections == ["authority"]
+          and approval_cursor.approval_sql ==
+          "select ops.approve_program5_release(%s,%s,%s::uuid,%s,%s,%s)"
+          and approval_cursor.approval_params == (
+              production.key, production.plan_hash, production.idempotency_key,
+              production.expires_hours, production.verifier,
+              production.verifier_evidence))
+
+    for name, bad in (
+        ("wrong environment", approval_args(environment="production")),
+        ("caller actor", approval_args(actor="attacker")),
+        ("missing plan hash", approval_args(plan_hash=None)),
+        ("missing idempotency key", approval_args(idempotency_key=None)),
+        ("invalid idempotency UUID", approval_args(idempotency_key="not-a-uuid")),
+    ):
+        connections.clear()
+        approval_cursor.approval_sql = ""
+        check(f"6d. staging approval {name} is refused before connection",
+              module.cmd_release(bad) == 2 and not connections
+              and not approval_cursor.approval_sql)
+
     source = RECORD.read_text(encoding="utf-8")
     check("7. candidate persists all three approval-bound assurance fields",
           all(field in source for field in (
               "performance_budget_ref", "performance_budget_ms", "recovery_strategy")))
+
+    # 8-10 pin the defect found 2026-08-19: `approve` set state='approved' and
+    # NEVER wrote verifier_actor or verifier_evidence_ref, while migration 0169
+    # requires both for that state. The only writer of those columns was the
+    # `complete` branch, which runs after approval and after the deploy — so
+    # approve could not succeed for ANY release, on any path, and died on a raw
+    # constraint name that told the reader nothing.
+    #
+    # Source assertions rather than a live database, matching how 7 above works
+    # and why: this selftest runs in CI, which must never hold a production
+    # credential, and the columns in question are only observable through a
+    # write nobody should be doing from a test run.
+    candidate_insert = source[source.index("insert into ops.release"):]
+    candidate_insert = candidate_insert[:candidate_insert.index("returning id, release_key")]
+    check("8. the CANDIDATE can collect the verifier, which 0169 says it may",
+          "verifier_actor" in candidate_insert
+          and "verifier_evidence_ref" in candidate_insert)
+
+    approval_migration = (REPO / "migrations" /
+                          "0205_program5_approval_verifier.sql").read_text(encoding="utf-8")
+    approval_migration_lower = approval_migration.lower()
+    check("9. APPROVE accepts a verifier, for the ordinary case where the "
+          "verifying run finishes after the candidate was filed",
+          "p_verifier_actor text,p_verifier_evidence_ref text" in approval_migration
+          and "supplied verifier actor and evidence must be an atomic nonblank pair" in approval_migration
+          and "verifier_actor_value:=coalesce(supplied_verifier_actor,candidate_verifier_actor)" in approval_migration)
+    check("10. approve REFUSES in words rather than leaving it to the constraint",
+          "cannot be approved without an INDEPENDENT VERIFIER" in approval_migration
+          and "maker cannot independently verify their own release" in approval_migration)
+    check("11. receipt binding preserves 0202 append-only evidence",
+          "populated 0202 evidence requires a separate audited versioned conversion"
+          in approval_migration
+          and "update ops.release_approval_receipt" not in approval_migration_lower)
 
     if FAILURES:
         print(f"release-assurance-record-selftest: {len(FAILURES)} FAILED")

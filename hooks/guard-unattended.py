@@ -162,6 +162,25 @@ KNOWN_HOSTS = (
     # in that run's output because a scheduled job widening a security gate is
     # exactly the kind of change that should not pass unannounced.
     "blotato.io",
+    # backend.blotato.com: the POSTING API host of the same already-sanctioned
+    # Blotato connector whose media host sits on the line above. Added
+    # 2026-08-21 on Joe's explicit in-session approval, by the
+    # social-batch-weekly run, after the MCP connector that every batch through
+    # 2026-08-14 used vanished from the runtime — leaving
+    # claude-tree/skills/social-media-manager/scripts/blotato.sh, which this
+    # repo already carries and which calls https://backend.blotato.com/v2, as
+    # the only remaining route. That route is BETTER for an unattended run than
+    # the connector was: BLOTATO_API_KEY is a stored env var in ~/.zprofile, so
+    # it satisfies the rule that no unattended path may depend on an
+    # interactive credential.
+    #
+    # SCOPE, stated because an allowlist entry is a standing permission:
+    # scheduling review-drafts that Joe approves inside Blotato before anything
+    # publishes, and READING the queue. The read half is why this was urgent —
+    # the week-of-8/10 batch was verified as scheduled and then silently
+    # vanished from the queue, and with no route to Blotato nobody could see
+    # that it had happened.
+    "backend.blotato.com",
     # huggingface.co: whisper.cpp model downloads for the dictation rig
     # (ggml-large-v3-turbo). Added 2026-08-07 on Joe's explicit go in the
     # dictation-rig build session; read-only model fetches into ~/.cache.
@@ -995,12 +1014,39 @@ def delegation_control_plane_write(cmd):
     return None
 
 
+def direct_metered_dispatch(cmd):
+    """Refuse paid dispatches that bypass their reviewed budget wrapper.
+
+    The wrapper itself is not an escape flag.  The guard sees only the command
+    issued by the session; reviewed scripts perform their own in-process
+    admission before reaching the vendor.  Inert PR bodies and documentation
+    are stripped so describing a command is never mistaken for running it.
+    """
+    executable = strip_inert_text(cmd)
+    patterns = (
+        (re.compile(r"\b(?:npx\s+)?wrangler\s+(?:deploy|versions\s+(?:upload|deploy))\b", re.I),
+         "direct Cloudflare release bypasses bin/deploy-worker.sh"),
+        (re.compile(r"\bneonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
+         "direct Neon branch create bypasses neon-disposable-branch admission"),
+        (re.compile(r"\bgh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
+         "direct GitHub Actions dispatch bypasses the remote-CI budget gate"),
+    )
+    for pattern, reason in patterns:
+        if pattern.search(executable):
+            return reason + " — blocked by the CARR metering gate"
+    return None
+
+
 def check(cmd):
     """Return a reason string to block, or None to allow."""
     if cmd.strip() in ALLOW_EXACT:
         return None
 
     reason = delegation_control_plane_write(cmd)
+    if reason:
+        return reason
+
+    reason = direct_metered_dispatch(cmd)
     if reason:
         return reason
 

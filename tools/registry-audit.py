@@ -35,19 +35,48 @@ import os
 import re
 import sys
 import glob
+import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import openpyxl
 from registry import (REGISTRY_COLUMNS, RETIRED_IDS, id_num, fmt_id, _s)
 
-VERBOSE = "--verbose" in sys.argv
-ROOT = os.environ.get("CARR_VAULT") or (sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else None)
-if not ROOT:
-    raise SystemExit("registry-audit: pass the vault root or set CARR_VAULT.")
+DEFAULT_RECOVERY_VAULT = (
+    "/Users/booko/Library/CloudStorage/"
+    "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+)
 
-REG = os.path.join(ROOT, "DNA", "Leads", "lead-registry.xlsx")
-PROSPECTS = os.path.join(ROOT, "DNA", "Clients", "prospects")
-ROSTER = os.path.join(ROOT, "DNA", "Clients", "clients-active.md")
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(description="Audit the canonical lead registry")
+    ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--recovery", action="store_true",
+                    help="audit the legacy Drive workbook projection")
+    ap.add_argument("--reason", help="required reason for recovery mode")
+    ap.add_argument("--vault", help="recovery Drive root")
+    ap.add_argument("--fixture", help=argparse.SUPPRESS)
+    args = ap.parse_args(argv)
+    if args.vault and not args.recovery:
+        ap.error("--vault is recovery-only; pass --recovery")
+    if args.recovery:
+        args.reason = (args.reason or os.environ.get("CARR_RECOVERY_REASON", "")).strip()
+        if not args.reason:
+            ap.error("--recovery requires a nonblank --reason")
+        args.vault = args.vault or os.environ.get("CARR_VAULT") or DEFAULT_RECOVERY_VAULT
+    else:
+        os.environ.pop("CARR_VAULT", None)
+    if args.fixture and args.recovery:
+        ap.error("--fixture cannot be combined with --recovery")
+    return args
+
+
+ARGS = parse_args(sys.argv[1:])
+VERBOSE = ARGS.verbose
+ROOT = ARGS.vault if ARGS.recovery else None
+
+REG = os.path.join(ROOT, "DNA", "Leads", "lead-registry.xlsx") if ROOT else ""
+PROSPECTS = os.path.join(ROOT, "DNA", "Clients", "prospects") if ROOT else ""
+ROSTER = os.path.join(ROOT, "DNA", "Clients", "clients-active.md") if ROOT else ""
 
 errors: list[str] = []
 warns: list[str] = []
@@ -86,6 +115,93 @@ def tokens(*parts):
     blob = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", blob)
     blob = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", blob)
     return {w for w in re.findall(r"[a-z]{4,}", blob.lower()) if w not in STOP}
+
+
+def canonical_audit():
+    """Audit the registry view itself without accepting its Drive rendering."""
+    from record_sources import MODE_RECORDS, load_leads
+
+    if ARGS.fixture:
+        import json
+        try:
+            with open(ARGS.fixture, encoding="utf-8") as fh:
+                canonical_rows = json.load(fh)
+            if not isinstance(canonical_rows, list) or not all(
+                    isinstance(row, dict) for row in canonical_rows):
+                raise ValueError("fixture must be a list of row objects")
+        except Exception as exc:
+            print(f"registry-audit: invalid fixture ({type(exc).__name__}: {exc})",
+                  file=sys.stderr)
+            return 2
+    else:
+        try:
+            canonical_rows = load_leads("", MODE_RECORDS)
+        except Exception as exc:
+            print("registry-audit: canonical v_export_leads unavailable "
+                  f"({type(exc).__name__}: {exc})", file=sys.stderr)
+            return 69
+
+    print("registry-audit — canonical v_export_leads — "
+          f"{len(canonical_rows)} rows")
+    print()
+    local_errors = []
+    local_warns = []
+
+    def c_err(msg):
+        local_errors.append(msg)
+        print("  ERROR  " + msg)
+
+    def c_warn(msg):
+        local_warns.append(msg)
+        print("  WARN   " + msg)
+
+    print("[3] schema")
+    keys = set().union(*(row.keys() for row in canonical_rows)) if canonical_rows else set()
+    missing = [c for c in REGISTRY_COLUMNS if c not in keys]
+    if missing:
+        c_err("canonical column(s) missing: %s" % missing)
+    elif VERBOSE:
+        print("  ok     all %d canonical columns present" % len(REGISTRY_COLUMNS))
+    print()
+
+    print("[5] ids")
+    ids = []
+    for row in canonical_rows:
+        n = id_num(row.get("Lead ID"))
+        if n is None:
+            c_err("row has no parseable Lead ID")
+        else:
+            ids.append(n)
+    dupes = sorted({n for n in ids if ids.count(n) > 1})
+    if dupes:
+        c_err("duplicate Lead ID(s): %s" % [fmt_id(n) for n in dupes])
+    elif VERBOSE:
+        print("  ok     no duplicate ids")
+    if ids:
+        for n in range(min(ids), max(ids) + 1):
+            if n not in ids and n not in RETIRED_IDS:
+                c_warn(f"{fmt_id(n)} is a gap and is not an explicit retired id")
+    print()
+
+    print("[4,2,1,6] projection-only corroboration")
+    legacy_pointers = sum(bool(str(row.get("Detail File") or "").strip())
+                          for row in canonical_rows)
+    print("  -- Drive backup drift, Intake Log, dossier pointers, and file existence are "
+          "not canonical registry facts and were not read")
+    print(f"  -- {legacy_pointers} canonical row(s) still carry a legacy Detail File value; "
+          "use --recovery --reason <why> only to corroborate the projection")
+    print()
+    print("registry-audit: %d error(s), %d warning(s)" %
+          (len(local_errors), len(local_warns)))
+    return 1 if local_errors else 0
+
+
+if not ARGS.recovery:
+    raise SystemExit(canonical_audit())
+
+print(f"REGISTRY RECOVERY MODE — NONCANONICAL Drive projection — reason: {ARGS.reason}",
+      file=sys.stderr)
+print(f"REGISTRY RECOVERY MODE — vault: {ROOT}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- load
@@ -280,7 +396,7 @@ for n in sorted(rows):
         prose += 1
         continue
     checked += 1
-    if not os.path.exists(os.path.join(ROOT, df)):
+    if not os.path.exists(os.path.join(str(ROOT), df)):
         broken += 1
         err("%s Detail File does not exist: %s" % (fmt_id(n), df))
 if not broken:

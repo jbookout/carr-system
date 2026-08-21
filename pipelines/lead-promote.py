@@ -45,6 +45,12 @@ from datetime import datetime, timezone
 import openpyxl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "lead-promote canonical record ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"lead-promote: {exc}") from exc
 try:
     from lib.record_sources import (MODE_FILES, MODE_RECORDS, ROUTER_SOURCE, load_clients,
                                      load_deals_doc, load_leads, load_pool, pool_reach,
@@ -53,14 +59,11 @@ try:
 except ImportError:
     MODE_FILES, MODE_RECORDS, _HAVE_RECORDS = "files", "records", False
 
-if _HAVE_RECORDS:
-    _MODE, _rest = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
-else:
-    _MODE = MODE_FILES
-    _rest = [x for x in sys.argv[1:] if x not in ("--files", "--records")]
-    if "--records" in sys.argv[1:]:
-        print("[lead-promote] this copy has no lib/record_sources.py — running file mode",
-              file=sys.stderr)
+_MODE = MODE_FILES if _RECOVERY.recovery else MODE_RECORDS
+_rest = list(_RECOVERY.args)
+if not _HAVE_RECORDS and not _RECOVERY.recovery:
+    raise SystemExit("lead-promote: canonical record ingress unavailable "
+                     "(lib/record_sources.py missing); normal mode refuses Drive fallback")
 
 ap = argparse.ArgumentParser()
 ap.add_argument("root", nargs="?")
@@ -71,8 +74,10 @@ ap.add_argument("--all-segments", action="store_true",
                 help="include watch-list segments, not just event-driven ones")
 a = ap.parse_args(_rest)
 
-ROOT = a.root or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if a.root:
+    raise SystemExit("lead-promote: positional roots are not accepted; use explicit recovery controls")
+ROOT = str(_RECOVERY.vault) if _RECOVERY.recovery else REPO
 
 # The renewal-radar lane (loop #204, Joe's ruling 2026-08-07). One of the
 # LANE_SOURCES in lib/record_sources.py; named here so file mode can reach the
@@ -83,9 +88,8 @@ MODE = _MODE
 if MODE == MODE_RECORDS:
     _ok, _why, _, _ = pool_reach((ROUTER_SOURCE, RADAR_SOURCE))
     if not _ok:
-        print(f"[lead-promote] records mode unavailable ({_why}) — falling back to the "
-              f"generated files", file=sys.stderr)
-        MODE = MODE_FILES
+        raise SystemExit(f"lead-promote: canonical record ingress unavailable ({_why}); "
+                         "normal mode refuses Drive fallback")
 
 def s(v): return str(v if v is not None else "").strip()
 

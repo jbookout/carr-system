@@ -145,6 +145,54 @@ def rule_item(cur: psycopg.Cursor[Any], actor_id: Any, suffix: str) -> Any:
         values (%s,%s,%s) returning id""", (rule_id, f"clause {suffix}", actor_id))
 
 
+def activate_enforced_rule_fixture(cur: psycopg.Cursor[Any], rule_id: Any,
+                                   intake_id: Any, actor_id: Any, suffix: str) -> None:
+    """Activate a rollback-only rule through the exact 0194 receipt boundary."""
+    control_key = f"guidance-db-gate:{suffix}"
+    cur.execute("""insert into ops.enforcement_control_catalog
+        (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+        values (%s,'migration:0194','ops/guidance-registry-db-gate.py',
+                'transactional_schema',true,now())
+        on conflict (control_key) do update set installed=true,verified_at=now()""",
+        (control_key,))
+    cur.execute("""insert into ops.rule_control_binding
+        (rule_id,control_key,statement_hash,binding_contract)
+        select id,%s,encode(digest(statement,'sha256'),'hex'),
+               '{"fixture":"guidance-registry-db-gate"}'::jsonb
+          from rule where id=%s""", (control_key, rule_id))
+    cur.execute("""insert into ops.rule_admission
+        (rule_id,guidance_intake_id,enforcement_class,enforcement_status,binding_moment,
+         applicability,projection,reachability,input_contract,fixture_refs,
+         state,admitted_by,admitted_at,reason)
+        values (%s,%s,'machine_enforceable','hard_enforced','database acceptance',
+                '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,
+                array['ops/guidance-registry-db-gate.py'],'admitted',%s,now(),
+                'rollback-only rule-backed guidance fixture')""",
+        (rule_id, intake_id, actor_id))
+    cur.execute("""insert into ops.rule_enforcement_point
+        (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+        values (%s,%s,'migration:0194','ops/guidance-registry-db-gate.py',
+                'transactional_schema',true,now())""", (rule_id, control_key))
+    cur.execute("""with approved as (
+          select r.id,r.version,encode(digest(r.statement,'sha256'),'hex') statement_hash,
+                 jsonb_build_object('fixture','guidance-registry-db-gate') contract
+            from rule r where r.id=%s
+        )
+        insert into ops.rule_approval_receipt
+          (idempotency_key,rule_id,rule_version,statement_hash,actor_id,policy_kind,
+           enforcement_status,requested_control_keys,installed_control_keys,reason,
+           normalized_contract,contract_hash,evidence_refs)
+        select %s,id,version,statement_hash,%s,'machine_enforceable','hard_enforced',
+               array[%s],array[%s],'rollback-only enforced activation fixture',contract,
+               encode(digest(contract::text,'sha256'),'hex'),
+               array['ops/guidance-registry-db-gate.py']
+          from approved""",
+        (rule_id, f"guidance-db-gate-approval:{rule_id}", actor_id,
+         control_key, control_key))
+    cur.execute("""update rule set status='active',activated_by=%s,activated_at=now()
+        where id=%s""", (actor_id, rule_id))
+
+
 def active_rule_source(cur: psycopg.Cursor[Any], actor_id: Any, suffix: str) -> Any:
     """Create an admitted active rule without pre-creating Guidance rows."""
     rule_id = one(cur, """insert into rule
@@ -155,16 +203,7 @@ def active_rule_source(cur: psycopg.Cursor[Any], actor_id: Any, suffix: str) -> 
         (lane,source_kind,source_ref,statement,state,normalized_contract,captured_by)
         values ('rule','system',%s,%s,'admitted','{}'::jsonb,%s) returning id""",
         (f"db-gate:rule:{suffix}", f"DB gate rule {suffix}", actor_id))
-    cur.execute("""insert into ops.rule_admission
-        (rule_id,guidance_intake_id,enforcement_class,binding_moment,
-         applicability,projection,reachability,input_contract,fixture_refs,
-         state,admitted_by,admitted_at,reason)
-        values (%s,%s,'judgment_advisory','database acceptance','{}'::jsonb,
-                '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}','admitted',%s,now(),
-                'rollback-only rule-backed guidance fixture')""",
-        (rule_id, intake_id, actor_id))
-    cur.execute("""update rule set status='active',activated_by=%s,activated_at=now()
-        where id=%s""", (actor_id, rule_id))
+    activate_enforced_rule_fixture(cur, rule_id, intake_id, actor_id, suffix)
     return rule_id
 
 
@@ -244,7 +283,8 @@ def import_manifest(cur: psycopg.Cursor[Any]) -> tuple[str, str]:
     the reviewed production classification.  It is rolled back with the gate.
     """
     rule_ids = [str(row[0]) for row in cur.execute(
-        "select id from rule where status='active' order by id").fetchall()]
+        "select id from rule where status='active' "
+        "and coalesce(scope->>'kind','') <> 'intro_politics' order by id").fetchall()]
     if len(rule_ids) < 5:
         fail("import fixture requires at least five active rules")
     source_rule_ids = {rule_id[:8]: rule_id for rule_id in rule_ids}
@@ -698,6 +738,7 @@ def main() -> int:
                 # would prove only that activation works when its guard is gone.
                 missing_rules = cur.execute("""select r.id from rule r
                     where r.status='active'
+                      and coalesce(r.scope->>'kind','') <> 'intro_politics'
                       and not exists (
                         select 1 from ops.v_guidance_current g
                          where g.source_rule_id=r.id and g.is_primary)
@@ -748,16 +789,9 @@ def main() -> int:
                     (lane,source_kind,source_ref,statement,state,normalized_contract,captured_by)
                     values ('rule','system',%s,'coverage fixture','admitted','{}'::jsonb,%s)
                     returning id""", (f"db-gate:coverage:{uuid.uuid4()}", actor_id))
-                cur.execute("""insert into ops.rule_admission
-                    (rule_id,guidance_intake_id,enforcement_class,binding_moment,
-                     applicability,projection,reachability,input_contract,fixture_refs,
-                     state,admitted_by,admitted_at,reason)
-                    values (%s,%s,'judgment_advisory','session boot','{}'::jsonb,
-                            '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}','admitted',%s,now(),
-                            'rollback-only coverage fixture')""",
-                    (uncovered_rule, uncovered_intake, actor_id))
-                cur.execute("""update rule set status='active',activated_by=%s,activated_at=now()
-                    where id=%s""", (actor_id, uncovered_rule))
+                activate_enforced_rule_fixture(
+                    cur, uncovered_rule, uncovered_intake, actor_id,
+                    f"coverage-{uncovered_rule}")
                 if one(cur, "select count(*) from ops.assert_guidance_registry_coverage()") == 0:
                     fail("coverage unexpectedly passes with an uncovered active rule")
 

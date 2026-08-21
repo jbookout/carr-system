@@ -78,6 +78,24 @@ def main() -> int:
         print(f"SKIP: registry unreadable ({type(e).__name__})")
         return 2
 
+    # THE CUTOFF (fired 2026-08-19). A retired .md render is ABSENT ON PURPOSE —
+    # it was moved to _to_delete staging and the exporter no longer writes it. Its
+    # last ok run still carries a file_sha, so without this the detector counted
+    # every retired render as GONE and told the reader to re-export a target that
+    # now prints RETIRED: a permanent red row whose remedy does nothing, which is
+    # the exact way a real tamper finding gets trained into background noise.
+    # Reads the SAME flag function the exporter itself gates on — one contract,
+    # so this row can never disagree with what the exporter actually did.
+    retired = 0
+    try:
+        from exporters.run_exports import md_renders_retired
+        if md_renders_retired():
+            gone = [k for k, rel in paths.items() if rel.lower().endswith(".md")]
+            retired = len(gone)
+            paths = {k: rel for k, rel in paths.items() if k not in gone}
+    except Exception:
+        pass          # fail OPEN, same as the exporter: keep checking everything
+
     checked = mismatched = missing = 0
     bad = []
     for target, stored in rows:
@@ -100,9 +118,10 @@ def main() -> int:
               f"renders: {', '.join(bad[:5])} · on breach: re-export the target AND investigate "
               f"the edit first (a re-export erases the evidence)")
         return 1
+    tail = f", {retired} retired at the cutoff" if retired else ""
     print(f"OK renders-verify — {checked} hashed renders match their export bytes "
-          f"({len(paths) - checked} not yet hashed; they gain a hash at next export) "
-          f"· on breach: re-export + investigate")
+          f"({len(paths) - checked} not yet hashed; they gain a hash at next export"
+          f"{tail}) · on breach: re-export + investigate")
     return 0
 
 

@@ -22,8 +22,8 @@
 # every week until a credential lands trains people to stop reading alarms.
 #
 # Appends to out/learning.log. Verified by OUTPUT — the four report files under
-# Automation/Learning/ and their first lines — never by this script existing and
-# never by its own claim of success (protocol rule 28).
+# out/Learning/ and their first lines — never by this script existing and never
+# by its own claim of success (protocol rule 28).
 #
 # Run by hand any time: ./bin/learning-weekly.sh
 set -u
@@ -31,9 +31,18 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin"
 LOG="$REPO/out/learning.log"
-VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
-LEARN_DIR="$VAULT/Automation/Learning"
+# THE CUTOFF, 2026-08-19. This used to write its reports into the vault at
+# Automation/Learning/ as well as here. Both clauses are PURE READERS of the
+# event spine and the metric tables — job_corrections says so in its own output,
+# "it proposes nothing and writes nothing" — so the vault copy was a rendering of
+# database content, never a home for it, and the same reasoning that retired the
+# 37 doctrine renders applies unchanged. The repo copy stays because the report
+# is regenerable on demand from rows that never left the database.
+LEARN_DIR="$REPO/out/Learning"
 mkdir -p "$REPO/out" "$LEARN_DIR"
+# Reports are canonical repo-local output.  Do not let an inherited Drive root
+# leak into either child clause merely because a caller still has one mounted.
+unset CARR_VAULT
 
 # Credentials, both from files on disk, never inlined here.
 #  · db.env carries the least-privilege exporter URL the read-only jobs ride.
@@ -88,7 +97,7 @@ step "placements + metrics (Blotato -> records)" \
 
 step "weekly learning + correction miner" \
   ./.venv/bin/python pipelines/learning_jobs.py weekly-chain \
-    --report-dir "$LEARN_DIR" --report-dir "$REPO/out/Learning"
+    --report-dir "$LEARN_DIR"
 
 if [ "$rc_total" -eq 0 ]; then
   say "===== learning weekly chain OK ====="

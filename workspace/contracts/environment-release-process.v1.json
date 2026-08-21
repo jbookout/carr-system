@@ -1,6 +1,6 @@
 {
   "contract": "carr-workspace-environment-release-process",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "status": "phase0_candidate_no_release_authority",
   "tonight_boundary": "Preparation only. No production construction, migration, deployment, or irreversible implementation is authorized by this contract. Per the council-approved delegation ruling (2026-08-12), a delegated session commits and pushes its own completed explicit-path work on an isolated branch as evidence packaging; merge to the protected trunk, deployment, production writes, and external communication remain separately authorized.",
   "repository": {
@@ -88,10 +88,10 @@
     {
       "test_id": "FLOW-WS-06",
       "status": "future_gate_not_implemented_in_phase0_static_prototype",
-      "environment": "uncoached_joe_and_dell_market_map_journey",
+      "environment": "uncoached_joe_owner_market_map_journey_with_optional_dell_validation",
       "required_evidence": [
-        "Joe and Dell each complete the whole-market scan and governed day-trip journey without coaching or Claude Code/Codex",
-        "each person distinguishes records from locations, identifies stale/Unknown/unlocated items, preserves locked appointments, reviews exclusions, and confirms the exact Tour handoff version",
+        "Joe completes the whole-market scan and governed day-trip journey without coaching or Claude Code/Codex; Dell may independently validate without gating release",
+        "each participating person distinguishes records from locations, identifies stale/Unknown/unlocated items, preserves locked appointments, reviews exclusions, and confirms the exact Tour handoff version",
         "the prior manual market-review and travel-planning routine has an explicit cutover or documented retained role"
       ]
     },
@@ -108,9 +108,9 @@
     {
       "test_id": "MAP-ADOPTION-001",
       "status": "future_gate_not_implemented_in_phase0_static_prototype",
-      "environment": "uncoached_joe_and_dell_acceptance",
+      "environment": "uncoached_joe_owner_acceptance_with_optional_dell_validation",
       "required_evidence": [
-        "Joe and Dell each complete the six market-map journeys without coaching or Claude Code/Codex",
+        "Joe completes the six market-map journeys without coaching or Claude Code/Codex; Dell may independently validate without gating adoption",
         "median state-understanding and trip-planning time compared to interviewed baseline",
         "old manual travel-planning routine has an explicit cutover or remains available"
       ]
@@ -202,7 +202,7 @@
       "required_evidence": [
         "canonical source and projection counts compared",
         "representative behavior parity including exclusions",
-        "Joe and Dell uncoached cutover evidence"
+        "Joe uncoached cutover evidence; Dell validation is optional and nonblocking"
       ]
     },
     {
@@ -451,7 +451,7 @@
     "phase0_exit": [
       "approved contracts and open-decision register",
       "runnable prototypes and canonical JSON twins",
-      "Joe and Dell complete six primary Workspace journeys without coaching",
+      "Joe completes six primary Workspace journeys without coaching; Dell may independently validate but does not gate exit",
       "approved test, release, rollback, CI, runbook, and threat-model package",
       "three-roadmap reconciliation against the Production Maturity Baseline"
     ],

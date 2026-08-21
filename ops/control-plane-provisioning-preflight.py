@@ -56,7 +56,8 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("version must be 1")
 
     authority = mapping(config.get("authority"), "authority", errors,
-                        {"environment_variables", "login_roles", "privilege_bundle_role", "provisioning"})
+                        {"environment_variables", "login_roles", "privilege_bundle_role", "provisioning",
+                         "required_for_system_rollout", "optional_nonblocking"})
     authority_env = mapping(authority.get("environment_variables"), "authority.environment_variables", errors,
                             {"joe", "dell", "single_seat_fallback"})
     for actor, env_name in {"joe": "CARR_DB_AUTHORITY_JOE_URL", "dell": "CARR_DB_AUTHORITY_DELL_URL",
@@ -67,6 +68,10 @@ def validate(config: dict[str, Any]) -> list[str]:
     equals(authority_roles.get("dell"), "carr_authority_dell", "authority.login_roles.dell", errors)
     equals(authority.get("privilege_bundle_role"), "carr_authority", "authority.privilege_bundle_role", errors)
     equals(authority.get("provisioning"), "external_human_approval", "authority.provisioning", errors)
+    if authority.get("required_for_system_rollout") != ["joe"]:
+        errors.append("authority.required_for_system_rollout must require Joe alone")
+    if authority.get("optional_nonblocking") != ["dell"]:
+        errors.append("authority.optional_nonblocking must preserve Dell without making him required")
 
     device = mapping(config.get("device_evidence"), "device_evidence", errors,
                      {"privilege_bundle_role", "principal_registry", "receipt_tables", "provisioning"})
@@ -163,7 +168,16 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("backup login-role mapping is not bound by migration 0119")
     if "CARR_DB_BACKUP_URL" not in backup_dump or "carr_backup" not in backup_dump:
         errors.append("backup credential and login boundary are not bound by backup-dump")
-    if 'DATABASE_URL="$CARR_DB_BACKUP_URL"' not in nightly or "pipelines/doctrine_mirror.py" not in nightly:
+    # SCOPE, which is this preflight's subject: the mirror receives the backup
+    # capability and nothing wider. #391 briefly also required the shell guard
+    # `if [ -n "$CARR_DB_BACKUP_URL" ]` here, which is a different question —
+    # what happens when the capability is absent — and one the callee now
+    # answers itself by exiting 78 (#387). Asserting it here made a provisioning
+    # preflight fail over the shape of a caller's error handling.
+    if (
+        'env DATABASE_URL="$CARR_DB_BACKUP_URL"' not in nightly
+        or "pipelines/doctrine_mirror.py" not in nightly
+    ):
         errors.append("backup credential is not scoped to the portability mirror step")
     if not all(token in calendar and token in notes for token in ("CARR_CANARY_DESTINATION_ID", "CARR_CONTROL_PLANE_MODE")) or "CARR_CALENDAR_CANARY_ENV" not in calendar or "CARR_NOTES_CANARY_ENV" not in notes:
         errors.append("isolated deterministic canary declarations are not bound by both entrypoints")

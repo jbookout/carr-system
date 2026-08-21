@@ -79,7 +79,7 @@ def run(tmp, path, decisions, state, event="Stop", stop_active=False):
     payload = json.dumps({"session_id": "s1", "transcript_path": path,
                           "hook_event_name": event,
                           "stop_hook_active": stop_active})
-    env = {**os.environ, "CARR_DECISIONS_PATH": decisions,
+    env = {**os.environ, "CARR_NONCANONICAL_DECISIONS_PATH": decisions,
            "CARR_DRIFT_ASSERTION_STATE": state}
     p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
                        text=True, env=env)

@@ -13,6 +13,12 @@ binding stress-test addendum). STATUS: schema v2 pending Joe's grain review
 - **Rehearse on a Neon branch first.** Risky changes run against a branch of
   production data before production (blueprint §4). Build sessions get
   BRANCH credentials only, never the production writer (addendum A14).
+- **Bound an authorized production prefix explicitly.** When newer unrelated
+  files are also pending, `bin/migrate-prod.sh --through NNNN_name.sql` lists
+  the exact forward prefix selected and every later file held back. Add
+  `--apply` only after that displayed prefix is approved. The boundary must be
+  an exact checked-in filename; it cannot skip an earlier pending dependency
+  or hand-pick files out of order.
 - **0001 mirrors the vault schema file.** `0001_init.sql` is the applied copy
   of `record-layer/schema-draft-2026-07-30.sql` (v2). Until first apply, keep
   them identical — after first apply, the vault file freezes as the design

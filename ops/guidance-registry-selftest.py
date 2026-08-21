@@ -376,8 +376,16 @@ def main():
     # take has been performed against the real target. It is a constraint by
     # construction — it binds at a named moment and prohibits a claim — so it
     # needs no manifest row of its own, only this total following the store.
+    # procedure 76 -> 77 on 2026-08-18, when rule bd4a6d22 was activated: a
+    # permanently chosen state is accepted BY NAME in the check rather than
+    # left red. Judging whether a state was chosen is not mechanical, but what
+    # to do once it has been is, so it carries a manifest row typed procedure
+    # rather than compiling as a constraint the way 937252fb did.
+    # doctrine 14 -> 13 on 2026-08-20 when e7a620cc was retired: the broad
+    # cross-session Dr. CRE persona was withdrawn while the real Doc app
+    # doctrine remained intact.
     reviewed_counts = {
-        "constraint": 75, "procedure": 76, "doctrine": 14, "rubric": 37,
+        "constraint": 75, "procedure": 77, "doctrine": 13, "rubric": 37,
         "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -432,9 +440,11 @@ def main():
         and activation_manifest["constitution_source_rule_ids"] == sorted(
             source_rule_ids[item["source_id"]]
             for item in reviewed_registry["items"] if item["guidance_id"] in constitution)
-        # 216 -> 217 on 2026-08-16 with rule 937252fb. One entry per compiled
-        # guidance item, so this total follows the same activation the counts
-        # above follow.
+        # 216 -> 217 on 2026-08-16 with rule 937252fb, 217 -> 218 on 2026-08-18
+        # with rule bd4a6d22, then 218 -> 217 when e7a620cc was retired on
+        # 2026-08-20. One entry per compiled guidance item, so this total
+        # follows the same lifecycle changes as the counts above, and the
+        # manifest entry_count above moves with the TSV that feeds it.
         and len(activation_manifest["entries"]) == 217
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64

@@ -32,7 +32,8 @@ Sources:
   <root>/Automation/lead-board-decisions.json  (optional; the curated decision queue)
   <root>/Automation/renewal-radar.json  (optional; CoStar renewal feed, built by build-renewal-feed.py)
   <root>/Automation/entity-formation-leads.json + pre-entity-watch.json  (optional segment feeds)
-  <root>/Automation/lead-board-template.html   (the shell)
+  generators/lead-board-template.html          (the shell; repo-canonical 2026-08-20,
+                                                vault copy is the cloud-only fallback)
 Writes:
   <root>/Automation/lead-board.html
 Then: update the `the-lead-board` artifact from that file if the desktop app is
@@ -44,10 +45,20 @@ from datetime import datetime, date
 from typing import Any
 import openpyxl
 
-_ARGV = [a for a in sys.argv[1:] if not a.startswith("--")]
-ROOT = _ARGV[0] if _ARGV else os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "lead-board canonical record ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"lead-board: {exc}") from exc
+if _RECOVERY.args:
+    raise SystemExit(f"lead-board: unexpected argument: {_RECOVERY.args[0]}")
+ROOT = str(_RECOVERY.vault) if _RECOVERY.recovery else REPO
 LEADS_DIR = os.path.join(ROOT, "DNA", "Leads")
 AUTO = os.path.join(ROOT, "Automation")
+OUTPUT_DIR = os.path.join(REPO, "out", "recovery" if _RECOVERY.recovery else "")
 
 # ── source mode ──────────────────────────────────────────────────────────────
 # The import is guarded, not assumed: the cloud-only vault copy of this script,
@@ -74,19 +85,18 @@ if _HAVE_RECORDS:
     #     lib/record_sources.py had never been taught to look for it.
     # The fallback below stays exactly as it was — a board that cannot reach the
     # pool still says so loudly and derives from files rather than failing.
-    MODE, _ = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
+    MODE = MODE_FILES if _RECOVERY.recovery else MODE_RECORDS
     if MODE == MODE_RECORDS:
         _want = (ROUTER_SOURCE,) + LANE_SOURCES
         _ok, _why, _, _ = pool_reach(_want)
         if not _ok:
-            print(f"[lead-board] records mode unavailable ({_why}) — falling back to the "
-                  f"generated files", file=sys.stderr)
-            MODE = MODE_FILES
+            raise SystemExit(f"lead-board: canonical record ingress unavailable ({_why}); "
+                             "normal mode refuses Drive fallback")
 else:
+    if not _RECOVERY.recovery:
+        raise SystemExit("lead-board: canonical record ingress unavailable "
+                         "(lib/record_sources.py missing); normal mode refuses Drive fallback")
     MODE = MODE_FILES
-    if "--records" in sys.argv[1:]:
-        print("[lead-board] this copy has no lib/record_sources.py — running file mode",
-              file=sys.stderr)
 
 # Schema-validated reads (orchestrator-lane corrective #1, 2026-07-25): columns are
 # resolved by HEADER NAME via sheets.py — a moved/renamed column halts loudly instead
@@ -415,7 +425,30 @@ if _payload_to:
               open(_payload_to, "w"), sort_keys=True, default=str)
     print(f"payload -> {_payload_to}  (mode {MODE})")
 
-template = open(os.path.join(AUTO, "lead-board-template.html"), encoding="utf-8").read()
+# ── the shell ────────────────────────────────────────────────────────────────
+# THE REPO COPY IS CANONICAL as of 2026-08-20. This file is hand-authored
+# SOURCE, not a render: the generator reads it and writes lead-board.html from
+# it. It lived only in the vault, tracked by git nowhere, so its only history
+# was Drive's own versioning. That cost a real bug — until 2026-08-09 the
+# board's date classifier hardcoded today as 2026-07-13, so four weeks of leads
+# rendered as future work rather than overdue, and the fix that repaired it had
+# no commit behind it. A source file outside version control cannot be
+# reviewed, diffed, or restored from the repo if the vault copy is damaged.
+#
+# The vault path stays as a FALLBACK rather than being deleted, because the
+# cloud-only copy of this script (see manifest.tsv) runs from the vault with no
+# repo beside it and would otherwise stop building the board entirely. Repo
+# first, vault second, and the vault keeps only the BUILT board once that
+# cloud-only surface is retired on its own gate.
+# Resolved from the REPO ROOT, not from this file's own directory, because the
+# two twins live in different folders (generators/ and shared/) and must find
+# the one shell. In the vault's cloud-only copies this resolves to a path that
+# does not exist, which is exactly what makes the fallback below fire there.
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_repo_shell = os.path.join(_repo_root, "generators", "lead-board-template.html")
+_vault_shell = os.path.join(AUTO, "lead-board-template.html")
+_shell = _repo_shell if os.path.exists(_repo_shell) else _vault_shell
+template = open(_shell, encoding="utf-8").read()
 stamp = date.today().strftime("%B %-d, %Y") if hasattr(date.today(),'strftime') else "today"
 
 html = template
@@ -451,27 +484,11 @@ html = html.replace("__DECISIONS__", json.dumps(DECISIONS,separators=(",",":")))
 html = html.replace("__HOTN__", str(hot_n))
 html = html.replace("__HOT__", json.dumps(HOT,separators=(",",":")))
 
-out_path = os.path.join(AUTO, "lead-board.html")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+out_path = os.path.join(OUTPUT_DIR, "lead-board.html")
 open(out_path,"w",encoding="utf-8").write(html)
 print(f"Wrote {out_path}  ({os.path.getsize(out_path):,} bytes)")
-
-# Shared-tier publish (added 2026-07-20): every rebuild also drops the built
-# board into DNA/Team/live-boards/ for the cloud-only delivery path to re-persist.
-# Derived view; overwrite is correct.
-shared_path = os.path.join(ROOT, "DNA", "Team", "live-boards", "lead-board-latest.html")
-publish_failed = None
-try:
-    os.makedirs(os.path.dirname(shared_path), exist_ok=True)
-    open(shared_path,"w",encoding="utf-8").write(html)
-    print(f"Published shared copy: {shared_path}")
-except Exception as e:
-    publish_failed = e
-    print(f"WARNING: shared-tier publish failed ({e}) — cloud fallback will go stale; fix before session end.")
 _src = ("records (candidate_pool + v_export_leads)" if MODE == MODE_RECORDS
         else "generated files")
 print(f"Router: {router_label} | {len(L):,} leads | queue {queue_n} | "
       f"decisions {len(DECISIONS)} | source: {_src}")
-if publish_failed:
-    # Corrective #2 (2026-07-25): a failed shared publish must FAIL the run, not
-    # whisper — exit 0 here let the heartbeat report success while the cloud fallback went stale.
-    sys.exit(f"EXIT 1: board written, but the shared-tier publish failed ({publish_failed}).")

@@ -1631,7 +1631,7 @@ SURFACE_REGISTRY = {
     #
     # So each keeps its retired manifest row, stays denied, and stays reported by
     # the effect check, with the denial now naming the job to fix.
-    "Automation/Learning/":                               "generated-outside-the-exporter (pipelines/learning_jobs.py + pull_placement_metrics.py; joins the render set when the exporter builds it, not before)",
+    "Automation/Learning/":                               "RETIRED at the 2026-08-19 cutoff — the learning reports now write to the repo's out/Learning only; nothing writes this vault path, and the entry stays so a reinstated write is still a decision rather than a surprise",
     "00_Context/today.md":                                "generated-outside-the-exporter (bin/local-briefs.sh concatenates out/brief-pack/*.md; same rule — exporter first, render set after)",
     "Automation/radar/":                                  "generated-outside-the-exporter (the Monday radar run per radar-digest-sop.md, off candidate_pool; same rule)",
     "Automation/npi-sweep-digest.md":                     "PENDING-phase1",

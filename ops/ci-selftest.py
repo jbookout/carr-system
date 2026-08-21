@@ -75,6 +75,46 @@ def check(label, ok, detail=""):
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
+# ------------------------------------------------------ accepted machine state
+# THE ONE ACCEPTED STATE in which the types class cannot be exercised at all.
+# requirements.txt pins `mypy>=2.3; python_version >= "3.10"`, so on an older
+# runtime mypy is not merely missing — it is deliberately not installable.
+# Dell's Mac ships the Command Line Tools' Python 3.9.6 and has no package
+# manager, which is a standing machine state, not a transient breakage.
+#
+# Named as an exact constant, and printed on the passing line, because a
+# permanently chosen machine state must never read as a permanent failure and
+# must never be normalised by habitually passing CARR_SKIP_CI on every push.
+# The acceptance is deliberately narrow: on 3.10 or newer a missing mypy is a
+# real defect, the seeded-error assertions below run unchanged, and
+# test_mypy_pin_acceptance_is_narrow proves that boundary still bites.
+MYPY_PIN_MIN_PYTHON = (3, 10)
+
+
+def type_check_interpreter_version():
+    """The Python bin/type-check.sh would actually use, not the one running us.
+
+    That script prefers $REPO/.venv/bin/mypy and falls back to mypy on PATH, so
+    the venv's interpreter is what decides whether mypy can exist at all.
+    Reading our own sys.version_info would be wrong the moment the selftest and
+    the venv differ, which is exactly the case on a machine whose venv was built
+    from a different python than the one invoking this file.
+    """
+    venv_python = REPO / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        probe = subprocess.run(
+            [str(venv_python), "-c", "import sys; print(sys.version_info[0], sys.version_info[1])"],
+            capture_output=True, text=True)
+        parts = probe.stdout.split()
+        if probe.returncode == 0 and len(parts) >= 2:
+            return (int(parts[0]), int(parts[1]))
+    return sys.version_info[:2]
+
+
+def mypy_pin_excludes_this_machine():
+    return type_check_interpreter_version() < MYPY_PIN_MIN_PYTHON
+
+
 # ---------------------------------------------------------------- seed safety
 # THIS FILE SEEDS REAL DAMAGE INTO THE LIVE WORKING TREE — that is the point of
 # it, because a check is only proven by making it fail. The danger is what
@@ -416,6 +456,18 @@ def test_types_class_catches_a_seeded_type_error():
     error inside an unannotated function body is not reported at all and this
     test would pass for the wrong reason a second time.
     """
+    if mypy_pin_excludes_this_machine():
+        found = type_check_interpreter_version()
+        check(
+            "types: ACCEPTED — Python %d.%d is below the mypy pin %d.%d, so mypy "
+            "cannot be installed here and the seeded-error path cannot run"
+            % (found[0], found[1], MYPY_PIN_MIN_PYTHON[0], MYPY_PIN_MIN_PYTHON[1]),
+            True)
+        rc, out = run(["--only", "types"])
+        check("types still reports honestly on the accepted machine (skip, not pass)",
+              rc == 0 and "SKIP" in out.upper(), f"rc={rc} out={out[-400:]}")
+        return
+
     fixture = "tools/_ci_selftest_types_fixture.py"
     with seeded_paths(fixture):
         rc, out = run(["--only", "types"])
@@ -575,6 +627,67 @@ def test_no_env_claims_a_production_hostname():
         os.unlink(path)
 
 
+def test_mypy_pin_acceptance_is_narrow():
+    """The accepted state must not quietly widen into "mypy is optional".
+
+    Rule bd4a6d22 requires that everything outside a named acceptance still
+    fails, and that a test proves it. The danger here is drift: someone raises
+    MYPY_PIN_MIN_PYTHON to silence a red types class on a NEWER machine, and the
+    type gate stops binding everywhere at once with nothing to catch it.
+    """
+    check("the mypy pin boundary is exactly 3.10",
+          MYPY_PIN_MIN_PYTHON == (3, 10), f"got {MYPY_PIN_MIN_PYTHON}")
+    for ver in ((3, 7), (3, 8), (3, 9)):
+        check(f"Python {ver[0]}.{ver[1]} is inside the acceptance",
+              ver < MYPY_PIN_MIN_PYTHON, f"{ver}")
+    for ver in ((3, 10), (3, 11), (3, 12), (3, 13), (4, 0)):
+        check(f"Python {ver[0]}.{ver[1]} is OUTSIDE it, so a missing mypy still fails",
+              not (ver < MYPY_PIN_MIN_PYTHON), f"{ver}")
+    pin = (REPO / "requirements.txt").read_text(encoding="utf-8")
+    check("requirements.txt still carries the pin this acceptance is derived from",
+          'python_version >= "3.10"' in pin,
+          "the constant and the pin must move together, or the acceptance is a guess")
+
+
+def test_gates_treats_only_78_as_not_configured():
+    """Exit 78 in the gates loop must mean "not configured", and nothing else.
+
+    The loop used to count every nonzero alike, so a selftest that correctly
+    declined for want of a local dependency read as a red gate, and the only way
+    past it was CARR_SKIP_CI on every push. The risk in the fix is that it
+    widens: if an ordinary crash ever
+    skipped too, this class would go quiet exactly when it should shout.
+
+    THIS TEST IS STRUCTURAL, AND THAT IS A DELIBERATE DOWNGRADE — say so rather
+    than pretend otherwise. The behavioural version (seed a fixture that exits 78
+    beside one that exits 1, run the gates class, assert only the second is
+    named) cannot work here for two independent reasons, both measured
+    2026-08-19: the gates loop globs ops/*-selftest.py, so it re-enters THIS file
+    recursively and the nested run's crash-safety restores the outer run's seeded
+    paths — the fixtures are deleted before the loop reaches them; and even if
+    they survived, the nested re-entry runs the slowest class in ci.sh a second
+    and third time, costing more on every push forever than the bug it guards.
+
+    This structural check binds the narrowness of the exception without adding
+    a recursively executing fixture to the slowest CI class.
+    """
+    ci = (REPO / "ops" / "ci.sh").read_text(encoding="utf-8")
+    body = ci[ci.index("check_gates()"):]
+    body = body[:body.index("\n}")]
+
+    check("the gates loop skips on exactly 78, not a range",
+          '[ "$grc" -eq 78 ]' in body,
+          "an -ge/-ne form here would swallow real failures")
+    check("every other nonzero still routes to the failure list",
+          '[ "$grc" -ne 0 ]' in body and 'failures="$failures $base"' in body,
+          "the else-branch must still record failures")
+    check("the 78 skip announces itself rather than passing silently",
+          "NOT CONFIGURED (exit 78)" in body,
+          "a silent skip is how coverage disappears without anyone noticing")
+    for bad in ('-ge 78', '-ne 0 ] && continue', '|| true'):
+        check(f"the gates loop does not weaken with {bad!r}", bad not in body, bad)
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -589,7 +702,9 @@ def main():
                test_lock_is_not_platform_specific,
                test_migration_filenames_match_the_runner,
                test_known_gaps_all_expire,
-               test_no_env_claims_a_production_hostname):
+               test_no_env_claims_a_production_hostname,
+               test_mypy_pin_acceptance_is_narrow,
+               test_gates_treats_only_78_as_not_configured):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip

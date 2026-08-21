@@ -43,14 +43,24 @@ sys.path.insert(0, os.path.dirname(HERE))
 # separate, external CoStar export and is untouched: it still only ever comes
 # from a file, and the JSON this file writes (Automation/renewal-radar.json)
 # still lands exactly where it always has.
-from lib.record_sources import MODE_RECORDS, effective_mode, load_leads, resolve_mode, source_note
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+from lib.record_sources import MODE_FILES, load_leads
 
-MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
-MODE = effective_mode(MODE, "renewal-feed")
-
-ROOT = ARGS[0] if ARGS else os.path.abspath(os.path.join(HERE, ".."))
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "renewal-feed canonical external MLS ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"renewal-feed: {exc}") from exc
+if _RECOVERY.args:
+    raise SystemExit(f"renewal-feed: unexpected argument: {_RECOVERY.args[0]}")
+if not _RECOVERY.recovery:
+    raise SystemExit("renewal-feed: canonical external MLS ingress is not implemented; "
+                     "normal mode refuses Drive files")
+MODE = MODE_FILES
+ROOT = str(_RECOVERY.vault)
+REPO = os.path.abspath(os.path.join(HERE, ".."))
 LEADS_DIR = os.path.join(ROOT, "DNA", "Leads")
 AUTO = os.path.join(ROOT, "Automation")
+OUTPUT_AUTO = os.path.join(REPO, "out", "recovery")
 
 SEG_LEASE = "\U0001F511 LEASE EVENT — decision window"
 SEG_OWNER = "\U0001F3E2 OWNER-OCCUPIER — 2nd location"
@@ -243,8 +253,10 @@ def main():
             # Corrective #2 (2026-07-25): the file EXISTS but is unreadable — that is
             # corruption, not absence; absence is the guarded no-op above. Fail loudly.
             raise SystemExit(f"GCCMLS feed exists but is unreadable ({ex}) — fix or remove {gc}")
-    json.dump(out, open(os.path.join(AUTO,"renewal-radar.json"),"w"), indent=1)
-    print(f"source: {os.path.basename(path)} -> {len(out)} rows on the board | registry source: {source_note(MODE)}")
+    os.makedirs(OUTPUT_AUTO, exist_ok=True)
+    output_path = os.path.join(OUTPUT_AUTO, "renewal-radar.json")
+    json.dump(out, open(output_path,"w"), indent=1)
+    print(f"source: {os.path.basename(path)} -> {len(out)} NONCANONICAL recovery rows at {output_path}")
     for s,n in dist.items(): print(f"   {n:>4}  {s}")
     print(f"\nTIER RECOMPUTE (run date {TODAY.isoformat()}): {moved} CoStar rows moved band vs the "
           f"spreadsheet column, {unparsed} kept their spreadsheet tier (no parseable date; flagged "
@@ -263,14 +275,5 @@ def main():
     # the only thing that can be missing here is psycopg itself or the DB
     # credential, both handled inside run_lane / the guard below, and neither
     # may take down a renewal-feed run that already succeeded at its real job.
-    try:
-        from pipelines.map_radar_lanes import run_lane
-    except ImportError as e:
-        print(f"[map-radar-lane SKIP] renewal-radar: {e} — pool mapping needs psycopg, "
-              f"which this interpreter does not have. renewal-radar.json was still "
-              f"written normally; catch the pool up by hand with the repo venv: "
-              f".venv/bin/python -m pipelines.map_radar_lanes --lane renewal-radar",
-              file=sys.stderr)
-    else:
-        run_lane("renewal-radar", rows=out)
+    print("[recovery] NONCANONICAL output is not mapped into candidate_pool", file=sys.stderr)
 if __name__=="__main__": main()

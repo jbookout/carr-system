@@ -10,6 +10,8 @@
 # Usage:
 #   ./bin/migrate-prod.sh            # dry run: list pending against production
 #   ./bin/migrate-prod.sh --apply    # apply (migrate.py adds --yes only from us)
+#   ./bin/migrate-prod.sh --through 0170_guidance_import_lifecycle.sql
+#   ./bin/migrate-prod.sh --apply --through 0170_guidance_import_lifecycle.sql
 #
 # RAILS, in order:
 #   1. Uncommitted migration files REFUSE to apply — production runs reviewed,
@@ -25,9 +27,32 @@ REPO="${0:A:h:h}"
 LOG="$REPO/out/migrate-prod.log"
 mkdir -p "$REPO/out"
 
+APPLY=0
+THROUGH=""
+while (( $# )); do
+  case "$1" in
+    --apply)
+      APPLY=1
+      shift
+      ;;
+    --through)
+      if (( $# < 2 )) || [[ -z "$2" ]]; then
+        print -u2 "--through requires an exact migration filename"
+        exit 2
+      fi
+      THROUGH="$2"
+      shift 2
+      ;;
+    *)
+      print -u2 "unknown argument: $1"
+      exit 2
+      ;;
+  esac
+done
+
 stamp() { print -r -- "$(date -u +%FT%TZ) migrate-prod $*" >> "$LOG" }
 
-if [[ "${1:-}" == "--apply" ]]; then
+if (( APPLY )); then
   dirty=$(cd "$REPO" && git status --porcelain migrations/)
   if [[ -n "$dirty" ]]; then
     stamp "REFUSED uncommitted migrations: ${dirty//$'\n'/ · }"
@@ -103,15 +128,53 @@ if [[ -z "$DSN" ]]; then
 fi
 rm -f /tmp/migrate-prod-neonctl.err
 
-if [[ "${1:-}" == "--apply" ]]; then
-  if DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" --apply --yes; then
-    stamp "OK applied"
+migrate_args=()
+if [[ -n "$THROUGH" ]]; then
+  migrate_args+=(--through "$THROUGH")
+fi
+
+if (( APPLY )); then
+  if DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" --apply --yes "${migrate_args[@]}"; then
+    stamp "OK applied${THROUGH:+ through $THROUGH}"
+    # THE SNAPSHOT REFRESH RIDES WITH THE APPLY, and this is the only place it
+    # can. db/schema.sql is a picture of production's structure, and THIS is the
+    # moment that structure changes — so leaving the refresh to a later, separate
+    # act is what let five layers of drift pile up behind one refresh nobody
+    # took, measured 2026-08-20: two app roles that had stopped being created
+    # anywhere, 67 PUBLIC revokes the file never carried, three seeded
+    # configuration tables, and two tests that had quietly come to depend on the
+    # file being stale. Every one of them was found by a rebuild failing, never
+    # by the change that caused it.
+    #
+    # It runs AFTER the apply and cannot refuse it. Production has already
+    # changed by this line; a snapshot that fails to regenerate is a reason to
+    # shout, never a reason to pretend the migration did not happen. So this
+    # never touches the exit code.
+    print ""
+    print "== refreshing db/schema.sql, because production's structure just moved =="
+    if "$REPO/bin/schema-snapshot.sh"; then
+      if "$REPO/bin/schema-snapshot.sh" --check >/dev/null 2>&1; then
+        stamp "OK snapshot refreshed"
+        print "  db/schema.sql now matches production. COMMIT IT — naming the path,"
+        print "  in the same change as the migration you just applied."
+      else
+        stamp "WARN snapshot refreshed but --check still stale"
+        print -u2 "  schema-snapshot.sh wrote the file and --check still reports it stale."
+        print -u2 "  That is a real finding: read it before committing anything."
+      fi
+    else
+      stamp "WARN snapshot refresh FAILED rc=$?"
+      print -u2 "  THE MIGRATION APPLIED; ONLY THE SNAPSHOT DID NOT REFRESH."
+      print -u2 "  Production is changed and db/schema.sql now describes a database"
+      print -u2 "  that no longer exists. Re-run bin/schema-snapshot.sh by hand and"
+      print -u2 "  commit it, or the next rebuild inherits the gap."
+    fi
   else
     rc=$?
     stamp "FAIL apply rc=$rc"
     exit $rc
   fi
 else
-  DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py"
-  stamp "OK dry-run"
+  DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "${migrate_args[@]}"
+  stamp "OK dry-run${THROUGH:+ through $THROUGH}"
 fi

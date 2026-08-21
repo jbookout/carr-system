@@ -24,9 +24,15 @@ failed build does not burn a concept).
 """
 import argparse, json, os, random, sys, datetime
 from PIL import Image
+from asset_boundary import recovery_video_assets
 
-AUD = ("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us"
-       "@gmail.com/My Drive/CARR AI/Marketing/Brand Assets/Audio/library/sfx")
+if sys.argv[1:] == ["--list"]:
+    _SURFACE_ARGS = ["--list"]
+    AUD = ""
+else:
+    _ASSETS = recovery_video_assets(sys.argv[1:], "versioned landing-sound library")
+    _SURFACE_ARGS = list(_ASSETS.context.args)
+    AUD = str(_ASSETS.brand_root / "Audio" / "library" / "sfx")
 
 # Landing sounds. Pool is deliberately narrow: short, soft, and airy. Anything
 # with a tail or a thump reads as a cheap transition and was the v3 failure.
@@ -172,7 +178,7 @@ def main():
     ap.add_argument("--commit", action="store_true",
                     help="append this build to the log (driver calls it after a good render)")
     ap.add_argument("--list", action="store_true")
-    a = ap.parse_args()
+    a = ap.parse_args(_SURFACE_ARGS)
 
     if a.list:
         print("concepts:")

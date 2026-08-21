@@ -106,13 +106,16 @@ else:
 
 # The actual search-packet render entry point performs its control checks before
 # touching fonts/photos, so malformed asset metadata reliably proves its refusal
-# even on a CI host without the CARR vault mounted.
+# even on a CI host without the CARR vault mounted.  The renderer's legacy brand
+# assets are now recovery-only, so these fixtures cross that boundary explicitly
+# and still prove the controls fire before any asset read.
 with tempfile.TemporaryDirectory() as tmp:
     Path(tmp, "properties.json").write_text(json.dumps({
         "client": {"findings": [], "confirmations": [["source", "confirmed"]]},
         "properties": [], "asset": {"tier": "reviewed"},
     }))
-    render = subprocess.run([sys.executable, str(REPO / "pipelines" / "build-space-search.py"), tmp],
+    render = subprocess.run([sys.executable, str(REPO / "pipelines" / "build-space-search.py"), tmp,
+                             "--recovery", "--reason", "asset-control fixture", "--vault", tmp],
                             capture_output=True, text=True)
     if render.returncode == 2 and "client.findings" in render.stderr:
         passes += 1
@@ -124,7 +127,8 @@ with tempfile.TemporaryDirectory() as tmp:
                    "confirmations": [["source", "confirmed"]]},
         "properties": [], "asset": {"tier": "reviewed"},
     }))
-    render = subprocess.run([sys.executable, str(REPO / "pipelines" / "build-space-search.py"), tmp],
+    render = subprocess.run([sys.executable, str(REPO / "pipelines" / "build-space-search.py"), tmp,
+                             "--recovery", "--reason", "asset-control fixture", "--vault", tmp],
                             capture_output=True, text=True)
     if render.returncode == 2 and "declined_and_why" in render.stderr:
         passes += 1
@@ -137,7 +141,8 @@ with tempfile.TemporaryDirectory() as tmp:
                    "declined_and_why": [{"option": "A", "why": "wrong size"}]},
         "properties": [], "asset": {},
     }))
-    render = subprocess.run([sys.executable, str(REPO / "pipelines" / "build-space-search.py"), tmp],
+    render = subprocess.run([sys.executable, str(REPO / "pipelines" / "build-space-search.py"), tmp,
+                             "--recovery", "--reason", "asset-control fixture", "--vault", tmp],
                             capture_output=True, text=True)
     if render.returncode == 2 and "tier" in render.stderr:
         passes += 1

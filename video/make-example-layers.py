@@ -25,15 +25,16 @@ ORANGE = (245, 127, 41, 255)
 WHITE = (255, 255, 255, 255)
 DIM = (198, 210, 228, 255)
 
-BRAND = ("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us"
-         "@gmail.com/My Drive/CARR AI/Marketing/Brand Assets")
-FONTS = os.path.expanduser("~/Library/Fonts")
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+BRAND = os.path.join(REPO, "claude-tree", "skills", "write-content", "graphics")
+FONTS = os.path.join(BRAND, "fonts")
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser(
     "~/Movies/CARR Video Pipeline/Scripts/example-layers")
 
 
 def font(name, size):
-    for p in (os.path.join(FONTS, name), os.path.join(BRAND, "fonts", name)):
+    family = "Oswald.ttf" if name.startswith("Oswald") else "Montserrat.ttf"
+    for p in (os.path.join(FONTS, family),):
         if os.path.isfile(p):
             return ImageFont.truetype(p, size)
     raise SystemExit(f"font not found: {name}")
@@ -107,7 +108,7 @@ for i, line in enumerate(["CARR represents healthcare",
 l.save(f"{OUT}/07_claim.png")
 
 # 08 — logo
-logo = Image.open(f"{BRAND}/Logos/CARR_White_Logo.png").convert("RGBA")
+logo = Image.open(os.path.join(BRAND, "assets", "carr-white.png")).convert("RGBA")
 scale = (W * 0.20) / logo.width
 logo = logo.resize((int(logo.width * scale), int(logo.height * scale)), Image.Resampling.LANCZOS)
 l = plate()

@@ -17,6 +17,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+from lib.platform_metering import MeteringRefusal, authorize_metered_execution
 _spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
 assert _spec and _spec.loader
 db_tap = importlib.util.module_from_spec(_spec)
@@ -310,6 +311,10 @@ def main() -> int:
     default_staging=db_tap.dsn(project="staging"); prod_host=host_of(db_tap.dsn(project="production")); stg_host=host_of(default_staging)
     branch_id=""; token=uuid.uuid4().hex[:12]; branch_name=f"cc-shadow-{token}"; succeeded=False; created_ok=False
     try:
+      metering_rows=run([db_tap.NEONCTL,"branches","list","--project-id",project,"--output","json"],env=env,timeout=180); must(metering_rows,"metering branch list")
+      try:
+        authorize_metered_execution(json.loads((REPO/"ops/config/platform-metering.v1.json").read_text()),"neon-disposable-branch",{"requested_lifetime_minutes":120,"cleanup_registered":True,"active_nondefault_branches":sum(1 for row in json.loads(metering_rows.stdout) if not row.get("default"))})
+      except (MeteringRefusal,ValueError,TypeError) as exc: raise HarnessRefusal(f"metered branch refused: {exc}") from exc
       created=run([db_tap.NEONCTL,"branches","create","--project-id",project,"--name",branch_name,"--output","json"],env=env,timeout=180); must(created,"ephemeral staging branch create")
       created_ok=True
       branch_id=created_branch_id(created.stdout)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import importlib.util
 import json
 import os
@@ -81,6 +82,13 @@ def main() -> int:
                 payload = {"endpoints": [{"id": "ep-fixture", "branch_id": "staging-main",
                                             "type": "read_write",
                                             "host": "ep-fixture.c-10.us-east-1.aws.neon.tech"}]}
+            elif args[1] == "connection-string":
+                payload = None
+                return subprocess.CompletedProcess(
+                    args, 0,
+                    "postgresql://neondb_owner:fixture-secret@ep-fixture.c-10.us-east-1.aws.neon.tech:5432/neondb?sslmode=require&channel_binding=require",  # ci-secret-scan: allow — hermetic non-routable fixture
+                    "",
+                )
             else:
                 raise AssertionError(args)
             return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
@@ -147,6 +155,22 @@ def main() -> int:
                 check("staging runtime target refuses the canonical Production project id", True)
             else:
                 raise AssertionError("canonical Production project id was accepted as staging")
+    finally:
+        db_tap.subprocess.run = original_run
+
+    owner_runner = Runner()
+    db_tap.subprocess.run = owner_runner
+    try:
+        revealed_stdout = io.StringIO()
+        with contextlib.redirect_stdout(revealed_stdout), environment(NEON_API_KEY="fixture-provider-key"):
+            owner_dsn = db_tap.dsn(project="staging", role_name="neondb_owner")
+        owner_call = next(call for call in owner_runner.calls if call[1] == "connection-string")
+        check("owner DSN reveal pins neondb and read-write endpoint",
+              owner_call[owner_call.index("--database-name") + 1] == "neondb"
+              and owner_call[owner_call.index("--endpoint-type") + 1] == "read_write"
+              and owner_dsn.endswith("/neondb?sslmode=require&channel_binding=require"))
+        check("owner DSN derivation does not print the provider credential",
+              "fixture-secret" not in revealed_stdout.getvalue())
     finally:
         db_tap.subprocess.run = original_run
 

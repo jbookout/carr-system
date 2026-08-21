@@ -49,6 +49,7 @@ is not a client practice site.
 
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -127,13 +128,77 @@ def _db_url():
     return None
 
 
-def collect():
-    """Return (sorted hosts, per-source counts, notes)."""
+def _raw_via_verb():
+    """{view: [raw domain, ...]} through the record verb. Raises on any failure.
+
+    THE DEFAULT PATH, and the reason this function exists at all (2026-08-19).
+    Reading the two export views directly needs CARR_DB_EXPORTER_URL, and on a
+    SECOND machine that was the only thing standing between it and needing no
+    database credential of its own — so the credential question was really this
+    one query's question. `export-email-domains` aggregates in SQL and hands
+    back domains, never addresses, which is strictly less than the connection
+    below can reach, and it arrives through the machine door so the read is
+    attributable to the partner who made it rather than to a shared string in a
+    file on a laptop.
+
+    The verb is tried FIRST on every machine, primary included, so both run the
+    same path and it cannot rot on the machine that never exercises it.
+    """
+    import json
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    p = subprocess.run(
+        [os.path.join(repo, "run.sh"), "call", "export-email-domains", "{}"],
+        capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    # STDOUT AND STDERR ARE DIFFERENT CHANNELS AND MERGING THEM BROKE THIS
+    # (found 2026-08-19, the first live run after the verb reached production).
+    # run.sh writes the result as clean JSON on stdout and its identity
+    # preamble on stderr. The first version concatenated the two, so the
+    # preamble landed AFTER the closing brace, json.loads choked on trailing
+    # content, and the failure surfaced as the reason "{" — a parser reporting
+    # a brace as the cause of its own confusion. The verb was live and working
+    # the whole time; only the reading of it was wrong.
+    #
+    # raw_decode stops at the end of the first complete object instead of
+    # demanding that the whole string be JSON, so trailing output can never
+    # break this again on either channel.
+    def _first_json(blob):
+        at = (blob or "").find("{")
+        if at == -1:
+            return None
+        try:
+            return json.JSONDecoder().raw_decode(blob, at)[0]
+        except Exception:
+            return None
+
+    payload = _first_json(p.stdout)
+    if p.returncode != 0 or not isinstance(payload, dict):
+        # Only now consult stderr, where a refusal prints "TOOL ERROR {json}".
+        err = _first_json(p.stderr)
+        why = (err or payload or {}).get("error") if isinstance(err or payload, dict) else None
+        first_line = ((p.stderr or p.stdout or "").strip().splitlines() or ["verb call failed"])[0]
+        raise RuntimeError(why or first_line[:160])
+    if not payload.get("ok"):
+        raise RuntimeError(payload.get("error") or "verb returned no ok")
+    by_source = payload.get("by_source") or {}
+    if not by_source:
+        raise RuntimeError("verb returned no per-source domains")
+    return {view: list(rows) for view, rows in by_source.items()}, list(payload.get("notes") or [])
+
+
+def _raw_via_db():
+    """{view: [raw domain, ...]} through a direct connection. Raises without one.
+
+    THE FALLBACK, kept rather than deleted because the allowlist must survive
+    the worker being unreachable on the machine that has a credential — and
+    because deleting it would make this script's correctness depend on a
+    network hop it never used to need. A machine with no credential simply does
+    not have this path, which is the intended end state for the second Mac.
+    """
     import psycopg
     url = _db_url()
     if not url:
         raise RuntimeError("no CARR_DB_EXPORTER_URL in ~/.config/carr/db.env")
-    hosts, counts, notes = set(), {}, []
+    out, notes = {}, []
     with psycopg.connect(url) as conn:
         for view, col in SOURCES:
             try:
@@ -141,25 +206,49 @@ def collect():
                     cur.execute(
                         f'select distinct lower(split_part({col}, \'@\', 2)) '
                         f'from {view} where {col} like %s', ("%@%",))
-                    found = [r[0] for r in cur.fetchall() if r[0]]
+                    out[view] = [r[0] for r in cur.fetchall() if r[0]]
             except Exception as exc:
                 conn.rollback()
                 notes.append(f"{view}: skipped ({type(exc).__name__})")
+    if not out:
+        raise RuntimeError("no export view was readable")
+    return out, notes
+
+
+def collect():
+    """Return (sorted hosts, per-source counts, notes).
+
+    The SOURCE of the domains is now pluggable; the POLICY below is not, and
+    that split is deliberate. Which domains the guard may trust — free-mail
+    exclusion by suffix, institutional TLDs, hostname shape — stays here in the
+    file that owns the security decision, so a change to the read path can
+    never quietly change what the guard trusts.
+    """
+    notes = []
+    try:
+        raw, verb_notes = _raw_via_verb()
+        notes.extend(verb_notes)
+    except Exception as verb_exc:
+        notes.append(f"verb path unavailable ({type(verb_exc).__name__}: {verb_exc})")
+        raw, db_notes = _raw_via_db()   # raises if this machine has no credential
+        notes.extend(db_notes)
+        notes.append("read through the direct database connection")
+    hosts, counts = set(), {}
+    for view, found in raw.items():
+        kept = 0
+        for d in found:
+            d = (d or "").strip().strip(".").lower()
+            if not d or not HOST_OK.match(d):
                 continue
-            kept = 0
-            for d in found:
-                d = d.strip().strip(".").lower()
-                if not d or not HOST_OK.match(d):
-                    continue
-                # SUFFIX match, not exact. mcgilvraydmd.gccoxmail.com is a Cox
-                # subdomain and an exact-membership test sails straight past it.
-                if d in FREEMAIL or any(d.endswith("." + f) for f in FREEMAIL):
-                    continue
-                if d.rsplit(".", 1)[-1] in INSTITUTIONAL_TLDS:
-                    continue
-                hosts.add(d)
-                kept += 1
-            counts[view] = (len(found), kept)
+            # SUFFIX match, not exact. mcgilvraydmd.gccoxmail.com is a Cox
+            # subdomain and an exact-membership test sails straight past it.
+            if d in FREEMAIL or any(d.endswith("." + f) for f in FREEMAIL):
+                continue
+            if d.rsplit(".", 1)[-1] in INSTITUTIONAL_TLDS:
+                continue
+            hosts.add(d)
+            kept += 1
+        counts[view] = (len(found), kept)
     return sorted(hosts), counts, notes
 
 

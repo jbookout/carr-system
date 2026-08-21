@@ -16,11 +16,12 @@
     other failure takes, and a probe that stops running makes all three go stale
     for ops/edge-liveness.py to catch from GitHub.
 
-    EVERY TEN MINUTES. These are interactive servers — dictation and the Doc
+    EVERY THIRTY MINUTES. These are interactive servers — dictation and the Doc
     conversation surface — so Joe finds out within seconds of reaching for one
     that is down. The probe exists to make that visible to the SYSTEM rather
-    than to beat him to it, and their registered cadence is 30 minutes so a
-    single missed pass is not an alarm.
+    than to beat him to it. Thirty minutes matches the registered health
+    cadence and avoids waking the metered record-layer database three times as
+    often as the health contract requires.
 
     ITSELF WRAPPED, like every other scheduled job here: the probe's own failure
     has to be durable too, or the watcher becomes the one thing nothing watches.
@@ -37,7 +38,7 @@
     <string>{{REPO}}/bin/probe-keepalive.py</string>
   </array>
 
-  <key>StartInterval</key><integer>600</integer>
+  <key>StartInterval</key><integer>1800</integer>
   <key>RunAtLoad</key><true/>
   <key>ThrottleInterval</key><integer>60</integer>
 

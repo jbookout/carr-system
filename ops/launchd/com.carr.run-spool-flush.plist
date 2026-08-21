@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The ONE scheduled door between the local run-row spool and Neon
+         (tools/ops-spool.py, 2026-08-18). Every 30 minutes it replays the
+         queued heartbeat rows through the real tools/ops-record.py in a
+         single batch, which is what lets the database sit idle and
+         autosuspend between batches instead of being held awake by a
+         recording every few minutes. It is itself wrapped by
+         bin/run-scheduled.sh, so a broken flusher is a recorded failure like
+         any other job; its OWN succeeded row rides the spool and lands on
+         the NEXT flush, which the widened cadence grace in
+         ops/config/services.json (run-spool-flush) accounts for. -->
+    <key>Label</key>
+    <string>com.carr.run-spool-flush</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>{{REPO}}/bin/run-scheduled.sh</string>
+        <string>run-spool-flush</string>
+        <string>launchd.run</string>
+        <string>{{REPO}}/.venv/bin/python</string>
+        <string>{{REPO}}/tools/ops-spool.py</string>
+        <string>flush</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/carr-run-spool-flush.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/carr-run-spool-flush.err</string>
+</dict>
+</plist>

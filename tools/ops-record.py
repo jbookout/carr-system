@@ -69,15 +69,23 @@ meant to be run through tools/db-tap.py.
 import argparse
 import json
 import os
+import stat
 import subprocess
 import sys
+import tomllib
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 REGISTRY = REPO / "ops" / "config" / "services.json"
+WRANGLER_CONFIG = REPO / "mcp-server" / "wrangler.toml"
+MAX_RELEASE_BODY_BYTES = 65536
+STAGING_ACCOUNT_ID = "12ccca77eb49142a6be8eb84c0d6a3a0"
+STAGING_WORKER_NAME = "carr-mcp-staging"
+STAGING_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
 
 # Routine ledger writes are jobs-only.  The broader write mode remains the
 # explicit operator/release path used by db-tap and disposable DB tests.
@@ -86,9 +94,255 @@ DSN_FOR = {
     "write": ("DATABASE_URL", "CARR_DB_JOBS_URL"),
     "owner": ("DATABASE_URL", "CARR_DB_EXPORTER_URL"),
     "read":  ("DATABASE_URL", "CARR_DB_EXPORTER_URL", "CARR_DB_JOBS_URL"),
+    "authority": ("CARR_DB_AUTHORITY_JOE_URL",),
 }
 
 TERMINAL_RUN_STATES = {"succeeded", "failed", "timed_out", "cancelled", "skipped"}
+
+
+def _exact_int(value, label: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"staging readback {label} is invalid")
+    return value
+
+
+def _object_field(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _read_bounded_regular_file(path: str) -> bytes:
+    """Read an untrusted response file without following or blocking on it."""
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise ValueError("staging readback is not a regular single-link file") from exc
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1):
+        raise ValueError("staging readback is not a regular single-link file")
+    if before.st_size > MAX_RELEASE_BODY_BYTES:
+        raise ValueError("staging readback is too large")
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError("staging readback is not a regular single-link file") from exc
+    try:
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or opened.st_size > MAX_RELEASE_BODY_BYTES):
+            raise ValueError("staging readback is not a regular single-link file")
+        chunks: list[bytes] = []
+        remaining = MAX_RELEASE_BODY_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        after = os.fstat(fd)
+        if len(body) > MAX_RELEASE_BODY_BYTES:
+            raise ValueError("staging readback is too large")
+        if (not stat.S_ISREG(after.st_mode) or after.st_nlink != 1
+                or (after.st_dev, after.st_ino, after.st_size)
+                != (opened.st_dev, opened.st_ino, opened.st_size)
+                or len(body) != after.st_size):
+            raise ValueError("staging readback changed while it was read")
+        return body
+    finally:
+        os.close(fd)
+
+
+def staging_readback_projection(path: str, expected_sha: str,
+                                expected_provider_tag: str,
+                                expected_program6_actions: str) -> dict:
+    """Parse only the bounded typed fields trusted by the DB receipt writer."""
+    try:
+        body = _read_bounded_regular_file(path)
+    except ValueError:
+        raise
+    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+        raise ValueError("staging readback is not valid JSON") from exc
+    try:
+        raw_object = json.loads(body)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise ValueError("staging readback is not valid JSON") from exc
+    if not isinstance(raw_object, dict):
+        raise ValueError("staging readback must be an object")
+    raw: dict[str, Any] = raw_object
+    env = _object_field(raw.get("env"))
+    sha = _object_field(raw.get("git_sha"))
+    version = _object_field(raw.get("worker_version"))
+    schema = _object_field(raw.get("schema"))
+    if (raw.get("ok") is not True or env.get("value") != "staging"
+            or sha.get("value") != expected_sha):
+        raise ValueError("staging readback environment/SHA identity does not match")
+    if raw.get("provider") != "cloudflare-workers":
+        raise ValueError("staging readback provider is not cloudflare-workers")
+    if expected_program6_actions not in ("enabled", "disabled"):
+        raise ValueError("expected Program 6 posture must be enabled or disabled")
+    program6_actions = raw.get("program6_actions")
+    expected_enabled = expected_program6_actions == "enabled"
+    if (not isinstance(program6_actions, dict)
+            or program6_actions.get("enabled") is not expected_enabled
+            or program6_actions.get("posture") != expected_program6_actions
+            or program6_actions.get("reason") is not None):
+        raise ValueError("staging readback Program 6 posture does not match this deploy")
+    try:
+        version_id = str(uuid.UUID(str(version.get("id"))))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("staging readback provider version is not an exact UUID") from exc
+    if version.get("id") != version_id:
+        raise ValueError("staging readback provider version is not canonical")
+    if version.get("tag") != expected_provider_tag:
+        raise ValueError("staging readback provider tag does not match this deploy")
+    if not isinstance(expected_provider_tag, str) or not expected_provider_tag.startswith("carr-staging-") \
+            or len(expected_provider_tag) > 63 \
+            or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-" for ch in expected_provider_tag):
+        raise ValueError("staging readback provider tag is invalid")
+    migration = schema.get("highest_applied_migration")
+    if (not isinstance(migration, str) or len(migration) > 128
+            or not migration.endswith(".sql")
+            or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789_-." for ch in migration)):
+        raise ValueError("staging readback schema identity is invalid")
+    doctrine_value = _object_field(raw.get("doctrine_generation")).get("value")
+    return {
+        "git_sha": expected_sha,
+        "provider": "cloudflare-workers",
+        "provider_version_id": version_id,
+        "provider_tag": expected_provider_tag,
+        "verb_count": _exact_int(raw.get("verb_count"), "verb_count", minimum=1),
+        "schema_highest_migration": migration,
+        "schema_applied_count": _exact_int(schema.get("applied_count"), "schema applied count", minimum=1),
+        "doctrine_generation": _exact_int(doctrine_value, "doctrine generation"),
+        # The boolean is the only database type: posture text is derived from
+        # it and malformed values have already been refused above.
+        "program6_actions_enabled": expected_enabled,
+    }
+
+
+def staging_provider_version(path: str, expected_tag: str,
+                             live_version_id: str) -> str:
+    """Bind a serving /release version to one exact recent provider row."""
+    try:
+        raw = json.loads(_read_bounded_regular_file(path))
+        canonical_live = str(uuid.UUID(live_version_id))
+    except (json.JSONDecodeError, UnicodeError, ValueError, TypeError) as exc:
+        raise ValueError("staging provider version list is invalid") from exc
+    if not isinstance(raw, list) or len(raw) > 10:
+        raise ValueError("staging provider version list is invalid")
+    matches: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("staging provider version list is invalid")
+        annotations = item.get("annotations")
+        if isinstance(annotations, dict) and annotations.get("workers/tag") == expected_tag:
+            try:
+                version_id = str(uuid.UUID(str(item.get("id"))))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ValueError("staging provider tag has an invalid version") from exc
+            if item.get("id") != version_id:
+                raise ValueError("staging provider tag version is not canonical")
+            matches.append(version_id)
+    if len(matches) != 1 or matches[0] != canonical_live or live_version_id != canonical_live:
+        raise ValueError("staging provider tag is missing, recreated, or differs from live readback")
+    return matches[0]
+
+
+def staging_worker_target(config_path: Path = WRANGLER_CONFIG) -> dict[str, str]:
+    """Resolve the one reviewed staging Worker target from checked-in config."""
+    try:
+        config = tomllib.loads(Path(config_path).read_text(encoding="utf-8"))
+        services = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("staging target config cannot be parsed") from exc
+    staging = (config.get("env") or {}).get("staging") or {}
+    variables = staging.get("vars") or {}
+    account_id = config.get("account_id")
+    worker_name = staging.get("name")
+    host = variables.get("DEALROOM_HOST")
+    if account_id != STAGING_ACCOUNT_ID:
+        raise ValueError("staging account_id is not the reviewed account")
+    if worker_name != STAGING_WORKER_NAME or staging.get("workers_dev") is not True:
+        raise ValueError("staging worker name/workers_dev declaration is invalid")
+    if staging.get("routes") != []:
+        raise ValueError("staging routes must be exactly empty")
+    if variables.get("CARR_ENV") != "staging" or host != STAGING_HOST:
+        raise ValueError("staging host/environment declaration is invalid")
+    catalog_host = None
+    for service in services.get("services", []):
+        if service.get("key") == "carr-mcp":
+            for environment in service.get("environments", []):
+                if environment.get("environment") == "staging":
+                    catalog_host = environment.get("endpoint")
+    if catalog_host != host:
+        raise ValueError("staging host differs from the service catalog")
+    return {"account_id": account_id, "worker_name": worker_name, "host": host}
+
+
+def record_staging_release_readback(cur, args, projection: dict) -> dict:
+    """Call the sole DB writer. Actor/time/digest/evidence refs are DB-derived."""
+    cur.execute(
+        """select ops.record_staging_release_readback(
+               %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s)
+        """,
+        (args.idempotency_key, projection["provider_version_id"],
+         projection["provider_tag"], projection["verb_count"],
+         projection["schema_highest_migration"],
+         projection["schema_applied_count"], projection["doctrine_generation"],
+         projection["program6_actions_enabled"]))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("staging receipt writer returned no durable readback")
+    return row[0]
+
+
+def prepare_staging_deployment_attempt(cur, args) -> dict:
+    """Persist the exact deployment intent before any provider mutation."""
+    cur.execute(
+        """select ops.prepare_staging_deployment_attempt(
+               %s::uuid,%s::uuid,%s,%s,%s::uuid,%s,%s)
+        """,
+        (args.idempotency_key, args.correlation, args.release_key,
+         args.prior_release_key, args.recovery_attempt_id, args.recovery_step,
+         args.git_sha))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("staging attempt writer returned no durable state")
+    return row[0]
+
+
+def claim_staging_deployment_attempt(cur, idempotency_key: str) -> dict:
+    """Claim the one provider mutation. Exact replays can observe, never redeploy."""
+    cur.execute("select ops.claim_staging_deployment_attempt(%s::uuid)",
+                (idempotency_key,))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("staging attempt claim returned no durable state")
+    return row[0]
+
+
+def credential_names() -> tuple[str, ...]:
+    """Every environment variable this recorder will read a DSN from, in
+    declaration order.
+
+    Public because a suite that must prove "no reachable database" has to blind
+    EVERY one of them, and blinding the ones it remembers is not the same thing.
+    That distinction is not theoretical: from 2026-08-16 to 2026-08-18, the two
+    scheduled-run selftests set DATABASE_URL to a dead port and deleted
+    CARR_DB_JOBS_URL, which was airtight while `run` was connect("write") and
+    stopped being airtight the moment it became connect("routine") —
+    _load_db_env() below simply re-supplied the PRODUCTION jobs DSN by
+    setdefault. ops/scheduled-run-record-selftest.py then recorded 46 fabricated
+    SUCCEEDED rows into production's ops.run against loop-drain-weekdays and
+    radar-weekly, one pair per CI run, each one a false observation of a job
+    that had not run. Reading this list means a future mode added to DSN_FOR is
+    blinded by both suites without either one being edited.
+    """
+    return tuple(dict.fromkeys(
+        name for names in DSN_FOR.values() for name in names))
 
 
 def _load_db_env() -> None:
@@ -113,6 +367,8 @@ def dsn(kind: str) -> str:
         if value:
             if kind == "routine" and not _is_jobs_dsn(value):
                 raise SystemExit("ops-record: CARR_DB_JOBS_URL must authenticate as carr_jobs")
+            if kind == "authority" and not _is_authority_dsn(value):
+                raise SystemExit("ops-record: CARR_DB_AUTHORITY_JOE_URL must authenticate as carr_authority_joe")
             return value
     raise SystemExit(
         f"ops-record: no credential — set one of {', '.join(DSN_FOR[kind])} "
@@ -127,19 +383,27 @@ def _is_jobs_dsn(value: str) -> bool:
     return any(part == "user=carr_jobs" for part in value.split())
 
 
+def _is_authority_dsn(value: str) -> bool:
+    parsed = urlsplit(value)
+    if parsed.scheme:
+        return unquote(parsed.username or "") == "carr_authority_joe"
+    return any(part == "user=carr_authority_joe" for part in value.split())
+
+
 def connect(kind: str):
     try:
         import psycopg
     except ImportError:
         raise SystemExit("ops-record: psycopg not installed (pip install 'psycopg[binary]')")
     conn = psycopg.connect(dsn(kind), autocommit=True)
-    if kind == "routine":
+    if kind in ("routine", "authority"):
         with conn.cursor() as cur:
             cur.execute("select session_user,current_user")
             row = cur.fetchone()
-        if row != ("carr_jobs", "carr_jobs"):
+        expected = "carr_jobs" if kind == "routine" else "carr_authority_joe"
+        if row != (expected, expected):
             conn.close()
-            raise SystemExit("ops-record: routine ledger connection is not carr_jobs")
+            raise SystemExit(f"ops-record: {kind} connection is not {expected}")
     return conn
 
 
@@ -531,12 +795,33 @@ def resolve_preconditions(incident, root_cause, evidence=None,
     }
 
 
+# ONE CLOCK, not two. Until 2026-08-18 this read the day twice: the sequence
+# counted rows whose ref matched to_char(now(), ...), which Postgres evaluates
+# in the SERVER's timezone, while the ref itself was formatted from the
+# CLIENT's datetime.now(timezone.utc). The two agree only when the server runs
+# UTC, so production was correct by luck (Neon is UTC) rather than by design.
+# Against a local Postgres 17 inheriting the Mac's US/Central zone the split
+# was reproduced on 2026-08-18 19:22 CDT: the count matched prefix
+# INC-20260818- (no rows, so seq 01) while the ref written said
+# INC-20260819-01. Every incident opened in that 5-hour window is numbered 01,
+# and the second one dies on incident_ref_key — which is exactly how
+# ops/program3-incident-gate.py failed.
+#
+# So the query now derives BOTH the prefix and the sequence, and the caller
+# formats nothing: the label cannot disagree with the number it was counted
+# against, and changing the server's zone later cannot reintroduce the split.
+# `at time zone 'UTC'` is what pins the day, so the numbering space stays UTC
+# regardless of what zone the cluster happens to inherit.
 def _next_incident_ref(cur) -> str:
     cur.execute(
-        """select coalesce(max(substring(ref from '[0-9]+$')::int), 0) + 1
+        """select to_char(now() at time zone 'UTC', 'YYYYMMDD') as day,
+                  coalesce(max(substring(ref from '[0-9]+$')::int), 0) + 1 as seq
              from ops.incident
-            where ref like 'INC-' || to_char(now(), 'YYYYMMDD') || '-%'""")
-    return f"INC-{datetime.now(timezone.utc):%Y%m%d}-{cur.fetchone()[0]:02d}"
+            where ref like 'INC-'
+                          || to_char(now() at time zone 'UTC', 'YYYYMMDD')
+                          || '-%'""")
+    day, seq = cur.fetchone()
+    return f"INC-{day}-{seq:02d}"
 
 
 def _record_failure_incident(
@@ -960,6 +1245,83 @@ def cmd_assess(args) -> int:
     return 0
 
 
+def cmd_staging_target(args) -> int:
+    try:
+        target = staging_worker_target()
+        print(target[args.field] if args.field else json.dumps(target, sort_keys=True))
+    except ValueError as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_staging_attempt(args) -> int:
+    """Prepare or claim the single provider mutation for one staging key."""
+    try:
+        args.idempotency_key = str(uuid.UUID(args.idempotency_key))
+        if args.action == "prepare":
+            if (not args.release_key or not args.git_sha
+                    or args.recovery_step not in
+                    ("standalone", "current_before", "prior", "current_after")):
+                raise ValueError("staging attempt prepare is missing exact release inputs")
+            if args.recovery_attempt_id:
+                args.recovery_attempt_id = str(uuid.UUID(args.recovery_attempt_id))
+            recovery_fields = (args.recovery_attempt_id, args.prior_release_key)
+            if args.recovery_step == "standalone" and any(recovery_fields):
+                raise ValueError("standalone attempt cannot carry recovery fields")
+            if args.recovery_step != "standalone" and not all(recovery_fields):
+                raise ValueError("recovery attempt requires attempt and prior release")
+            args.correlation = correlation_of(args.correlation)
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = prepare_staging_deployment_attempt(cur, args)
+        else:
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = claim_staging_deployment_attempt(cur, args.idempotency_key)
+    except (ValueError, RuntimeError) as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print("ops-record: could not persist staging attempt: "
+              f"{str(exc).splitlines()[0][:240]}", file=sys.stderr)
+        return 1
+    if args.field:
+        value = result.get(args.field)
+        if value is None:
+            print("")
+        elif isinstance(value, bool):
+            print("true" if value else "false")
+        else:
+            print(value)
+    else:
+        print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def cmd_staging_readback_verify(args) -> int:
+    try:
+        projection = staging_readback_projection(args.file, args.git_sha,
+                                                  args.provider_tag,
+                                                  args.expected_program6_actions)
+    except ValueError as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    value = projection[args.field]
+    print(value)
+    return 0
+
+
+def cmd_staging_provider_version(args) -> int:
+    try:
+        print(staging_provider_version(args.file, args.provider_tag,
+                                       args.live_version_id))
+    except ValueError as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 # ── deployment ───────────────────────────────────────────────────────────────
 def _validate_provider_identity(args, subject: str) -> bool:
     """Keep provider-version evidence exclusive to Production promotion.
@@ -1000,6 +1362,47 @@ def _validate_provider_identity(args, subject: str) -> bool:
 
 
 def cmd_deployment(args) -> int:
+    if args.staging_readback_file:
+        if (args.environment != "staging" or args.state != "complete"
+                or not args.git_sha or not args.release_key
+                or not args.idempotency_key or not args.expected_provider_tag
+                or not args.expected_program6_actions):
+            print("ops-record: typed staging readback requires complete staging, "
+                  "--git-sha, --release-key, --idempotency-key and "
+                  "--expected-provider-tag and --expected-program6-actions", file=sys.stderr)
+            return 2
+        if args.recovery_step not in ("standalone", "current_before", "prior", "current_after"):
+            print("ops-record: invalid recovery step", file=sys.stderr)
+            return 2
+        recovery_fields = (args.recovery_attempt_id, args.prior_release_key)
+        if args.recovery_step == "standalone" and any(recovery_fields):
+            print("ops-record: standalone readback cannot carry recovery fields", file=sys.stderr)
+            return 2
+        if args.recovery_step != "standalone" and not all(recovery_fields):
+            print("ops-record: recovery readback requires attempt and prior release", file=sys.stderr)
+            return 2
+        try:
+            args.idempotency_key = str(uuid.UUID(args.idempotency_key))
+            if args.recovery_attempt_id:
+                args.recovery_attempt_id = str(uuid.UUID(args.recovery_attempt_id))
+            args.correlation = correlation_of(args.correlation)
+            projection = staging_readback_projection(
+                args.staging_readback_file, args.git_sha, args.expected_provider_tag,
+                args.expected_program6_actions)
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                receipt = record_staging_release_readback(cur, args, projection)
+        except (ValueError, RuntimeError) as exc:
+            print(f"ops-record: {exc}", file=sys.stderr)
+            return 2
+        except SystemExit:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print("ops-record: could not record typed staging readback: "
+                  f"{str(exc).splitlines()[0][:240]}", file=sys.stderr)
+            return 1
+        print(json.dumps(receipt, sort_keys=True))
+        return 0
+
     if not _validate_provider_identity(args, "deployment"):
         return 2
     if args.environment == "production" and not args.release_key:
@@ -1112,6 +1515,25 @@ def cmd_release(args) -> int:
     elif not args.key:
         print(f"ops-record: release {args.action} needs --key", file=sys.stderr)
         return 2
+    if args.action in ("approve", "staging-approve") and args.actor:
+        print("ops-record: approval identity is not a caller field; Joe is derived "
+              "from CARR_DB_AUTHORITY_JOE_URL", file=sys.stderr)
+        return 2
+    if args.action == "staging-approve" and args.environment != "staging":
+        print("ops-record: release staging-approve requires --environment staging", file=sys.stderr)
+        return 2
+    approval_key = None
+    if args.action in ("approve", "staging-approve"):
+        if not args.plan_hash or not args.idempotency_key:
+            print(f"ops-record: release {args.action} requires --plan-hash and "
+                  "--idempotency-key; Joe identity comes from the authority "
+                  "credential, never --actor", file=sys.stderr)
+            return 2
+        try:
+            approval_key = str(uuid.UUID(args.idempotency_key))
+        except ValueError:
+            print("ops-record: approval idempotency key is not a UUID", file=sys.stderr)
+            return 2
 
     manifest = {}
     if getattr(args, "manifest", None):
@@ -1163,7 +1585,8 @@ def cmd_release(args) -> int:
             return 2
 
     try:
-        with connect("write") as conn, conn.cursor() as cur:
+        connection_kind = "authority" if args.action in ("approve", "staging-approve") else "write"
+        with connect(connection_kind) as conn, conn.cursor() as cur:
             if args.action == "candidate":
                 sid = service_id(cur, args.service)
                 corr = correlation_of(getattr(args, "correlation", None))
@@ -1175,13 +1598,15 @@ def cmd_release(args) -> int:
                             recovery_strategy,
                             artifact_digest, dependency_lock_digest,
                             sbom_ref, migration_set, schema_highest_migration,
+                            schema_applied_count, schema_ledger_sha256,
                             config_fingerprint, declared_env_differences,
                             asset_versions, maker_actor, maker_verification_ref,
+                            verifier_actor, verifier_evidence_ref,
                             test_evidence_ref, security_evidence_ref,
                             rollback_ready, rollback_plan_ref, work_request_ref,
                             plan_hash, source_kind, source_ref, expires_at)
-                       values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                               %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
+                       values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                               %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
                                'tools/release-manifest.py', %s)
                        returning id, release_key""",
                     (corr, args.key, sid, args.environment,
@@ -1193,10 +1618,23 @@ def cmd_release(args) -> int:
                      manifest.get("dependency_lock_digest"), manifest.get("sbom_ref"),
                      manifest.get("migration_set"),
                      manifest.get("schema_highest_migration"),
+                     manifest.get("schema_applied_count"),
+                     manifest.get("schema_ledger_sha256"),
                      manifest.get("config_fingerprint"),
                      manifest.get("declared_env_differences"),
                      json.dumps(manifest.get("asset_versions")) if manifest.get("asset_versions") else None,
                      args.maker, args.maker_verification,
+                     # COLLECTED AT CANDIDACY, which is exactly what migration
+                     # 0169's own comment says should be possible: "drafts and
+                     # candidates may still collect it." Until this line existed
+                     # they could not. The only writer of these two columns was
+                     # the `complete` branch, which runs AFTER approval and after
+                     # the deployment — while the constraint added in that same
+                     # migration demands both columns AT approval. The result was
+                     # an approve that could never succeed for any release on any
+                     # path; see the approve branch below for the refusal that
+                     # now explains it instead of surfacing a raw constraint name.
+                     args.verifier, args.verifier_evidence,
                      args.test_evidence, args.security_evidence,
                      (manifest.get("rollback_ready") if args.environment == "production"
                       else args.rollback_ready),
@@ -1258,6 +1696,13 @@ def cmd_release(args) -> int:
                             where git_sha = %s and environment = %s
                               and state in ('approved','deploying','verifying')
                               and approval_expires_at > now()
+                              and exists (
+                                select 1 from ops.staging_release_approval_receipt a
+                                 where a.id=ops.release.staging_approval_receipt_id
+                                   and a.release_id=ops.release.id and a.plan_hash=ops.release.plan_hash
+                                   and a.approved_by_actor='joe'
+                                   and a.approved_at=ops.release.approved_at
+                                   and a.approval_expires_at=ops.release.approval_expires_at)
                             order by approved_at desc
                             limit 1""",
                         (args.sha, args.environment))
@@ -1275,7 +1720,7 @@ def cmd_release(args) -> int:
                               f"--provider {args.provider} --provider-version-id "
                               f"{args.provider_version_id} --manifest out/bound.json\n"
                               "    tools/ops-record.py release approve --key <key> "
-                              "--plan-hash <bound-hash> --actor joe",
+                              "--plan-hash <bound-hash> --idempotency-key <uuid>",
                               file=sys.stderr)
                     else:
                         print(f"NO LIVE APPROVAL for {release_identity} in {args.environment}.\n"
@@ -1284,9 +1729,10 @@ def cmd_release(args) -> int:
                               f"    tools/release-manifest.py build --sha {args.sha} "
                               "> out/release.json\n"
                               "    tools/ops-record.py release candidate --key <key> "
-                              "--manifest out/release.json\n"
-                              "    tools/ops-record.py release approve --key <key> "
-                              "--plan-hash <hash> --actor joe",
+                              "--environment staging --manifest out/release.json\n"
+                              "    tools/ops-record.py release staging-approve --key <key> "
+                              "--environment staging "
+                              "--plan-hash <hash> --idempotency-key <uuid>",
                               file=sys.stderr)
                     return 3
                 key, state, expires, stored_plan, release_sha = row
@@ -1391,30 +1837,15 @@ def cmd_release(args) -> int:
                 print(f"{args.key} {row[0]}")
                 return 0
 
-            if args.action == "approve":
+            if args.action in ("approve", "staging-approve"):
+                approval_function = ("ops.approve_staging_release" if args.action == "staging-approve"
+                                     else "ops.approve_program5_release")
                 cur.execute(
-                    "select plan_hash, state from ops.release where release_key = %s",
-                    (args.key,))
-                row = cur.fetchone()
-                if not row:
-                    print(f"ops-record: no release {args.key!r}", file=sys.stderr)
-                    return 2
-                stored_hash, state = row
-                if args.plan_hash != stored_hash:
-                    print(f"ops-record: the plan moved. You are approving "
-                          f"{args.plan_hash}, the release carries {stored_hash}. "
-                          f"Rebuild the manifest and re-read it before approving.",
-                          file=sys.stderr)
-                    return 2
-                cur.execute(
-                    """update ops.release
-                          set state = 'approved', approved_by_actor = %s,
-                              approved_at = now(),
-                              approval_expires_at = now() + make_interval(hours => %s)
-                        where release_key = %s
-                    returning approval_expires_at""",
-                    (args.actor, args.expires_hours, args.key))
-                print(f"approved until {cur.fetchone()[0].isoformat()}")
+                    f"select {approval_function}(%s,%s,%s::uuid,%s,%s,%s)",
+                    (args.key, args.plan_hash, approval_key, args.expires_hours,
+                     args.verifier, args.verifier_evidence),
+                )
+                print(json.dumps(cur.fetchone()[0],sort_keys=True,default=str))
                 return 0
 
             # read one back — the manifest, in one query, as the gate asserts
@@ -1602,6 +2033,19 @@ def main() -> int:
     d.add_argument("--ended-at")
     d.add_argument("--read-back-at", help="when production was read back; required for complete")
     d.add_argument("--verification-evidence-ref")
+    d.add_argument("--staging-readback-file", help="one local /release JSON file; only a whitelisted digest is retained")
+    d.add_argument("--expected-provider-tag",
+                   help="server-observed Worker tag minted for this exact staging deploy")
+    d.add_argument("--expected-program6-actions", choices=["enabled", "disabled"],
+                   help="reviewed Program 6 posture required in the staging /release receipt")
+    d.add_argument("--idempotency-key",
+                   help="exact UUID for atomic staging receipt replay")
+    d.add_argument("--recovery-attempt-id",
+                   help="one UUID binding current -> prior -> current")
+    d.add_argument("--recovery-step", default="standalone",
+                   choices=["standalone", "current_before", "prior", "current_after"])
+    d.add_argument("--prior-release-key",
+                   help="completed Production release restored during a recovery rehearsal")
     d.add_argument("--failure-class")
     d.add_argument("--correlation")
     d.add_argument("--source-kind", default="wrapper",
@@ -1622,7 +2066,7 @@ def main() -> int:
                     default="production")
 
     rel = sub.add_parser("release", help="record, approve or read one release (P0-1)")
-    rel.add_argument("action", choices=["candidate", "approve", "require", "complete",
+    rel.add_argument("action", choices=["candidate", "approve", "staging-approve", "require", "complete",
                                         "abandon", "show"])
     rel.add_argument("--sha", help="require only: the SHA about to ship")
     rel.add_argument("--provider", help="Production provider, e.g. cloudflare-workers")
@@ -1645,16 +2089,18 @@ def main() -> int:
     rel.add_argument("--rollback-plan", help="ref to the rollback runbook")
     rel.add_argument("--work-request", help="the Work Request this release delivers")
     rel.add_argument("--expires-at", help="when this candidate's evidence goes stale")
-    rel.add_argument("--plan-hash", help="approve only: the hash the approver read")
-    rel.add_argument("--actor", help="approve only: who is approving")
-    rel.add_argument("--verifier", help="complete only: who verified, and it may not be the maker")
+    rel.add_argument("--plan-hash", help="approve/staging-approve: the hash the approver read")
+    rel.add_argument("--actor", help="approve/staging-approve: deprecated; identity is DB-derived")
+    rel.add_argument("--idempotency-key",
+                     help="approve/staging-approve: UUID binding an exact Joe approval replay")
+    rel.add_argument("--verifier", help="candidate, approve, or complete: who verified; never the maker")
     rel.add_argument("--verifier-evidence", dest="verifier_evidence",
-                     help="complete only: ref to the verification that closed it")
+                     help="candidate, approve, or complete: ref to that verification")
     rel.add_argument("--reason", help="abandon only: why this release will never "
                                       "ship. Required unless --superseded-by names "
                                       "the release that replaced it.")
     rel.add_argument("--expires-hours", type=int, default=24,
-                     help="approve only: how long the approval stays live. An "
+                     help="approve/staging-approve: how long the approval stays live. An "
                           "approval that never expires is how a plan-hash check "
                           "gets bypassed by time.")
 
@@ -1662,6 +2108,40 @@ def main() -> int:
     t.add_argument("correlation")
 
     sub.add_parser("health", help="derived health of every registered service")
+    st = sub.add_parser("staging-target",
+                        help="print the reviewed staging Worker account/name/host config")
+    st.add_argument("--field", choices=["account_id", "worker_name", "host"])
+
+    sa = sub.add_parser("staging-attempt",
+                        help="persist/claim a crash-safe staging provider attempt")
+    sa.add_argument("action", choices=["prepare", "claim"])
+    sa.add_argument("--idempotency-key", required=True)
+    sa.add_argument("--release-key")
+    sa.add_argument("--prior-release-key")
+    sa.add_argument("--recovery-attempt-id")
+    sa.add_argument("--recovery-step", default="standalone",
+                    choices=["standalone", "current_before", "prior", "current_after"])
+    sa.add_argument("--git-sha")
+    sa.add_argument("--correlation")
+    sa.add_argument("--field", choices=["attempt_id", "state", "deploy_claimed",
+                                         "deploy_allowed", "expected_provider_tag",
+                                         "provider_version_id", "receipt_ref"])
+
+    srv = sub.add_parser("staging-readback-verify",
+                         help="verify one bounded staging /release file without writing")
+    srv.add_argument("--file", required=True)
+    srv.add_argument("--git-sha", required=True)
+    srv.add_argument("--provider-tag", required=True)
+    srv.add_argument("--expected-program6-actions", required=True,
+                     choices=["enabled", "disabled"])
+    srv.add_argument("--field", required=True,
+                     choices=["provider_version_id", "schema_highest_migration"])
+
+    spv = sub.add_parser("staging-provider-version",
+                         help="bind a live version to one exact structured provider row")
+    spv.add_argument("--file", required=True)
+    spv.add_argument("--provider-tag", required=True)
+    spv.add_argument("--live-version-id", required=True)
 
     rs = sub.add_parser("resolve", help="close one incident, with its outcome recorded")
     rs.add_argument("--ref", required=True, help="e.g. INC-20260814-09")
@@ -1695,6 +2175,10 @@ def main() -> int:
         "release": cmd_release,
         "trace": cmd_trace,
         "health": cmd_health,
+        "staging-target": cmd_staging_target,
+        "staging-attempt": cmd_staging_attempt,
+        "staging-readback-verify": cmd_staging_readback_verify,
+        "staging-provider-version": cmd_staging_provider_version,
         "assess": cmd_assess,
         "resolve": cmd_resolve,
         "sweep": cmd_sweep,

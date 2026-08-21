@@ -13,11 +13,23 @@ no network) and settings-change-db-outage (a genuinely unreachable DSN, no
 staging credential needed for the MECHANICS, only for the evidence write at
 the end — see the note on that below).
 
+TIER 1 ALSO PROVES THE SPOOL-ERA RECORDER CONTRACT (added 2026-08-18), with no
+credential and no network, by driving the REAL bin/run-scheduled.sh through the
+drill's OWN env helpers. This is the half of drill 1 that went wrong when
+tools/ops-spool.py landed: an unreachable ledger stopped being a recording
+failure, so the drill's "recorder_exit is non-zero" assertion inverted and would
+have reported a lie where the system was in fact deferring durably. The two
+states are checked here directly, where a regression shows up on every push
+rather than only on a machine with a staging credential.
+
 TIER 2 (only when a staging credential is actually available — gated behind
 CARR_OUTAGE_DRILL_SELFTEST_LIVE=1, never on by default, because it spends a
 Neon staging round trip and a real HTTP call to the staging Worker on every
 invocation otherwise). Runs record-layer-unreachable, stale-observation and
-worker-unreachable for real and checks their verdicts.
+worker-unreachable for real and checks their verdicts. Both database drills
+additionally mint an ephemeral isolated-staging carr_jobs credential through
+tools/staging_jobs_dsn.py; on a machine that cannot resolve staging at all they
+skip, and this suite says so rather than reporting a bare failure.
 
 WHY TIER 1's LOCAL DRILLS STILL NEED "LIVE" LOOSELY DEFINED: both
 model-provider-unavailable and settings-change-db-outage end by calling
@@ -33,9 +45,14 @@ RUN IT:
     python3 ops/outage-drill-selftest.py
     CARR_OUTAGE_DRILL_SELFTEST_LIVE=1 python3 ops/outage-drill-selftest.py
 """
+import importlib.util
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
+from pathlib import Path
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SCRIPT = os.path.join(REPO, "bin", "outage-drill.py")
@@ -58,6 +75,32 @@ def check(label: str, cond: bool, detail: str = "") -> bool:
 def run(args: list[str], timeout: int = 60, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run([PY, SCRIPT, *args], capture_output=True, text=True,
                            timeout=timeout, cwd=REPO, env=env)
+
+
+def drill_module():
+    """bin/outage-drill.py imported as a module, so the recorder-contract block
+    below drives the harness's REAL env helpers rather than a paraphrase of
+    them. A copy of _unreachable_env()'s rules here would be a copy that keeps
+    passing after the original drifts, which is the failure mode this whole
+    suite exists to catch."""
+    spec = importlib.util.spec_from_file_location("carr_outage_drill", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["carr_outage_drill"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def staging_credential_present(drill) -> bool:
+    """Whether this machine can reach isolated staging at all. Deliberately the
+    OWNER credential and not a mint: asking is a read, while minting alters a
+    role, and a suite that only wants to know which tier to run should not have
+    a side effect."""
+    try:
+        drill.staging_dsn()
+    except Exception:                                              # noqa: BLE001
+        return False
+    return True
 
 
 def tier1() -> None:
@@ -123,6 +166,103 @@ def tier1() -> None:
           proc.stdout[-1000:])
 
 
+def tier1_recorder_contract() -> None:
+    """The spool-era recorder contract, driven through the real wrapper.
+
+    WHY THIS IS TIER 1 AND NOT TIER 2. The assertion that broke on 2026-08-18 —
+    "an unreachable database means recorder_exit is non-zero" — needed no
+    staging credential to be wrong, and needs none to be caught. Everything
+    below is loopback and a scratch directory."""
+    print("\n  the spool-era recorder contract (real wrapper, no network)")
+    drill = drill_module()
+
+    probe = "carr-outage-drill-selftest-" + uuid.uuid4().hex[:8]
+    run_key = "selftest.recorder-contract"
+    scratch = Path(tempfile.mkdtemp(prefix="carr-outage-drill-selftest-"))
+    try:
+        # An explicit CARR_DB_JOBS_URL is the whole point of the fix: popping it
+        # lets tools/ops-record.py reload the PRODUCTION jobs DSN from db.env by
+        # setdefault, so an "unreachable" test would quietly dial the live
+        # ledger. Assert the harness sets it rather than trusting it does.
+        unreachable = drill._unreachable_env(dict(os.environ))
+        check("the harness SETS CARR_DB_JOBS_URL for an outage rather than "
+              "popping it (popping lets db.env resupply the production DSN)",
+              unreachable.get("CARR_DB_JOBS_URL", "").startswith("postgresql://carr_jobs@127.0.0.1:1"),
+              repr(unreachable.get("CARR_DB_JOBS_URL")))
+
+        deferred_env = drill._throwaway_spool_env(unreachable, scratch)
+        check("...and it redirects the run-row spool away from the shared "
+              "out/run-spool.sqlite3",
+              deferred_env["CARR_RUN_SPOOL_DB"].startswith(str(scratch)),
+              deferred_env["CARR_RUN_SPOOL_DB"])
+
+        # STATE 1 — ledger unreachable, queue writable. Truthful behavior is
+        # durable deferral, and recorder_exit 0 is the honest report of it.
+        proc = subprocess.run(
+            [drill.RUN_SCHEDULED.__fspath__(), probe, run_key, "/bin/sh", "-c", "exit 0"],
+            capture_output=True, text=True, env=deferred_env, cwd=REPO, timeout=60)
+        line = drill._tail_provenance(run_key, probe)
+        queued = drill._spool_rows(Path(deferred_env["CARR_RUN_SPOOL_DB"]), probe, run_key)
+        check("state 1: the wrapped job's exit code is untouched",
+              proc.returncode == 0, f"rc={proc.returncode}")
+        check("state 1: an unreachable ledger alone reports recorder_exit=0 — "
+              "durable, not failed (this is what inverted the old assertion)",
+              drill._field(line, "recorder_exit") == "0", repr(line))
+        check("state 1: ...and the row is REALLY in the local queue",
+              len(queued) == 1, repr(queued))
+
+        # STATE 2 — the record layer broken all the way down. The only state in
+        # which a non-zero recorder exit is honest since the spool.
+        broken_env = drill._unwritable_spool_env(deferred_env)
+        check("the harness induces genuine failure with a spool path under "
+              "/dev/null, the same fixture run-scheduled-selftest uses",
+              os.path.devnull in broken_env["CARR_RUN_SPOOL_DB"],
+              broken_env["CARR_RUN_SPOOL_DB"])
+        proc = subprocess.run(
+            [drill.RUN_SCHEDULED.__fspath__(), probe, run_key, "/bin/sh", "-c", "exit 0"],
+            capture_output=True, text=True, env=broken_env, cwd=REPO, timeout=60)
+        line = drill._tail_provenance(run_key, probe)
+        check("state 2: the wrapped job's exit code is STILL untouched",
+              proc.returncode == 0, f"rc={proc.returncode}")
+        check("state 2: with the queue unwritable too, recorder_exit is "
+              "non-zero — the row is durable nowhere and says so",
+              drill._field(line, "recorder_exit") not in ("0", ""), repr(line))
+
+        # The isolation this whole block depends on, asserted rather than
+        # assumed: a selftest that quietly queued into the shared spool would
+        # be manufacturing production noise on every push.
+        check("neither state queued anything into the SHARED production spool",
+              not drill._spool_rows(Path(REPO) / "out" / "run-spool.sqlite3",
+                                    probe, run_key),
+              "rows found in out/run-spool.sqlite3")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def tier1_unreachable_staging_skips() -> None:
+    """With no staging credential at all, the two database drills must SKIP —
+    cleanly, exit 2, no traceback, and never a verdict about the system under
+    test. This is every CI runner, and it is the shape a drill has to hold to be
+    safe to run anywhere."""
+    drill = drill_module()
+    if staging_credential_present(drill):
+        print("\n  (staging is reachable here — the unreachable-staging skip "
+              "path is not exercised on this machine)")
+        return
+
+    print("\n  the unreachable-staging skip path")
+    for name in ("record-layer-unreachable", "stale-observation"):
+        proc = run(["--only", name], timeout=60)
+        check(f"{name} exits 2 (skipped), never 0 and never a crash",
+              proc.returncode == 2, f"rc={proc.returncode}\n{proc.stdout[-600:]}")
+        check(f"{name} reports a skip rather than a verdict about the target",
+              "SKIPPED" in proc.stdout and "NOT TRUTHFUL" not in proc.stdout,
+              proc.stdout[-600:])
+        check(f"{name} leaves no traceback behind",
+              "Traceback" not in proc.stdout and "Traceback" not in proc.stderr,
+              proc.stderr[-600:])
+
+
 def tier2() -> None:
     if os.environ.get("CARR_OUTAGE_DRILL_SELFTEST_LIVE") != "1":
         print("\nTIER 2 — skipped (set CARR_OUTAGE_DRILL_SELFTEST_LIVE=1 to run the "
@@ -130,6 +270,13 @@ def tier2() -> None:
         return
 
     print("\nTIER 2 — the staging-database and staging-Worker drills, run for real")
+
+    # Named plainly rather than left to surface as a puzzling verdict: the
+    # difference between "this machine cannot reach staging" and "it can, and
+    # the drill failed" is the whole value of running tier 2 at all.
+    if not staging_credential_present(drill_module()):
+        print("  (no staging credential on this machine — the two database "
+              "drills below will SKIP rather than report a verdict.)")
 
     print("\n  drill: record-layer-unreachable")
     proc = run(["--only", "record-layer-unreachable"], timeout=60)
@@ -159,6 +306,8 @@ def main() -> int:
           "claims to, touch nothing on --dry-run, and never mistake the target's "
           "own dishonesty for its own crash")
     tier1()
+    tier1_recorder_contract()
+    tier1_unreachable_staging_skips()
     tier2()
     print()
     if FAILED:

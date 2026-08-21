@@ -31,6 +31,17 @@ QUEUE SOURCE ADDITION (2026-08-06, loop #212): before step 1 above, read
 task's FIRST queue, ahead of never-verified records, because a stale "verified"
 stamp misleads where a blank at least looks unknown.
 
+SCOPE THAT VIEW TO CONTACTS (added 2026-08-20). `v_expired_verification` returns
+every expired finding in the system, and `record-finding` has taken non-contact
+subjects since 0066 (campaign, platform, pillar, format) and 0101 (repo, commit).
+Filter on `subject_type in ('party','vendor','lead','client')`. On 2026-08-20 the
+view held exactly one row and it was a `commit` subject — a code finding
+(`control_plane_production_readiness`, expired 2026-08-17) that this task can
+neither research nor enrich. An unfiltered read makes the first queue look
+non-empty when it holds nothing this task can act on. If a non-contact row is
+expired, do not enrich it and do not silently skip it: name it in the chat
+summary so the lane that owns it can pick it up.
+
 WRITE-UP: findings land through `record-finding` — one row per fact, source
 required, `expires_on` per the stamping rule, discrepancies as
 `proposes_correction`. NEVER a markdown report file: the previous instruction

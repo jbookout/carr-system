@@ -23,6 +23,10 @@ class IntakeFake {
       const row = this.toolCalls.get(params[0]);
       return { rows: row ? [row] : [] };
     }
+    // Sponsor resolution moved behind a definer function in migration 0223, so
+    // the read path never selects from the actor table it cannot fully read.
+    if (sql.includes("retrieval_visibility_actor_id"))
+      return { rows: [{ id: ACTOR.id }] };
     if (sql.includes("search_doctrine_situations") && this.noHits) return { rows: [] };
     if (sql.includes("search_doctrine_situations")) return { rows: [
       ...(this.personalFirst ? [{ section_id: "30000000-0000-0000-0000-000000000099", doc_slug: "personal", section_key: "top",

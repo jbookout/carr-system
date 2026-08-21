@@ -18,15 +18,29 @@ Never contacts anyone. Nothing enters the registry. GREEN.
 import sys, os, json, re, glob
 from datetime import datetime, date
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "corroborate canonical upstream ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"corroborate: {exc}") from exc
+if _RECOVERY.args:
+    raise SystemExit(f"corroborate: unexpected argument: {_RECOVERY.args[0]}")
+if not _RECOVERY.recovery:
+    raise SystemExit("corroborate: canonical upstream signal ingress is not implemented; "
+                     "normal mode refuses Drive files")
+ROOT = str(_RECOVERY.vault)
 UP   = os.path.join(ROOT, "Automation", "radar", "upstream")
 AUTO = os.path.join(ROOT, "Automation")
+OUTPUT_AUTO = os.path.join(_REPO, "out", "recovery")
 
 # The REPO (not ROOT — ROOT is the VAULT when run.sh passes it as argv[1])
 # this script itself lives under, two directories up from pipelines/radar/.
 # Needed only to import pipelines.map_radar_lanes for the ORDER 26b pool hook
 # below; never used for anything file-facing.
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 try:
@@ -189,7 +203,8 @@ def main():
                 "GEO-SINGLE-SOURCE": 2}
     candidates.sort(key=lambda c: (GEO_RANK.get(c["geo"], 3), -c["score"]))
 
-    out = os.path.join(AUTO, "pre-entity-watch.json")
+    os.makedirs(OUTPUT_AUTO, exist_ok=True)
+    out = os.path.join(OUTPUT_AUTO, "pre-entity-watch.json")
     json.dump(candidates, open(out, "w"), indent=1)
     print(f"[out] {len(candidates)} pre-entity candidate(s) -> {out}")
     if unanchored:
@@ -216,18 +231,7 @@ def main():
     # under a bare interpreter (see the corp-filings SOP fallback) must not
     # have a missing dependency here take down the lane run that just
     # succeeded at its real job.
-    try:
-        if _REPO not in sys.path:
-            sys.path.insert(0, _REPO)
-        from pipelines.map_radar_lanes import run_lane
-    except ImportError as e:
-        print(f"[map-radar-lane SKIP] upstream: {e} — pool mapping needs psycopg, which "
-              f"this interpreter does not have. pre-entity-watch.json was still written "
-              f"normally; catch the pool up by hand with the repo venv: "
-              f".venv/bin/python -m pipelines.map_radar_lanes --lane upstream",
-              file=sys.stderr)
-    else:
-        run_lane("upstream", rows=candidates)
+    print("[recovery] NONCANONICAL output is not mapped into candidate_pool", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

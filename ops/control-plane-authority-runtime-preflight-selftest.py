@@ -104,18 +104,22 @@ def main() -> int:
 
     joe_dsn = "postgresql://carr_authority_joe:synthetic-only@invalid.invalid/carr"  # ci-secret-scan: allow
     dell_dsn = "postgresql://carr_authority_dell:synthetic-only@invalid.invalid/carr"  # ci-secret-scan: allow
-    check("direct Joe authority URI is admitted",
-          probe.is_direct_authority_uri(joe_dsn, "carr_authority_joe"))
-    check("direct Dell authority URI is admitted",
-          probe.is_direct_authority_uri(dell_dsn, "carr_authority_dell"))
+    joe_tls_dsn = joe_dsn + "?sslmode=require"
+    dell_tls_dsn = dell_dsn + "?sslmode=require&channel_binding=require"
+    check("direct authority URI admits canonical Neon TLS forms",
+          probe.is_direct_authority_uri(joe_tls_dsn, "carr_authority_joe")
+          and probe.is_direct_authority_uri(dell_tls_dsn, "carr_authority_dell"))
     invalid_dsns = [
         "postgresql://carr_writer:synthetic-only@invalid.invalid/carr",  # ci-secret-scan: allow
         "postgresql://carr_authority_joe@invalid.invalid/carr",
         "postgresql://carr_authority_joe:synthetic-only@invalid.invalid/carr?service=alternate",  # ci-secret-scan: allow
+        "postgresql://carr_authority_joe:synthetic-only@invalid.invalid/carr?sslmode=disable",  # ci-secret-scan: allow
+        "postgresql://carr_authority_joe:synthetic-only@invalid.invalid/carr?channel_binding=require",  # ci-secret-scan: allow
+        "postgresql://carr_authority_joe:synthetic-only@invalid.invalid/carr?sslmode=require&sslmode=require",  # ci-secret-scan: allow
         "postgresql://carr_authority_joe:synthetic-only@invalid.invalid/carr#fragment",  # ci-secret-scan: allow
         "user=carr_authority_joe password=synthetic-only host=invalid.invalid dbname=carr",  # ci-secret-scan: allow
     ]
-    check("fallback, broad, incomplete, query, fragment, and keyword DSNs refuse",
+    check("fallback, broad, incomplete, noncanonical TLS query, fragment, and keyword DSNs refuse",
           all(not probe.is_direct_authority_uri(value, "carr_authority_joe") for value in invalid_dsns))
 
     connector_calls: list[str] = []
@@ -139,18 +143,37 @@ def main() -> int:
               report["error"] == "broad_environment_refused" and len(connector_calls) == before)
 
     env = {
-        "CARR_DB_AUTHORITY_JOE_URL": joe_dsn,
-        "CARR_DB_AUTHORITY_DELL_URL": dell_dsn,
+        "CARR_DB_AUTHORITY_JOE_URL": joe_tls_dsn,
+        "CARR_DB_AUTHORITY_DELL_URL": dell_tls_dsn,
     }
     report = probe.collect_runtime(env, connector)
-    check("both partner authority identities verify", report["authority_runtime_identities_verified"] is True)
+    check("Joe authority identity is the required rollout proof",
+          report["required_authority_identities_verified"] is True
+          and report["authority_runtime_identities_verified"] is True)
+    check("Dell authority identity is verified when available without becoming required",
+          report["optional_authority_identities_verified"] == {"dell": True})
     check("runtime report never authenticates phase exit", report["phase_exit_authorized"] is False)
     check("runtime report contains no credential material",
           "synthetic-only" not in json.dumps(report) and "invalid.invalid" not in json.dumps(report))
     check("partner-specific credentials are both exercised", len(connector_calls) == 2)
 
-    joe_conn = connector(joe_dsn)
-    joe = probe.probe_principal("joe", "carr_authority_joe", joe_dsn, lambda _dsn: joe_conn)
+    joe_only = probe.collect_runtime({"CARR_DB_AUTHORITY_JOE_URL": joe_tls_dsn}, connector)
+    check("Joe-only authority is rollout-ready and Dell remains optional",
+          joe_only["required_authority_identities_verified"] is True
+          and joe_only["authority_runtime_identities_verified"] is False
+          and joe_only["principals"]["dell"]["credential_present"] is False
+          and joe_only["optional_authority_identities_verified"] == {"dell": False}
+          and probe.system_rollout_ready(joe_only) is True)
+
+    dell_only = probe.collect_runtime({"CARR_DB_AUTHORITY_DELL_URL": dell_tls_dsn}, connector)
+    check("Dell-only authority preserves Dell capability but cannot replace Joe's ownership",
+          dell_only["required_authority_identities_verified"] is False
+          and dell_only["authority_runtime_identities_verified"] is False
+          and dell_only["optional_authority_identities_verified"] == {"dell": True}
+          and probe.system_rollout_ready(dell_only) is False)
+
+    joe_conn = connector(joe_tls_dsn)
+    joe = probe.probe_principal("joe", "carr_authority_joe", joe_tls_dsn, lambda _dsn: joe_conn)
     queries = [query for query, _ in joe_conn.fake_cursor.queries]
     check("read-only transaction begins before identity or catalog reads",
           queries[0] == "begin transaction read only"
@@ -162,24 +185,24 @@ def main() -> int:
     check("Joe actor mapping is exercised, not inferred", joe["actor_mapping_matches"] is True)
 
     mismatch = FakeConnection(FakeCursor(login="carr_writer"))
-    mismatch_report = probe.probe_principal("joe", "carr_authority_joe", joe_dsn, lambda _dsn: mismatch)
+    mismatch_report = probe.probe_principal("joe", "carr_authority_joe", joe_tls_dsn, lambda _dsn: mismatch)
     check("post-connect identity mismatch refuses", mismatch_report["verified"] is False)
 
     broad_member = FakeConnection(FakeCursor(login="carr_authority_joe",
         memberships={"carr_authority": True, "carr_writer": True}))
-    broad_member_report = probe.probe_principal("joe", "carr_authority_joe", joe_dsn,
+    broad_member_report = probe.probe_principal("joe", "carr_authority_joe", joe_tls_dsn,
                                                 lambda _dsn: broad_member)
     check("writer membership refuses", broad_member_report["verified"] is False)
 
     extra_write = FakeConnection(FakeCursor(login="carr_authority_joe",
         mutation_privileges=[("ops.job", "UPDATE")]))
-    extra_write_report = probe.probe_principal("joe", "carr_authority_joe", joe_dsn,
+    extra_write_report = probe.probe_principal("joe", "carr_authority_joe", joe_tls_dsn,
                                                lambda _dsn: extra_write)
     check("unexpected direct table mutation authority refuses", extra_write_report["verified"] is False)
 
     missing_function = probe.REQUIRED_AUTHORITY_FUNCTIONS[0]
     missing = FakeConnection(FakeCursor(login="carr_authority_joe", missing_function=missing_function))
-    missing_report = probe.probe_principal("joe", "carr_authority_joe", joe_dsn,
+    missing_report = probe.probe_principal("joe", "carr_authority_joe", joe_tls_dsn,
                                           lambda _dsn: missing)
     check("missing authority function reach refuses", missing_report["verified"] is False)
 

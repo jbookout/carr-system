@@ -50,13 +50,14 @@ import urllib.parse
 from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 NEONCTL = os.path.join(REPO, "mcp-server", "node_modules", ".bin", "neonctl")
 PSQL_CANDIDATES = [
     "/opt/homebrew/opt/libpq/bin/psql",
     "/usr/local/opt/libpq/bin/psql",
     "psql",
 ]
-LOCAL_ACTOR_FILE = os.path.join(os.path.expanduser("~"), ".config", "carr", "local-actor.json")
+from lib.local_principal import LocalPrincipalError, local_actor_slug as _established_actor_slug
 RECEIPT_LOG = os.path.join(REPO, "out", "break-glass-receipts.log")
 
 
@@ -261,7 +262,12 @@ def dsn(branch=None, project: str = "production", role_name: str = "neondb_owner
     out = subprocess.run(
         [NEONCTL, "connection-string", branch,
          "--project-id", project_id,
-         "--role-name", role_name],
+         "--role-name", role_name,
+         # A project can hold more than one database.  All sanctioned CARR
+         # owner paths target this one explicitly rather than inheriting the
+         # provider's mutable default database selection.
+         "--database-name", "neondb",
+         "--endpoint-type", "read_write"],
         capture_output=True, text=True, timeout=60, env=env,
     )
     if out.returncode != 0 or not out.stdout.strip():
@@ -307,14 +313,9 @@ def local_actor_slug() -> str:
     job must be the same code. Was `_local_actor_slug`; renamed, no other
     caller referenced the old name."""
     try:
-        with open(LOCAL_ACTOR_FILE, encoding="utf-8") as fh:
-            data = json.load(fh)
-        slug = (data.get("actor_slug") or "").strip()
-        if slug:
-            return slug
-    except (OSError, ValueError):
-        pass
-    return "identity-not-set"
+        return _established_actor_slug()
+    except LocalPrincipalError:
+        return "identity-not-set"
 
 
 def append_receipt(actor: str, mode: str, target: str, host: str, reason: str,

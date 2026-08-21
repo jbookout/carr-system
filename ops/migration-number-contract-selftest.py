@@ -107,6 +107,43 @@ def main() -> int:
     assert "0169_hermes_pilot_actor.sql" in pending_names
     assert "0169_program5_release_binding.sql" in pending_names
 
+    selected, held_back = migration_runner.migrations_through(
+        loaded, pending, "0170_guidance_import_lifecycle.sql"
+    )
+    selected_names = [name for name, _sql, _digest in selected]
+    held_back_names = [name for name, _sql, _digest in held_back]
+    assert "0169_program5_release_binding.sql" in selected_names
+    assert selected_names[-1] == "0170_guidance_import_lifecycle.sql"
+    assert held_back_names[0] == "0171_program5_provider_version.sql"
+    assert all(name <= "0170_guidance_import_lifecycle.sql" for name in selected_names)
+    assert all(name > "0170_guidance_import_lifecycle.sql" for name in held_back_names)
+    try:
+        migration_runner.migrations_through(loaded, pending, "0170_not_a_file.sql")
+    except ValueError as exc:
+        assert "exact checked-in migration filename" in str(exc), str(exc)
+    else:
+        raise AssertionError("unknown --through boundary was accepted")
+
+    # A bounded prefix must not make an out-of-order ledger look safe.  If a
+    # later file is already applied while an earlier file is absent, history
+    # has drifted and the runner must stop before selecting anything.
+    try:
+        migration_runner.validate_applied_ledger(
+            loaded,
+            {
+                name: digest
+                for name, _sql, digest in loaded
+                if name != "0170_guidance_import_lifecycle.sql"
+                and name <= "0171_program5_provider_version.sql"
+            },
+        )
+    except migration_runner.AppliedMigrationLedgerError as exc:
+        assert "ledger is reordered" in str(exc), str(exc)
+        assert "0170_guidance_import_lifecycle.sql" in str(exc), str(exc)
+        assert "0171_program5_provider_version.sql" in str(exc), str(exc)
+    else:
+        raise AssertionError("out-of-order applied ledger was accepted")
+
     # A ledger row whose file disappeared is a rename/deletion, not harmless
     # history. Only the exact pre-renumber Control Plane aliases are accepted,
     # and only while their mapped forward migrations remain in the tree.
@@ -124,10 +161,12 @@ def main() -> int:
     else:
         raise AssertionError("deleted applied non-legacy migration was accepted")
 
-    migration_runner.validate_applied_ledger(
-        loaded,
-        {"0134_control_plane_admission.sql": "legacy-ledger-digest"},
-    )
+    alias_prefix = {
+        name: digest for name, _sql, digest in loaded
+        if name < "0148_control_plane_admission.sql"
+    }
+    alias_prefix["0134_control_plane_admission.sql"] = "legacy-ledger-digest"
+    migration_runner.validate_applied_ledger(loaded, alias_prefix)
     try:
         migration_runner.validate_applied_ledger(
             loaded,

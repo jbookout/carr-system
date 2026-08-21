@@ -4,94 +4,87 @@
 
 import urllib.parse, html, json, re, os, sys
 
-# CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant,
-# which structurally blocked any non-Joe machine (Dell's clone) from running this.
-FOLDER = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
-REMINDER = "Reminder before we start: this session needs the CARR AI folder connected to read and write (this launcher link should connect it automatically; if it is not connected, connect it before sending)."
-DOCTRINE = "Run this as a guided flow per DNA/Team/guided-entry-doctrine.md: tell me up front how many questions it will be, ask one at a time with multiple choice wherever possible and fill-in-the-blank otherwise, and if this creates a record, capture the core first, save it, then offer to fill in the rest later so a couple of minutes is enough (the daily heartbeat or Monday brief will chase the missing pieces)."
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "front-door.html")
+if sys.argv[1:]:
+    raise SystemExit("build-front-door: no folder or recovery arguments are accepted")
+REMINDER = (
+    "Use the CARR record-layer verbs and canonical carr-system repository context only. "
+    "Do not attach external folders. Start with "
+    "standing-context; use doctrine-index, search-doctrine, and read-doctrine for doctrine, "
+    "and the purpose-built record verbs for business records."
+)
+DOCTRINE = (
+    "Run this as a guided flow: say up front how many questions it will be, ask one at a "
+    "time with multiple choice wherever possible and fill-in-the-blank otherwise. Capture "
+    "the core record first through its verb, then offer to fill in the rest later."
+)
+
+PROMPTS = {
+    "New Prospect": "Ask whether this is a lead or active client, then gather the minimum facts one at a time. CALL find(query) first. find returns role or group refs, not a party_id. If find returns any live match, stop and report exactly: existing-party UUID resolution/intake seam unavailable. Never pass a find ref as party_id. Only when find returns no live match and this is a genuinely new person, CALL add-party(idempotency_key,name) and read its returned party_id; never continue on needs_confirm. Then, for a lead, CALL new-lead(idempotency_key,party_id,stage). For an active client, CALL new-client(idempotency_key,party_id,status,acquisition_source,research_evidence). Use a fresh idempotency_key for each intended write. Owner is derived by the server from the authenticated actor; never ask for or pass owner. If the selected verb cannot represent the intake, name the missing intake seam and stop.",
+    "New Vendor": "Gather name, category, category ref code, stage, territory, and source one at a time. CALL find(query) first. find returns role or group refs, not a party_id. If find returns any live match, stop and report exactly: existing-party UUID resolution/intake seam unavailable. Never pass a find ref as party_id. Only when find returns no live match and this is a genuinely new person or organization, CALL add-party(idempotency_key,name) and read its returned party_id; never continue on needs_confirm. CALL new-vendor(idempotency_key,party_id,category,ref_code,stage,research_evidence) with a fresh idempotency_key. Owner is derived by the server from the authenticated actor; never ask for or pass owner. new-vendor does not accept territory: only when territory was supplied, read the freshly created vendor and its version, then CALL update-vendor(idempotency_key,vendor,base_version,fields) with fields containing only territory and a different fresh idempotency_key. Stop if a fresh base_version is unavailable.",
+    "Log My Day": "Debrief the day one item at a time. Use find before naming a record; use log-activity for meetings, introductions, and relationship events, add-deal-note or set-next-action for deal facts, and add-loop only for genuinely blocked work. Name any item whose record verb is missing instead of filing it elsewhere.",
+    "New Idea": "Ask for the idea and why it matters, then CALL add-loop(idempotency_key,kind,owner,body) with kind idea and owner Joe. If it is actionable work rather than an idea, apply the deferral gate before using add-loop; do not create an inbox file.",
+    "Log an Event": "Read the introduction-rules doctrine with search-doctrine and read-doctrine. Gather event type, hosts, date, cost, attendees, and outcomes one at a time. Resolve hosts with find and record the event through log-activity. Stop on any attendee or relationship you cannot resolve; never write an event log file.",
+    "Import a List": "Ask me to attach the list and give its source. Preview and deduplicate each person with find. The front door has no approved bulk contact-list importer: name that canonical import seam as unavailable and stop after the reviewed preview; do not claim an import or write registry/vendor files.",
+    "File a Comp": "Gather the real deal terms and their source one at a time. There is no canonical comp-write verb exposed at this front door: name the comp-ingress seam as unavailable and stop with a structured preview; do not write a comp row or file.",
+    "Teach a Rule": "Read applicable doctrine with search-doctrine and read-doctrine, then ask for the exact statement in Joe's words. CALL teach(idempotency_key,statement,human_quote) first and read the returned proposed rule_id. Inspect the authoritative response: if it does not supply the exact installed policy_kind and control_keys for that rule, report pending seam: exact installed control contract unavailable, and stop. If and only if it supplies both, CALL approve-rule(idempotency_key,rule_id,policy_kind,control_keys,reason). Never invent controls, skip teach, or fabricate activation.",
+    "Vendor to Vendor Match": "Resolve the target vendor with find, use who-do-we-know for relationship paths, and read introduction rules with the doctrine verbs. Present only evidence-backed compatible pairs and apply the politics block; this is advisory and writes nothing.",
+    "Vendor to Client Match": "Resolve the named client or vendor with find-and-catch-up, read the matching doctrine with doctrine verbs, and use who-do-we-know for relationship evidence. Present an evidence-backed match only; this is advisory and writes nothing.",
+    "Build a Tour Packet": "Ask for the client, market, criteria, and approved properties one at a time. Resolve the client with find-and-catch-up and read the tour doctrine through doctrine verbs. Use prepare-document only if a registered tour-packet template exists; otherwise name the missing document-template seam and stop.",
+    "Deal Comparison": "Ask for the comparison type and source documents, resolve the client/deal with find-and-catch-up, and read the comparison doctrine through doctrine verbs. Use prepare-document only with a registered matching template; otherwise name the missing template seam and stop. Reconcile every displayed number to its source.",
+    "Draft an LOI": "Resolve the client and deal with find-and-catch-up, read negotiation, lease-review, and writing doctrine through doctrine verbs, then gather terms one at a time. Use prepare-document only with a registered LOI template; otherwise name the missing template seam and stop. Draft only; never send.",
+    "Renewal Workup": "Resolve the client and deal with find-and-catch-up, read renewal and lease-estimator doctrine through doctrine verbs, and gather current terms one at a time. Use prepare-document only with a registered renewal-comparison template; otherwise name the missing template seam and stop. Label estimates and reconcile outputs.",
+    "Deal One-Pager": "Resolve the client/deal with find-and-catch-up and read the comparison doctrine through doctrine verbs. Use prepare-document only with a registered purchase-vs-lease one-page template and verified source numbers; otherwise name the missing template seam and stop.",
+    "What's Waiting On Me": "Call today-triage and work from its returned records only. Present the single oldest actionable item first. Use complete-action, set-next-action, triage-item, promote-pool, or decline-candidate only when that exact returned item and Joe's answer fit the verb; then read back the result before continuing.",
+    "Write a Post": "Ask for topic, platform, and angle one at a time. Use the write-content skill and doctrine verbs for voice rules. Produce a draft and graphic for review; do not publish or invent a substance-bank write.",
+    "Audit Writing": "Ask for the text, read writing doctrine through search-doctrine and read-doctrine, and provide review-only findings. Do not rewrite or write a record unless asked.",
+    "Research a Market": "Ask for market and scope, then perform sourced research and verify each claim. Use record-finding only for evidence that belongs to an existing resolved record; there is no general market-report write verb, so name that seam and return the sourced result without claiming it was saved.",
+    "Who Do We Know": "Ask for the target, resolve it with find, and call who-do-we-know. Read introduction rules with doctrine verbs and apply the politics check before presenting paths. This is read-only.",
+    "Hand to Dell": "Ask for the handoff and what it unblocks, then use add-loop with kind team_loop and owner Dell. Read the created loop back before confirming; never write a team-board row.",
+    "Prep for a Meeting": "Ask who, when, and purpose. Resolve the person with find-and-catch-up, then call prepare-conversation. Use the returned records and doctrine verbs only; produce a concise brief and do not claim a file was created.",
+    "Draft a Follow-Up": "Resolve the lead with find-and-catch-up, read outreach and writing doctrine with doctrine verbs, and ask whether they replied. Draft the next touch only from returned history. Never send; log-outreach is used only after Joe actually sends.",
+    "Open the Dashboard": "Call today-triage, deal-room-board, and loop-board, then show a compact live summary from those returned records. Do not rebuild or open a legacy dashboard file.",
+    "Open the Lead Board": "Call lead-hot and claim-card, then show this week's actionable leads from those returned records. Do not open or rebuild a lead-board file.",
+    "Open the Deal Room": "Call deal-room-board and show signed, on-deck, and hot deal records from its response. Do not refresh or open a Deal Room file.",
+}
+
+
+def canonical_prompt(label):
+    """Return the explicit record-native contract for one named tile."""
+    try:
+        prompt = PROMPTS[label]
+    except KeyError as exc:
+        raise ValueError(f"Front Door tile has no explicit canonical prompt: {label}") from exc
+    return REMINDER + " " + prompt + " " + DOCTRINE
+
 
 GROUPS = [
-("Add to the system", [
- ("New Prospect","Lead or client, one flow",
-  "New prospect intake for the CARR system. This is someone entering our pipeline, either a cold lead or an active client. Read DNA/Leads/lead-system.md (intake SOPs, the claim protocol, and the 'ownership is asked, never assumed' rule) first. Then interview me ONE QUESTION AT A TIME: multiple-choice wherever you can (segment, deal type, owner, source type, stage) and fill-in-the-blank for names and details, never more than one thing at once. If whose relationship this is isn't obvious, ask me before stamping an owner. Before creating anything, run find to dedup-check the name against every client and lead already in the system; if it turns up a match, run catch-me-up on that record and tell me where it stands before we go further (fall back to DNA/Clients/clients-active.md and DNA/Leads/lead-registry.xlsx directly only if the record-layer connector isn't available). When you have enough, allocate the next L-ID (and a C-ID plus detail file if they are an active prospect, not just a cold name), cite the lead source, stamp every write with the DNA write-verify sandwich, then tell me exactly what you wrote and where."),
- ("New Vendor","Referral partner",
-  "New vendor intake for the CARR system. Read DNA/Network/README.md (the five-layer vendor stack and the Tabled system) and DNA/Team/dna-protocol.md first. Interview me ONE QUESTION AT A TIME, multiple-choice wherever possible (category, territory or state, stage, owner) and fill-in-the-blank otherwise, never all at once. Before creating anything, run find to dedup-check the name against every vendor and client already in the system; if it turns up a match, run catch-me-up on that record and tell me where it stands before we go further (fall back to DNA/Network/vendors.xlsx and the client roster directly only if the record-layer connector isn't available). Allocate the next V-ID as max+1 on the live sheet, write the row with stamps and the write-verify sandwich, then tell me exactly what you wrote and where."),
- ("Log My Day","Debrief that routes everything",
-  "Debrief me and log my day for the CARR system. Read the network-debrief flow and DNA/Leads/lead-system.md. Walk me through it one or two questions at a time in my usual debrief style: who I saw, new people, intros, deal moves, market observations, objections heard, events, commitments. Use multiple-choice prompts where you can. Route every item to the right file (registry, vendors, clients, content substance bank, team board, idea bank), applying the claim, ID, source-citation, and ownership rules, then tell me exactly what changed so I can catch any errors."),
- ("New Idea","Park it before it's lost",
-  "I want to capture an idea for the CARR system. Ask me for the idea in my own words and any detail I want to add (what it is, why it's good, anything to remember), one question at a time. File it per my idea-inbox convention, confirm the filename back to me, and if it is really an action rather than an idea, tell me and offer to put it in open-loops instead."),
- ("Log an Event","Happy hour, panel, lunch-and-learn",
-  "Log a joint event for the CARR system. Read the intro-politics rules first. Interview me one question at a time, multiple-choice where you can: what kind of event, co-hosts, date, cost, who we met, any leads it produced. Run the guest-list politics check if it is a planned event. Record it with log-activity on the co-host vendors (links[] between the parties, leads linked) — DNA/Network/deals.md's Joint Events log is a render of those rows (ORDER 39), never hand-write it — then tell me what you logged."),
- ("Import a List","CSV of contacts",
-  "I have a contact list to import into the CARR system. Tell me to attach the file, then ask me one line of context (whose list it is and what it is). Read tutorial 19 in DNA/Team/abilities.md and the import precedent. Dedup against the registry, roster, and vendors, enrich from email signals, route doctors to the registry with the newsletter drip and vendors to the network, keep every flag visible, and summarize what will land where before anything is final."),
- ("File a Comp","Real deal terms only",
-  "File a comp for the CARR system. Read the DNA/Deal Management comps conventions (real terms only, no estimates). Interview me one question at a time, multiple-choice where possible (deal type, market, property type, lease or purchase) and fill-in-the-blank for the terms. Write the comp row, then tell me what you filed."),
- ("Teach a Rule","Intro politics, permanent",
-  "I want to teach the system an intro-politics rule that is permanent and binds both brains. Read DNA/Network/introduction-rules.md. Ask me the rule in one or two questions (who cannot meet whom, and why), capture it with the teach verb (scope intro_politics, my verbatim words), propose activation, and confirm it back to me."),
-]),
-("Deals & matchmaking", [
- ("Vendor to Vendor Match","Partners who should know each other",
-  "Vendor-to-vendor matchmaker for the CARR network. Read DNA/Network/engine.md and DNA/Network/introduction-rules.md. Ask me one question at a time: are we finding good partners for one specific vendor, or scanning the whole network for ripe vendor-to-vendor intros. Propose compatible pairings (complementary categories, shared market, real mutual benefit), run the intro-politics hard-block check on every pair and never pair same-category competitors, rank by relationship stage and delivery tier, and show me each pair with the reason and a suggested warm-intro line."),
- ("Vendor to Client Match","Right vendor for a client",
-  "Vendor-to-client matchmaker for CARR. Read DNA/Network/engine.md (delivery-weighted matching), DNA/Deal Management/playbooks/practice-os-playbooks.md, and the Scoreboard in DNA/Network/deals.md. Ask me one question at a time: am I matching one client to the right vendor, or one vendor to clients who could use them. For a client, read their file and vertical and pull the current best-fit vendor by Scoreboard tier and state fit; for a vendor, scan active clients for a genuine need. Run the intro-politics check, then give me the match with the reason and a warm-intro line."),
- ("Build a Tour Packet","Client-ready property tour",
-  "Build a property tour packet for a CARR client. Read DNA/Research/costar-how-to.md (the pre-tour and tour-packet sections) and DNA/Deal Management/deal-room-kit.md. Ask me one question at a time: which client, the market and criteria (SF, budget, property type, lease or purchase), and which specific properties or listings to include. Assemble the packet the CARR way with client-facing rates shown as NA, produce it as a Word document, then tell me what to double-check before I send it."),
- ("Deal Comparison","Lease, purchase, or multi-option, side by side",
-  "Build a client deal comparison for CARR using our company templates. First ask me ONE question: which comparison type, with these choices: 5-vs-10-year lease, single 10-year lease, multiple space options (LOIs) side by side, purchase vs lease, multiple purchase options, or tell me it is a different comparison and use the closest template. Then read DNA/Deal Management/fill-engine/fill-it-in-workflow.md, deal-analysis-toolkit.md, and purchase-vs-lease-fill-guide.md, and use the matching template (LeaseComparison-5vs10Year, LeaseComparison-10Year, LOI-Grid for multiple spaces, PurchaseVsLeaseComparison, or PurchaseComparison). Tell me to drop each LOI or set of terms into the chat now (paste or attach), and read any rent schedule from the RENDERED page image, not a text extraction. Ask me one question at a time for anything missing (client, addresses, the factor they weight most), apply CARR's conservative-direction assumptions, run the fill-engine, then reconcile every headline number against its source cell as a fresh-eyes pass before it is client-facing. Produce the finished Excel (and the branded one-pager for purchase vs lease), keep the estimates and consult-your-CPA disclaimer, and never include the internal commission calculator. Then tell me what you built and what to double-check."),
- ("Draft an LOI","Letter of intent, ready to send",
-  "Draft a letter of intent for a CARR client. Read DNA/Deal Management/playbooks/negotiation.md and DNA/Deal Management/legal-considerations-lease-review.md, and the client's file in DNA/Clients/prospects/. Ask me one question at a time: which client and property, lease or purchase, and the key terms we are proposing (rate, term, TI, free rent, options, or purchase price and contingencies). Draft the LOI in CARR's voice per DNA/writing-rules.md, flag anything that should be negotiated or protected, and give it to me as a Word document to review. This is a draft for me to send, never sent on my behalf."),
- ("Renewal Workup","What a represented renewal saves",
-  "Run a lease renewal workup for a CARR client. Read DNA/Deal Management/playbooks/renewals.md and DNA/Leads/lease-term-estimator.md, and use the LeaseComparison-5vs10Year template. Ask me one question at a time: which client, their current space and rent, when the lease expires, and whether they would consider relocating as leverage. Estimate the renewal position with CARR's conservative assumptions, quantify what a represented renewal saves versus renewing blind (free rent, escalation, TI), produce the comparison workbook plus a plain-English read, keep the estimates and consult-your-CPA disclaimer, and tell me the negotiation angle and what to double-check."),
- ("Deal One-Pager","Branded purchase-vs-lease summary",
-  "Build the branded purchase-vs-lease one-pager for a CARR client. Read DNA/Deal Management/fill-engine/fill-it-in-workflow.md. If a filled purchase-vs-lease workbook already exists for this client, use it; if not, ask me one question at a time for the numbers and run the fill-engine first. Generate the CARR-branded one-pager (navy and orange, disclaimer intact), reconcile every headline number against its source cell as a fresh-eyes pass before it is client-facing, and give me the finished Word one-pager plus a note on what to verify."),
-]),
-("Get work done", [
- # THE ONLY TILE THAT CLEARS ANYTHING. Every other tile on this page CREATES
- # work: new prospect, new vendor, log my day, new idea, log an event, import a
- # list. Measured 2026-08-09: 24 tiles, and grepping the built page for triage,
- # waiting, overdue or backlog returned nothing. The entry point to a system
- # holding 229 open asks was a menu of 24 ways to make it 230.
- ("What's Waiting On Me","Clear it, one at a time",
-  "Show me what is waiting on me and drive it one item at a time. Call today-triage and read the claim card in 00_Context/today.md. Rank by how late each item is, counting business days only, and lead with the single oldest thing. Then walk me through them ONE AT A TIME, never a list to answer at once: for each, tell me what it is in plain words with the person's name, say how many business days it has been sitting, and give me the choices. If it is a next action: I did it, I am doing it now, push it to a date, or drop it and why. If it is a candidate on the claim card: yes claim it, or no with my reason in my own words. If it is an inbox item: what it became, not ours, or a duplicate. Record each answer as I give it with the right verb, then move to the next one. Do not ask me to confirm the whole batch at the end. When I stop or the list is empty, tell me in one line what got cleared and what is left, and end with the single next thing to do."),
- ("Write a Post","Your voice + a graphic",
-  "Write me a social post in Joe's voice. Ask me one question at a time: what it is about, any platform preference, any angle I want. Use the write-content skill and the substance bank, and show me the draft and the graphic for approval before anything is published."),
- ("Audit Writing","Review only, no rewrite",
-  "Audit a piece of writing for CARR, review only. Ask me to paste the text, then critique it for credibility, voice, and AI-tells against DNA/writing-rules.md. Do not rewrite it unless I ask you to."),
- ("Research a Market","Sourced pull",
-  "Do a market research pull for the CARR system. Ask me one question at a time: which market or area, and the scope. Read the DNA/Research conventions, run the sourced pull and verify every claim to a source, save it to DNA/Research, feed the best data points to the content substance bank, and give me the prospect hooks."),
- ("Who Do We Know","Warmest path to anyone",
-  "Find the warmest path through our network to someone I don't know yet. Read DNA/Network/engine.md (the intro-graph queries) and introduction-rules.md. Ask me who I am trying to reach (name, company, or role), then show me the warmest routes with the politics check applied."),
- ("Hand to Dell","Partner handoff",
-  "I want to hand something off to Dell. Read DNA/Team/team-loops.md. Ask me what the ask is, one question at a time, write it as a stamped row on the team board aimed at Dell, and confirm it back to me."),
- ("Prep for a Meeting","Everything we know, one page",
-  "Prep me for a meeting with a prospect or client. Ask me one question at a time: who I am meeting and when, and what the meeting is about. Then pull everything the system knows about them, their DNA/Clients/prospects/ file, their registry row and roster record, any network ties (DNA/Network/engine.md), and any market notes, into one tight brief: who they are, where the relationship stands, the open next step, the strongest angle for this conversation, and two or three smart questions to ask. Flag anything I should not raise. Keep it to one page I can read on my phone."),
- ("Draft a Follow-Up","Next touch, in your voice",
-  "Draft the next follow-up touch for a lead. Read DNA/templates.md (the touch calendar and voice rules) and the lead's DNA/Clients/prospects/ file. Ask me one question at a time: which lead, and whether they have replied since the last touch. First check the registry and any reply-forwards for where they are in the sequence, then draft the correct next touch in Joe's voice, aware of every prior touch, following the handover-channel format, and hand it to me to send. Never send it on my behalf."),
-]),
+    ("Add to the system", [("New Prospect", "Lead or client, one flow"), ("New Vendor", "Referral partner"), ("Log My Day", "Debrief that routes everything"), ("New Idea", "Park it before it's lost"), ("Log an Event", "Happy hour, panel, lunch-and-learn"), ("Import a List", "CSV of contacts"), ("File a Comp", "Real deal terms only"), ("Teach a Rule", "Intro politics, permanent")]),
+    ("Deals & matchmaking", [("Vendor to Vendor Match", "Partners who should know each other"), ("Vendor to Client Match", "Right vendor for a client"), ("Build a Tour Packet", "Client-ready property tour"), ("Deal Comparison", "Lease, purchase, or multi-option, side by side"), ("Draft an LOI", "Letter of intent, ready to send"), ("Renewal Workup", "What a represented renewal saves"), ("Deal One-Pager", "Branded purchase-vs-lease summary")]),
+    ("Get work done", [("What's Waiting On Me", "Clear it, one at a time"), ("Write a Post", "Your voice + a graphic"), ("Audit Writing", "Review only, no rewrite"), ("Research a Market", "Sourced pull"), ("Who Do We Know", "Warmest path to anyone"), ("Hand to Dell", "Partner handoff"), ("Prep for a Meeting", "Everything we know, one page"), ("Draft a Follow-Up", "Next touch, in your voice")]),
 ]
 
-def link(prompt):
-    q=REMINDER+" "+prompt+" "+DOCTRINE
-    return "claude://cowork/new?q="+urllib.parse.quote(q,safe="")+"&folder="+urllib.parse.quote(FOLDER,safe="")
-def fullprompt(prompt):
-    return REMINDER+" "+prompt+" "+DOCTRINE
+def link(label):
+    return "claude://cowork/new?q="+urllib.parse.quote(canonical_prompt(label),safe="")
+def fullprompt(label):
+    return canonical_prompt(label)
 def tiles_html(btns):
     out=[]
-    for lbl,sub,p in btns:
-        href=link(p); pj=json.dumps(fullprompt(p))
-        assert len(urllib.parse.quote(fullprompt(p),safe=""))<14000, lbl
+    for lbl,sub in btns:
+        href=link(lbl); pj=json.dumps(fullprompt(lbl))
+        assert len(urllib.parse.quote(fullprompt(lbl),safe=""))<14000, lbl
         out.append(f'''<div class="tile"><a class="tile-main" target="_blank" rel="noopener" href="{html.escape(href)}"><span class="tile-label">{html.escape(lbl)}</span><span class="tile-sub">{html.escape(sub)}</span></a><button class="tile-copy" data-prompt={html.escape(pj,quote=True)} title="Copy the prompt">copy</button></div>''')
     return ''.join(out)
 def section(name,btns,cls="group"):
     return f'''<section class="{cls}"><div class="group-head"><span class="bar"></span>{html.escape(name)}</div><div class="grid">{tiles_html(btns)}</div></section>'''
 
-lookup={lbl:(sub,p) for _,bs in GROUPS for (lbl,sub,p) in bs}
-EVERYDAY=[(lbl,lookup[lbl][0],lookup[lbl][1]) for lbl in ["What's Waiting On Me","Log My Day","New Prospect","Draft a Follow-Up","Prep for a Meeting","New Vendor"]]
+lookup={lbl:sub for _,bs in GROUPS for (lbl,sub) in bs}
+EVERYDAY=[(lbl,lookup[lbl]) for lbl in ["What's Waiting On Me","Log My Day","New Prospect","Draft a Follow-Up","Prep for a Meeting","New Vendor"]]
 BOARDS=[
- ("Open the Dashboard","Your whole system, live","Open the CARR dashboard and rebuild it from current data, then show it to me."),
- ("Open the Lead Board","This week, hot, segments","Open the lead board and show me this week and the hot leads."),
- ("Open the Deal Room","Signed, on deck, hot","Refresh The Deal Room and show me signed deals, on deck, and hot leads."),
+ ("Open the Dashboard","Your whole system, live"),
+ ("Open the Lead Board","This week, hot, segments"),
+ ("Open the Deal Room","Signed, on deck, hot"),
 ]
 everyday_html=section("Start here, your everyday few",EVERYDAY,"group everyday")
 boards_html=section("See the boards",BOARDS)
@@ -165,12 +158,12 @@ HTML=f'''<!DOCTYPE html>
     <div class="head">
       <div class="wordmark">CARR<span class="b"></span></div>
       <h1>The Front Door</h1>
-      <p class="lede">Tap what you need. A new session opens pointed at your CARR folder with the task written in, you review, hit send, and answer one question at a time. Start with your everyday few. The full set is under All actions.</p>
+      <p class="lede">Tap what you need. A new session opens with the task written in, you review, hit send, and answer one question at a time. Start with your everyday few. The full set is under All actions.</p>
     </div>
     {everyday_html}
     {boards_html}
     <details class="more"><summary>All actions</summary>{more_html}</details>
-    <p class="foot">Every tile opens a fresh session with your CARR folder linked and the prompt loaded, and nothing sends on its own, so you always review first. Each session tells you in plain words what it changed, and you can say <b>undo</b> to reverse the last thing it did. If a tile does not open the app, tap <b>copy</b> and paste into a new session.</p>
+    <p class="foot">Every tile opens a fresh session with the canonical record workflow loaded, and nothing sends on its own, so you always review first. Each session tells you in plain words what it changed, and you can say <b>undo</b> to reverse the last thing it did. If a tile does not open the app, tap <b>copy</b> and paste into a new session.</p>
   </div>
   <div id="toast">Prompt copied</div>
 <script>
@@ -185,46 +178,20 @@ HTML=f'''<!DOCTYPE html>
       else{{fallback(text,ok);}}
     }});
   }});
-  document.querySelectorAll('.tile-main').forEach(function(a){{a.addEventListener('click',function(){{try{{var q=(a.getAttribute('href').split('q=')[1]||'').split('&folder=')[0];var text=decodeURIComponent(q);var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();document.execCommand('copy');document.body.removeChild(ta);toast.textContent='Prompt copied. Paste into the new chat (Cmd+V)';flash();setTimeout(function(){{toast.textContent='Prompt copied';}},2800);}}catch(e){{}}}});}});
+  document.querySelectorAll('.tile-main').forEach(function(a){{a.addEventListener('click',function(){{try{{var q=(a.getAttribute('href').split('q=')[1]||'');var text=decodeURIComponent(q);var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();document.execCommand('copy');document.body.removeChild(ta);toast.textContent='Prompt copied. Paste into the new chat (Cmd+V)';flash();setTimeout(function(){{toast.textContent='Prompt copied';}},2800);}}catch(e){{}}}});}});
   function fallback(text,ok){{var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();try{{document.execCommand('copy');ok();}}catch(err){{}}document.body.removeChild(ta);}}
 </script>
 </body>
 </html>'''
 
-import os as _os
-open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'front-door.html'),'w',encoding='utf-8').write(HTML)
-
-# DELIVER IT. Added 2026-08-09. This script wrote the page beside itself inside
-# the repo and NOTHING copied it anywhere, so the front-door.html Joe actually
-# opens in the vault was last written 2026-07-14. Every change made to this
-# generator for nearly a month, including the board links that were built and
-# never inserted, reached a file no human opens.
-#
-# That is the third instance of one property in one audit: brief_pack wrote the
-# daily call list into a gitignored folder, the renewal shortlist went with it,
-# and this page did the same. Codex named the property, and it is worth naming
-# here too because it will keep recurring otherwise: a producer in this system
-# declares success when it CREATES an artifact, never when the consumer can
-# reach it. The generator that builds a surface is the right place to deliver
-# it, so the two cannot drift apart again.
-_vault = _os.environ.get(
-    "CARR_VAULT",
-    _os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
-_dest = _os.path.join(_vault, "DNA", "Team", "front-door.html")
-if _os.path.isdir(_os.path.dirname(_dest)):
-    open(_dest, "w", encoding="utf-8").write(HTML)
-    print("delivered ->", _dest)
-else:
-    # Loud, not silent. A vault that is not mounted is a real condition on a
-    # laptop, and the page simply not arriving is exactly the failure this block
-    # exists to end.
-    print("NOT DELIVERED: vault not mounted at", _os.path.dirname(_dest))
+open(OUTPUT,'w',encoding='utf-8').write(HTML)
+print("generated ->", OUTPUT)
 visible=' '.join(re.findall(r'>([^<>]+)<',HTML))
 assert '—' not in visible, "em-dash in visible copy"
 low=visible.lower()
 hits=[b for b in ['delve','seamless','unlock','elevate','leverage','robust','tapestry','realm'] if b in low]
 hrefs=[html.unescape(x) for x in re.findall(r'href="(claude://[^"]+)"',HTML)]
-allfolder=all('&folder=' in x for x in hrefs)
-allrem=all(urllib.parse.parse_qs(urllib.parse.urlparse(x.replace('claude://','https://')).query)['q'][0].startswith("Reminder") for x in hrefs)
-print("total tiles:",nbtn,"| links:",len(hrefs),"| AI-tell:",hits,"| folder all:",allfolder,"| reminder all:",allrem)
+nofolder=all('&folder=' not in x for x in hrefs)
+allcanonical=all(urllib.parse.parse_qs(urllib.parse.urlparse(x.replace('claude://','https://')).query)['q'][0].startswith("Use the CARR record-layer verbs") for x in hrefs)
+print("total tiles:",nbtn,"| links:",len(hrefs),"| AI-tell:",hits,"| folder none:",nofolder,"| canonical all:",allcanonical)
 print("has everyday:","everyday" in HTML,"| has details:","<details" in HTML,"| boards:","See the boards" in HTML)

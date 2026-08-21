@@ -1,0 +1,715 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CARR · The Lead Board</title>
+<style>
+:root{
+  --bg:#0C1A2E; --card:#122540; --card-2:#0F2038; --ink:#E8EDF4; --ink-2:#A6B4C6; --ink-3:#71809A;
+  --line:#243650; --accent:#F57F29; --accent-ink:#FFB273;
+  --hot:#F26B70; --warm:#E8A33D; --early:#7FA8CC; --hold:#71809A;
+  --hot-bg:#2E1A1E; --warm-bg:#2B2312; --early-bg:#16283A; --chip:#1B2C44; --ok:#5FBF8F;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;padding:0}
+.wrap{max-width:1080px;margin:0 auto;padding:26px 20px 60px}
+a{color:var(--accent-ink)}
+.eyebrow{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+h1{font-size:30px;font-weight:800;letter-spacing:-.01em;margin:2px 0 3px}
+.sub{color:var(--ink-2);font-size:13.5px;margin:0 0 20px}
+.sub b{color:var(--ink)}
+.strip{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 18px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 15px;min-width:96px}
+.stat .n{font-size:21px;font-weight:800;font-variant-numeric:tabular-nums}
+.stat .l{font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3)}
+.n.hot{color:var(--hot)} .n.warm{color:var(--warm)} .n.early{color:var(--early)} .n.ok{color:var(--ok)}
+.tabbar{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:0 0 22px;position:sticky;top:0;background:var(--bg);z-index:5;padding-top:6px}
+.tab{appearance:none;background:none;border:none;color:var(--ink-3);font:inherit;font-weight:700;font-size:14px;padding:10px 14px;cursor:pointer;border-bottom:2px solid transparent;display:flex;align-items:center;gap:7px}
+.tab:hover{color:var(--ink-2)}
+.tab.active{color:var(--ink);border-bottom-color:var(--accent)}
+.tab .ct{font-size:11px;font-weight:800;background:var(--chip);color:var(--ink-2);border-radius:999px;padding:1px 8px;font-variant-numeric:tabular-nums}
+.tab.active .ct{background:var(--accent);color:#1a0f04}
+.tab.cta{color:var(--accent-ink)} .tab.cta .ct{background:var(--accent);color:#1a0f04}
+.pane{display:none} .pane.active{display:block}
+h2{font-size:12.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);margin:26px 0 12px}
+h2:first-child{margin-top:6px}
+/* queue cards */
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:0 0 12px;overflow:hidden;display:flex}
+.stripe{width:6px;flex:none}
+.stripe.hot{background:var(--hot)} .stripe.warm{background:var(--warm)} .stripe.early{background:var(--early)} .stripe.hold{background:var(--hold)} .stripe.ok{background:var(--ok)}
+.body{padding:14px 17px;flex:1;min-width:0}
+.top{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.name{font-size:17px;font-weight:800}
+.entity{color:var(--ink-2);font-size:13.5px}
+.due{font-weight:800;font-size:12px;font-variant-numeric:tabular-nums;padding:2px 9px;border-radius:999px;white-space:nowrap}
+.due.ready{background:rgba(95,191,143,.16);color:var(--ok)} .due.today{background:var(--warm-bg);color:var(--warm)} .due.soon{background:var(--early-bg);color:var(--early)} .due.none{background:var(--chip);color:var(--ink-3)}
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;background:var(--chip);color:var(--ink-2);padding:3px 8px;border-radius:5px;white-space:nowrap}
+.chip.id{color:var(--ink-3);background:transparent;border:1px solid var(--line);font-weight:600;font-size:9.5px;letter-spacing:.03em;padding:2px 6px;opacity:.7}
+.next{margin:9px 0 2px;color:var(--ink);font-size:14px;font-weight:600}
+.say{margin:8px 0 2px;font-size:12.5px;color:var(--ink-3)} .say b{color:var(--accent-ink);font-weight:800}
+.clk{cursor:pointer}
+.card.clk:hover{border-color:var(--accent)} .hotcard.clk:hover{border-color:var(--accent)} tr.clk:hover td{background:var(--card-2)}
+.tgist{font-size:11px;color:var(--ink-3);margin-top:2px;line-height:1.35}
+.dv-wrap{position:fixed;inset:0;background:rgba(4,10,20,.74);z-index:60;display:none;overflow-y:auto;padding:30px 15px}
+.dv-wrap.on{display:block}
+.dv-panel{max-width:720px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 80px rgba(0,10,30,.6);overflow:hidden}
+.dv-head{padding:22px 24px 15px;border-bottom:1px solid var(--line);position:relative}
+.dv-name{font-size:26px;font-weight:800;color:var(--ink);padding-right:42px;line-height:1.1}
+.dv-chips{margin-top:9px;display:flex;gap:7px;flex-wrap:wrap}
+.dv-close{position:absolute;top:18px;right:18px;width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:var(--chip);color:var(--ink-2);font-size:18px;cursor:pointer;line-height:1}
+.dv-close:hover{border-color:var(--accent);color:var(--accent-ink)}
+.dv-body{padding:20px 24px 24px}
+.dv-story{font-size:14.5px;line-height:1.62;color:var(--ink);background:var(--card-2);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:14px 16px}
+.dv-contact{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px}
+.dv-facts{margin-top:18px;display:grid;grid-template-columns:1fr 1fr;gap:11px 22px}
+@media(max-width:560px){.dv-facts{grid-template-columns:1fr}}
+.dv-facts .fk{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);margin-bottom:2px}
+.dv-facts .fv{color:var(--ink);font-size:13.5px}
+.dv-actions{margin-top:22px;display:flex;gap:10px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:18px}
+.dv-btn{display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;font-size:14px}
+.dv-btn.primary{background:var(--accent);color:#1a0f04}
+.dv-btn.ghost{background:var(--chip);color:var(--ink);border:1px solid var(--line)}
+.dv-btn.contact{background:var(--card-2);color:var(--accent-ink);border:1px solid var(--line);font-weight:600}
+
+.meta{margin-top:9px;display:flex;gap:8px 18px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);border-top:1px solid var(--line);padding-top:9px}
+.meta .k{color:var(--ink-3);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;display:block}
+/* segment grid */
+.seggrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.segcard{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:12px;padding:15px 16px;cursor:pointer;transition:.12s}
+.segcard:hover{border-color:var(--accent);transform:translateY(-1px)}
+.segcard.hot{border-left-color:var(--hot)} .segcard.warm{border-left-color:var(--warm)} .segcard.early{border-left-color:var(--early)} .segcard.hold{border-left-color:var(--hold)}
+.segcard .cnt{font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
+.segcard .lab{font-size:15px;font-weight:800;margin:3px 0 5px}
+.segcard .clk{font-size:12px;color:var(--ink-3);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.segcard .ply{font-size:12.5px;color:var(--ink-2);margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
+/* search + table */
+.controls{display:flex;gap:9px;flex-wrap:wrap;margin:0 0 14px;position:sticky;top:52px;background:var(--bg);z-index:4;padding:8px 0}
+input,select{background:var(--card);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:14px;padding:9px 12px;border-radius:9px}
+input#q{flex:1;min-width:200px}
+input::placeholder{color:var(--ink-3)}
+.count{font-size:12.5px;color:var(--ink-3);margin:0 0 10px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);padding:8px 10px;border-bottom:1px solid var(--line);position:sticky;top:104px;background:var(--bg);cursor:pointer;white-space:nowrap}
+th:hover{color:var(--ink)}
+td{padding:8px 10px;border-bottom:1px solid var(--card-2);vertical-align:top}
+tr:hover td{background:var(--card-2)}
+.sdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.tname{font-weight:700}
+.tsub{color:var(--ink-3);font-size:11.5px}
+/* Confidence pill (2026-07-27). Only DSO-associate rows carry one; everything else
+   shows an em rule. LOW is deliberately muted, not red — a LOW is "verify before
+   working it", not a warning. */
+/* Freshness chip (2026-07-27). The build date alone was a façade: a board rebuilt
+   today off a 15-day-old router read as current. Stale is stated, never hidden. */
+.freshline{margin-top:-6px}
+.fresh{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;font-weight:600}
+.fresh.f-fresh{background:rgba(16,148,90,.14);color:#10945a}
+.fresh.f-aging{background:rgba(214,142,20,.14);color:#b97d10}
+.fresh.f-stale{background:rgba(198,60,60,.15);color:#c63c3c}
+/* Already-in-the-registry mark. Deliberately a caution, not a removal: the join is
+   name-only (the registry has no street address), so it can collide. Joe qualifies. */
+.warnchip{background:rgba(214,142,20,.16)!important;color:#b97d10!important}
+.workedchip{display:inline-block;margin-top:3px;padding:1px 7px;border-radius:10px;font-size:11px;
+  font-weight:600;background:rgba(214,142,20,.16);color:#b97d10}
+.conf{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600;letter-spacing:.02em}
+.conf.c-high{background:rgba(16,148,90,.14);color:#10945a}
+.conf.c-medium{background:rgba(214,142,20,.14);color:#b97d10}
+.conf.c-low{background:var(--bg-2,rgba(120,130,145,.13));color:var(--ink-3)}
+.mono{font-variant-numeric:tabular-nums}
+.more{display:block;width:100%;background:var(--card);border:1px solid var(--line);color:var(--accent-ink);font:inherit;font-weight:700;padding:11px;border-radius:9px;cursor:pointer;margin-top:12px}
+.email a{color:var(--early)}
+/* decisions */
+.deckwrap{max-width:640px;margin:0 auto}
+.progress{text-align:center;color:var(--ink-3);font-size:12.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:12px}
+.deck{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 22px 24px}
+.deck .dtag{font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--accent-ink)}
+.deck .dname{font-size:22px;font-weight:800;margin:4px 0 2px}
+.deck .dloop{font-size:11.5px;color:var(--ink-3)}
+.deck .dq{font-size:14.5px;color:var(--ink);margin:14px 0 18px}
+.opt{display:flex;gap:12px;align-items:flex-start;background:var(--card-2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:9px;cursor:pointer;transition:.1s}
+.opt:hover{border-color:var(--accent)}
+.opt.pick{border-color:var(--accent);background:var(--warm-bg)}
+.opt .lt{font-weight:800;color:var(--accent);font-size:15px;min-width:16px}
+.opt .ot{font-weight:700;font-size:14px}
+.opt .od{color:var(--ink-2);font-size:12.5px;margin-top:2px}
+.deknav{display:flex;justify-content:space-between;align-items:center;margin-top:16px}
+.deknav button{background:var(--card);border:1px solid var(--line);color:var(--ink-2);font:inherit;font-weight:700;padding:9px 16px;border-radius:9px;cursor:pointer}
+.deknav button:hover:not(:disabled){border-color:var(--accent);color:var(--ink)}
+.deknav button:disabled{opacity:.35;cursor:default}
+.picked{color:var(--accent-ink);font-size:12.5px;font-weight:700;text-align:center;min-height:18px}
+.done{text-align:center;padding:30px 10px}
+.done h3{font-size:20px;margin:0 0 10px}
+.summ{text-align:left;background:var(--card-2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-top:14px;font-size:13.5px}
+.summ div{padding:4px 0;border-bottom:1px solid var(--line)} .summ div:last-child{border:none}
+/* hot leads */
+.hotcard{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:0 0 13px;overflow:hidden;display:flex}
+.hotcard .body{padding:15px 18px}
+.score{font-weight:800;font-size:14px;font-variant-numeric:tabular-nums;padding:2px 10px;border-radius:999px;white-space:nowrap}
+.score.hot{background:var(--hot-bg);color:var(--hot)} .score.warm{background:var(--warm-bg);color:var(--warm)} .score.early{background:var(--early-bg);color:var(--early)}
+.why{margin:10px 0 11px;color:var(--ink);font-size:14px}
+.hgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:7px 20px;font-size:12.5px;border-top:1px solid var(--line);padding-top:11px}
+.hgrid .k{color:var(--ink-3);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;display:block}
+.hgrid .v{color:var(--ink)}
+.play-b{margin-top:11px;padding:9px 12px;background:var(--chip);border-radius:8px;font-size:13.5px}
+.play-b b{color:var(--accent-ink)}
+details.win{margin-top:8px;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;font-size:13.5px;color:var(--ink-2);background:var(--card-2)}
+details.win summary{padding:9px 12px;cursor:pointer;font-weight:700;color:var(--ink);list-style:none;user-select:none}
+details.win summary::-webkit-details-marker{display:none}
+details.win summary::before{content:"▸ ";color:var(--accent)}
+details.win[open] summary::before{content:"▾ "}
+details.win .wbody{padding:0 12px 12px;color:var(--ink-2)}
+.hsub{color:var(--ink-3);font-size:12.5px;margin:2px 0 16px}
+.hold-row,.signal-row{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:11px 15px;margin-bottom:9px;font-size:13.5px;display:flex;gap:11px;align-items:baseline;flex-wrap:wrap}
+.hold-tag{font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--hold);border:1px solid var(--line);padding:2px 8px;border-radius:5px;white-space:nowrap}
+.signal-tag{font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-ink);background:var(--chip);padding:2px 8px;border-radius:5px;white-space:nowrap}
+.hold-row b,.signal-row b{color:var(--ink)}
+.foot{margin-top:30px;border-top:1px solid var(--line);padding-top:14px;font-size:11.5px;color:var(--ink-3)}
+.hint{font-size:12px;color:var(--ink-3);margin:-6px 0 14px}
+/* ---------- Blueprint tab (static explainer; styles scoped to the pane) ---------- */
+#pane-blueprint .bp-thesis{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:0 10px 10px 0;background:var(--card);padding:13px 16px;font-size:14.5px;margin:0 0 16px}
+#pane-blueprint .bp-thesis b{color:var(--accent-ink)}
+#pane-blueprint .bp-band{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:0 0 4px}
+#pane-blueprint .bp-band.engine{border-color:var(--accent)}
+#pane-blueprint .bp-band.gatefoot{border-color:var(--warm)}
+#pane-blueprint .bp-bh{display:flex;align-items:baseline;gap:11px;flex-wrap:wrap}
+#pane-blueprint .bp-no{font-size:13px;font-weight:800;color:#1a0f04;background:var(--accent);border-radius:6px;padding:1px 9px}
+#pane-blueprint .bp-band.gatefoot .bp-no{background:var(--warm)}
+#pane-blueprint h3.bp-t{font-size:17px;font-weight:800;margin:0}
+#pane-blueprint .bp-why{color:var(--ink-2);font-size:13px;margin:8px 0 14px;line-height:1.55}
+#pane-blueprint .bp-flow{display:flex;flex-direction:column;align-items:center;padding:9px 0;color:var(--accent)}
+#pane-blueprint .bp-flow .s{width:2px;height:16px;background:var(--accent);opacity:.8}
+#pane-blueprint .bp-flow .l{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;margin:3px 0;color:var(--accent-ink)}
+#pane-blueprint .bp-flow .a{width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-top:9px solid var(--accent)}
+#pane-blueprint .bp-rung{display:grid;grid-template-columns:140px 1fr;gap:14px;padding:13px 0;border-top:1px dashed var(--line)}
+#pane-blueprint .bp-rung:first-of-type{border-top:none}
+#pane-blueprint .bp-rl{font-size:12.5px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+#pane-blueprint .bp-rt{display:block;font-size:11px;color:var(--accent-ink);font-weight:700;margin-top:3px;text-transform:none;letter-spacing:0}
+#pane-blueprint .bp-rn{display:block;font-size:11px;color:var(--ink-3);font-weight:400;margin-top:5px;text-transform:none;letter-spacing:0;line-height:1.4}
+#pane-blueprint .bp-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(255px,1fr));gap:10px}
+#pane-blueprint .bp-card{background:var(--card-2);border:1px solid var(--line);border-radius:10px;padding:12px 13px}
+#pane-blueprint .bp-card h4{font-size:14px;font-weight:800;margin:0 0 5px}
+#pane-blueprint .bp-what{color:var(--ink-2);font-size:12.5px;line-height:1.5;margin:0 0 8px}
+#pane-blueprint .bp-chips{display:flex;flex-wrap:wrap;gap:5px}
+#pane-blueprint .bp-chip{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;border-radius:5px;padding:2px 7px;background:var(--chip);color:var(--ink-2)}
+#pane-blueprint .bp-chip.cad{color:var(--early)}
+#pane-blueprint .bp-chip.wt{color:var(--warm)}
+#pane-blueprint .bp-chip.hot{color:var(--hot)}
+#pane-blueprint .bp-chip.per{color:var(--hot);background:var(--hot-bg)}
+#pane-blueprint .bp-chip.ok{color:var(--ok)}
+#pane-blueprint .bp-chip.joe{color:var(--accent-ink);background:var(--warm-bg)}
+#pane-blueprint details.bp-mx{border-top:1px dashed var(--line);margin-top:9px;padding-top:7px}
+#pane-blueprint details.bp-mx summary{cursor:pointer;font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);list-style:none;user-select:none}
+#pane-blueprint details.bp-mx summary::-webkit-details-marker{display:none}
+#pane-blueprint details.bp-mx summary::before{content:"▸ ";color:var(--accent)}
+#pane-blueprint details.bp-mx[open] summary::before{content:"▾ "}
+#pane-blueprint details.bp-mx[open] summary{color:var(--accent-ink)}
+#pane-blueprint .bp-mech{font-size:12px;color:var(--ink-2);margin-top:7px;line-height:1.5}
+#pane-blueprint .bp-f{display:block;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;color:var(--ink-3);margin-top:6px;word-break:break-all}
+#pane-blueprint .bp-wts{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:7px;margin:12px 0}
+#pane-blueprint .bp-wt{background:var(--card-2);border:1px solid var(--line);border-radius:8px;padding:7px 9px;text-align:center}
+#pane-blueprint .bp-wt .n{font-size:20px;font-weight:800;color:var(--warm)}
+#pane-blueprint .bp-wt .l{font-size:10px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+#pane-blueprint .bp-rule{border:1px solid var(--line);border-left:4px solid var(--warm);background:var(--warm-bg);border-radius:0 8px 8px 0;padding:10px 13px;font-size:13px}
+#pane-blueprint .bp-rule b{color:var(--warm)}
+#pane-blueprint .bp-gates{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch}
+#pane-blueprint .bp-gate{flex:1 1 200px;background:var(--card-2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+#pane-blueprint .bp-gn{font-size:10px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--accent-ink)}
+#pane-blueprint .bp-gate h4{font-size:13.5px;font-weight:800;margin:3px 0 4px}
+#pane-blueprint .bp-gate p{font-size:12px;color:var(--ink-2);margin:0;line-height:1.5}
+#pane-blueprint .bp-ga{align-self:center;color:var(--accent);font-size:18px;font-weight:800}
+#pane-blueprint .bp-tl{border-left:3px solid var(--accent);margin:8px 0 4px 7px;padding-left:19px;display:flex;flex-direction:column;gap:12px}
+#pane-blueprint .bp-ti{position:relative}
+#pane-blueprint .bp-ti:before{content:"";position:absolute;left:-25px;top:4px;width:9px;height:9px;border-radius:50%;background:var(--accent);border:2px solid var(--bg)}
+#pane-blueprint .bp-ti .t{font-size:10.5px;font-weight:800;color:var(--accent-ink);text-transform:uppercase;letter-spacing:.06em}
+#pane-blueprint .bp-ti h4{font-size:14px;font-weight:800;margin:1px 0 2px}
+#pane-blueprint .bp-ti p{font-size:12.5px;color:var(--ink-2);margin:0;line-height:1.5}
+#pane-blueprint .bp-segs{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px}
+#pane-blueprint .bp-seg{display:flex;gap:10px;align-items:center;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:9px 12px}
+#pane-blueprint .bp-seg .b{width:5px;align-self:stretch;border-radius:3px;flex:none}
+#pane-blueprint .bp-seg .nm{font-weight:700;font-size:12.5px}
+#pane-blueprint .bp-seg .src{font-size:10.5px;color:var(--ink-3)}
+#pane-blueprint .bp-seg .n{margin-left:auto;font-weight:800;font-size:13px;color:var(--ink-2);font-variant-numeric:tabular-nums;white-space:nowrap}
+#pane-blueprint .b.hot{background:var(--hot)} #pane-blueprint .b.warm{background:var(--warm)} #pane-blueprint .b.early{background:var(--early)} #pane-blueprint .b.hold{background:var(--hold)}
+#pane-blueprint table.bp-tab{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+#pane-blueprint table.bp-tab th{position:static;cursor:default}
+#pane-blueprint table.bp-tab td:first-child{color:var(--ink);font-weight:700}
+@media(max-width:600px){#pane-blueprint .bp-rung{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+<div class="eyebrow">CARR · Joe Bookout &amp; Dell McCraney · South Alabama + Florida Panhandle</div>
+<h1>The Lead Board</h1>
+<p class="sub">One surface for the whole book. <b>__TOTAL__ routed leads</b> across __COUNTIES__ counties, the live call queue, and the decisions waiting on you. Derived view, regenerated <b>__STAMP__</b> from the lead router and registry. Fix the records, not this page.</p>
+<p class="sub freshline">Lead data is from <b>__SRCDATE__</b> <span class="fresh f-__SRCSTATE__">__SRCNOTE__</span> &nbsp;·&nbsp; <b>__WORKED_N__</b> of these are already in the registry and are marked. &nbsp;·&nbsp; <b>__UNOWNED_N__</b> registry leads have no owner and sit on nobody's board.</p>
+<div class="strip">
+ <div class="stat"><div class="n">__TOTAL__</div><div class="l">Routed leads</div></div>
+ <div class="stat"><div class="n ok">__EMAIL__</div><div class="l">With email</div></div>
+ <div class="stat"><div class="n hot">__QUEUE__</div><div class="l">Call queue</div></div>
+ <div class="stat"><div class="n warm">__DEC__</div><div class="l">Decisions</div></div>
+ <div class="stat"><div class="n">__COUNTIES__</div><div class="l">Counties</div></div>
+</div>
+<div class="tabbar">
+ <button class="tab active" data-p="queue">This Week <span class="ct">__QUEUE__</span></button>
+ <button class="tab" data-p="hot">Hot <span class="ct">__HOTN__</span></button>
+ <button class="tab" data-p="segments">Segments <span class="ct">9</span></button>
+ <button class="tab" data-p="all">Search All <span class="ct">__TOTAL__</span></button>
+ <button class="tab" data-p="decisions">Decisions <span class="ct">__DEC__</span></button>
+ <button class="tab" data-p="blueprint">Blueprint</button>
+</div>
+
+<div class="pane active" id="pane-queue"></div>
+
+<div class="pane" id="pane-hot">
+ <p class="hint">The ranked prospects, deepest research first. Heat weighs how close the real-estate decision is, financial strength, the timing window, and fit. The play is the move; open <b>Winning it</b> for the strategy, the channel, and what not to reveal. Nothing here is contacted without your per-lead go.</p>
+ <div id="hotwrap"></div>
+ <details class="win" style="margin-top:18px">
+  <summary>How to read this board</summary>
+  <div class="wbody" style="padding-top:4px">
+   <p style="margin:8px 0"><b>Heat score</b> weighs four things: how close the real-estate decision is (the biggest factor), financial strength and production history, the timing window before someone signs, and fit with the client profile. Scores move as facts change.</p>
+   <p style="margin:8px 0"><b>Stage guess</b> is exactly that, a read from public records stated so it can be corrected on the first call. Vocabulary: pre-space &rarr; entity formed &rarr; expanding in place &rarr; relocating &rarr; renewal window.</p>
+   <p style="margin:8px 0"><b>Source sensitivity</b> is graded on every lead. <b>STANDARD</b> = business public records. <b>PERSONAL</b> = the signal derives from someone's personal life or an unannounced private move (home purchase, pre-announcement departure, household signals). Personal-tagged leads follow the handling rules: the detection is NEVER the opener, outreach references only what they have publicly self-announced, warmer channel and slower clock, and every touch passes the "how did you know to call me?" test. Hardship-derived signals get a service posture only, no urgency framing ever.</p>
+   <p style="margin:8px 0"><b>The play</b> is the move to make; <b>Winning it</b> is the deeper strategy: the person's real situation and psychology, the natural channel, what not to reveal knowing, how fast the lead decays, and the realistic risk.</p>
+   <p style="margin:8px 0"><b>Sources are cited on every lead</b> in the registry's Source Detail. Nothing on this board is contacted without your per-lead go. The full books: <a href="https://drive.google.com/file/d/1-fAUBcYID_HIpWLt3keMRiJa6eBAeteg/view">Lead registry</a> (every L-row) and <a href="https://drive.google.com/file/d/1I3wkNxatIs6hMnAppAoIJxE0DYL02e1z/view">Client roster</a> (every C-row).</p>
+  </div>
+ </details>
+</div>
+
+<div class="pane" id="pane-segments">
+ <p class="hint">The reservoir, routed. Every person in territory is a lead of some kind, filed by the clock they are on. Click a segment to work its list.</p>
+ <div class="seggrid" id="seggrid"></div>
+</div>
+
+<div class="pane" id="pane-all">
+ <div class="controls">
+  <input id="q" placeholder="Search name, city, practice address, email, phone, license…">
+  <select id="fseg"></select>
+  <select id="fco"></select>
+  <select id="fpr"></select>
+ </div>
+ <div class="count" id="count"></div>
+ <table><thead><tr>
+  <th data-k="n">Name</th><th data-k="pr">Profession</th><th data-k="s">Segment</th>
+  <th data-k="conf">Confidence</th>
+  <th data-k="ci">City</th><th data-k="co">County</th><th data-k="e">Email</th><th data-k="ph">Phone</th>
+ </tr></thead><tbody id="tbody"></tbody></table>
+ <button class="more" id="more">Show more</button>
+</div>
+
+<div class="pane" id="pane-decisions">
+ <div class="deckwrap" id="deckwrap"></div>
+</div>
+
+<div class="pane" id="pane-blueprint">
+ <p class="hint">How every lead on this board gets found, checked, and ranked. Read top to bottom: the page runs from the earliest whisper to the moment you pick up the phone. Open "mechanics" on any card for the files and gotchas.</p>
+ <div class="bp-thesis">The organizing law: <b>the entity filing is the LATEST clean indicator, and everything earlier is noisier and more personal.</b> By the time a doctor files a PLLC, the decision is months old. So the engine listens on every rung above the filing, and it trusts nothing alone: <b>one clue is noise; two independent clues pointing at the same person is a doctor packing boxes.</b></div>
+
+ <div class="bp-band">
+  <div class="bp-bh"><span class="bp-no">1</span><h3 class="bp-t">The upstream ladder · before anything is filed</h3></div>
+  <p class="bp-why">The earliest indicators, stacked by how far ahead of the filing they fire. The higher the rung, the more it comes from humans instead of datasets, and the more carefully it gets handled. None of these become a lead on their own; they feed the corroboration engine in band 2.</p>
+  <div class="bp-rung">
+   <div class="bp-rl">Rung 0 · Someone talks<span class="bp-rt">3 to 18 months early</span><span class="bp-rn">Pure human intel. The only rung that reaches the decision moment itself.</span></div>
+   <div class="bp-cards">
+    <div class="bp-card"><h4>The tip network</h4><div class="bp-what">Hospital physician liaisons, MSO and practice-management firms, healthcare bankers, CPAs and attorneys, equipment reps. They hear "I'm thinking about going out on my own" before any record exists.</div><div class="bp-chips"><span class="bp-chip wt">weight 4 · heaviest</span><span class="bp-chip per">⚠ tipper protected</span></div>
+     <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Any tip Joe or Dell hears enters the system with a <b>tip:</b> prefix in any session or phone note. A lone tip surfaces as TIP-ONLY; it never waits for a second clue. The tipper is logged as a V-ID and never shown here or hinted at in outreach. The build is vendor hunt #2: liaisons and MSOs are the two zero-coverage categories, and tips only keep flowing while value flows back.<span class="bp-f">Automation/radar/upstream/tips.json</span></div></details></div>
+   </div>
+  </div>
+  <div class="bp-rung">
+   <div class="bp-rl">Rung 1 · Money moves<span class="bp-rt">1 to 12 months early</span><span class="bp-rn">Public record, strong on its own terms. The workhorse rung.</span></div>
+   <div class="bp-cards">
+    <div class="bp-card"><h4>County deeds · 9 counties</h4><div class="bp-what">A doctor buys territory property while the practice still points somewhere else. A relocation announced by a recorded instrument.</div><div class="bp-chips"><span class="bp-chip cad">monthly · 1st Mon</span><span class="bp-chip wt">weight 3</span><span class="bp-chip per">⚠ home purchase = personal</span></div>
+     <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">All 9 county portals verified live: Escambia, Santa Rosa, Okaloosa, Bay, Walton, Leon (FL) plus Baldwin, Mobile, Houston (AL). Mobile and Houston ride Joe's free accounts in the automation Chrome profile; never sign that profile out. Bulk-pull new deeds, then name-match locally against the license and NPI pools. A commercial parcel is standard handling; a home purchase informs the read and is never the opener.<span class="bp-f">Automation/radar/upstream/deeds.json · recipes in upstream-sop.md</span></div></details></div>
+    <div class="bp-card"><h4>Medicare enrollment · PECOS</h4><div class="bp-what">A provider newly enrolled to bill Medicare with territory geography is setting up to practice here, weeks to months before opening.</div><div class="bp-chips"><span class="bp-chip cad">quarterly</span><span class="bp-chip wt">weight 3</span><span class="bp-chip joe">Joe downloads</span></div>
+     <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">CMS Public Provider Enrollment file, free. Quarterly diff: rows newly carrying territory city or zip = a clue. Also corroborates relocators, since the enrollment state flips before the practice moves.<span class="bp-f">Automation/radar/upstream/pecos.json</span></div></details></div>
+    <div class="bp-card"><h4>Tax rolls · NAL + SDF</h4><div class="bp-what">The state's own answer to "who owns what." Feeds the relocating-owner join in band 4, the sale-comp book, and the own-vs-lease read on the whole territory.</div><div class="bp-chips"><span class="bp-chip cad">quarterly</span><span class="bp-chip joe">Joe pulls</span></div>
+     <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">FL DOR Data Portal, free, openly browsable. NAL = owner + owner mailing address per parcel; SDF = every sale since 2009 with price. Raw rolls stay in the local off-Drive scratch and are deleted after the run. First run (Escambia + Santa Rosa) yielded 646 medical parcels, 117 sale comps, and the relocating-owner candidates.<span class="bp-f">Automation/radar/parse-tax-rolls.py · tax-roll-sop.md</span></div></details></div>
+   </div>
+  </div>
+  <div class="bp-rung">
+   <div class="bp-rl">Rung 2 · Credentialing<span class="bp-rt">0 to 9 months early</span><span class="bp-rn">Loud but ambiguous. Never trusted alone; that lesson cost Extension B its life.</span></div>
+   <div class="bp-cards">
+    <div class="bp-card"><h4>The license pool</h4><div class="bp-what">Every new FL or AL license in a CARR profession enters a silent pool and waits. It contributes the "who and what profession"; a second clue has to supply the "here."</div><div class="bp-chips"><span class="bp-chip cad">weekly</span><span class="bp-chip wt">weight 1</span></div>
+     <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Why silent: 3,269 new out-of-state APRN licenses a year are routine telehealth paperwork, and a true relocator's record says their origin state, never Pensacola. So the pool holds minimal fields (name, profession, issue date, origin state) and expires rows after 24 months without a hit.<span class="bp-f">Automation/radar/upstream/licenses-pool.json</span></div></details></div>
+    <div class="bp-card"><h4>NPPES address moves · D1</h4><div class="bp-what">A provider's practice or mailing address moving INTO territory zips, including in-state movers from Miami, Orlando, Tampa, or Birmingham, whom no license filter can see.</div><div class="bp-chips"><span class="bp-chip cad">weekly</span><span class="bp-chip wt">weight 2</span></div>
+     <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Rides the Monday NPI sweep. Standing rule from the Knapp correction: a D1 flag means nothing until the record's practiceLocations array has been read; the mailing address alone misleads.<span class="bp-f">Automation/radar/upstream/nppes-moves.json</span></div></details></div>
+   </div>
+  </div>
+  <div class="bp-rung">
+   <div class="bp-rl">Rung 3 · Digital exhaust<span class="bp-rt">0 to 3 months early</span><span class="bp-rn">Cheap to watch, low yield alone, valuable as corroboration.</span></div>
+   <div class="bp-cards">
+    <div class="bp-card"><h4>New domains · CZDS</h4><div class="bp-what">"pensacoladerm.com" registered weeks before anything else exists. The domain name itself is the clue; WHOIS privacy hides the person.</div><div class="bp-chips"><span class="bp-chip cad">weekly</span><span class="bp-chip wt">weight 1</span><span class="bp-chip joe">one-time signup</span></div></div>
+    <div class="bp-card"><h4>Job postings · D12</h4><div class="bp-what">A practice that does not exist yet hiring front-desk staff has signed space or is about to.</div><div class="bp-chips"><span class="bp-chip cad">weekly</span><span class="bp-chip wt">weight 2</span></div></div>
+    <div class="bp-card"><h4>New Google Business Profiles · D13</h4><div class="bp-what">Usually fires at or after the filing, so it serves as a freshness check and a corroborator rather than an early warning.</div><div class="bp-chips"><span class="bp-chip cad">weekly</span><span class="bp-chip wt">corroborator</span></div></div>
+   </div>
+  </div>
+ </div>
+
+ <div class="bp-flow" aria-hidden="true"><div class="s"></div><div class="l">every rung feeds one machine</div><div class="s"></div><div class="a"></div></div>
+
+ <div class="bp-band engine">
+  <div class="bp-bh"><span class="bp-no">2</span><h3 class="bp-t">The corroboration engine</h3></div>
+  <p class="bp-why">Nothing upstream gets filtered out. Each weak clue accumulates in a pool per person (name-keyed, city-checked) and waits. A candidate surfaces only when independent clue classes agree, which is what makes rungs 1 through 3 usable at all.</p>
+  <div class="bp-wts">
+   <div class="bp-wt"><div class="n">4</div><div class="l">human tip</div></div>
+   <div class="bp-wt"><div class="n">3</div><div class="l">deed</div></div>
+   <div class="bp-wt"><div class="n">3</div><div class="l">PECOS enrollment</div></div>
+   <div class="bp-wt"><div class="n">2</div><div class="l">NPPES move</div></div>
+   <div class="bp-wt"><div class="n">2</div><div class="l">job posting</div></div>
+   <div class="bp-wt"><div class="n">1</div><div class="l">new license</div></div>
+   <div class="bp-wt"><div class="n">1</div><div class="l">domain</div></div>
+  </div>
+  <div class="bp-rule"><b>The surfacing rule: score of 3 or more, from 2 or more independent clue classes.</b> A lone tip still surfaces, marked TIP-ONLY. A suppressor kills names already in the registry or client books. When the entity eventually files, the candidate GRADUATES to the New Entity segment carrying its <b>earlyBy</b> count: the number of days the engine knew first, which is the metric that proves the whole layer.</div>
+  <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Runs as Radar lane 4 every Monday: corroborate.py. Output lands in pre-entity-watch.json, which this board renders as the Pre-Entity Watch segment (hidden while empty). Tip-derived and residential-deed candidates carry the ⚠ PERSONAL tag: the detection is never the opener, and every touch has to pass the "how did you know to call me?" test out loud.<span class="bp-f">Automation/radar/upstream/ (pools) → Automation/pre-entity-watch.json → this board</span></div></details>
+ </div>
+
+ <div class="bp-flow" aria-hidden="true"><div class="s"></div><div class="l">then the clean trigger fires</div><div class="s"></div><div class="a"></div></div>
+
+ <div class="bp-band">
+  <div class="bp-bh"><span class="bp-no">3</span><h3 class="bp-t">Day zero · the entity filing</h3></div>
+  <p class="bp-why">The primary detector. Filing a business entity is the act of intent: a person committing to a practice, and a practice needs a building. In Florida the entity always precedes the org NPI by weeks or months (the Pappas lesson: 97 days late on a lead sitting in a free daily file), so Sunbiz leads and NPPES confirms. This lane also catches the two classes the 9,300-lead reservoir structurally misses: relocators and all of Alabama. Vets, who never appear in NPI, arrive here too.</p>
+  <div class="bp-cards" style="margin-bottom:12px">
+   <div class="bp-card"><h4>FL Sunbiz daily filings</h4><div class="bp-what">Every new FL entity, daily, fixed-width text. Filtered on healthcare name tokens plus panhandle zips. A new PLLC in territory is a first-class STRONG candidate by itself.</div><div class="bp-chips"><span class="bp-chip cad">daily files · swept Mon</span><span class="bp-chip hot">primary trigger</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">sftp.floridados.gov, public credentials published by the state. About 2,800 entities per workday statewide; territory yield roughly 2 per workday. Token list includes the med-spa family (AESTHETIC, IV THERAPY, INFUSION...) after SWS Aesthetics slipped the original net. The filing hands over entity name, date, registered agent (often the doctor), members, and principal address on day one.<span class="bp-f">corp-filings-sop.md · fetched through Chrome on Joe's Mac</span></div></details></div>
+   <div class="bp-card"><h4>AL SOS diff-sweep</h4><div class="bp-what">Alabama publishes no bulk file, so the lane crawls professional-entity searches per county and diffs against the stored maximum entity ID. New IDs above the max are new filings.</div><div class="bp-chips"><span class="bp-chip cad">weekly</span><span class="bp-chip hot">covers AL</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">DPL + DPC types across Mobile, Baldwin, Escambia-AL, and Houston (Dothan). Entity IDs are sequential; a reconciliation guard stops the run if the sequence assumption ever breaks. Baseline: 1,773 live entities, July 13.<span class="bp-f">arc-sos.state.al.us · snapshots/al-baseline-*.md</span></div></details></div>
+  </div>
+  <p class="bp-why" style="margin-bottom:8px">Every raw hit then walks the gate chain. Name tokens find candidates; the gates prove them.</p>
+  <div class="bp-gates">
+   <div class="bp-gate"><div class="bp-gn">Gate 1</div><h4>License verification</h4><p>FL MQA, AL board, and NPPES lookups on the principal. No license and no NPI means no candidate. The Core Wellness lesson: one lookup kills a week of wasted watching.</p></div>
+   <div class="bp-ga" aria-hidden="true">→</div>
+   <div class="bp-gate"><div class="bp-gn">Gate 2</div><h4>Known-name check</h4><p>The Terrezza rule. Every STRONG name is searched against the client roster, active index, and network first. A known client becomes a dated intel note on their existing record instead of a fresh lead.</p></div>
+   <div class="bp-ga" aria-hidden="true">→</div>
+   <div class="bp-gate"><div class="bp-gn">Gate 3</div><h4>The address workup</h4><p>Five questions, in order: who owns the building and since when · is it on the market, and how old is the listing · who else is in it and are they leaving · who represents the landlord (do we know them) · is there a build-out permit. An address is a lead to dig into, and the digging keeps going until it changes the action or stops paying.</p></div>
+   <div class="bp-ga" aria-hidden="true">→</div>
+   <div class="bp-gate"><div class="bp-gn">Gate 4</div><h4>The why-now score</h4><p>0 to 10: lease-event proximity (a pre-space entity scores the full 4), formation strength, vertical + territory fit, warm network path. 6+ goes TOP, 3 to 5 WATCH, below 3 logged. Active clients are suppressed. Every score carries its evidence one-liner.</p></div>
+  </div>
+ </div>
+
+ <div class="bp-flow" aria-hidden="true"><div class="s"></div><div class="l">confirmed + enriched by</div><div class="s"></div><div class="a"></div></div>
+
+ <div class="bp-band">
+  <div class="bp-bh"><span class="bp-no">4</span><h3 class="bp-t">Confirmation, qualification, enrichment</h3></div>
+  <p class="bp-why">The layers that turn a name into a fully worked lead. Detection asks "who just moved?"; qualification asks "is this person really a lead?" Different jobs, different data, cheapest check first.</p>
+  <div class="bp-cards">
+   <div class="bp-card"><h4>NPPES org-NPI sweep · D0</h4><div class="bp-what">New organizational NPIs in territory, swept through the public API in city-by-taxonomy slices. Arrives after the entity, so it confirms and enriches: taxonomy, practice address, phone, and the authorized official, who is the owner.</div><div class="bp-chips"><span class="bp-chip cad">Mon 6:30am</span><span class="bp-chip ok">fresher than the bulk file</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">The API beat the bulk file by up to a week (21 vs 4 finds on the same window). Stateless: the enumeration date is the filter, so there is nothing to snapshot or delete. Truncation guard: any slice returning the full cap gets sub-sliced by zip and reported.<span class="bp-f">npi-sweep-sop.md LANE v2</span></div></details></div>
+   <div class="bp-card"><h4>The qualification stack</h4><div class="bp-what">Run in order, stop on a disqualifier: does NPPES show they already own a practice out of state (chase) or hospital employment (nurture) · has any FL entity appeared in their name · do they own territory property · only then deep research.</div><div class="bp-chips"><span class="bp-chip ok">free · cheapest first</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Joe's framing: once they file and there is no address yet, that gap is the only window where a tenant rep changes the outcome. The gap is the gold.<span class="bp-f">npi-sweep-sop.md · qualification stack</span></div></details></div>
+   <div class="bp-card"><h4>Relocating-owner join</h4><div class="bp-what">The strongest single cross-reference in the stack: an out-of-state clinician licensed in FL within ~12 months who ALSO owns a territory parcel is almost certainly moving here, months before any filing.</div><div class="bp-chips"><span class="bp-chip cad">quarterly</span><span class="bp-chip hot">own board segment</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">parse-tax-rolls.py joins the out-of-state rows of the license pool to NAL owners by name. HIGH = licensee state matches the owner mailing state; MEDIUM = states differ (common-name risk); LOW = likely a namesake with junk parcels. A name match is not a person match until corroborated.<span class="bp-f">relocating-owner-leads.json → RELOCATING OWNER segment</span></div></details></div>
+   <div class="bp-card"><h4>Contact enrichment · FL DOH file</h4><div class="bp-what">Florida publishes every licensed practitioner's email and phone as public record, free, nightly. About 91% email coverage in territory. This solved the contact problem. It stays an enrichment layer, because the trigger belongs to the entity filing.</div><div class="bp-chips"><span class="bp-chip cad">nightly file</span><span class="bp-chip joe">Joe's account</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">The tempting detector ("residential address of record = left the group") died on base rate: 28% of territory MDs look like that. Brown was hot because of the conjunction: home address PLUS a PLLC filed there six days earlier. Discard rule on every pull: filter to territory, keep matches, delete the statewide raw the same session. Alabama publishes no emails at all, so AL is phone-first by necessity.<span class="bp-f">data-download.mqa.flhealthsource.gov</span></div></details></div>
+   <div class="bp-card"><h4>Owner vs associate split</h4><div class="bp-what">Florida: the Sunbiz owner index (7,195 territory healthcare owners and officers) answers who owns something. Alabama: the NPPES authorized-official field stands in, because AL sells no bulk registry.</div><div class="bp-chips"><span class="bp-chip ok">the ownership truth</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">A practitioner at a group address with no entity in their name is an ASSOCIATE; a registered agent or officer is an OWNER and routes to the owner segments. Alabama adds one gift Florida lacks: 1,923 explicit supervising-physician links in the board roster, an associate detector with no inference needed.<span class="bp-f">sunbiz-owner-index-2026-07-13.json · al-license-clock-2026-07-13.json</span></div></details></div>
+   <div class="bp-card"><h4>DSO / corporate associate detector</h4><div class="bp-what">Joe's method: collect a brand's territory clinic addresses, then tag every licensee whose PRACTICE location matches one. Each Aspen office reliably holds 3 or 4 employed associates; the old email-domain tag found one in the whole territory.</div><div class="bp-chips"><span class="bp-chip cad">rides the license sweep</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Depends on the practice-location field from the MQA search (Joe's Chrome), because the bulk file's mailing address is usually the associate's home. Aspen's 6 Panhandle offices are seeded; every brand and vertical extends the JSON.<span class="bp-f">dso-corporate-locations.json · dso-match.py → dso-matches.json</span></div></details></div>
+  </div>
+ </div>
+
+ <div class="bp-flow" aria-hidden="true"><div class="s"></div><div class="l">meanwhile, on the other clock</div><div class="s"></div><div class="a"></div></div>
+
+ <div class="bp-band">
+  <div class="bp-bh"><span class="bp-no">5</span><h3 class="bp-t">The lease clock · people already practicing here</h3></div>
+  <p class="bp-why">Everything above finds people on their way in. This lane works the people already in the territory, on a different clock: the lease. Joe's reframe governs it end to end: the building points at a person, and the person is the lead. A lease coming due means the doctor is approaching a real-estate decision of some kind: renew, relocate and lease, relocate and buy, buy the space they occupy, build, sale-leaseback, or exit. The job is to be in the room before they decide.</p>
+  <div class="bp-cards">
+   <div class="bp-card"><h4>CoStar tenant export</h4><div class="bp-what">The seed list. 167 medical tenant locations in the Pensacola pull. Expiration and rent fields are blank in this market, so every date downstream is derived and says so.</div><div class="bp-chips"><span class="bp-chip cad">quarterly export</span><span class="bp-chip joe">Joe exports</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Raw export processed and deleted; the derived list is ours. Fifteen prebuilt Tenant Insights overlay the tiers: a building sold, a landlord's loan maturing near the lease expiry, non-contiguous suites, neighbors leaving. Any firing promotes the row to T1 regardless of the clock, because the situation changed.<span class="bp-f">renewal-radar-sop.md · renewal-radar-*.xlsx</span></div></details></div>
+   <div class="bp-card"><h4>Route, then date, then tier</h4><div class="bp-what">Every row routes to a segment (nothing is discarded). Tenancy dates come from an evidence ladder: stated term, a lease we hold, a build-out permit, CoStar commencement, then move-in. A blank date is honest; a dressed-up guess is a lie the system would act on.</div><div class="bp-chips"><span class="bp-chip ok">confidence tagged H/M/L</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Owner-occupiers are confirmed by two independent sources (CoStar Occupancy=Owned plus the tax-roll owner match against 1,541 medical parcels) and reclassified rather than deleted: a proven transactor with a balance sheet is a second-location conversation and the best referral source alive. Tiers: T1 inside 12 months, T2 the 12-to-24-month window where a tenant rep builds negotiating position, T3 nurture.</div></details></div>
+   <div class="bp-card"><h4>GCCMLS lease events</h4><div class="bp-what">The Gulf Coast CMLS lease-comp pull (327 medical comps) yields 116 estimated lease-event windows at the property level, feeding the same LEASE EVENT segment from a second source.</div><div class="bp-chips"><span class="bp-chip cad">refresh on new pulls</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Entries are property-level ESTIMATES; the tenant is not yet identified. Rate sanity caps guard against monthly-rate entry errors in the source.<span class="bp-f">gccmls-lease-events.json → build-renewal-feed.py</span></div></details></div>
+   <div class="bp-card"><h4>Registry lease-event capture</h4><div class="bp-what">Capture-time exhaust: every intake, debrief, and conversation writes Est-Lease-Event, its source, and its confidence into the registry, no extra work invented.</div><div class="bp-chips"><span class="bp-chip ok">Radar lane 3</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">The Radar surfaces registry rows whose estimated event sits inside 30 months. As the comps book fills with observed terms from our own deals, the measured median term replaces the assumption per vertical. That book cannot be bought, which makes it the moat and the bottleneck at once.<span class="bp-f">lead-registry.xlsx cols 24-26</span></div></details></div>
+   <div class="bp-card"><h4>The registry suppressor</h4><div class="bp-what">Before any lease-event row reaches the board: a do-not-contact, paused, or closed match is dropped outright, and any other registry match is kept but flagged, so a known prospect never masquerades as a fresh lead.</div><div class="bp-chips"><span class="bp-chip ok">cross-check</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Matching is deliberately precise (full name, or 2+ distinctive practice tokens with common healthcare and geo words stopped) so it never false-drops. Every drop and flag prints on the run.<span class="bp-f">build-renewal-feed.py → renewal-radar.json</span></div></details></div>
+  </div>
+ </div>
+
+ <div class="bp-flow" aria-hidden="true"><div class="s"></div><div class="l">all of it sits on top of</div><div class="s"></div><div class="a"></div></div>
+
+ <div class="bp-band">
+  <div class="bp-bh"><span class="bp-no">6</span><h3 class="bp-t">The reservoir · 9,300+ routed practitioners</h3></div>
+  <p class="bp-why">The standing base layer: every licensed territory practitioner, routed into a segment with its own play and its own clock. Built by joining the FL DOH licensure file (identity, license age, email), the Sunbiz owner index (who owns an entity), the tax rolls (who owns a building), and NPPES. Alabama runs the inverted stack: NPPES supplies the addresses the AL board withholds, the board roster supplies the license clock, and there are no emails, so Alabama is phone-first and more manual by nature.</p>
+  <div class="bp-cards">
+   <div class="bp-card"><h4>The associate window · the longest clock</h4><div class="bp-what">An associate owns nothing, works at somebody else's practice, and is the future practice owner. License age 3 to 15 years marks the going-independent window (Brown went at 7, Pappas at 14). By the time an entity files, the engine is already late; this lane means we knew them for years first.</div><div class="bp-chips"><span class="bp-chip cad">weekly diff planned</span><span class="bp-chip hot">earliest lane there is</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Group the territory by practice address: 2+ licensees = a group, and anyone there with no entity in their name is an associate. The watch list fires when a new entity appears in their name, their address of record changes or turns residential, they vanish from a group roster, or an adjacent-state license shows up. The play is a five-year relationship: useful twice a year, never pitched, never told what tipped us.<span class="bp-f">associate-lane-sop.md</span></div></details></div>
+   <div class="bp-card"><h4>Post-sale founders + ripe-for-sale owners</h4><div class="bp-what">409 founders who sold and serve an earn-out (capital, a book, and a grudge: the hottest class), plus 268 owners 60+ with no succession plan, referred to practice brokers and worth a post-sale relationship either way.</div><div class="bp-chips"><span class="bp-chip cad">corevent quarterly</span><span class="bp-chip joe">SFTP pull gates the dates</span></div>
+    <details class="bp-mx"><summary>Mechanics</summary><div class="bp-mech">Earn-out dating walks corevent MERGER events to historical officers to founder name-matches, because founders detach from the entities they sold (a naive join resolved 4 of 409). Gated on Joe pulling corevent.zip and cordata.zip.<span class="bp-f">corevent-earnout-sop.md · date-founders.py</span></div></details></div>
+   <div class="bp-card"><h4>The honest gaps</h4><div class="bp-what">3,904 solo practitioners with unconfirmed ownership (the biggest data gap). 18 of 20 T1 renewal dates are low-confidence estimates. Lease comps are nearly zero until our own deals fill the book. Permits stay a per-address confirmation tool, since no statewide permit dataset exists.</div><div class="bp-chips"><span class="bp-chip ok">stated on every row</span></div></div>
+  </div>
+ </div>
+
+ <div class="bp-flow" aria-hidden="true"><div class="s"></div><div class="l">and runs itself every</div><div class="s"></div><div class="a"></div></div>
+
+ <div class="bp-band">
+  <div class="bp-bh"><span class="bp-no">7</span><h3 class="bp-t">Monday morning · the machine turns over</h3></div>
+  <p class="bp-why">Every fetch runs through Chrome on Joe's Mac (the sandbox has no outbound network); Chrome only has to be open, nobody has to watch. A lane that cannot reach its source reports "unreachable, stale" and the run continues. Stale beats silent, every time.</p>
+  <div class="bp-tl">
+   <div class="bp-ti"><div class="t">6:30 AM CT</div><h4>The NPI sweep</h4><p>New org enumerations, D1 address moves, classify, cross-check, work each STRONG lead, digest.</p></div>
+   <div class="bp-ti"><div class="t">7:05 AM CT</div><h4>The Radar, four lanes</h4><p>Lane 1 consumes the sweep · lane 2 runs corp-filings (FL daily files + AL diff) · lane 3 surfaces registry lease events inside 30 months · lane 4 runs the corroboration engine and any date-gated pool pulls (deeds on the 1st Monday, PECOS quarterly).</p></div>
+   <div class="bp-ti"><div class="t">then</div><h4>Score + digest</h4><p>Every candidate scored with its evidence line. The digest files TOP, WATCH, LOGGED, LANE HEALTH, and proposed registry entries awaiting a yes or no.</p></div>
+   <div class="bp-ti"><div class="t">then</div><h4>Rebuild this board</h4><p>build-renewal-feed.py refreshes the lease-event feed, build-lead-board.py merges every feed with the router and registry, writes the dated board, and updates the artifact when the desktop is connected. Files stay truth; the board is the picture.</p></div>
+   <div class="bp-ti"><div class="t">then</div><h4>Decay guards + the Monday brief</h4><p>Source ages are checked (DOH ~35 days, CoStar ~90, tax rolls quarterly, the router ~60) and anything due lands in the digest and open-loops. Joe gets a 5-line brief and a tappable decision queue, one verdict at a time.</p></div>
+  </div>
+ </div>
+
+ <div class="bp-flow" aria-hidden="true"><div class="s"></div><div class="l">and lands on the segments</div><div class="s"></div><div class="a"></div></div>
+
+ <div class="bp-band">
+  <div class="bp-bh"><span class="bp-no">8</span><h3 class="bp-t">The board · where every lane lands</h3></div>
+  <p class="bp-why">Fifteen segments in heat order. Each traces back to the lane that produced it, so every card on this board has a paper trail through this page.</p>
+  <div class="bp-segs">
+   <div class="bp-seg"><div class="b hot"></div><div><div class="nm">🔭 Pre-Entity Watch</div><div class="src">corroboration engine · band 2</div></div><div class="n">hot</div></div>
+   <div class="bp-seg"><div class="b hot"></div><div><div class="nm">🆕 New Entity</div><div class="src">corp-filings, FL + AL · band 3</div></div><div class="n">hot</div></div>
+   <div class="bp-seg"><div class="b hot"></div><div><div class="nm">🔑 Lease Event, decision window</div><div class="src">CoStar + GCCMLS + registry · band 5</div></div><div class="n">hot</div></div>
+   <div class="bp-seg"><div class="b hot"></div><div><div class="nm">🧭 Relocating Owner</div><div class="src">tax-roll × license join · band 4</div></div><div class="n">hot</div></div>
+   <div class="bp-seg"><div class="b hot"></div><div><div class="nm">🎯 Practice Ripe for Sale</div><div class="src">reservoir · band 6</div></div><div class="n">268</div></div>
+   <div class="bp-seg"><div class="b hot"></div><div><div class="nm">⭐⭐ Post-Sale Founder</div><div class="src">Sunbiz corevent · band 6</div></div><div class="n">409</div></div>
+   <div class="bp-seg"><div class="b warm"></div><div><div class="nm">⭐ Associate in the Window</div><div class="src">license clock + address grouping · band 6</div></div><div class="n">1,055</div></div>
+   <div class="bp-seg"><div class="b warm"></div><div><div class="nm">⭐ DSO / Corporate Associate</div><div class="src">address-match detector · band 4</div></div><div class="n">warm</div></div>
+   <div class="bp-seg"><div class="b warm"></div><div><div class="nm">Practice Owner, confirmed</div><div class="src">Sunbiz owner index · band 6</div></div><div class="n">1,202</div></div>
+   <div class="bp-seg"><div class="b warm"></div><div><div class="nm">🏢 Owner-Occupier, 2nd location</div><div class="src">CoStar + tax roll · band 5</div></div><div class="n">warm</div></div>
+   <div class="bp-seg"><div class="b early"></div><div><div class="nm">Solo, owner unconfirmed</div><div class="src">the biggest remaining gap · band 6</div></div><div class="n">3,904</div></div>
+   <div class="bp-seg"><div class="b hold"></div><div><div class="nm">New Grad, watch</div><div class="src">license age under 3 years</div></div><div class="n">hold</div></div>
+   <div class="bp-seg"><div class="b hold"></div><div><div class="nm">Winding Down</div><div class="src">courtesy only</div></div><div class="n">hold</div></div>
+   <div class="bp-seg"><div class="b hold"></div><div><div class="nm">🏛 Institutional, watch the physicians</div><div class="src">the farm system independents come from</div></div><div class="n">hold</div></div>
+   <div class="bp-seg"><div class="b hold"></div><div><div class="nm">Unclassified</div><div class="src">needs a pass</div></div><div class="n">hold</div></div>
+  </div>
+ </div>
+
+ <div class="bp-flow" aria-hidden="true"><div class="s"></div><div class="l">behind one gate</div><div class="s"></div><div class="a"></div></div>
+
+ <div class="bp-band gatefoot">
+  <div class="bp-bh"><span class="bp-no">✋</span><h3 class="bp-t">The human gate</h3></div>
+  <p class="bp-why" style="margin-bottom:6px">Every lane above reads and ranks; none of it touches a prospect. Nothing enters the registry without a tap from Joe or Dell. Claude drafts, Joe sends, and nothing external ever fires on its own. On sensitive lanes the standard is higher still: the detection is never the opener, and every touch has to survive the question "how did you know to call me?" answered honestly, out loud.</p>
+  <table class="bp-tab">
+   <tr><th>Sensitivity</th><th>Covers</th><th>Handling</th></tr>
+   <tr><td>STANDARD</td><td>Licenses, entities, NPIs, commercial deeds, emails of record</td><td>Normal outreach discipline; the source passes the say-it-out-loud test</td></tr>
+   <tr><td>⚠ PERSONAL</td><td>Home purchases, tips, pre-announcement departures, household clues</td><td>Warmer channel, slower clock, open only on what the prospect has publicly self-announced, or wait for a public trigger</td></tr>
+  </table>
+ </div>
+</div>
+
+<div class="foot">
+ Canonical file: <b>Automation/lead-board.html</b> · sources of truth: <b>DNA/Leads/lead-router-2026-07-13.xlsx</b> (the 9,320) and <b>DNA/Leads/lead-registry.xlsx</b> (the worked leads). Regenerated by the weekly lead-system run (Automation/local-tasks/lead-weekly.md). Nothing here is contacted without your per-lead go. Ranked hot-lead detail lives in the Hot Leads dashboard; signed deals live in The Deal Room.
+</div>
+</div>
+<script>
+const LEADS=__LEADS__, REG=__REG__, UNOWNED=__UNOWNED__, DEC=__DECISIONS__, SEGMETA=__SEGMETA__, SEGCOUNT=__SEGCOUNT__, HOT=__HOT__;
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const heatOf={}; SEGMETA.forEach(m=>heatOf[m[0]]=m[3]);
+const shortOf={}; SEGMETA.forEach(m=>shortOf[m[0]]=m[1]);
+
+/* ---------- tabs ---------- */
+$$('.tab').forEach(t=>t.onclick=()=>{
+ $$('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active');
+ $$('.pane').forEach(p=>p.classList.remove('active')); $('#pane-'+t.dataset.p).classList.add('active');
+ window.scrollTo(0,0);
+});
+
+/* ---------- queue ---------- */
+// 't' WAS HARDCODED TO '2026-07-13' until 2026-08-09, so every due date between
+// that day and whenever the board was opened classified as FUTURE work. On the
+// day this was found that was a four-week window silently rendering overdue
+// leads as "set for <date>". Found by the outside council seat reading the
+// template, not by any check: nothing here compares the board's clock to a real
+// one, and a frozen date produces a page that looks entirely healthy.
+// Local calendar date, not toISOString() on its own: that returns UTC, so a
+// board opened after 7pm Central would call tomorrow "today" and push every
+// same-day item into the future by one day.
+function dueClass(d){ if(!d) return ['none','ready when you are'];
+ const n=new Date(), t=new Date(n.getTime()-n.getTimezoneOffset()*6e4).toISOString().slice(0,10);
+ if(d<t) return ['ready','waiting for you']; if(d===t) return ['today','ready today']; return ['soon','set for '+d]; }
+// heat by stage/score hints
+const stageHeat={'Active Deal':'ok','Outreach Active':'warm','Engaged':'ok','Qualified':'early','New':'hot'};
+function renderQueue(){
+ const rows=REG.slice().filter(r=>r.stage!=='Nurture (Drip)');
+ // order: dated first (by date), then hot New leads (Pappas/Brown etc), then holds
+ const dated=rows.filter(r=>r.nextdate).sort((a,b)=>a.nextdate<b.nextdate?-1:1);
+ const undated=rows.filter(r=>!r.nextdate);
+ const ordered=[...dated,...undated];
+ window.__Q=ordered;
+ let h='<h2>Worked leads, your queue</h2>';
+ ordered.forEach((r,qi)=>{
+  const [dc,dl]=dueClass(r.nextdate);
+  const heat=stageHeat[r.stage]||'early';
+  h+=`<div class="card clk" data-q="${qi}"><div class="stripe ${heat}"></div><div class="body">
+   <div class="top"><span class="name">${esc(r.name)}</span>
+   ${r.practice?`<span class="entity">${esc(r.practice)}</span>`:''}
+   <span class="due ${dc}">${dl}</span><span class="chip">${esc(r.stage)}</span></div>
+   ${(()=>{const nx=cleanNext(r.next);return nx?`<div class="next">▸ ${esc(nx)}</div>`:`<div class="next" style="color:var(--ok)">A new lead, waiting for your first touch</div>`;})()}
+   <div class="say">Say: <b>prep me for ${esc(firstName(r.name))}</b></div>
+   <div class="meta">
+    ${r.phone?`<div><span class="k">Phone</span><span class="mono">${esc(r.phone)}</span></div>`:''}
+    ${r.city?`<div><span class="k">Market</span>${esc(r.city)}${r.county?', '+esc(r.county):''}</div>`:''}
+    ${r.spec?`<div><span class="k">Specialty</span>${esc(r.spec)}</div>`:''}
+    ${r.lasttouch?`<div><span class="k">Last touch</span><span class="mono">${esc(r.lasttouch)}</span></div>`:''}
+    ${r.lease?`<div><span class="k">Lease event</span><span class="mono">${esc(r.lease)}</span> ${esc(r.leaseconf||'')}</div>`:''}
+    ${r.id?`<div><span class="k">Ref</span><span class="mono" style="opacity:.5">${esc(r.id)}</span></div>`:''}
+   </div></div></div>`;
+ });
+ // Unowned registry leads (2026-07-27). Owner is the routing key for the whole
+ // two-brain split, so a blank one puts a lead on NOBODY's board — not Joe's, not
+ // Dell's. They were not lost, they were invisible, which is worse. One action:
+ // give it an owner. Rendered last so it never pushes the live queue down the page.
+ if(UNOWNED.length){
+  h+=`<div class="sec" style="margin-top:26px">NO OWNER — ON NOBODY'S BOARD (${UNOWNED.length})</div>
+   <p class="sub" style="margin:2px 0 10px">Owner routes every lead to a board. These have none, so neither
+   partner sees them in their queue. One action each: set an owner in the registry.</p>`;
+  UNOWNED.forEach(r=>{
+   h+=`<div class="qrow"><div class="qh">
+    <span class="qn">${esc(r.name||'(no contact name)')}</span>
+    ${r.practice?`<span class="qp">${esc(r.practice)}</span>`:''}
+    <span class="chip warnchip">needs an owner</span>
+    ${r.stage?`<span class="chip">${esc(r.stage)}</span>`:''}</div>
+    <div class="meta">
+     ${r.city?`<div><span class="k">Market</span>${esc(r.city)}${r.county?', '+esc(r.county):''}</div>`:''}
+     ${r.spec?`<div><span class="k">Specialty</span>${esc(r.spec)}</div>`:''}
+     ${r.id?`<div><span class="k">Ref</span><span class="mono" style="opacity:.5">${esc(r.id)}</span></div>`:''}
+    </div></div>`;
+  });
+ }
+ $('#pane-queue').innerHTML=h;
+}
+
+/* ---------- hot ---------- */
+function hotCard(l,hi){
+ return `<div class="hotcard clk" data-h="${hi}"><div class="stripe ${l.heat}"></div><div class="body">
+  <div class="top"><span class="score ${l.heat}">${esc(l.score)} / 10</span><span class="name">${esc(l.name)}</span>
+   <span class="entity">${esc(l.entity)}</span><span class="chip id">${esc(l.id)}</span><span class="chip">${esc(l.stage)}</span></div>
+  <p class="why">${esc(l.why)}</p>
+  <div class="hgrid">${(l.grid||[]).map(g=>`<div><span class="k">${esc(g[0])}</span><span class="v">${esc(g[1])}</span></div>`).join('')}</div>
+  ${l.play?`<div class="play-b"><b>The play:</b> ${esc(l.play)}</div>`:''}
+  ${l.win?`<details class="win"><summary>Winning it</summary><div class="wbody">${esc(l.win)}</div></details>`:''}
+  <div class="say">Say: <b>prep me for ${esc(firstName(l.name))}</b></div>
+ </div></div>`;
+}
+function renderHot(){
+ window.__H=[...HOT.ranked,...(HOT.proposed||[])];
+ let h='<h2>Ranked leads</h2>'+HOT.ranked.map((l,i)=>hotCard(l,i)).join('');
+ if(HOT.proposed&&HOT.proposed.length){ h+='<h2>Proposed, awaiting your yes / no (nothing self-enters)</h2>'+HOT.proposed.map((l,i)=>hotCard(l,HOT.ranked.length+i)).join(''); }
+ if(HOT.holds&&HOT.holds.length){ h+='<h2>On hold, do not touch (their terms, not ours)</h2>'+HOT.holds.map(r=>`<div class="hold-row"><span class="hold-tag">${esc(r.tag)}</span><span>${r.text}</span></div>`).join(''); }
+ if(HOT.signals&&HOT.signals.length){ h+='<h2>Client signals, not leads</h2>'+HOT.signals.map(r=>`<div class="signal-row"><span class="signal-tag">${esc(r.tag)}</span><span>${r.text}</span></div>`).join(''); }
+ $('#hotwrap').innerHTML=h;
+}
+
+/* ---------- segments ---------- */
+function renderSegments(){
+ let h='';
+ SEGMETA.forEach(m=>{
+  const c=SEGCOUNT[m[0]]||0; if(!c) return;
+  h+=`<div class="segcard ${m[3]}" data-seg="${esc(m[0])}">
+   <div class="cnt">${c.toLocaleString()}</div><div class="lab">${esc(m[1])}</div>
+   <div class="clk">${esc(m[2])}</div><div class="ply">${esc(m[4]||'')}</div></div>`;
+ });
+ $('#seggrid').innerHTML=h;
+ $$('.segcard').forEach(el=>el.onclick=()=>{
+  $$('.tab').forEach(x=>x.classList.remove('active'));
+  $('.tab[data-p=all]').classList.add('active');
+  $$('.pane').forEach(p=>p.classList.remove('active')); $('#pane-all').classList.add('active');
+  $('#fseg').value=el.dataset.seg; applyFilter(); window.scrollTo(0,0);
+ });
+}
+
+/* ---------- search / all ---------- */
+let shown=0, filtered=[], PAGE=60, sortK='n', sortDir=1;
+function buildFilters(){
+ const segs=[...new Set(LEADS.map(l=>l.s))];
+ const cos=[...new Set(LEADS.map(l=>l.co))].filter(Boolean).sort();
+ const prs=[...new Set(LEADS.map(l=>l.pr))].filter(Boolean).sort();
+ $('#fseg').innerHTML='<option value="">All segments</option>'+segs.map(s=>`<option value="${esc(s)}">${esc(shortOf[s]||s)} (${SEGCOUNT[s]})</option>`).join('');
+ $('#fco').innerHTML='<option value="">All counties</option>'+cos.map(c=>`<option>${esc(c)}</option>`).join('');
+ $('#fpr').innerHTML='<option value="">All professions</option>'+prs.map(p=>`<option>${esc(p)}</option>`).join('');
+}
+function applyFilter(){
+ const q=$('#q').value.trim().toLowerCase(), fs=$('#fseg').value, fc=$('#fco').value, fp=$('#fpr').value;
+ filtered=LEADS.filter(l=>{
+  if(fs&&l.s!==fs) return false; if(fc&&l.co!==fc) return false; if(fp&&l.pr!==fp) return false;
+  if(q){ const hay=(l.n+' '+l.ci+' '+l.ad+' '+l.e+' '+l.ph+' '+(l.lic||'')).toLowerCase(); if(!hay.includes(q)) return false; }
+  return true;
+ });
+ filtered.sort((a,b)=>{ let x=(a[sortK]||''),y=(b[sortK]||''); if(sortK==='ly'){x=+x||0;y=+y||0;} return x<y?-sortDir:x>y?sortDir:0;});
+ shown=0; $('#tbody').innerHTML=''; renderMore();
+ $('#count').textContent=filtered.length.toLocaleString()+' of '+LEADS.length.toLocaleString()+' leads';
+}
+function renderMore(){
+ const slice=filtered.slice(shown,shown+PAGE);
+ const dot={hot:'var(--hot)',warm:'var(--warm)',early:'var(--early)',hold:'var(--hold)'};
+ let h='';
+ slice.forEach((l,ai)=>{
+  h+=`<tr class="clk" data-a="${shown+ai}"><td><span class="sdot" style="background:${dot[heatOf[l.s]]||'var(--hold)'}"></span>
+   <span class="tname">${esc(l.n)}</span>${l.ad?`<div class="tsub">${esc(l.ad)}</div>`:''}<div class="tgist">${esc(gistRouter(l))}</div>${l.worked?`<div class="workedchip">${esc(l.flag||'already in the registry')}</div>`:''}</td>
+   <td>${esc(l.pr)}${l.ly!==''?` <span class="tsub">${l.ly}y</span>`:''}</td>
+   <td>${esc(shortOf[l.s]||l.s)}</td>
+   <td>${l.conf?`<span class="conf c-${esc(String(l.conf).toLowerCase())}">${esc(l.conf)}</span>${l.brand?`<div class="tsub">${esc(l.brand)}</div>`:''}`:''}</td>
+   <td>${esc(l.ci)}</td><td>${esc(l.co)}</td>
+   <td class="email">${l.e?`<a href="mailto:${esc(l.e)}">${esc(l.e)}</a>`:'<span class="tsub">not listed</span>'}</td>
+   <td class="mono">${hasPhone(l.ph)?esc(l.ph):'<span class="tsub">not listed</span>'}</td></tr>`;
+ });
+ $('#tbody').insertAdjacentHTML('beforeend',h);
+ shown+=slice.length;
+ $('#more').style.display=shown<filtered.length?'block':'none';
+ $('#more').textContent='Show more ('+(filtered.length-shown).toLocaleString()+' left)';
+}
+$('#more').onclick=renderMore;
+['q','fseg','fco','fpr'].forEach(id=>$('#'+id).addEventListener('input',applyFilter));
+$$('th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k; if(sortK===k)sortDir*=-1;else{sortK=k;sortDir=1;} applyFilter();});
+
+/* ---------- decisions ---------- */
+let di=0; const picks={};
+function renderDeck(){
+ const w=$('#deckwrap');
+ if(di>=DEC.length){
+  let s='<div class="done"><h3>Queue clear.</h3><p class="sub">Your calls, in order. Nothing fires without you.</p><div class="summ">';
+  DEC.forEach(d=>{ const p=picks[d.id]; s+=`<div><b>${d.name}</b>: ${p?('<span style=color:var(--accent-ink)>'+p+'</span>'):'<span style=color:var(--ink-3)>skipped</span>'}</div>`; });
+  s+='</div><button class="more" onclick="di=0;renderDeck()" style="max-width:200px;margin:16px auto 0">Run it again</button></div>';
+  w.innerHTML=s; return;
+ }
+ const d=DEC[di];
+ let h=`<div class="progress">Decision ${di+1} of ${DEC.length}</div><div class="deck">
+  <div class="dtag">${esc(d.tag)}</div><div class="dname">${esc(d.name)}</div>
+  ${(()=>{const rr=REG.find(x=>x.name&&d.name&&x.name.toLowerCase()===d.name.toLowerCase());const ctx=rr?[rr.spec,rr.city].filter(Boolean).join(' · '):'';return ctx?`<div class="dloop">${esc(ctx)}</div>`:'';})()}<div class="dq">${esc(d.q)}</div>`;
+ d.opts.forEach(o=>{ const on=picks[d.id]===o[0]?' pick':'';
+  h+=`<div class="opt${on}" data-l="${o[0]}"><div class="lt">${o[0]}</div><div><div class="ot">${esc(o[1])}</div><div class="od">${esc(o[2])}</div></div></div>`; });
+ h+=`<div class="picked">${picks[d.id]?('Leaning '+picks[d.id]+'. Tell Joe to lock it in chat.'):'&nbsp;'}</div>
+  <div class="deknav"><button ${di===0?'disabled':''} onclick="di--;renderDeck()">← Back</button>
+  <button onclick="di++;renderDeck()">${picks[DEC[di].id]?'Next →':'Skip →'}</button></div></div>`;
+ w.innerHTML=h;
+ $$('.opt').forEach(el=>el.onclick=()=>{picks[d.id]=el.dataset.l;renderDeck();});
+}
+
+function cleanNext(t){t=String(t||'');t=t.replace(/JOE DECIDE\s*\(?loop\s*#?\d+\)?\s*:?\s*/ig,'');t=t.replace(/\(?loop\s*#?\d+\)?/ig,'');t=t.replace(/^[\s:;,\u2013-]+/,'').trim();if(t)t=t.charAt(0).toUpperCase()+t.slice(1);return t;}
+function firstName(n){n=String(n||'');var q=n.split(/[\s,]+/).filter(Boolean);if(q[0]&&/^dr\.?$/i.test(q[0]))q.shift();return q[0]||n;}
+var REMINDER="Use the CARR record layer and canonical carr-system repository context only. Do not attach external folders.";
+function segByFull(x){for(var i=0;i<SEGMETA.length;i++){if(SEGMETA[i][0]===x)return SEGMETA[i];}return [x,(shortOf[x]||x),'','',''];}
+function gistRouter(l){var m=segByFull(l.s);var base=[m[1],m[2]].filter(Boolean).join(' · ');if(l.flag||l.tier||l.le){var x=[(l.flag?'⚠ '+l.flag:''),l.tier,(l.le?'lease ~'+l.le:''),l.rep].filter(Boolean).join(' · ');return x+(base?' · '+base:'');}return base;}
+function storyRouter(l){var m=segByFull(l.s);var f=[];if(l.pr)f.push(l.pr);if(l.ly!==''&&l.ly!=null)f.push('about '+l.ly+' years in');if(l.ci)f.push(l.ci+(l.co?', '+l.co+' County':''));if(l.own==='YES')f.push('owns the practice, Sunbiz-confirmed');else if(l.own==='NO')f.push('not the practice owner');var lead=m[1]+(m[2]?', '+m[2]:'')+'.';var play=m[4]?(' '+m[4]):'';return lead+play+(f.length?(' This one: '+f.join(', ')+'.'):'');}
+function storyReg(r){var b=[];b.push((r.spec||'Healthcare provider')+(r.city?' in '+r.city+(r.county?', '+r.county+' County':''):'')+'.');var st={'New':'A fresh lead in your queue.','Qualified':'Triaged and worth pursuing.','Outreach Active':'Outreach is in motion.','Engaged':'They have replied, this one is warm.','Meeting Set':'A meeting is set.','Opportunity':'A real space need is being worked.','Active Deal':'A live deal in motion.'};if(r.stage&&st[r.stage])b.push(st[r.stage]);else if(r.stage)b.push('Stage: '+r.stage+'.');if(r.lasttouch)b.push('Last touched '+r.lasttouch+'.');else b.push('Not touched yet.');var nx=cleanNext(r.next);if(nx)b.push('Next: '+nx+'.');return b.join(' ');}
+function dl(t){return 'claude://cowork/new?q='+encodeURIComponent(REMINDER+' '+t);}
+function pNewProspect(o){return 'New prospect intake for the CARR system, from the lead board. This lead is '+o.name+(o.role?', '+o.role:'')+(o.city?', in '+o.city+(o.county?', '+o.county+' County':''):'')+'.'+(o.email?' Email '+o.email+'.':'')+(o.phone?' Phone '+o.phone+'.':'')+(o.seg?' Segment: '+o.seg+'.':'')+' Read DNA/Leads/lead-system.md (intake SOPs, the claim protocol, and the ownership-is-asked rule) and DNA/Clients/clients-active.md first. Cross-check the roster and registry for a duplicate before creating anything. Then interview me ONE QUESTION AT A TIME, multiple-choice where you can and fill-in-the-blank otherwise, for the rest (owner, deal type, stage, next step). Cite the lead source as the lead board. Allocate the next ID with the write-verify sandwich, then tell me exactly what you wrote and where.';}
+function pPrep(f){return 'Prep me for a meeting with '+f+'. Pull everything the system knows about them, their prospect file, registry row, network ties, and market notes, into one tight one-page brief: who they are, where the relationship stands, the open next step, the strongest angle, and two or three smart questions to ask. If you need to know which '+f+' I mean, ask me one question first.';}
+function pFollow(f){return 'Draft the next follow-up touch for '+f+'. Read DNA/templates.md (the touch calendar and voice rules) and their prospect file, check the registry for where they are in the sequence, then draft the next touch in Joe\'s voice for me to send. Never send it on my behalf.';}
+function fRow(k,v){return v?('<div><span class="fk">'+esc(k)+'</span><span class="fv">'+esc(v)+'</span></div>'):'';}
+function lbCopy(el){var t=el.getAttribute('data-copy')||'';var ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);var tt=document.getElementById('lbtoast');if(!tt){tt=document.createElement('div');tt.id='lbtoast';tt.style.cssText='position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#F57F29;color:#1a0f04;font-weight:700;font-size:13.5px;padding:11px 20px;border-radius:10px;z-index:80;box-shadow:0 12px 30px rgba(0,0,0,.45);transition:opacity .2s;pointer-events:none';document.body.appendChild(tt);}tt.textContent='Prompt copied. Paste it into the new chat (Cmd+V)';tt.style.opacity='1';setTimeout(function(){tt.style.opacity='0';},2800);}
+function openDetail(o,type){
+ if(!o)return;var name,story,phone='',email='',chips=[],facts='',actions='',first;
+ if(type==='router'){var m=segByFull(o.s);name=o.n;phone=o.ph;email=o.e;first=firstName(o.n);chips=[m[1]];story=storyRouter(o);
+  facts=fRow('Email',email)+fRow('Phone',phone)+fRow('Profession',o.pr)+fRow('Years licensed',(o.ly!==''&&o.ly!=null)?o.ly:'')+fRow('Age band',o.ab)+fRow('Owner',o.own==='YES'?'Yes (Sunbiz-confirmed)':(o.own==='NO'?'No':''))+fRow('Address',o.ad)+fRow('City',o.ci)+fRow('County',o.co)+fRow('Tier',o.tier)+fRow('Est. lease event',o.le)+fRow('Confidence',o.conf)+fRow('Landlord',o.ll)+fRow('Tenant rep',o.rep)+fRow('Already in system',o.flag)+fRow('Note',o.newll);
+  actions='<a target="_blank" rel="noopener" class="dv-btn primary" href="'+dl(pNewProspect({name:o.n,role:o.pr,city:o.ci,county:o.co,email:o.e,phone:o.ph,seg:m[1]}))+'">Enter '+esc(first)+' as a prospect</a><a target="_blank" rel="noopener" class="dv-btn ghost" href="'+dl(pPrep(first))+'">Prep me for '+esc(first)+'</a>';
+ }else if(type==='reg'){name=o.name;phone=o.phone;email=o.email;if(!email){for(var zi=0;zi<LEADS.length;zi++){if(LEADS[zi].n&&o.name&&LEADS[zi].n.toLowerCase()===o.name.toLowerCase()&&LEADS[zi].e){email=LEADS[zi].e;break;}}}first=firstName(o.name);chips=[o.stage];if(o.seg)chips.push(o.seg);story=storyReg(o);
+  facts=fRow('Email',email)+fRow('Phone',phone)+fRow('Specialty',o.spec)+fRow('Practice',o.practice)+fRow('Market',(o.city||'')+(o.county?', '+o.county:''))+fRow('Next step',cleanNext(o.next))+fRow('Last touch',o.lasttouch)+fRow('Lease event',o.lease?(o.lease+' '+(o.leaseconf||'')):'')+fRow('Reference',o.id);
+  actions='<a target="_blank" rel="noopener" class="dv-btn primary" href="'+dl(pPrep(first))+'">Prep me for '+esc(first)+'</a><a target="_blank" rel="noopener" class="dv-btn ghost" href="'+dl(pFollow(first))+'">Draft a follow-up for '+esc(first)+'</a>';
+ }else{name=o.name;first=firstName(o.name);email=o.email||'';phone=o.phone||'';if(!email){for(var zi=0;zi<LEADS.length;zi++){if(LEADS[zi].n&&o.name&&LEADS[zi].n.toLowerCase()===o.name.toLowerCase()&&LEADS[zi].e){email=LEADS[zi].e;break;}}}chips=[(o.score!=null?o.score+' / 10':''),o.stage].filter(Boolean);story=o.why||'';var g=(o.grid||[]).map(function(x){return fRow(x[0],x[1]);}).join('');facts=fRow('Email',email)+fRow('Phone',phone)+g+fRow('The play',o.play)+fRow('Entity',o.entity);
+  actions='<a target="_blank" rel="noopener" class="dv-btn primary" href="'+dl(pPrep(first))+'">Prep me for '+esc(first)+'</a><a target="_blank" rel="noopener" class="dv-btn ghost" href="'+dl(pNewProspect({name:o.name,role:'',city:'',county:'',email:'',phone:'',seg:o.entity}))+'">Enter as a prospect</a>';}
+ var contact='';if(phone)contact+='<a target="_blank" rel="noopener" class="dv-btn contact" href="tel:'+esc(String(phone).replace(/[^0-9+]/g,''))+'">Call '+esc(phone)+'</a>';if(email)contact+='<a target="_blank" rel="noopener" class="dv-btn contact" href="mailto:'+esc(email)+'">Email '+esc(email)+'</a>';
+ var chipsH=chips.filter(Boolean).map(function(c){return '<span class="chip">'+esc(c)+'</span>';}).join('');
+ var d=document.getElementById('detail');if(!d){d=document.createElement('div');d.id='detail';d.className='dv-wrap';d.addEventListener('click',function(e){if(e.target===d)closeDetail();});document.body.appendChild(d);}
+ d.innerHTML='<div class="dv-panel"><div class="dv-head"><button class="dv-close" onclick="closeDetail()">×</button><div class="dv-name">'+esc(name)+'</div><div class="dv-chips">'+chipsH+'</div></div><div class="dv-body"><div class="dv-story">'+esc(story)+'</div>'+(contact?'<div class="dv-contact">'+contact+'</div>':'')+'<div class="dv-facts">'+facts+'</div><div class="dv-actions">'+actions+'</div></div></div>';
+ Array.prototype.forEach.call(d.querySelectorAll('.dv-btn[href^="claude:"]'),function(a){var q=(a.getAttribute('href').split('q=')[1]||'');a.setAttribute('data-copy',decodeURIComponent(q));a.addEventListener('click',function(){lbCopy(a);});});
+ d.classList.add('on');document.body.style.overflow='hidden';
+}
+function closeDetail(){var d=document.getElementById('detail');if(d)d.classList.remove('on');document.body.style.overflow='';}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeDetail();});
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+// 923 router rows carry a literal "()" for phone. `l.ph||'not listed'` treats that as
+// a real value, so a tenth of the board showed empty parens. A phone is only a phone
+// if it has digits in it.
+function hasPhone(p){return /\d/.test(String(p==null?'':p));}
+renderQueue(); renderHot(); renderSegments(); buildFilters(); applyFilter(); renderDeck();
+document.addEventListener('click',function(e){if(e.target.closest('a')||e.target.closest('.tab')||e.target.closest('.segcard')||e.target.closest('.opt')||e.target.closest('#more')||e.target.closest('.dv-panel'))return;var c=e.target.closest('[data-q],[data-h],[data-a]');if(!c)return;if(c.hasAttribute('data-q'))openDetail(window.__Q[+c.getAttribute('data-q')],'reg');else if(c.hasAttribute('data-h'))openDetail(window.__H[+c.getAttribute('data-h')],'hot');else if(c.hasAttribute('data-a'))openDetail(filtered[+c.getAttribute('data-a')],'router');});
+</script></body></html>

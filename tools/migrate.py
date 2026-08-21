@@ -8,8 +8,9 @@ sha256 is recorded and re-checked, so drift is caught).
 
 Usage:
     DATABASE_URL=postgres://... python3 tools/migrate.py            # dry run
+    DATABASE_URL=postgres://... python3 tools/migrate.py --through 0170_guidance_import_lifecycle.sql
     DATABASE_URL=postgres://... python3 tools/migrate.py --apply    # apply, confirm host
-    DATABASE_URL=postgres://... python3 tools/migrate.py --apply --yes
+    DATABASE_URL=postgres://... python3 tools/migrate.py --apply --yes --through 0170_guidance_import_lifecycle.sql
 
 CREDENTIAL RULE (stress-test addendum A14): build sessions run against a
 NEON BRANCH credential, never the production writer. Risky changes rehearse
@@ -135,6 +136,31 @@ def pending_migrations(
     return [(name, sql, digest) for name, sql, digest in migrations if name not in applied]
 
 
+def migrations_through(
+    migrations: list[tuple[str, str, str]],
+    pending: list[tuple[str, str, str]],
+    through: str | None,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """Split pending migrations into the authorized prefix and held-back tail.
+
+    A production activation may need an already-reviewed migration without also
+    taking every newer, unrelated file that merged while the activation was
+    waiting.  The boundary is an exact checked-in filename, and selection is
+    still the ordinary forward-only filename prefix: no gap or hand-picked
+    dependency can be skipped.
+    """
+    if through is None:
+        return pending, []
+    names = [name for name, _sql, _digest in migrations]
+    if through not in names:
+        raise ValueError(
+            f"--through target is not an exact checked-in migration filename: {through}"
+        )
+    selected = [item for item in pending if item[0] <= through]
+    held_back = [item for item in pending if item[0] > through]
+    return selected, held_back
+
+
 class AppliedMigrationLedgerError(ValueError):
     """The database ledger cannot be reconciled to immutable files in the tree."""
 
@@ -142,7 +168,13 @@ class AppliedMigrationLedgerError(ValueError):
 def validate_applied_ledger(
     migrations: list[tuple[str, str, str]], applied: dict[str, str]
 ) -> None:
-    """Refuse missing/edited applied files, except exact legacy convergence aliases."""
+    """Refuse missing, edited, or reordered ledger state.
+
+    The effective applied set accounts for the exact historical rename aliases,
+    then must be an uninterrupted prefix of the current migration tree.  A
+    later applied row after any earlier hole is not a harmless partial deploy:
+    applying the hole now would reorder history and may violate dependencies.
+    """
     current = {name: digest for name, _sql, digest in migrations}
     missing = sorted(set(applied) - set(current))
     unknown_missing = [name for name in missing if name not in LEGACY_APPLIED_ALIASES]
@@ -167,12 +199,37 @@ def validate_applied_ledger(
                 f"{name} was EDITED after being applied (sha mismatch). Write a new "
                 "migration instead; never rewrite an applied one."
             )
+    effective_applied = set(applied) & set(current)
+    effective_applied.update(
+        LEGACY_APPLIED_ALIASES[name]
+        for name in applied
+        if name in LEGACY_APPLIED_ALIASES
+    )
+    first_hole: str | None = None
+    later_applied: list[str] = []
+    for name, _sql, _digest in migrations:
+        if name not in effective_applied:
+            first_hole = first_hole or name
+        elif first_hole is not None:
+            later_applied.append(name)
+    if later_applied:
+        raise AppliedMigrationLedgerError(
+            "migration ledger is reordered: earlier migration is pending "
+            f"({first_hole}) while later migration(s) are already applied: "
+            + ", ".join(later_applied)
+            + ". Stop; reconcile dependency history before applying anything."
+        )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="apply pending migrations")
     ap.add_argument("--yes", action="store_true", help="skip the host confirmation")
+    ap.add_argument(
+        "--through",
+        metavar="FILENAME",
+        help="consider only the forward migration prefix through this exact checked-in filename",
+    )
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -199,13 +256,26 @@ def main() -> None:
         except AppliedMigrationLedgerError as exc:
             fail(str(exc))
 
-        pending = pending_migrations(migrations, applied)
+        all_pending = pending_migrations(migrations, applied)
+        try:
+            pending, held_back = migrations_through(
+                migrations, all_pending, args.through
+            )
+        except ValueError as exc:
+            fail(str(exc))
         print(f"host: {host}")
-        print(f"applied: {len(applied)}   pending: {len(pending)}")
+        print(f"applied: {len(applied)}   pending: {len(all_pending)}")
+        if args.through:
+            print(
+                f"authorized prefix: through {args.through}   "
+                f"selected: {len(pending)}   held back: {len(held_back)}"
+            )
         for name, _s, _d in pending:
             print(f"  pending: {name}")
+        for name, _s, _d in held_back:
+            print(f"  held back: {name}")
         if not pending:
-            print("nothing to do")
+            print("nothing to do in authorized prefix")
             return
         if not args.apply:
             print("dry run — pass --apply to run these")
