@@ -883,6 +883,230 @@ def main(dsn):  # noqa: C901
     check("req 1: carr_writer cannot mint through the slug wrapper either",
           writer_cannot_mint_by_slug)
 
+    # ---------------------------------------------- 0211: write receipts ----
+    # This layer was REJECTED once, for three things. Each contract below names
+    # which rejection it answers, and every one acts as carr_writer rather than
+    # as the superuser the harness hands you.
+    def receipt_fixture(sess=None, key=None, req_hash="req-hash-A"):
+        """A live session plus one qualified tool_call row, written as the
+        writer. Returns (session_id, idempotency_key, digest)."""
+        sid = sess or mint(conn, joe)
+        k = key or str(uuid.uuid4())
+        writer_runs(conn, TOOL_CALL_INSERT.replace("'hash'", f"'{req_hash}'"),
+                    (k, joe, sid), because="receipt fixture needs qualified evidence")
+        with conn.cursor() as cur:
+            cur.execute("""select ops.write_receipt_digest('log-activity', %s,
+                             'carr-internal', %s, %s)""", (joe, sid, req_hash))
+            digest = cur.fetchone()[0]
+        return sid, k, digest
+
+    RECEIPT_INSERT = """insert into ops.write_receipt
+        (id, application_session_id, actor_id, organization_tenant_id, verb,
+         subject_type, subject_id, tool_call_idempotency_key, claimed_digest, prior_digest)
+        values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,%s)"""
+
+    def honest_receipt_proves():
+        """The whole point, driven as the writer: a receipt over evidence that
+        session really wrote proves against a readback the DATABASE computes."""
+        sid, key, digest = receipt_fixture()
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "prior-0"),
+                    because="carr_writer must be able to file a receipt")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+            assert cur.fetchone()[0] is True, "an honest receipt failed to prove"
+            conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("select is_proven, readback_digest from ops.write_receipt where id=%s",
+                        (rid,))
+            proven, readback = cur.fetchone()
+        assert proven is True, "readback ran but is_proven did not follow"
+        assert readback == digest
+    check("req 6: an honest receipt proves against a database-computed readback",
+          honest_receipt_proves)
+
+    def false_claim_does_not_prove():
+        """REJECTION 2. The readback must be computed from the frozen row, not
+        echoed from what the caller claimed. A caller that claims a digest it
+        never wrote must end up with an UNPROVEN receipt rather than a proof."""
+        sid, key, _digest = receipt_fixture()
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sid, joe, subject, key, "a-digest-nobody-ever-wrote", "prior-0"),
+                    because="filing a receipt is allowed; proving a false one is not")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+            assert cur.fetchone()[0] is False, \
+                "a receipt claiming a digest it never wrote reported as PROVEN"
+            conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("select is_proven from ops.write_receipt where id=%s", (rid,))
+            assert cur.fetchone()[0] is False, "a false claim still reported is_proven"
+    check("req 6: a receipt claiming what it did not write cannot prove",
+          false_claim_does_not_prove)
+
+    def readback_is_not_caller_supplied():
+        """REJECTION 2, the structural half. If a caller can write the readback
+        column, the readback proves nothing. carr_writer holds no UPDATE."""
+        sid, key, digest = receipt_fixture()
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "prior-0"),
+                    because="setup")
+        refuses(conn, "update ops.write_receipt set readback_digest=%s where id=%s",
+                (digest, rid),
+                because="a caller-supplied readback would make the proof circular",
+                role="carr_writer", expect_message="permission denied",
+                privilege_is_the_point=True)
+    check("req 6: carr_writer cannot supply a readback itself", readback_is_not_caller_supplied)
+
+    def receipt_needs_a_live_session():
+        """REJECTION 1. The session is the APPLICATION session, held to the same
+        standard as evidence: live, unexpired, unrevoked, matching actor and
+        tenant. Not the database backend that happened to write it."""
+        # Minted with a real future expiry and then waited out: 0208 refuses to
+        # mint a session that is already dead, so an expired one can only be
+        # produced the way time produces it.
+        sid = mint(conn, joe, expires="now() + interval '1 second'")
+        time.sleep(1.5)
+        key = str(uuid.uuid4())
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        refuses(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, "d", "prior-0"),
+                because="a receipt naming an expired session would look like proof",
+                role="carr_writer", expect_message="is expired")
+    check("req 6: a receipt cannot name an expired session", receipt_needs_a_live_session)
+
+    def receipt_cannot_cross_actors():
+        sid = mint(conn, joe)
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        refuses(conn, RECEIPT_INSERT,
+                (rid, sid, dell, subject, str(uuid.uuid4()), "d", "prior-0"),
+                because="a receipt whose actor its session never vouched for is worse "
+                        "than no receipt, because it looks like proof",
+                role="carr_writer", expect_message="different actor")
+    check("req 6: a receipt cannot name an actor its session did not authenticate",
+          receipt_cannot_cross_actors)
+
+    def receipt_cannot_prove_another_sessions_evidence():
+        """REJECTION 1 again, at readback time rather than insert time."""
+        sid_a, key_a, digest_a = receipt_fixture()
+        sid_b = mint(conn, joe)
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (rid, sid_b, joe, subject, key_a, digest_a, "prior-0"),
+                    because="setup: a receipt on session B naming session A's evidence")
+        try:
+            with as_writer(conn), conn.cursor() as cur:
+                cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+            conn.rollback()
+            raise AssertionError(
+                "a receipt was proven against another session's evidence")
+        except psycopg.Error as exc:
+            conn.rollback()
+            assert "different session" in str(exc).lower(), (
+                f"refused, but by a different guard: {str(exc).strip().splitlines()[0]}")
+    check("req 6: a receipt cannot be proven against another session's evidence",
+          receipt_cannot_prove_another_sessions_evidence)
+
+    def legacy_evidence_cannot_be_read_back():
+        """A proof about a row 0208 says proves nothing is not a proof."""
+        sid = mint(conn, joe)
+        key = str(uuid.uuid4())
+        writer_runs(conn, TOOL_CALL_INSERT, (key, joe, None),
+                    because="setup: a legacy row")
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, "d", "prior-0"),
+                    because="setup")
+        try:
+            with as_writer(conn), conn.cursor() as cur:
+                cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+            conn.rollback()
+            raise AssertionError("a receipt was proven against LEGACY evidence")
+        except psycopg.Error as exc:
+            conn.rollback()
+            assert "legacy evidence" in str(exc).lower(), (
+                f"refused by a different guard: {str(exc).strip().splitlines()[0]}")
+    check("req 6: legacy evidence cannot back a receipt", legacy_evidence_cannot_be_read_back)
+
+    def reversal_must_be_exact():
+        """REJECTION 3. 'This undoes that' is checked, not believed: a reversal
+        is exact only when it produces the state its target built on."""
+        sid, key, digest = receipt_fixture()
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "prior-0"),
+                    because="setup: the receipt to be reversed")
+        bad = """insert into ops.write_receipt
+            (id, application_session_id, actor_id, organization_tenant_id, verb,
+             subject_type, subject_id, tool_call_idempotency_key, claimed_digest,
+             prior_digest, reverses_receipt_id)
+            values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,
+                    'not-the-prior-state',%s,%s)"""
+        refuses(conn, bad, (uuid.uuid4(), sid, joe, subject, key, digest, rid),
+                because="a reversal that does not restore the prior state is not a reversal",
+                role="carr_writer", expect_message="reversal is not exact")
+        # and the exact one is accepted
+        good = bad.replace("'not-the-prior-state'", "'prior-0'")
+        writer_runs(conn, good, (uuid.uuid4(), sid, joe, subject, key, digest, rid),
+                    because="an exact reversal must be permitted, or the guard is "
+                            "simply refusing everything")
+    check("req 6: a reversal must land exactly where its target began",
+          reversal_must_be_exact)
+
+    def conflicts_are_derived_not_declared():
+        """REJECTION 3. Two receipts conflict when they build on the same prior
+        state and produce different results — evaluated, never asserted."""
+        sid, key, digest = receipt_fixture()
+        subject = uuid.uuid4()
+        a, b = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (a, sid, joe, subject, key, digest, "shared-prior"),
+                    because="setup")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (b, sid, joe, subject, key, "a-different-result", "shared-prior"),
+                    because="setup: same prior state, different result")
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)", (subject,))
+            assert cur.fetchone()[0] >= 1, \
+                "two receipts on the same prior state with different results are a conflict"
+        # A SEQUENCE IS NOT A CONFLICT, and this is the distinction the whole
+        # definition rests on. Two receipts that each build on the state the
+        # other produced are history, not divergence. Without this assertion,
+        # dropping the shared-prior-state condition entirely still passes — the
+        # detector would then call every edit of a subject a conflict, which is
+        # the same as detecting nothing.
+        seq_subject = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (uuid.uuid4(), sid, joe, seq_subject, key, "state-1", "state-0"),
+                    because="setup: first write")
+        writer_runs(conn, RECEIPT_INSERT,
+                    (uuid.uuid4(), sid, joe, seq_subject, key, "state-2", "state-1"),
+                    because="setup: a second write built on the first")
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)",
+                        (seq_subject,))
+            assert cur.fetchone()[0] == 0, (
+                "two receipts in sequence — the second built on what the first "
+                "produced — must not be reported as conflicting")
+
+        # a subject with one receipt is not a conflict
+        lone = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (uuid.uuid4(), sid, joe, lone, key, digest, "p"), because="setup")
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from ops.receipt_conflicts('deal', %s)", (lone,))
+            assert cur.fetchone()[0] == 0, \
+                "a single receipt must not report as conflicting with itself"
+    check("req 6: conflict is derived from causal history, not declared",
+          conflicts_are_derived_not_declared)
+
+    def receipts_are_frozen():
+        sid, key, digest = receipt_fixture()
+        rid, subject = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (rid, sid, joe, subject, key, digest, "prior-0"),
+                    because="setup")
+        refuses(conn, "delete from ops.write_receipt where id=%s", (rid,),
+                because="a receipt that can be deleted is not a receipt",
+                role="carr_writer", expect_message="permission denied",
+                privilege_is_the_point=True)
+    check("req 6: carr_writer cannot delete a receipt", receipts_are_frozen)
+
     def triggers_enable_always():
         with conn.cursor() as cur:
             cur.execute("""select c.relname, t.tgname, t.tgenabled
