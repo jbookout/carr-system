@@ -273,10 +273,27 @@ def _canonical_snapshot():
     snapshot = {"exports": None, "job_definitions": None, "jobs": None,
                 "controls": None, "errors": []}
     if CANONICAL_SECTION in ("all", "exports"):
+        # THE CUTOFF (fired 2026-08-19) IS CARRIED HERE TOO. A retired .md target
+        # stops producing export_run rows at all, so 26 hours later every one of
+        # them trips the STALE branch below — 88 amber lines on this machine,
+        # prescribing a re-export of targets the exporter now refuses to write.
+        # A state chosen on purpose was reading as a permanent failure, which is
+        # the thing rule bd4a6d22 forbids and the same defect this file already
+        # carried for active rule gaps.
+        #
+        # The register further down this file (the "a target nobody registered is
+        # not a target that failed" block) already had this right. It is a
+        # different section and does not run in a normal `run.sh health`, so its
+        # correctness never reached the line Joe and Dell actually read. Same
+        # flag function the exporter itself gates on — one contract, no second
+        # opinion, and no second place to decide what "retired" means.
         probe = r'''
 import json
 from exporters.targets import TARGETS
 from exporters.common import connect
+from exporters.run_exports import md_renders_retired
+retired = sorted(k for k, (rel, _fn) in TARGETS.items()
+                 if rel.lower().endswith(".md")) if md_renders_retired() else []
 with connect() as c, c.cursor() as cur:
     cur.execute("""select target,
                           max(ran_at) filter (where status='ok'),
@@ -284,7 +301,7 @@ with connect() as c, c.cursor() as cur:
                      from export_run group by target""")
     rows = [{"target": t, "last_ok": x.isoformat() if x else None,
              "latest_status": s} for t, x, s in cur.fetchall()]
-print(json.dumps({"registered": sorted(TARGETS), "rows": rows}))
+print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retired}))
 '''
         _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
         _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
@@ -581,6 +598,11 @@ def _canonical_health():
             rc = 1
         else:
             registered = set(exports.get("registered") or [])
+            # A RETIRED TARGET IS NOT A MISSED CHAIN. Subtracted before the loop
+            # rather than filtered out of `bad` afterwards, so a retired target
+            # cannot reach any of the four failure branches by another route.
+            retired = set(exports.get("retired") or [])
+            registered -= retired
             rows = {r.get("target"): r for r in exports.get("rows") or [] if isinstance(r, dict)}
             bad = []
             for target in sorted(registered):
@@ -605,10 +627,19 @@ def _canonical_health():
             for finding in bad:
                 print(f"  ⚠︎ {finding}")
                 _canonical_finding("export_receipt", finding)
+            # THE RETIRED COUNT RIDES ON THE LINE EITHER WAY. Rule bd4a6d22 asks
+            # for a chosen state to stay visible rather than become silence, so
+            # the reader is told how many targets are carried and why they have
+            # no receipt — never left to infer it from a number that shrank.
+            _carried = (f", {len(retired)} retired at the 2026-08-19 cutoff and "
+                        f"correctly unreceipted" if retired else "")
             if bad:
                 rc = 1
+                if retired:
+                    print(f"  -- RETIRED {len(retired)} md render target(s) not counted above")
             else:
-                print(f"  OK {len(registered)} registered target(s), all receipted inside 26h")
+                print(f"  OK {len(registered)} registered target(s), "
+                      f"all receipted inside 26h{_carried}")
 
     if CANONICAL_SECTION in ("all", "jobs"):
         print("Schedule drift — durable Control Plane job state")
