@@ -558,7 +558,7 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
 fi
 
 # Production reachability + the default branch id, which teardown checks against.
-BRANCH_LIST_JSON="$("$NEONCTL" branches list --project-id "$PROJECT_ID" --output json 2>/dev/null)"
+BRANCH_LIST_JSON="$("$NEONCTL" branches list --project-id "$PROJECT_ID" --org-id "${NEON_ORG_ID:-org-dry-dew-75906281}" --output json 2>/dev/null)"
 PROD_DEFAULT_ID="$(print -r -- "$BRANCH_LIST_JSON" \
   | python3 -c 'import json,sys; print(next((b["id"] for b in json.load(sys.stdin) if b.get("default")), ""))' 2>/dev/null)"
 [ -n "$PROD_DEFAULT_ID" ] || die "cannot list Neon branches — is neonctl authenticated? ($NEONCTL auth)"
@@ -574,7 +574,7 @@ say "  ok    Neon reachable; default branch is $PROD_DEFAULT_ID"
 # backup-dump.sh and tools/db-tap.py, and for the same two reasons: the harness
 # classifier refuses a Bash command containing $(...), and a DSN that never
 # reaches a shell argument never reaches a shell history either. Never printed.
-PROD_URL="$("$NEONCTL" connection-string "$PROD_BRANCH" --project-id "$PROJECT_ID" \
+PROD_URL="$("$NEONCTL" connection-string "$PROD_BRANCH" --project-id "$PROJECT_ID" --org-id "${NEON_ORG_ID:-org-dry-dew-75906281}" \
             --role-name neondb_owner 2>/dev/null)"
 [ -n "$PROD_URL" ] || die "could not obtain the production connection string"
 PROD_HOST="${${PROD_URL#*@}%%/*}"; PROD_HOST="${PROD_HOST%%\?*}"
@@ -640,7 +640,7 @@ say "  ok    created $BRANCH_NAME ($BRANCH_ID)"
 # collide with existing objects and prove nothing. A fresh database is a genuine
 # empty target and costs one statement.
 step "phase 3: restore"
-BRANCH_ADMIN_URL="$("$NEONCTL" connection-string "$BRANCH_ID" --project-id "$PROJECT_ID" \
+BRANCH_ADMIN_URL="$("$NEONCTL" connection-string "$BRANCH_ID" --project-id "$PROJECT_ID" --org-id "${NEON_ORG_ID:-org-dry-dew-75906281}" \
                     --role-name neondb_owner 2>/dev/null)"
 [ -n "$BRANCH_ADMIN_URL" ] || die "could not obtain the branch connection string"
 BRANCH_HOST="${${BRANCH_ADMIN_URL#*@}%%/*}"; BRANCH_HOST="${BRANCH_HOST%%\?*}"
@@ -657,7 +657,7 @@ if ! psql "$BRANCH_ADMIN_URL" -v ON_ERROR_STOP=1 -q -c "create database $RESTORE
   say "$(cat "$WORKDIR/createdb.err")" >&2
   die "could not create the $RESTORE_DB database on the branch"
 fi
-RESTORE_URL="$("$NEONCTL" connection-string "$BRANCH_ID" --project-id "$PROJECT_ID" \
+RESTORE_URL="$("$NEONCTL" connection-string "$BRANCH_ID" --project-id "$PROJECT_ID" --org-id "${NEON_ORG_ID:-org-dry-dew-75906281}" \
                --role-name neondb_owner --database-name "$RESTORE_DB" 2>/dev/null)"
 [ -n "$RESTORE_URL" ] || die "could not obtain the $RESTORE_DB connection string"
 say "  ok    empty database $RESTORE_DB created on the branch"

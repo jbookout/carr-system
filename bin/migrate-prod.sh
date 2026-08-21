@@ -110,7 +110,7 @@ fi
 # because it is rebuilt often; production is never rebuilt.
 NEON_PROJECT_PRODUCTION="steep-field-48688294"
 
-DSN="$(neonctl connection-string production \
+DSN="$(neonctl connection-string production --org-id "${NEON_ORG_ID:-org-dry-dew-75906281}" \
         --project-id "$NEON_PROJECT_PRODUCTION" \
         --role-name neondb_owner 2>/tmp/migrate-prod-neonctl.err)"
 if [[ -z "$DSN" ]]; then

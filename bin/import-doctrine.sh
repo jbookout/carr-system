@@ -39,7 +39,7 @@ if [[ " $* " == *" --apply "* ]]; then
   if [ -z "${NEON_API_KEY:-}" ] && [ -f "$HOME/.config/carr/db.env" ]; then
     set -a; . "$HOME/.config/carr/db.env"; set +a
   fi
-  DSN="$(neonctl connection-string production --role-name app_writer 2>/dev/null)"
+  DSN="$(neonctl connection-string production --org-id "${NEON_ORG_ID:-org-dry-dew-75906281}" --role-name app_writer 2>/dev/null)"
 else
   DSN=""   # dry runs parse only; no credential needed
 fi

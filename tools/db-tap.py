@@ -187,7 +187,8 @@ def _staging_runtime_target(env: dict) -> tuple[str, str, str, str]:
     if project_id == PROJECTS["production"]["id"]:
         sys.exit("db-tap: staging resolved to the canonical Production project id")
     branch_payload = _json_command(
-        [NEONCTL, "branches", "list", "--project-id", project_id, "--output", "json"],
+        [NEONCTL, "branches", "list", "--project-id", project_id,
+         "--org-id", NEON_ORG, "--output", "json"],
         env, "staging branch lookup",
     )
     branches = branch_payload if isinstance(branch_payload, list) else branch_payload.get("branches", [])
@@ -198,7 +199,8 @@ def _staging_runtime_target(env: dict) -> tuple[str, str, str, str]:
     if not branch_id:
         sys.exit("db-tap: staging main branch has no immutable id")
     endpoint_payload = _json_command(
-        [NEONCTL, "api", f"/projects/{project_id}/branches/{branch_id}/endpoints", "--output", "json"],
+        [NEONCTL, "api", f"/projects/{project_id}/branches/{branch_id}/endpoints",
+         "--org-id", NEON_ORG, "--output", "json"],
         env, "staging endpoint lookup",
     )
     endpoints = endpoint_payload if isinstance(endpoint_payload, list) else endpoint_payload.get("endpoints", [])
@@ -260,7 +262,7 @@ def dsn(branch=None, project: str = "production", role_name: str = "neondb_owner
     if branch is None:
         branch = spec["default_branch"]
     out = subprocess.run(
-        [NEONCTL, "connection-string", branch,
+        [NEONCTL, "connection-string", branch, "--org-id", NEON_ORG,
          "--project-id", project_id,
          "--role-name", role_name,
          # A project can hold more than one database.  All sanctioned CARR

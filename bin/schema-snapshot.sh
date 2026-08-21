@@ -126,7 +126,7 @@ if [ -n "$URL" ]; then
     || { echo "schema-snapshot: disposable source must be passwordless carr_ci on 127.0.0.1/carr_ci" >&2; exit 64; }
 else
   [ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
-  URL="$("$NEONCTL" connection-string production \
+  URL="$("$NEONCTL" connection-string production --org-id "${NEON_ORG_ID:-org-dry-dew-75906281}" \
           --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
   [ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
 fi

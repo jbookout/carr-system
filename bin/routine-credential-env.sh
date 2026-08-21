@@ -2,6 +2,15 @@
 # Narrow credential loader for unattended routines.  This file is safe to source;
 # it never evaluates ~/.config/carr/db.env.
 
+# THE ORG PICKER IS AN INTERACTIVE CREDENTIAL. When the Neon login belongs to
+# more than one organization, neonctl stops answering and starts ASKING — an
+# arrow-key picker, at runtime, in a context with nobody at the keyboard. It
+# does not fail fast either: it waits, and the caller dies on its own timeout,
+# which reads like a slow network rather than a prompt. Naming the org here
+# covers every routine that sources this file; the Python callers name it at
+# the call site as well, because an export can be lost and an argument cannot.
+export NEON_ORG_ID="${NEON_ORG_ID:-org-dry-dew-75906281}"
+
 carr_clear_routine_db_env() {
   unset DATABASE_URL CARR_DB_WRITER_URL CARR_DB_OWNER_URL CARR_DB_CADENCE_URL \
     CARR_DB_MATCHER_URL CARR_DB_EXPORTER_URL CARR_DB_JOBS_URL CARR_DB_BACKUP_URL \
