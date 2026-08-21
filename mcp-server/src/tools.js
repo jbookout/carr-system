@@ -2562,8 +2562,7 @@ export const TOOLS = {
         // not.  Account ownership is therefore filtered from authenticated
         // sponsor scope exactly as deal ownership is, never from caller input.
         return { items: value.deals.filter(ownOrShared),
-          accounts: value.accounts.filter((row) => !row?.account_owner
-            || String(row.account_owner).toLowerCase() === scope.sponsor) };
+          accounts: value.accounts.filter((row) => String(row?.account_owner || "").toLowerCase() === scope.sponsor) };
       });
       const loops = await section(async () => {
         const value = await TOOLS["loop-board"].handler(c, actor,

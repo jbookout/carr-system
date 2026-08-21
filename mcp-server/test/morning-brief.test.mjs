@@ -81,14 +81,16 @@ test("morning-brief filters accounts by authenticated sponsor rather than exposi
   const accounts = [
     { account_name: "Joe Account", account_owner: "joe" },
     { account_name: "Dell Account", account_owner: "dell" },
-    { account_name: "Shared Account", account_owner: null },
+    { account_name: "Unowned Account", account_owner: null },
   ];
   const joe = await executeRegisteredTool(client({ accounts }), JOE, "morning-brief", {});
   const dell = await executeRegisteredTool(client({ accounts }), DELL, "morning-brief", {});
-  assert.deepEqual(joe.sections.deals.accounts.map((row) => row.account_name), ["Joe Account", "Shared Account"]);
-  assert.deepEqual(dell.sections.deals.accounts.map((row) => row.account_name), ["Dell Account", "Shared Account"]);
+  assert.deepEqual(joe.sections.deals.accounts.map((row) => row.account_name), ["Joe Account"]);
+  assert.deepEqual(dell.sections.deals.accounts.map((row) => row.account_name), ["Dell Account"]);
   assert.doesNotMatch(JSON.stringify(joe), /Dell Account/);
   assert.doesNotMatch(JSON.stringify(dell), /Joe Account/);
+  assert.doesNotMatch(JSON.stringify(joe), /Unowned Account/);
+  assert.doesNotMatch(JSON.stringify(dell), /Unowned Account/);
 });
 
 test("morning-brief refuses an unsponsored runtime rather than selecting a shared or caller-supplied brain", async () => {
