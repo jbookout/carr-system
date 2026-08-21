@@ -134,8 +134,11 @@ cat > "$TMP" <<'ROLES'
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
 --
--- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
--- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- ALL EIGHT of production's carr_ roles are now accounted for. Seven are created
+-- here. carr_session_minter joined on 2026-08-20 with migration 0204: it is the
+-- ONLY role permitted to mint an authenticated application session, which is the
+-- whole of that migration's separation argument, so a rebuilt cluster missing it
+-- would have no separation to enforce. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
@@ -154,7 +157,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence','carr_session_minter'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -168,7 +171,6 @@ begin
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
 end $$;
-
 ROLES
 
 if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" >> "$TMP"; then
@@ -239,7 +241,7 @@ select format('revoke all on function %s.%s(%s) from public;',
  order by 1;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -253,7 +255,7 @@ select format('grant %s on schema %s to %s;',
  order by n.nspname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -269,7 +271,7 @@ select format('grant %s on %s %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -286,7 +288,7 @@ select format('grant %s (%s) on table %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -300,7 +302,7 @@ select format('grant execute on function %s.%s(%s) to %s;',
  order by n.nspname, p.proname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_session_minter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s to %s;', gr.rolname, mem.rolname)
   from pg_auth_members m

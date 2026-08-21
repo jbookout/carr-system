@@ -113,3 +113,29 @@ while requiring every mapped forward file to remain present. Unrelated current
 files in the same numeric band—especially `0134_release_abandon_reason.sql`,
 `0135_situation_retrieval.sql`, and `0136_release_manifest_view_grant.sql`—are
 not aliases and receive no exemption.
+
+## The application-session substrate has a gate that CI does not run (2026-08-20)
+
+`0204_authenticated_application_session.sql` is the authenticated application-session
+floor. Its guarantees are database-level — trigger shapes, role separation, expiry and
+revocation — and they are proven by executing them, not by reading the SQL:
+
+```
+ops/check-application-session.sh
+```
+
+That stands up a disposable local PostgreSQL, applies the migration, and runs
+`mcp-server/test/db/application_session_contract.py` twice. **Run it before and after
+any change to that migration.** It is deliberately NOT in the GitHub workflow: it needs
+a live PostgreSQL and this repo's Action minutes are metered and over the free
+allowance, so wiring it there is a cost decision rather than a default.
+
+The predecessor attempt asserted thirteen database properties with regex over its own
+migration text and zero connections, and reported green while the runtime writer could
+not write a single qualified row. A gate nobody runs is the same failure one level up,
+which is why this note exists rather than only a docstring inside the test.
+
+Anything that creates a role must also add it to the role preamble in `db/schema.sql`.
+`0204` creates `carr_session_minter`, and that role is the whole of its separation
+argument: on the day the snapshot's ledger passes 0204, the migration stops replaying
+and a rebuilt cluster would not have the role at all.

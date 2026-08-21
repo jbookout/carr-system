@@ -23,8 +23,11 @@
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
 --
--- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
--- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- ALL EIGHT of production's carr_ roles are now accounted for. Seven are created
+-- here. carr_session_minter joined on 2026-08-20 with migration 0204: it is the
+-- ONLY role permitted to mint an authenticated application session, which is the
+-- whole of that migration's separation argument, so a rebuilt cluster missing it
+-- would have no separation to enforce. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
@@ -43,7 +46,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence','carr_session_minter'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
