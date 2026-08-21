@@ -124,7 +124,11 @@ with current_run as (
 select t1_candidate_count,source_observed_at,
        case when source_observed_at is null
                    or source_observed_at < now()-interval '36 hours'
-                   or sealed_member_count<>current_member_count then 'unavailable'
+                   -- A source addition is just as material as an edit or a
+                   -- removal: otherwise an old sealed subset could claim to
+                   -- be the current renewal snapshot.
+                   or sealed_member_count<>current_member_count
+                   or sealed_member_count<>(select count(*) from candidate_pool where source='renewal-radar' and status='pool') then 'unavailable'
             when t1_candidate_count=0 then 'empty'
             else 'ready' end as freshness_state
   from aggregate;

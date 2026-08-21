@@ -99,6 +99,19 @@ def main() -> int:
             fail("sealed nonempty source did not become ready")
         cur.execute("reset role")
 
+        # A post-seal addition must invalidate the whole snapshot.  Counting only
+        # sealed members would otherwise make an old, partial source look current.
+        cur.execute(
+            """insert into candidate_pool(source,source_key,source_row,name,city,state,status,created_by,updated_by)
+               values ('renewal-radar',%s,%s,%s,'Mobile','AL','pool',%s,%s)""",
+            (uuid.uuid4().hex, Jsonb({"tier": "T1", "flag": ""}), f"Renewal Added After Seal {suffix}", actor, actor),
+        )
+        set_local_role(cur, "carr_reader")
+        if one(cur, "select freshness_state from v_renewal_decision_queue_status")[0] != "unavailable" or cur.execute("select * from v_renewal_decision_queue").fetchall():
+            fail("post-seal source addition looked fresh or left safe rows visible")
+        cur.execute("reset role")
+        cur.execute("update candidate_pool set source='renewal-radar-gate-shadow',updated_by=%s where name=%s", (actor, f"Renewal Added After Seal {suffix}"))
+
         # A mutable post-seal edit invalidates the entire snapshot rather than
         # reusing updated_at to claim freshness.
         cur.execute("update candidate_pool set city='Changed After Seal',updated_by=%s where name=%s", (actor, fixtures[0][0]))
