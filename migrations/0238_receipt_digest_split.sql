@@ -433,6 +433,19 @@ begin
     raise exception 'receipt % claims a different tenant than its evidence', p_receipt_id;
   end if;
 
+  -- A DISAVOWED RECEIPT CANNOT BE PROVED AFTERWARDS. Retraction is refused
+  -- against a receipt that is already proven, but nothing stopped the reverse
+  -- order: retract while unproven, prove the retraction, then come back and
+  -- prove the original. Readback is one-way and final, so that left a receipt
+  -- permanently proven and permanently retracted -- a state no honest sequence
+  -- produces and every downstream reader disagrees about.
+  if exists (select 1 from ops.write_receipt rr
+              where rr.retracts_receipt_id = r.id and rr.is_proven) then
+    raise exception
+      'receipt % has already been retracted by a proven receipt and cannot now '
+      'be proved', p_receipt_id;
+  end if;
+
   -- Computed HERE, from the frozen row AND from this receipt's own subject, so
   -- a digest computed for one subject cannot prove a receipt naming another.
   digest := encode(sha256(convert_to(
@@ -471,9 +484,17 @@ as $$
      where w.subject_type = p_subject_type
        and w.subject_id   = p_subject_id
        and w.retracts_receipt_id is null
-       and not exists (
+       -- A PROVEN RECEIPT IS NEVER DROPPED, the same rule ops.continuity_reducer
+       -- follows. Without this clause the two functions read one predicate two
+       -- ways, and the gap between them is a false yes: file a receipt, retract
+       -- it WHILE UNPROVEN so the retraction is accepted, prove the retraction,
+       -- then prove the original. It is now proven AND retracted, this function
+       -- drops it, and a second receipt forking the same prior stops being a
+       -- conflict. Two proven receipts disagreeing about one subject, and the
+       -- acceptance record says the database is clean.
+       and (w.is_proven or not exists (
          select 1 from ops.write_receipt rr
-          where rr.retracts_receipt_id = w.id and rr.is_proven)
+          where rr.retracts_receipt_id = w.id and rr.is_proven))
   )
   select a.id, b.id, a.prior_digest
     from live a
@@ -649,8 +670,18 @@ begin
     from ops.write_receipt w
    where w.organization_tenant_id = s.organization_tenant_id;
 
+  -- SCOPED ON BOTH HALVES. Enumerating this tenant's subjects is not the same
+  -- as counting this tenant's conflicts: a subject id is a bare uuid, so a
+  -- writer in another tenant can file two conflicting receipts naming a subject
+  -- of THIS one. Those two are same-tenant with each other, so the detector
+  -- calls them a legal conflict, and they landed in this tenant's count with no
+  -- remedy available here -- every closer is same-tenant by construction. That
+  -- is the identical "bar you cannot clear from where you stand" this migration
+  -- exists to remove, surviving in the half the earlier fix did not touch.
   select coalesce(sum(c), 0) into n_conflict from (
-    select (select count(*) from ops.receipt_conflicts(w.subject_type, w.subject_id)) as c
+    select (select count(*) from ops.receipt_conflicts(w.subject_type, w.subject_id) rc
+             join ops.write_receipt lw on lw.id = rc.left_receipt
+            where lw.organization_tenant_id = s.organization_tenant_id) as c
       from (select distinct subject_type, subject_id from ops.write_receipt
              where organization_tenant_id = s.organization_tenant_id) w
   ) t;
@@ -1024,12 +1055,19 @@ begin
   -- it, or you are a human -- the same standard phase acceptance holds, and
   -- for the same reason: undoing somebody else's recorded work is a partner's
   -- call, not a runtime credential's.
-  if new.withdrawn_by_actor_id is distinct from r.retired_by_actor_id
-     and not coalesce((select a.kind = 'human' from public.actor a
-                        where a.id = new.withdrawn_by_actor_id), false) then
+  -- ONLY THE PARTY THAT RETIRED IT. The earlier form allowed a stranger through
+  -- if the actor was human, and that is not a bound against this credential:
+  -- carr_writer holds UPDATE on public.actor (granted wholesale in 0004), so it
+  -- can relabel its own actor as human, or insert a human one, and walk through.
+  -- Any check that reads actor.kind is decoration while that grant stands.
+  -- Narrowing to the retiring party needs no such check and cannot be forged
+  -- from the writer's side, because the retirer is recorded on the row being
+  -- withdrawn. A partner who needs to withdraw somebody else's retirement can
+  -- still do it through the authority identity, which carr_writer does not hold.
+  if new.withdrawn_by_actor_id is distinct from r.retired_by_actor_id then
     raise exception
-      'withdrawing a retirement you did not make requires a human actor; % is '
-      'neither the party that retired it nor a human', new.withdrawn_by_actor_id;
+      'only the party that retired a dependency may withdraw that retirement; '
+      '% did not make it', new.withdrawn_by_actor_id;
   end if;
   return new;
 end $$;
@@ -1069,6 +1107,17 @@ returns trigger language plpgsql
 set search_path = pg_catalog, ops, public
 as $$
 begin
+  -- SERIALISE ON THE DEPENDENCY FIRST. What this replaced was a UNIQUE
+  -- CONSTRAINT, which is atomic; an existence read in a BEFORE trigger is not.
+  -- Under READ COMMITTED neither of two concurrent inserts sees the other's
+  -- uncommitted row, so both pass the check and both commit -- reproduced with
+  -- two real connections. That matters beyond tidiness: a second live row makes
+  -- the withdrawal correction path a no-op, because withdrawing one still
+  -- leaves the dependency counted retired, and section (G) exists precisely so
+  -- a wrong retirement can be undone. A transaction-scoped advisory lock keyed
+  -- on the dependency makes the read-then-insert atomic without reintroducing a
+  -- constraint that would forbid the honest retire-after-withdrawal case.
+  perform pg_advisory_xact_lock(hashtext('drive_retirement:' || new.drive_dependency_id::text));
   if exists (
     select 1 from ops.drive_retirement r
      where r.drive_dependency_id = new.drive_dependency_id
@@ -1260,34 +1309,77 @@ revoke all on function ops.require_receipt_says_what_its_call_wrote() from publi
 -- the receipt, then file a new one against the corrected state. That is what
 -- retraction is for, and it leaves both the mistake and the correction on the
 -- record instead of rewriting history in place.
+-- THE DIGEST IS A FOLD OVER A SET, so the freeze has to guard SET MEMBERSHIP,
+-- not just one row's contents. The first version guarded a single shape and a
+-- reviewer walked past it three ways, all reproduced:
+--
+--   APPEND. Adding a new event row to the same call and subject changes the set
+--   the digest folds without touching any existing row, and the trigger was
+--   BEFORE UPDATE only, so nothing fired at all.
+--
+--   MOVE OUT. Changing an event's subject_id leaves the four digest columns
+--   untouched, so the early return fired and the row left the set silently.
+--
+--   THE WINDOW. Editing between filing a receipt and proving it: the freeze
+--   looked for a PROVEN receipt, and at that moment there was not one yet.
+--
+-- All three end in the same place: a proven receipt whose stored material is not
+-- what the database would compute today. The honest producer opens none of them
+-- -- it proves in the same transaction and never appends afterwards -- but this
+-- layer exists for the writer that is buggy rather than careful, and a retry or
+-- a two-phase verb reaches the first one without trying.
+--
+-- ANY receipt now freezes the set, not merely a proven one, which closes the
+-- window without costing the producer anything: within its own transaction the
+-- producer has already written every event before it files the receipt.
 create function ops.refuse_receipted_event_rewrite()
 returns trigger language plpgsql
 set search_path = pg_catalog, ops, public
 as $$
+declare
+  key_    text;
+  sess_   uuid;
+  stype_  text;
+  sid_    uuid;
 begin
-  if (new.verb, new.field, new.old_value, new.new_value)
-     is not distinct from
-     (old.verb, old.field, old.old_value, old.new_value) then
-    return new;                      -- nothing the digest reads has moved
+  if tg_op = 'INSERT' then
+    key_ := new.idempotency_key; sess_ := new.application_session_id;
+    stype_ := new.subject_type;  sid_ := new.subject_id;
+  else
+    -- On UPDATE the OLD identity is what matters: a row moving OUT of a receipted
+    -- set is exactly as damaging as one being edited inside it.
+    if (new.verb, new.field, new.old_value, new.new_value,
+        new.idempotency_key, new.application_session_id, new.subject_type, new.subject_id)
+       is not distinct from
+       (old.verb, old.field, old.old_value, old.new_value,
+        old.idempotency_key, old.application_session_id, old.subject_type, old.subject_id)
+    then
+      return new;                    -- nothing the digest reads, or keys on, has moved
+    end if;
+    key_ := old.idempotency_key; sess_ := old.application_session_id;
+    stype_ := old.subject_type;  sid_ := old.subject_id;
+  end if;
+
+  if sess_ is null then
+    return new;                      -- legacy evidence backs no receipt
   end if;
   if exists (
     select 1 from ops.write_receipt w
-     where w.tool_call_idempotency_key = old.idempotency_key
-       and w.application_session_id    = old.application_session_id
-       and w.subject_type              = old.subject_type
-       and w.subject_id                = old.subject_id
-       and w.is_proven)
+     where w.tool_call_idempotency_key = key_
+       and w.application_session_id    = sess_
+       and w.subject_type              = stype_
+       and w.subject_id                = sid_)
   then
     raise exception
-      'this event has a proven write receipt resting on it, so the content the '
-      'receipt was proved against cannot be rewritten. Retract the receipt and '
-      'file a new one against the corrected state.';
+      'a write receipt rests on this call and subject, so the evidence it was '
+      'filed against cannot be added to, moved or rewritten. Retract the receipt '
+      'and file a new one against the corrected state.';
   end if;
   return new;
 end $$;
 
 create trigger event_receipted_content_frozen
-before update on public.event
+before insert or update on public.event
 for each row execute function ops.refuse_receipted_event_rewrite();
 alter table public.event enable always trigger event_receipted_content_frozen;
 
@@ -2798,19 +2890,97 @@ begin
         update public.event set new_value = '"TAMPERED"'::jsonb where id = ev_id;
       exception when others then
         failed := true;
-        if position('proven write receipt resting on it' in sqlerrm) = 0 then
+        if position('cannot be added to, moved or rewritten' in sqlerrm) = 0 then
           raise exception '0238 FAILED: event rewrite refused by the WRONG guard: %', sqlerrm;
         end if;
       end;
       if not failed then
-        raise exception '0238 FAILED: an event a PROVEN receipt was proved against '
-                        'was rewritten underneath it';
+        raise exception '0238 FAILED: an event a receipt rests on was rewritten '
+                        'underneath it';
       end if;
 
       -- AND AN UNRECEIPTED EVENT STAYS EDITABLE, which is the whole reason 0232
       -- left UPDATE open: update-decision and detach-decision rewrite an event
       -- in place, and detaching is this repo's designed retraction path. A
       -- freeze that broke those would be a worse bug than the one it fixed.
+      -- THE THREE ESCAPES A REVIEWER WALKED THROUGH, each closed and each
+      -- probed. A digest folded over a SET is only as frozen as its membership.
+      --
+      -- APPEND: a new row joining the set changes the fold without touching a
+      -- single existing row.
+      failed := false;
+      begin
+        insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+          field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+        values (clock_timestamp(),probe_actor,'log-activity','deal',v_subj,'price','"9999"'::jsonb,'system',kq,'carr-internal',sid);
+      exception when others then
+        failed := true;
+        if position('cannot be added to, moved or rewritten' in sqlerrm) = 0 then
+          raise exception '0238 FAILED: appending to receipted evidence refused by the WRONG guard: %', sqlerrm;
+        end if;
+      end;
+      if not failed then
+        raise exception '0238 FAILED: a row was APPENDED to the evidence a receipt '
+                        'was filed against, changing what the digest folds';
+      end if;
+
+      -- MOVE OUT: the four digest columns are untouched, so a check that looked
+      -- only at those returned early and let the row leave the set.
+      failed := false;
+      begin
+        update public.event set subject_id = gen_random_uuid() where id = ev_id;
+      exception when others then
+        failed := true;
+        if position('cannot be added to, moved or rewritten' in sqlerrm) = 0 then
+          raise exception '0238 FAILED: moving receipted evidence refused by the WRONG guard: %', sqlerrm;
+        end if;
+      end;
+      if not failed then
+        raise exception '0238 FAILED: an event was MOVED OUT of the set a receipt was '
+                        'proved against, without touching a digest column';
+      end if;
+
+      -- THE WINDOW: edit after filing and before proving. A freeze that looked
+      -- for a PROVEN receipt could not see one yet, so ordering alone defeated
+      -- it. ANY receipt freezes the set now.
+      declare
+        kw text := 'p14w-' || gen_random_uuid()::text;
+        wsubj uuid := gen_random_uuid();
+        wev uuid;
+        wrid uuid := gen_random_uuid();
+      begin
+        insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+          response, organization_tenant_id, application_session_id)
+        values (kw,'log-activity',probe_actor,kw,'{}'::jsonb,'carr-internal',sid);
+        insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+          field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+        values (clock_timestamp(),probe_actor,'log-activity','deal',wsubj,'stage','"before"'::jsonb,'system',kw,'carr-internal',sid)
+        returning id into wev;
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+        values (wrid,sid,probe_actor,'carr-internal','log-activity','deal',wsubj,kw,
+                ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kw,'deal',wsubj),
+                ops.write_receipt_material_digest(kw, sid, 'deal', wsubj),'origin');
+        failed := false;
+        begin
+          update public.event set new_value = '"rewritten under the receipt"'::jsonb
+           where id = wev;
+        exception when others then
+          failed := true;
+          if position('cannot be added to, moved or rewritten' in sqlerrm) = 0 then
+            raise exception '0238 FAILED: in-window rewrite refused by the WRONG guard: %', sqlerrm;
+          end if;
+        end;
+        if not failed then
+          raise exception '0238 FAILED: evidence was rewritten between filing a receipt '
+                          'and proving it, so ordering alone defeats the freeze';
+        end if;
+        if not ops.prove_write_receipt(wrid) then
+          raise exception '0238 FAILED: an untouched receipt did not prove';
+        end if;
+      end;
+
       -- AND A COLUMN THE DIGEST DOES NOT READ STAYS EDITABLE EVEN WHEN THE
       -- EVENT IS RECEIPTED. update-decision rewrites human_quote and
       -- agent_rationale alongside new_value; only the four columns the material
@@ -2938,8 +3108,16 @@ begin
      where not exists (select 1 from ops.drive_retirement_withdrawal w
                         where w.drive_retirement_id = dr.id)
      limit 1;
+    -- A HUMAN third party, deliberately. The earlier guard let any human
+    -- through, and carr_writer holds UPDATE on public.actor, so "is human" was
+    -- a label the attacker could give itself. Probing with a human is the only
+    -- way to show that escape is closed rather than merely unused.
     select id into machine_actor from public.actor
-      where kind <> 'human' and id <> probe_actor order by slug limit 1;
+      where kind = 'human' and id <> probe_actor order by slug limit 1;
+    if machine_actor is null then
+      select id into machine_actor from public.actor
+        where id <> probe_actor order by slug limit 1;
+    end if;
     if a_retirement is not null and machine_actor is not null then
       declare msid uuid := gen_random_uuid();
       begin
@@ -2955,13 +3133,13 @@ begin
                   'probe: a third party with no standing');
         exception when others then
           failed := true;
-          if position('requires a human actor' in sqlerrm) = 0 then
+          if position('did not make it' in sqlerrm) = 0 then
             raise exception '0238 FAILED: standingless withdrawal refused by the WRONG guard: %', sqlerrm;
           end if;
         end;
         if not failed then
           raise exception '0238 FAILED: a third party withdrew a retirement it had no '
-                          'part in making';
+                          'part in making, and being human did not stop it';
         end if;
       end;
     end if;
@@ -3193,6 +3371,117 @@ begin
                         'not belong to';
       end if;
     end if;
+  end;
+
+  -- ===== (16) what the third security round reproduced
+  declare
+    k16 text := 'p16-' || gen_random_uuid()::text;
+    k16b text := 'p16b-' || gen_random_uuid()::text;
+    f_subj uuid := gen_random_uuid();
+    fa uuid := gen_random_uuid();
+    fr uuid := gen_random_uuid();
+    x_subj uuid := gen_random_uuid();
+    kx1 text := 'p16x-' || gen_random_uuid()::text;
+    kx2 text := 'p16y-' || gen_random_uuid()::text;
+  begin
+    -- (16a) RETRACT WHILE UNPROVEN, THEN PROVE. Retraction is refused against a
+    -- proven receipt, but nothing stopped the reverse order, and readback is
+    -- one-way -- so a receipt ended up permanently proven AND retracted, which
+    -- the conflict detector then dropped, silencing a real fork under a clean
+    -- acceptance. Closed twice: proving a disavowed receipt is refused, and the
+    -- detector no longer drops a proven one.
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (k16,'log-activity',probe_actor,k16,'{}'::jsonb,'carr-internal',sid),
+           (k16b,'log-activity',probe_actor,k16b,'{}'::jsonb,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',f_subj,'stage','"a"'::jsonb,'system',k16,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','deal',f_subj,'stage','"b"'::jsonb,'system',k16b,'carr-internal',sid);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (fa,sid,probe_actor,'carr-internal','log-activity','deal',f_subj,k16,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,k16,'deal',f_subj),
+            ops.write_receipt_material_digest(k16, sid, 'deal', f_subj),'origin');
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+      retracts_receipt_id)
+    values (fr,sid,probe_actor,'carr-internal','log-activity','deal',f_subj,k16b,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,k16b,'deal',f_subj),
+            'a-retraction-states-no-material','origin',fa);
+    if not ops.prove_write_receipt(fr) then
+      raise exception '0238 FAILED: the retract-then-prove fixture retraction did not prove';
+    end if;
+    failed := false;
+    begin
+      perform ops.prove_write_receipt(fa);
+    exception when others then
+      failed := true;
+      if position('already been retracted by a proven receipt' in sqlerrm) = 0 then
+        raise exception '0238 FAILED: proving a disavowed receipt refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0238 FAILED: a receipt a PROVEN retraction had disavowed was '
+                      'then proved, so it is both at once and every reader disagrees';
+    end if;
+
+    -- (16b) ONE TENANT CANNOT INJECT A CONFLICT INTO ANOTHER'S ACCEPTANCE. The
+    -- bar was scoped on its unproven half only; the conflict half enumerated
+    -- this tenant's subjects but counted conflicts belonging to anyone, and
+    -- every closer is same-tenant, so there was no remedy from inside.
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (kx1,'log-activity',probe_actor,kx1,'{}'::jsonb,'other-tenant',sid2),
+           (kx2,'log-activity',probe_actor,kx2,'{}'::jsonb,'other-tenant',sid2);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',x_subj,'stage','"x"'::jsonb,'system',kx1,'other-tenant',sid2),
+           (clock_timestamp(),probe_actor,'log-activity','deal',x_subj,'stage','"y"'::jsonb,'system',kx2,'other-tenant',sid2);
+    declare xa uuid := gen_random_uuid(); xb uuid := gen_random_uuid();
+    begin
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (xa,sid2,probe_actor,'other-tenant','log-activity','deal',x_subj,kx1,
+              ops.write_receipt_digest('log-activity',probe_actor,'other-tenant',sid2,kx1,'deal',x_subj),
+              ops.write_receipt_material_digest(kx1, sid2, 'deal', x_subj),'origin');
+      perform ops.prove_write_receipt(xa);
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (xb,sid2,probe_actor,'other-tenant','log-activity','deal',x_subj,kx2,
+              ops.write_receipt_digest('log-activity',probe_actor,'other-tenant',sid2,kx2,'deal',x_subj),
+              ops.write_receipt_material_digest(kx2, sid2, 'deal', x_subj),'origin');
+      perform ops.prove_write_receipt(xb);
+      if (select count(*) from ops.receipt_conflicts('deal', x_subj)) <> 1 then
+        raise exception '0238 FAILED: the cross-tenant injection fixture did not conflict';
+      end if;
+      -- ASSERTED ON THE COUNT THE BAR COMPUTES, not on whether acceptance
+      -- succeeds. By this point the retirement probes above have deliberately
+      -- left conflicts in THIS tenant, so acceptance refuses for a reason of its
+      -- own and the clause under test never speaks -- which is how the first
+      -- version of this probe reproduced the finding it was written to close.
+      declare
+        n_here bigint;
+      begin
+        select coalesce(sum(c), 0) into n_here from (
+          select (select count(*) from ops.receipt_conflicts(w.subject_type, w.subject_id) rc
+                   join ops.write_receipt lw on lw.id = rc.left_receipt
+                  where lw.organization_tenant_id = 'carr-internal') as c
+            from (select distinct subject_type, subject_id from ops.write_receipt
+                   where organization_tenant_id = 'carr-internal'
+                     and subject_id = x_subj) w
+        ) t;
+        if n_here <> 0 then
+          raise exception '0238 FAILED: a conflict belonging entirely to ANOTHER tenant '
+                          'counted against this one (% found), and nothing here can '
+                          'close it', n_here;
+        end if;
+      end;
+    end;
   end;
 
   raise notice '0238 apply-time proof passed';
