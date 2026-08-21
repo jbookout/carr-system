@@ -79,5 +79,14 @@ check("EventKit capture emits finite shadow and live evidence markers",
 check("obsolete published-feed reader is not the registered Control Plane command",
       execution["entrypoint"] != "bin/pull-gmail-calendar.py")
 
-print(f"control-plane calendar EventKit reconciliation — {14-len(FAILED)}/14 passed")
+task_doc = (ROOT / "ops/scheduled-tasks/calendar-fetch-daily.SKILL.md").read_text()
+check("calendar task instructions use the registered EventKit path, not the retired Drive feed",
+      "bin/calendar-eventkit-capture.sh" in task_doc
+      and "EventKit" in task_doc
+      and "Google Drive" not in task_doc
+      and "fetch-calendar.sh" not in task_doc
+      and "pull-gmail-calendar.py" not in task_doc
+      and "calendar-latest" not in task_doc)
+
+print(f"control-plane calendar EventKit reconciliation — {15-len(FAILED)}/15 passed")
 raise SystemExit(1 if FAILED else 0)

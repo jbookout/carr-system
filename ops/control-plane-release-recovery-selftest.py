@@ -17,6 +17,8 @@ MIGRATIONS = [
     "0193_session_work", "0194_atomic_rule_approval", "0195_control_plane_cache_observations",
     "0199_guidance_standing_context_boundary", "0200_calendar_canary_record_layer",
     "0201_nightly_availability_canary_record_layer", "0203_atomic_rule_lifecycle_forward_upgrade",
+    "0212_doctrine_meta_singleton", "0215_program5_completion_hash_grant",
+    "0216_calendar_prebrief_projection",
 ]
 STEPS = [
     {"id": "contain", "action_kind": "contain"},
@@ -101,36 +103,46 @@ def main() -> int:
     check("1. canonical procedure validates", not validate(contract, schema))
     check("2. schema is closed at every object", schema_closed(schema))
     check("3. schema itself pins exact migration order", schema["properties"]["candidate"]["properties"]["migrations"]["const"] == MIGRATIONS)
-    check("4. canonical procedure has no receipt or evidence claim", not contains_receipt_or_evidence(contract))
-    check("5. schema version is an integer constant", schema["properties"]["schema_version"].get("type") == "integer")
-    check("6. exact forward-fix steps are pinned", contract["forward_fix_steps"] == STEPS)
-    check("7. every referenced enforcement path exists", not missing_paths(contract["existing_promotion_contract_paths"]))
-    check("8. existing enforcement paths are pinned", contract["existing_promotion_contract_paths"] == PATHS)
-    check("9. worker rollback is not authorized here", contract["previous_worker_traffic_rollback"] == "not_authorized_by_this_plan")
-    check("10. recovery requires a fresh upload, never version promotion", contract["provider_version_recovery_path"] == "fresh_upload_only" and contract["existing_version_promotion"] == "forbidden_by_this_plan")
+    check("4. contract pins the reconciled migration list", contract["candidate"]["migrations"] == MIGRATIONS)
+    check("5. every candidate migration file exists", not missing_paths([f"migrations/{migration}.sql" for migration in MIGRATIONS]))
+    check("6. canonical procedure has no receipt or evidence claim", not contains_receipt_or_evidence(contract))
+    check("7. schema version is an integer constant", schema["properties"]["schema_version"].get("type") == "integer")
+    check("8. exact forward-fix steps are pinned", contract["forward_fix_steps"] == STEPS)
+    check("9. every referenced enforcement path exists", not missing_paths(contract["existing_promotion_contract_paths"]))
+    check("10. existing enforcement paths are pinned", contract["existing_promotion_contract_paths"] == PATHS)
+    check("11. worker rollback is not authorized here", contract["previous_worker_traffic_rollback"] == "not_authorized_by_this_plan")
+    check("12. recovery requires a fresh upload, never version promotion", contract["provider_version_recovery_path"] == "fresh_upload_only" and contract["existing_version_promotion"] == "forbidden_by_this_plan")
 
     with tempfile.TemporaryDirectory() as raw:
         copied = Path(raw) / "procedure.json"; copied.write_text(json.dumps(contract), encoding="utf-8")
-        check("11. real procedure parses as a local artifact", json.loads(copied.read_text(encoding="utf-8")) == contract)
+        check("13. real procedure parses as a local artifact", json.loads(copied.read_text(encoding="utf-8")) == contract)
 
     bad = copy.deepcopy(contract); bad["candidate"]["migrations"].reverse()
-    rejected("12. migration order mutation is refused", bad, schema)
+    rejected("14. migration order mutation is refused", bad, schema)
+    bad = copy.deepcopy(contract); bad["candidate"]["migrations"] = list(MIGRATIONS); bad["candidate"]["migrations"].remove("0212_doctrine_meta_singleton")
+    rejected("15. omission of the main candidate migration is refused", bad, schema)
+    bad = copy.deepcopy(contract); bad["candidate"]["migrations"] = list(MIGRATIONS); bad["candidate"]["migrations"][-2:] = list(reversed(bad["candidate"]["migrations"][-2:]))
+    rejected("16. reordered Program 5 and calendar migrations are refused", bad, schema)
+    bad = copy.deepcopy(contract); bad["candidate"]["migrations"] = list(MIGRATIONS); bad["candidate"]["migrations"][-1] = "0216_calendar_prebrief_projection_replayed"
+    rejected("17. substituted calendar migration is refused", bad, schema)
     bad = copy.deepcopy(contract); bad["forward_fix_steps"][1]["id"] = "retry"
-    rejected("13. step ID mutation is refused", bad, schema)
+    rejected("18. step ID mutation is refused", bad, schema)
     bad = copy.deepcopy(contract); bad["forward_fix_steps"] = [{"id": "be-careful", "action_kind": "prose"}]
-    rejected("14. generic steps are refused", bad, schema)
+    rejected("19. generic steps are refused", bad, schema)
     bad = copy.deepcopy(contract); bad["previous_worker_traffic_rollback"] = "authorized"
-    rejected("15. rollback authorization is refused", bad, schema)
+    rejected("20. rollback authorization is refused", bad, schema)
     bad = copy.deepcopy(contract); bad["rollback_receipt_ref"] = "invented"
-    rejected("16. invented receipt fields are refused", bad, schema)
+    rejected("21. invented receipt fields are refused", bad, schema)
+    bad = copy.deepcopy(contract); bad["calendar_activation"] = {"workflow": "calendar-prebrief-projection-joe-daily"}
+    rejected("22. workflow activation claims are refused", bad, schema)
     bad = copy.deepcopy(contract); bad["existing_promotion_contract_paths"][0] = "invented/path"
-    rejected("17. enforcement-path mutation is refused", bad, schema)
+    rejected("23. enforcement-path mutation is refused", bad, schema)
     bad = copy.deepcopy(contract); bad["provider_version_id"] = "locally-invented"
-    rejected("18. locally fabricated provider IDs are refused", bad, schema)
+    rejected("24. locally fabricated provider IDs are refused", bad, schema)
     bad = copy.deepcopy(contract); bad["schema_version"] = True
-    rejected("19. boolean schema version is refused", bad, schema)
+    rejected("25. boolean schema version is refused", bad, schema)
     bad = copy.deepcopy(contract); bad["existing_promotion_contract_paths"][0] = "missing/not-a-contract"
-    check("20. missing referenced path is detected and rejected", bool(missing_paths(bad["existing_promotion_contract_paths"])) and bool(validate(bad, schema)))
+    check("26. missing referenced path is detected and rejected", bool(missing_paths(bad["existing_promotion_contract_paths"])) and bool(validate(bad, schema)))
 
     if FAILURES:
         print(f"control-plane-release-recovery-selftest: {len(FAILURES)} FAILED")
