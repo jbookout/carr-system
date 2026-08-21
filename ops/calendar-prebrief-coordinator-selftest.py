@@ -6,7 +6,9 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -71,6 +73,91 @@ with tempfile.TemporaryDirectory() as raw:
     check("live and canary profiles accept only their own execution identity", coordinator._profile_file(live, "joe", "live")["CARR_DB_CALENDAR_PREBRIEF_JOE_URL"].startswith("postgresql://carr_calendar_prebrief_joe:") and coordinator._profile_file(canary, "joe", "canary")["CARR_DB_CALENDAR_PREBRIEF_CANARY_JOE_URL"].startswith("postgresql://carr_calendar_prebrief_canary_joe:"))
     check("a live profile cannot run canary and a canary profile cannot run live", refuses(lambda: coordinator._profile_file(live, "joe", "canary")) and refuses(lambda: coordinator._profile_file(canary, "joe", "live")))
     check("raw attendee material has no temporary-file or argv sink", all(token not in source for token in ("NamedTemporaryFile", "mkstemp", "--snapshot", "--email")))
+
+    # Exercise the executable parent -> child -> collector path, not just its
+    # individual helpers.  The fixtures record identity/environment *names*
+    # only; no DSN values or raw attendee material leave this temp directory.
+    e2e_log = root / "e2e.jsonl"
+    fake = root / "fake"
+    (fake / "psycopg" / "types").mkdir(parents=True)
+    calendar_key = hashlib.sha256(b"calendar\0calendar-joe").hexdigest()
+    live_job, canary_job = "00000000-0000-4000-8000-000000000011", "00000000-0000-4000-8000-000000000021"
+    e2e_contracts = {
+        live_job: {**contract(), "job_id": live_job, "lease_token": "00000000-0000-4000-8000-000000000012", "calendar_keys": [calendar_key]},
+        canary_job: {**contract(), "job_id": canary_job, "lease_token": "00000000-0000-4000-8000-000000000022", "mode": "canary", "destination": "calendar-prebrief-canary-joe", "calendar_keys": [calendar_key]},
+    }
+    (fake / "psycopg" / "types" / "json.py").write_text("class Jsonb:\n def __init__(self,value): self.value=value\n", encoding="utf-8")
+    (fake / "psycopg" / "__init__.py").write_text(
+        "\n".join((
+            "import json, os", "from urllib.parse import unquote, urlsplit",
+            f"LOG={str(e2e_log)!r}", f"CONTRACTS={e2e_contracts!r}",
+            "def note(kind,user=''):",
+            " with open(LOG,'a',encoding='utf-8') as out: out.write(json.dumps({'kind':kind,'user':user,'db_env':sorted(k for k in os.environ if k.startswith('CARR_DB_') or k.startswith('PG'))})+'\\n')",
+            "class Cursor:",
+            " def __init__(self,user): self.user=user; self.query=''; self.args=()",
+            " def execute(self,query,args=None): self.query=query; self.args=args or ()",
+            " def fetchone(self):",
+            "  if 'session_user,current_user' in self.query: return (self.user,self.user)",
+            "  if 'issue_calendar_prebrief_capture_contract' in self.query:",
+            "   note('contract',self.user); return (CONTRACTS[self.args[0]],)",
+            "  if 'resolve_calendar_prebrief_email_ref' in self.query: note('resolver',self.user); return ('C-E2E-1',)",
+            "  if 'record_calendar_prebrief_verified_envelope' in self.query: note('attestor',self.user); return ('00000000-0000-4000-8000-000000000031',)",
+            "  if 'ingest_calendar_prebrief_projection' in self.query: note('live_ingest',self.user); return ('00000000-0000-4000-8000-000000000041',)",
+            "  if 'ingest_calendar_prebrief_canary_projection' in self.query: note('canary_ingest',self.user); return ('00000000-0000-4000-8000-000000000051',)",
+            "  raise RuntimeError('unexpected fixture query')",
+            " def __enter__(self): return self", " def __exit__(self,*_): return False",
+            "class Conn:",
+            " def __init__(self,dsn): self.user=unquote(urlsplit(dsn).username or ''); note('connect',self.user)",
+            " def cursor(self): return Cursor(self.user)", " def commit(self): pass",
+            " def __enter__(self): return self", " def __exit__(self,*_): return False",
+            "def connect(dsn): return Conn(dsn)", "",
+        )), encoding="utf-8")
+    (fake / "EventKit.py").write_text(
+        "\n".join((
+            "import json, os", f"LOG={str(e2e_log)!r}",
+            "with open(LOG,'a',encoding='utf-8') as out: out.write(json.dumps({'kind':'collector_env','user':'','db_env':sorted(k for k in os.environ if k.startswith('CARR_DB_') or k.startswith('PG'))})+'\\n')",
+            "class URL:\n def resourceSpecifier(self): return 'mailto:raw.e2e@example.test'",
+            "class Attendee:\n def URL(self): return URL()",
+            "class Calendar:\n def calendarIdentifier(self): return 'calendar-joe'",
+            "class Event:\n def calendar(self): return Calendar()\n def eventIdentifier(self): return 'event-e2e'\n def startDate(self): from datetime import datetime,timezone; return datetime(2026,8,20,8,tzinfo=timezone.utc)\n def endDate(self): from datetime import datetime,timezone; return datetime(2026,8,20,9,tzinfo=timezone.utc)\n def title(self): return 'Meeting'\n def location(self): return None\n def attendees(self): return [Attendee()]\n def organizer(self): return None",
+            "class Store:\n def requestFullAccessToEventsWithCompletion_(self,done): done(True,None)\n def calendarsForEntityType_(self,_): return [Calendar()]\n def predicateForEventsWithStartDate_endDate_calendars_(self,*args): return args\n def eventsMatchingPredicate_(self,_): return [Event()]",
+            "class EKEventStore:\n @classmethod\n def alloc(cls): return cls()\n def init(self): return Store()", "",
+        )), encoding="utf-8")
+    (fake / "Foundation.py").write_text("class NSDate:\n @staticmethod\n def dateWithTimeIntervalSince1970_(value): return value\n", encoding="utf-8")
+    allowlist = root / "e2e-allowlist.json"
+    allowlist.write_text('{"version":1,"calendars":[{"identifier":"calendar-joe","sponsor":"joe"}]}', encoding="utf-8")
+    allowlist.chmod(0o600)
+    profile = root / "e2e-profile.env"
+    claim = root / "claim.py"
+
+    def dsn(user: str) -> str:
+        return f"postgresql://{user}:fixture@db.example/carr"
+
+    def run_e2e(mode: str) -> subprocess.CompletedProcess[str]:
+        job_id = live_job if mode == "live" else canary_job
+        execution_key = "CARR_DB_CALENDAR_PREBRIEF_JOE_URL" if mode == "live" else "CARR_DB_CALENDAR_PREBRIEF_CANARY_JOE_URL"
+        execution_user = "carr_calendar_prebrief_joe" if mode == "live" else "carr_calendar_prebrief_canary_joe"
+        profile.write_text("\n".join((
+            f"CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_JOE_URL={dsn('carr_calendar_prebrief_attestor_joe')}",
+            f"CARR_DB_CALENDAR_PREBRIEF_RESOLVER_JOE_URL={dsn('carr_calendar_prebrief_resolver_joe')}",
+            f"{execution_key}={dsn(execution_user)}",
+        )) + "\n", encoding="utf-8")
+        profile.chmod(0o600)
+        claim.write_text("import json,os\n" + f"open({str(e2e_log)!r},'a',encoding='utf-8').write(json.dumps({{'kind':'parent_claim_env','user':'','db_env':sorted(k for k in os.environ if k.startswith('CARR_DB_') or k.startswith('PG'))}})+'\\n')\n" + f"print(json.dumps({{'job_id':{job_id!r},'lease':{e2e_contracts[job_id]['lease_token']!r},'scheduled_for':'2026-08-20T06:30:00Z'}}))\n", encoding="utf-8")
+        claim.chmod(0o700)
+        environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(fake), "CARR_DB_JOBS_URL": dsn("carr_jobs"), "CARR_CALENDAR_PREBRIEF_CLAIM_COMMAND": f"{sys.executable} {claim}", "CARR_CALENDAR_PREBRIEF_CHILD_PROFILE": str(profile), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY": str(public), "CARR_CALENDAR_PREBRIEF_ALLOWLIST": str(allowlist), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY": str(private), "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION": "fixture-1"}
+        return subprocess.run([sys.executable, str(SCRIPT), "--sponsor", "joe", "--mode", mode], text=True, capture_output=True, env=environment, timeout=15, check=False)
+
+    e2e_live, e2e_canary = run_e2e("live"), run_e2e("canary")
+    if e2e_live.returncode or e2e_canary.returncode:
+        raise RuntimeError(f"coordinator E2E fixture failed: live={e2e_live.stderr!r} canary={e2e_canary.stderr!r}")
+    e2e_rows = [json.loads(line) for line in e2e_log.read_text(encoding="utf-8").splitlines()]
+    check("executable parent-to-child live and canary paths return isolated receipts", e2e_live.returncode == 0 and e2e_canary.returncode == 0 and json.loads(e2e_live.stdout).get("mode") == "live" and json.loads(e2e_canary.stdout).get("mode") == "canary")
+    check("parent claim sees only the jobs credential", [row["db_env"] for row in e2e_rows if row["kind"] == "parent_claim_env"] == [["CARR_DB_JOBS_URL"], ["CARR_DB_JOBS_URL"]])
+    check("child database calls receive no ambient DB credential", all(row["db_env"] == [] for row in e2e_rows if row["kind"] in {"connect", "contract", "resolver", "attestor", "live_ingest", "canary_ingest"}))
+    check("collector receives no database credential", all(row["db_env"] == [] for row in e2e_rows if row["kind"] == "collector_env"))
+    seen = [(row["kind"], row["user"]) for row in e2e_rows if row["kind"] in {"contract", "attestor", "live_ingest", "canary_ingest"}]
+    check("E2E uses resolver, attestor, and distinct live/canary ingest identities", seen == [("contract", "carr_calendar_prebrief_resolver_joe"), ("attestor", "carr_calendar_prebrief_attestor_joe"), ("live_ingest", "carr_calendar_prebrief_joe"), ("contract", "carr_calendar_prebrief_resolver_joe"), ("attestor", "carr_calendar_prebrief_attestor_joe"), ("canary_ingest", "carr_calendar_prebrief_canary_joe")])
 
 print("OK" if not bad else "FAIL " + ", ".join(bad))
 raise SystemExit(bool(bad))
