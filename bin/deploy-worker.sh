@@ -459,9 +459,10 @@ record_deployment() {
   # proven and `failed` means the opposite, and neither is a finished release.
   if [ "$rd_state" = "complete" ] && [ -n "$RELEASE_KEY" ]; then
     set +e
-    "$PY" "$REPO/tools/ops-record.py" release complete --key "$RELEASE_KEY" \
-      --verifier "golden-workflow-suite" \
-      --verifier-evidence "bin/smoke-and-record.sh#${rd_corr:-unknown}" >/dev/null 2>&1
+    # Approval owns the independent verifier pair immutably.  Completion adds
+    # deployment/performance evidence through its own gates; it must not try to
+    # replace that approval-bound verifier with the golden-suite runner.
+    "$PY" "$REPO/tools/ops-record.py" release complete --key "$RELEASE_KEY" >/dev/null 2>&1
     rc_rel=$?
     set -e
     if [ "$rc_rel" -eq 0 ]; then
