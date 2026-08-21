@@ -68,6 +68,14 @@ def main() -> int:
           any("canary isolation guard is not registered" in error
               for error in forged_errors))
 
+    notes_canary = next(workflow for workflow in manifest["workflows"]
+                        if workflow["key"] == "notes-sweep-hourly")
+    check("Notes canary manifest names the lease-bound isolated aggregate as its completion evidence",
+          notes_canary["execution"]["canary"] == {
+              "enabled": True, "isolation_guard": "notes-sweep-hourly.canary.v1", "args": ["--canary"]}
+          and "lease-bound" in notes_canary["inventory"]["current_completion_signal"]
+          and "source snapshot" in notes_canary["completion"]["description"])
+
     tracked = {p.stem.replace(".SKILL", "") for p in
                (REPO / "ops" / "scheduled-tasks").glob("*.SKILL.md")}
     registered = {w["key"] for w in manifest.get("workflows", [])}

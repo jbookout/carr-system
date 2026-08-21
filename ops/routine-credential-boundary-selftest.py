@@ -42,8 +42,17 @@ def main() -> int:
     check("portability mirror uses only the backup capability",
           'portability mirror (md+csv, 2 locations)' in nightly
           and 'DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
+    # WAS 3 UNTIL 2026-08-21, now 2, and the boundary is unchanged. The chain
+    # used to carry two separate recovery-point catch-up call sites — one for
+    # "no prior backup at all" and one for "N hours since the last one" —
+    # because the age test was inline shell that had to branch on those cases
+    # itself. ops/recovery-point.py answers both with a single exit code, so
+    # the two collapsed into one call site. What this check exists to enforce
+    # is that EVERY invocation binds the backup capability explicitly rather
+    # than inheriting an ambient credential, and every remaining one still
+    # does; only how many there are changed.
     check("each backup invocation binds the backup capability explicitly",
-          nightly.count('env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh') == 3)
+          nightly.count('env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh') == 2)
     # The bare form above is SAFE, and this file is not where that is proved.
     # nightly.sh defaults CARR_DB_BACKUP_URL once, right after the loader, so
     # every dereference below it is defined even when the credential was never

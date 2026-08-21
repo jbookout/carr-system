@@ -56,6 +56,7 @@ RUNNING IT. Needs a throwaway Postgres; skips cleanly without one:
     CARR_CI_DATABASE_URL=postgres://…/throwaway .venv/bin/python ops/trigger-grant-selftest.py
 """
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -63,6 +64,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CHECK = REPO / "ops" / "trigger-grant-check.py"
+
+# The postgres CLIENT lookup, shared with ops/p1-rebuild-gate.py. Loading by path
+# is how every ops gate reaches tools/db-tap.py, whose hyphenated filename cannot
+# be imported normally.
+_spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
+if _spec is None or _spec.loader is None:
+    sys.exit("trigger-grant-selftest: could not load tools/db-tap.py")
+db_tap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(db_tap)
 
 passed = 0
 failures: list[str] = []
@@ -101,7 +111,9 @@ check("with no database it SKIPS and says so", rc == 0 and "skip" in out.lower()
       out[:140])
 
 def psql(sql, dsn=DSN):
-    return subprocess.run(["psql", "-d", dsn, "-At", "-c", sql],
+    # Not the bare name: with no client installed that failed as FileNotFoundError
+    # from inside subprocess, naming neither the missing dependency nor the fix.
+    return subprocess.run([db_tap.psql_bin(), "-d", dsn, "-At", "-c", sql],
                           capture_output=True, text=True)
 
 

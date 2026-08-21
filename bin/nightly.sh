@@ -45,6 +45,41 @@ RECOVERY_REASON=""
 # surfaces without loading credentials, taking locks, writing logs, touching
 # Drive, or calling production. A canary uses the normal path under the same
 # singleton lock as the legacy schedule.
+run_canary() {
+  # The Nightly canary is intentionally only the availability-matcher subchain.
+  # It must reject ambient capability before it can create a directory, log,
+  # acquire the normal nightly lock, or source the routine credential loader.
+  [ "${CARR_CONTROL_PLANE_MODE:-}" = "canary" ] || {
+    print -ru2 -- "nightly canary requires explicit control-plane canary mode"; return 64; }
+  [ -n "${CARR_NIGHTLY_CANARY_ROOT:-}" ] || {
+    print -ru2 -- "nightly canary requires a parent-selected output root"; return 64; }
+  local key value
+  while IFS='=' read -r key value; do
+    case "$key" in
+      DATABASE_URL|BACKUP_DATABASE_URL|PG*|CARR_VAULT|CARR_ONEDRIVE_DEALS|CARR_EXPORT_LIVE|CARR_DRIVE_RECOVERY|CARR_ROUTINE_DB_ENV_FILE|CARR_INGEST_URL|CARR_AI_ROUTE_PRIMARY_URL|CARR_AI_ROUTE_SECONDARY_URL|CARR_GMAIL_APP_PASSWORD|CARR_AGE_IDENTITY|CARR_DB_*|*TOKEN*|*SECRET*|*PASSWORD*|*API_KEY*|*PROVIDER_URL*|*EXPORTER_URL*|*BACKUP_URL*)
+        print -ru2 -- "nightly canary refused ambient live capability: $key"; return 78 ;;
+    esac
+  done < <(env)
+  local base="$REPO/out/canary/nightly-record-layer" root="$CARR_NIGHTLY_CANARY_ROOT"
+  case "$root" in "$base"/*) ;; *) print -ru2 -- "nightly canary output root escapes dedicated canary directory"; return 64 ;; esac
+  [[ "$root" != *'/../'* && "$root" != *'/./'* && "$root" != "$base" ]] || {
+    print -ru2 -- "nightly canary output root is not a direct run directory"; return 64; }
+  local component
+  for component in "$REPO/out" "$REPO/out/canary" "$base"; do
+    [ ! -L "$component" ] || { print -ru2 -- "nightly canary output root crosses a symlink"; return 64; }
+  done
+  local py="$REPO/.venv/bin/python"
+  [ -x "$py" ] || py=python3
+  local snapshot marker
+  snapshot="$(cat)"
+  [ -n "$snapshot" ] || { print -ru2 -- "nightly canary requires a protected parent snapshot"; return 78; }
+  marker="$(print -rn -- "$snapshot" | "$py" "$REPO/pipelines/availability_matcher.py" --canary)" || return $?
+  case "$marker" in
+    'availability-matcher: canary-result '*) print -r -- "nightly canary result: ${marker#availability-matcher: canary-result }" ;;
+    *) print -ru2 -- "nightly canary child emitted no registered aggregate"; return 1 ;;
+  esac
+}
+
 if [ "${1:-}" = "--preflight" ]; then
   required=(
     ops/vault-drift-watch.py bin/schema-snapshot.sh ops/p1-environment-gate.py
@@ -68,7 +103,10 @@ if [ "${1:-}" = "--preflight" ]; then
   print -r -- "nightly preflight: ${#required[@]} chain surfaces present; writes=0"
   exit 0
 fi
-if [ "$#" -eq 0 ]; then
+if [ "$#" -eq 1 ] && [ "$1" = "--canary" ]; then
+  run_canary
+  exit $?
+elif [ "$#" -eq 0 ]; then
   unset CARR_VAULT CARR_EXPORT_LIVE
 elif [ "$#" -eq 3 ] && [ "$1" = "--recovery" ] && [ "$2" = "--reason" ] && [ -n "$3" ]; then
   RECOVERY=1
@@ -338,19 +376,45 @@ fi
 # before the chain risks stalling. The end-of-chain backup still runs and is still
 # the authoritative post-write snapshot; this only fires when we are ALREADY out
 # of contract, which on a healthy night is never.
+# THE RECOVERY POINT IS MEASURED ACROSS BOTH BACKUP PATHS, not just the local
+# one. Until 2026-08-21 this block read `ls -t backups/*.sql.age` and nothing
+# else, so it saw only the dump taken on this Mac. There are two paths, and
+# Program 4 built the second one precisely so the backup of last resort would
+# not depend on this machine: .github/workflows/backup-nightly.yml runs the
+# SAME bin/backup-dump.sh on GitHub's infrastructure with the same age key.
+#
+# WHAT THE ONE-PATH VIEW COST, measured the day this changed. The local
+# credential was absent, so the newest local dump was 104h old and this block
+# announced "objective is 24h" on every run. The cloud workflow had succeeded
+# that morning and every morning before it; the true recovery point was about
+# twelve hours, well inside the objective. Every local signal said otherwise.
+#
+# The alarm also pointed at a fix that would have made things worse. The role
+# comment in migrations/0119_backup_role.sql is explicit: the backup credential
+# is held "never on Joe's Mac and never in this repo". Adding it locally to
+# quiet this line would have put the credential on the exact machine the second
+# path exists to be independent of.
+#
+# ops/recovery-point.py keeps UNKNOWN separate from STALE, which is the whole
+# reason it is a script rather than another line of shell here: a path that
+# could not be read is not a path that reported a gap, and collapsing the two
+# is how a false alarm gets built in the first place.
+#   exit 0 = within objective · 1 = a real, verified gap · 2 = unknown
 RPO_HOURS=24
-newest_backup="$(ls -t "$REPO"/backups/*.sql.age 2>/dev/null | head -1)"
-if [ -z "$newest_backup" ]; then
-  say "CATCH-UP  no prior backup found — taking one before the chain begins"
-  step "recovery-point catch-up (no prior backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+recovery_report="$(./.venv/bin/python ops/recovery-point.py 2>&1)"
+recovery_rc=$?
+print -r -- "$recovery_report" >> "$LOG"
+if [ "$recovery_rc" -eq 1 ]; then
+  say "CATCH-UP  recovery point is out of contract on every readable path — taking one before the chain begins"
+  step "recovery-point catch-up (out of contract)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+elif [ "$recovery_rc" -eq 2 ]; then
+  # Deliberately NOT a catch-up. Unknown means we could not ask, so taking a
+  # dump here would be acting on an absence of evidence — and on a machine with
+  # no local credential it would only ever produce a SKIP line that reads like
+  # a gap, which is the noise this whole change removes.
+  say "UNKNOWN  recovery point could not be read on any path — see the lines above; not assuming a gap and not assuming a backup"
 else
-  backup_age_h=$(( ( $(date +%s) - $(stat -f %m "$newest_backup") ) / 3600 ))
-  if [ "$backup_age_h" -ge "$RPO_HOURS" ]; then
-    say "CATCH-UP  newest backup is ${backup_age_h}h old, objective is ${RPO_HOURS}h — taking one before the chain begins"
-    step "recovery-point catch-up (${backup_age_h}h since last backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
-  else
-    say "OK    recovery point intact (newest backup ${backup_age_h}h old, objective ${RPO_HOURS}h)"
-  fi
+  say "OK    recovery point intact (objective ${RPO_HOURS}h) — see the lines above for which path is newest"
 fi
 
 drive_projection "vault drift watch (check, first)" \
@@ -613,14 +677,16 @@ step "type-check tripwire (mypy)"                    ./bin/type-check.sh
 # first and each parameter returned to its own field, per row.
 step "tool-call markup sweep (records)"              ./.venv/bin/python ops/store-markup-scan.py
 
-# Added 2026-08-07 (Joe's pick: "build the one-page view first"): the combined
-# open-items dashboard — every open loop, team row, idea, and action-required
-# item on one filterable page, derived read-only from v_export_loops. Runs after
-# the exports so it reflects the same night's truth. Output:
-# 00_Context/open-items.html (GENERATED — never hand-edited).
-drive_projection "open-items dashboard (one-page view)" \
-  "open-items dashboard document destination" \
-  ./.venv/bin/python generators/build-open-items-dashboard.py --recovery --reason "$RECOVERY_REASON"
+# The legacy one-page file is recovery-only. Normal dashboard delivery is the
+# record-native Front Door composition (today-triage, deal-room-board, and
+# loop-board), so the nightly chain must not call a missing-seam refusal for a
+# replacement that already exists.
+if [ "$RECOVERY" -eq 1 ]; then
+  step "RECOVERY NONCANONICAL open-items dashboard (one-page view)" \
+    ./.venv/bin/python generators/build-open-items-dashboard.py --recovery --reason "$RECOVERY_REASON"
+else
+  step "open-items dashboard replaced by record-native Front Door" true
+fi
 
 # Added 2026-08-02 (cold-session audit): the smoke canary runs IN the chain and records
 # its own heartbeat. Before this it sat in the dead-man freshness list with NOTHING
