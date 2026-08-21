@@ -25115,6 +25115,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0199_guidance_standing_context_boundary.sql	76bb5327079abbdba667c22ac643a0ddadd0110dcdc46f1393c375304d59dff1	2026-08-21 03:12:08.288479+00
 0202_staging_release_readback_receipt.sql	526b9815897bdfb641329c506826afc230fb2bb76a8a67d59a347e2f7754fcb5	2026-08-21 03:12:08.791175+00
 0205_program5_approval_verifier.sql	02cb742f7be2c2d278704e9a58fa9626abc00323901adca9f2da5b539bfbd38a	2026-08-21 03:12:09.011429+00
+0212_doctrine_meta_singleton.sql	673545077c5e1bbe37676425a1addfb224acb5ef99921a736ce111fab4c4e8ab	2026-08-21 03:47:57.328664+00
 \.
 
 
@@ -25493,3 +25494,11 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
+
+
+--
+-- CARR DOCTRINE META BOOTSTRAP (bin/schema-snapshot.sh) — canonical, not
+-- production data.  A snapshot rebuild starts generation at zero.
+--
+
+insert into public.doctrine_meta (id, generation) values (1, 0);
