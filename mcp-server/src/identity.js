@@ -269,13 +269,13 @@ const LOCAL_SPONSOR = Object.freeze({ "joe-local": "joe", "dell-local": "dell" }
  */
 // PHASE 4: THIS DOOR MINTS NO APPLICATION SESSION, AND THAT IS THE DESIGN.
 // It authenticates against a STATIC SECRET MAP, which has no issuance instant,
-// no expiry and no revocation state — the three properties migration 0232's
+// no expiry and no revocation state — the three properties migration 0257's
 // session identity exists to carry. A session minted here would be a fiction
 // dressed as evidence: it would assert an authentication moment nobody can
 // point to and a revocability nobody has.
 //
 // Rows written by this actor therefore carry a NULL application_session_id and
-// are permanently non-qualifying. 0232 refuses to promote them later, so this
+// are permanently non-qualifying. 0257 refuses to promote them later, so this
 // is a durable statement rather than missing data.
 //
 // THE RISK HERE IS NOT THAT THIS BREAKS. It is that a later reader sees "these
@@ -372,13 +372,13 @@ const HERMES_SPONSOR = Object.freeze({ "hermes-pilot": "joe" });
 
 // PHASE 4: THIS DOOR MINTS NO APPLICATION SESSION, AND THAT IS THE DESIGN.
 // It authenticates against a STATIC SECRET MAP, which has no issuance instant,
-// no expiry and no revocation state — the three properties migration 0232's
+// no expiry and no revocation state — the three properties migration 0257's
 // session identity exists to carry. A session minted here would be a fiction
 // dressed as evidence: it would assert an authentication moment nobody can
 // point to and a revocability nobody has.
 //
 // Rows written by this actor therefore carry a NULL application_session_id and
-// are permanently non-qualifying. 0232 refuses to promote them later, so this
+// are permanently non-qualifying. 0257 refuses to promote them later, so this
 // is a durable statement rather than missing data.
 //
 // THE RISK HERE IS NOT THAT THIS BREAKS. It is that a later reader sees "these

@@ -69,9 +69,9 @@ def main():
         with conn.cursor() as cur:
             # THE WHOLE CHAIN, not just its first table. This probe used to check
             # only that ops.drive_retirement existed, then queried objects that
-            # arrive with 0238 -- the withdrawal table and write_receipt's
-            # material_digest. Applied only through 0237, which
-            # `bin/migrate-prod.sh --through` produces and which 0238's own
+            # arrive with 0263 -- the withdrawal table and write_receipt's
+            # material_digest. Applied only through 0262, which
+            # `bin/migrate-prod.sh --through` produces and which 0263's own
             # header names as a real operator path, the tool raised an
             # UndefinedTable traceback instead of saying which piece was
             # missing. A verifier whose job is to name what is absent should
@@ -89,8 +89,8 @@ def main():
                 print(f"target : {target_label}")
                 print("\nPARTIALLY DEPLOYED: the retirement surface exists but the "
                       "receipt\n                    digest split does not. This "
-                      "database was migrated\n                    through 0237 and "
-                      "stopped short of 0238, so retirement\n                    "
+                      "database was migrated\n                    through 0262 and "
+                      "stopped short of 0263, so retirement\n                    "
                       "cannot be verified against the guards that make its\n"
                       "                    receipts mean anything. Apply the rest of "
                       "the chain.")

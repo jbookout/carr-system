@@ -21,7 +21,7 @@
 // not exercise the producer's transaction, and the advisory lock it takes is
 // released immediately. Concurrency is out of scope here; the guards are not.
 //
-// SKIPPED unless CARR_TEST_DSN names a database with 0232 through 0238 applied.
+// SKIPPED unless CARR_TEST_DSN names a database with 0257 through 0263 applied.
 // ops/check-application-session.sh sets it.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

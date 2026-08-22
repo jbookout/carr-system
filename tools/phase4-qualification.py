@@ -2,7 +2,7 @@
 """phase4-qualification.py — is the session substrate deployed, and does anything
 actually qualify?
 
-WHY THIS EXISTS. Migration 0232 gives the database an authenticated session
+WHY THIS EXISTS. Migration 0257 gives the database an authenticated session
 identity and the doors mint one. Both halves can be present and correct while
 the system produces NO qualified evidence at all, and that state is invisible:
 a row with a null session is the ordinary legacy path, so a fleet that has

@@ -1,4 +1,4 @@
--- 0236 — the continuity reducer, and Phase 4 acceptance
+-- 0261 — the continuity reducer, and Phase 4 acceptance
 --
 -- WHY THIS COMES LAST, AND WHY NOTHING BEFORE IT WAS ALLOWED TO TOUCH THIS.
 -- Every earlier slice ran under a contract asserting that no reducer, no
@@ -6,7 +6,7 @@
 -- not bureaucracy: a system that can declare itself finished before it can
 -- prove anything will do exactly that, and the declaration is the artifact
 -- everyone downstream trusts. The surface is introduced HERE, deliberately, and
--- only after receipts can prove themselves (0235).
+-- only after receipts can prove themselves (0260).
 --
 -- TWO THINGS, AND THE SECOND DEPENDS ENTIRELY ON THE FIRST.
 --
@@ -20,7 +20,7 @@
 --
 --   1. THE COUNTS ARE COMPUTED, NEVER SUPPLIED. There is no parameter through
 --      which a caller can pass "qualifying rows: many". The function counts
---      them itself, the same lesson 0235's readback encodes.
+--      them itself, the same lesson 0260's readback encodes.
 --   2. IT IS REFUSED WHEN THE EVIDENCE DOES NOT SUPPORT IT. Zero qualifying
 --      evidence, any unproven receipt, or any open conflict, and the insert
 --      fails on a table constraint rather than on anyone's judgement.
@@ -108,7 +108,7 @@ end $$;
 
 -- ------------------------------------------- reconciled conflicts close
 -- FOUND BY MUTATION TESTING, and it is a design fix rather than a test fix.
--- 0235 defined a conflict as two receipts on the same subject that built on the
+-- 0260 defined a conflict as two receipts on the same subject that built on the
 -- same prior state and produced different results. That definition is right,
 -- and receipts are immutable, so under it a conflict could NEVER close — which
 -- made the acceptance bar below unreachable forever in any database that had
@@ -116,7 +116,7 @@ end $$;
 --
 -- A conflict is therefore OPEN until one of its two sides is explicitly
 -- reversed. Reversal is already the one operation whose exactness the database
--- checks (0235), so "resolved" means the same thing here as it does there:
+-- checks (0260), so "resolved" means the same thing here as it does there:
 -- somebody put the subject back where the losing branch started, on the record.
 create or replace function ops.receipt_conflicts(p_subject_type text, p_subject_id uuid)
 returns table (left_receipt uuid, right_receipt uuid, shared_prior text)
@@ -311,13 +311,13 @@ declare
 begin
   select id into probe_actor from public.actor where kind = 'human' order by slug limit 1;
   if probe_actor is null then
-    raise exception '0236 FAILED: need a human actor to exercise acceptance';
+    raise exception '0261 FAILED: need a human actor to exercise acceptance';
   end if;
 
   -- empty subject reduces to empty
   select * into r from ops.continuity_reducer('deal', subject);
   if r.state <> 'empty' then
-    raise exception '0236 FAILED: a subject with no receipts did not reduce to empty (got %)', r.state;
+    raise exception '0261 FAILED: a subject with no receipts did not reduce to empty (got %)', r.state;
   end if;
 
   insert into ops.application_session
@@ -339,7 +339,7 @@ begin
           'deal', subject, key1, claimed, 'origin');
   select * into r from ops.continuity_reducer('deal', subject);
   if r.state <> 'unproven' then
-    raise exception '0236 FAILED: an unproven receipt did not reduce to unproven (got %)', r.state;
+    raise exception '0261 FAILED: an unproven receipt did not reduce to unproven (got %)', r.state;
   end if;
   begin
     failed := false;
@@ -348,16 +348,16 @@ begin
     failed := true;
   end;
   if not failed then
-    raise exception '0236 FAILED: Phase 4 was ACCEPTED while a receipt was unproven';
+    raise exception '0261 FAILED: Phase 4 was ACCEPTED while a receipt was unproven';
   end if;
 
   perform ops.prove_write_receipt(rid1);
   select * into r from ops.continuity_reducer('deal', subject);
   if r.state <> 'continuous' then
-    raise exception '0236 FAILED: a single proven receipt did not reduce to continuous (got %)', r.state;
+    raise exception '0261 FAILED: a single proven receipt did not reduce to continuous (got %)', r.state;
   end if;
   if r.head_digest is distinct from claimed then
-    raise exception '0236 FAILED: the reducer head is not the last claimed digest';
+    raise exception '0261 FAILED: the reducer head is not the last claimed digest';
   end if;
 
   -- A BROKEN CHAIN. A second receipt that did not build on the first.
@@ -369,20 +369,20 @@ begin
   perform ops.prove_write_receipt(rid2);
   select * into r from ops.continuity_reducer('deal', subject);
   if r.state <> 'broken' then
-    raise exception '0236 FAILED: a chain with a gap did not reduce to broken (got %)', r.state;
+    raise exception '0261 FAILED: a chain with a gap did not reduce to broken (got %)', r.state;
   end if;
   if r.break_at is distinct from rid2 then
-    raise exception '0236 FAILED: the reducer did not name where the chain broke';
+    raise exception '0261 FAILED: the reducer did not name where the chain broke';
   end if;
 
   -- Acceptance must refuse while that subject is broken? No: the bar is about
   -- unproven receipts and conflicts, and a broken chain with both receipts
   -- proven is a real history someone must reconcile, not a proof failure. What
   -- MUST refuse is a conflict, which is checked next.
-  raise notice '0236 apply-time proof passed';
-  raise exception 'ROLLBACK_0236_PROBE';
+  raise notice '0261 apply-time proof passed';
+  raise exception 'ROLLBACK_0261_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0236_PROBE' then
+  if sqlerrm = 'ROLLBACK_0261_PROBE' then
     return;
   end if;
   raise;

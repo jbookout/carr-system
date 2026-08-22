@@ -227,14 +227,14 @@ begin
   -- and no such grant exists until those migrations land and this file is
   -- regenerated. The migrations create both roles themselves.
   -- THE ROLE ONLY, NEVER THE MEMBERSHIP, and the reason is about what the
-  -- tests then prove. 0232 no longer objects to a purpose-built issuer holding
+  -- tests then prove. 0257 no longer objects to a purpose-built issuer holding
   -- the membership, so this is a choice on the merits rather than a workaround.
   --
-  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0233
+  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0258
   -- having run, and the contracts that assert the membership graph would pass
   -- against the preamble instead of against the migration they exist to test --
-  -- a suite testing its own fixture. Establishing the membership is 0233's
-  -- whole job, so 0233 is where it happens and where a test can see it happen.
+  -- a suite testing its own fixture. Establishing the membership is 0258's
+  -- whole job, so 0258 is where it happens and where a test can see it happen.
   --
   -- Creating the role here is still required and is a different question: the
   -- grant-whitelist gates name it, and has_function_privilege RAISES on a

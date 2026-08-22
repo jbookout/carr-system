@@ -7,7 +7,7 @@
 // surface and the gate depending on it both ship and the producer between them
 // does not. These tests drive the producer with a recording fake client.
 //
-// 0238 SPLITS THE DIGEST THE PRODUCER COMPUTES. What was one `claimed_digest`
+// 0263 SPLITS THE DIGEST THE PRODUCER COMPUTES. What was one `claimed_digest`
 // is now two: `call_digest` (proof of attachment, recomputed by the database
 // from the frozen tool_call row and the receipt's own subject) and
 // `material_digest` (the caller's claim about the SUBJECT, read by
@@ -139,7 +139,7 @@ test("one receipt per subject the write touched", async () => {
 });
 
 test("the call digest is computed per subject — two subjects must not share one", async () => {
-  // 0238 binds the call digest to the receipt's own subject, so hoisting the
+  // 0263 binds the call digest to the receipt's own subject, so hoisting the
   // digest query out of the per-subject loop (computing it once per CALL
   // instead of once per SUBJECT) would hand every subject the same digest and
   // make it transferable between them. This asserts the query actually runs

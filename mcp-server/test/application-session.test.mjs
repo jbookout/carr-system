@@ -1,4 +1,4 @@
-// application-session.test.mjs — the minting layer for migration 0232/0233.
+// application-session.test.mjs — the minting layer for migration 0257/0258.
 //
 // Every test here drives the real exported function with injected fakes. None
 // asserts on source text: this file exists because the substrate below it was
@@ -45,7 +45,7 @@ test("sessionExpiry: the credential's own expiry wins when it is sooner than the
   assert.equal(sessionExpiry(oneHour, NOW), oneHour);
 });
 
-test("sessionExpiry: 0232's 30-day cap wins over a longer-lived credential", () => {
+test("sessionExpiry: 0257's 30-day cap wins over a longer-lived credential", () => {
   const ninetyDays = NOW + 90 * 24 * 3600_000;
   assert.equal(sessionExpiry(ninetyDays, NOW), NOW + SESSION_CAP_MS,
     "a 90-day refresh lifetime must not become a 90-day session");
@@ -223,7 +223,7 @@ test("bearer-token doors build actors carrying NO session, and none may gain one
   }
 });
 
-test("a static-secret actor produces legacy evidence, and 0232 keeps it that way forever", async () => {
+test("a static-secret actor produces legacy evidence, and 0257 keeps it that way forever", async () => {
   const { auditIdentity } = await import("../src/tools.js");
   const agent = agentActorForToken("Bearer codex-secret", JSON.stringify({ codex: "codex-secret" }), "agent-token");
   assert.equal(auditIdentity(agent).application_session_id, null,
@@ -270,7 +270,7 @@ test("the OAuth door actually mints — delete the call site and this fails", as
 
 test("the door sends a real authorization class and tenant, not undefined", async () => {
   // Both are derived in dispatch(), which runs AFTER the mint. Reading them off
-  // the actor yields undefined, and 0232 raises on a null authorization class —
+  // the actor yields undefined, and 0257 raises on a null authorization class —
   // the exact reason the first version minted nothing.
   const token = "joe:g2:live";
   const id = await accessTokenIdentity(bearer(token));
@@ -292,7 +292,7 @@ test("the door mints by SLUG, because it has no actor id to give", async () => {
   // A mint keyed on an actor uuid therefore cannot be called from here at all.
   const built = actorFromProps({ slug: "joe", via: "oauth-google" });
   assert.equal(built.id, undefined,
-    "if this ever gains an id, re-examine 0234's reason for existing");
+    "if this ever gains an id, re-examine 0259's reason for existing");
 });
 
 // ─────────────────────────────────────────── downgrades are observable ─────
@@ -371,7 +371,7 @@ test("tool_call INSERT names application_session_id and binds it last", () => {
 test("tool_call INSERT records null for a door that minted no session", () => {
   const { params } = toolCallInsertSQL("key-2", "log-activity", DOOR_ACTOR, "hash", {});
   assert.equal(params.at(-1), null,
-    "null is the permanent legacy marker; 0232 refuses to promote such a row later");
+    "null is the permanent legacy marker; 0257 refuses to promote such a row later");
 });
 
 test("tool_call INSERT cannot take a session from the verb's own arguments", () => {
@@ -634,7 +634,7 @@ test("Deal Room call site: the mint gets a REAL authorization class and tenant",
   // THE TEST THAT WAS MISSING, and its absence let this door ship dead. The
   // OAuth door has had this assertion since the day it minted nothing; the Deal
   // Room had no counterpart, so a fake mint that ignores its parameters happily
-  // "worked" while 0232 would have refused the real call for a null class.
+  // "worked" while 0257 would have refused the real call for a null class.
   //
   // The fake now REFUSES WHAT THE DATABASE REFUSES rather than accepting
   // anything. A fixture more permissive than production cannot see a defect
@@ -653,7 +653,7 @@ test("Deal Room call site: the mint gets a REAL authorization class and tenant",
   const res = await f.handler.fetch(f.request, f.env, { waitUntil: () => {} });
   assert.equal(res.status, 200);
   assert.equal(mints.length, 1,
-    "the Deal Room door must mint; a null authorization class makes 0232 refuse");
+    "the Deal Room door must mint; a null authorization class makes 0257 refuse");
   const [, slug, tenant, , via, issuer, authClass, subject] = mints[0].p;
   assert.equal(slug, "joe");
   assert.ok(tenant, "tenant must be resolved at the door");

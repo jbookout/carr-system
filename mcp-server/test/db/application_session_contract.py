@@ -223,7 +223,7 @@ def refuse_non_disposable(dsn):
     if host not in LOOPBACK:
         raise SystemExit(
             f"REFUSING TO RUN against host {host!r}. This suite writes rows that "
-            f"0232 makes permanently undeletable; it may only target a disposable "
+            f"0257 makes permanently undeletable; it may only target a disposable "
             f"local cluster (see ops/disposable-pg.sh).")
     dbname = (info.get("dbname") or "").lower()
     for banned in ("prod", "production", "staging", "neon"):
@@ -719,9 +719,9 @@ def main(dsn):  # noqa: C901
     check("guard functions and their table share one owner no runtime role can assume",
           guards_have_one_unassumable_owner)
 
-    # ------------------------------------------- 0233: the minting credential ----
-    # 0232 left carr_session_minter memberless ON PURPOSE and said so; 0233 is
-    # the decision about which credential joins it. 0233's own apply-time block
+    # ------------------------------------------- 0258: the minting credential ----
+    # 0257 left carr_session_minter memberless ON PURPOSE and said so; 0258 is
+    # the decision about which credential joins it. 0258's own apply-time block
     # asserts the MEMBERSHIP GRAPH from the catalog, which is the right tool for
     # a graph. These three assert what a catalog cannot: what each role can
     # actually DO when something acts as it.
@@ -749,14 +749,14 @@ def main(dsn):  # noqa: C901
             cur.execute("select count(*) from ops.application_session where id=%s", (sid,))
             assert cur.fetchone()[0] == 1, \
                 "the mint reported success but wrote no session row"
-    check("req 1: carr_session_issuer CAN mint (the credential 0233 chose)",
+    check("req 1: carr_session_issuer CAN mint (the credential 0258 chose)",
           issuer_can_actually_mint)
 
     def issuer_cannot_write_evidence():
         """The separation runs BOTH ways, and this is the half that is easy to
         forget. If the issuer could also insert evidence, one leaked secret
         would mint a session AND bind rows to it, which is the whole attack
-        0232 exists to prevent -- just performed with a different credential."""
+        0257 exists to prevent -- just performed with a different credential."""
         sid = mint(conn, joe)
         key = str(uuid.uuid4())
         try:
@@ -814,7 +814,7 @@ def main(dsn):  # noqa: C901
     check("req 1: only the issuer reaches the mint, transitively",
           minter_membership_is_exactly_the_issuer)
 
-    # ------------------------------------- 0234: minting from an actor slug ----
+    # ------------------------------------- 0259: minting from an actor slug ----
     def issuer_can_mint_by_slug():
         """The door authenticates a SLUG and has no actor id: actor.id is not
         resolved until callTool runs, long after authentication. The first
@@ -844,12 +844,12 @@ def main(dsn):  # noqa: C901
             row = cur.fetchone()
         assert row and row[0] == "joe", \
             "the session must resolve to the actor the slug names, not a null principal"
-    check("req 1: the issuer can mint from a slug (0234 — the door has no actor id)",
+    check("req 1: the issuer can mint from a slug (0259 — the door has no actor id)",
           issuer_can_mint_by_slug)
 
     def unknown_slug_refuses():
         """A session with a null actor would satisfy 'a row exists' while failing
-        the only thing the row is for: 0232's guard matches the evidence row's
+        the only thing the row is for: 0257's guard matches the evidence row's
         actor against the session's, and null matches nothing."""
         sid = uuid.uuid4()
         try:
@@ -877,7 +877,7 @@ def main(dsn):  # noqa: C901
     def writer_cannot_mint_by_slug():
         """The slug wrapper must not become a second door into the mint. It is
         SECURITY DEFINER, so an over-broad grant here would hand the writer
-        exactly what 0233 spent a role separating it from."""
+        exactly what 0258 spent a role separating it from."""
         sid = uuid.uuid4()
         refuses(conn, """select ops.mint_application_session_for_slug(
                            %s,'joe','carr-internal','joe','oauth-google',
@@ -889,25 +889,25 @@ def main(dsn):  # noqa: C901
     check("req 1: carr_writer cannot mint through the slug wrapper either",
           writer_cannot_mint_by_slug)
 
-    # ---------------------------------------------- 0235: write receipts ----
+    # ---------------------------------------------- 0260: write receipts ----
     # This layer was REJECTED once, for three things. Each contract below names
     # which rejection it answers, and every one acts as carr_writer rather than
     # as the superuser the harness hands you.
     def receipt_fixture(sess=None, key=None, req_hash="req-hash-A", subject_type="deal",
                          subject_id=None, new_value=None, tenant=TENANT, actor=None):
-        """A live session, one qualified tool_call row, AND -- new under 0238
+        """A live session, one qualified tool_call row, AND -- new under 0263
         section (F), rule 1 -- ONE event row recording what that call wrote
         about the subject, all written as the writer. Returns (session_id,
         idempotency_key, call_digest, subject_id, material_digest).
 
-        RULE 1 (0238 F): a receipt is refused unless a public.event row exists
+        RULE 1 (0263 F): a receipt is refused unless a public.event row exists
         with the SAME idempotency_key, application_session_id, subject_type and
         subject_id. This fixture writes that event BEFORE anything else, so
         every receipt built from its return value already clears rule 1 --
         this is true for an ordinary receipt, a reversal, AND a retraction:
         rule 1 has no exemption for either of the other two.
 
-        RULE 2 (0238 F): an ORDINARY receipt (reverses_receipt_id AND
+        RULE 2 (0263 F): an ORDINARY receipt (reverses_receipt_id AND
         retracts_receipt_id both null) must carry
         material_digest = ops.write_receipt_material_digest(key, session,
         subject_type, subject_id), recomputed by the database from that same
@@ -925,7 +925,7 @@ def main(dsn):  # noqa: C901
         earlier transition, or two retirement receipts that must assert
         identical material) passes an explicit, matching new_value both times.
 
-        THE CALL DIGEST IS SUBJECT-BOUND (0238): ops.write_receipt_digest takes
+        THE CALL DIGEST IS SUBJECT-BOUND (0263): ops.write_receipt_digest takes
         the receipt's own subject_type/subject_id as part of its input, so a
         digest computed for one subject cannot prove a receipt naming another.
         A caller that wants the receipt it files to actually PROVE must name
@@ -969,7 +969,7 @@ def main(dsn):  # noqa: C901
         values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,%s,%s,%s)"""
 
     # Same shape, with organization_tenant_id as a parameter -- needed by the
-    # cross-tenant retraction/reversal/withdrawal contracts (0238 rules 4/5),
+    # cross-tenant retraction/reversal/withdrawal contracts (0263 rules 4/5),
     # which must file a receipt under a SECOND, real tenant.
     RECEIPT_INSERT_TENANT = """insert into ops.write_receipt
         (id, application_session_id, actor_id, organization_tenant_id, verb,
@@ -977,7 +977,7 @@ def main(dsn):  # noqa: C901
          call_digest, material_digest, prior_digest)
         values (%s,%s,%s,%s,'log-activity','deal',%s,%s,%s,%s,%s)"""
 
-    # Same shape, over a subject_type of 'drive_dependency' -- needed once 0238
+    # Same shape, over a subject_type of 'drive_dependency' -- needed once 0263
     # binds a retirement receipt's proof to naming the dependency it is about.
     RECEIPT_INSERT_DEP = RECEIPT_INSERT.replace("'deal'", "'drive_dependency'")
 
@@ -1130,9 +1130,9 @@ def main(dsn):  # noqa: C901
                 f"expected to update exactly one dependency, got {cur.rowcount}")
             conn.commit()
 
-    # ---------------------------------------------------- 0238: the split ----
+    # ---------------------------------------------------- 0263: the split ----
     def retraction_clears_the_acceptance_bar():
-        """0238 (C). The escape hatch is a PROVEN retraction, not a delete or
+        """0263 (C). The escape hatch is a PROVEN retraction, not a delete or
         an update -- receipts stay immutable. An unproven receipt blocks
         acceptance until a proven receipt disavows it; only then does the bar
         stop counting it.
@@ -1151,7 +1151,7 @@ def main(dsn):  # noqa: C901
         receipts, not the separate (and, on a bare table, equally true) bar
         requiring at least one proven receipt to exist at all.
 
-        RULE 1 NOW APPLIES TO THE SWEEP TOO (0238 F): a retraction is a
+        RULE 1 NOW APPLIES TO THE SWEEP TOO (0263 F): a retraction is a
         receipt like any other, and it is refused unless the SWEEP's own call
         wrote an event about the subject it names. event.idempotency_key is
         non-unique, so one shared tool_call row can back many such events --
@@ -1265,7 +1265,7 @@ def main(dsn):  # noqa: C901
           "retracts it", retraction_clears_the_acceptance_bar)
 
     def unproven_retraction_clears_nothing():
-        """0238 (C)'s other half. If an UNPROVEN retraction could clear the
+        """0263 (C)'s other half. If an UNPROVEN retraction could clear the
         bar, the escape hatch could be opened from inside by asserting the
         same thing twice -- a retraction is only as good as its own proof.
 
@@ -1278,7 +1278,7 @@ def main(dsn):  # noqa: C901
 
         EVERY RETRACTION HERE USES 'origin' AS ITS OWN prior_digest. Both
         ops.receipt_conflicts and ops.continuity_reducer exclude any row with
-        retracts_receipt_id set from their live/fold sets entirely (0238
+        retracts_receipt_id set from their live/fold sets entirely (0263
         rules 6/7), so a retraction's prior_digest cannot manufacture a
         conflict no matter what it names -- unlike an ORDINARY receipt's
         prior, which must still be 'origin' or PROVEN, unretracted material
@@ -1363,7 +1363,7 @@ def main(dsn):  # noqa: C901
 
             # DROP THE WRITER ROLE FOR THE ACCEPTANCE CALL, WITHOUT LEAVING
             # THE TRANSACTION. carr_writer holds no EXECUTE on accept_phase4
-            # (0236 puts it on carr_authority), so calling it as the writer
+            # (0261 puts it on carr_authority), so calling it as the writer
             # returns 'permission denied' -- which IS a refusal, and would
             # have let this contract report a pass while never reaching the
             # bar it exists to test. The fixture above is uncommitted and
@@ -1383,7 +1383,7 @@ def main(dsn):  # noqa: C901
           unproven_retraction_clears_nothing)
 
     def retraction_must_match_subject():
-        """0238 (C)'s structural half. A retraction that could disavow a claim
+        """0263 (C)'s structural half. A retraction that could disavow a claim
         about a DIFFERENT subject would let a caller clear the bar for one
         subject by pointing at unrelated evidence."""
         sid, key, digest, subject, material = receipt_fixture()
@@ -1406,18 +1406,18 @@ def main(dsn):  # noqa: C901
           retraction_must_match_subject)
 
     def receipt_cannot_reverse_and_retract():
-        """0238's xor constraint. Reversal and retraction mean different
+        """0263's xor constraint. Reversal and retraction mean different
         things -- one restores a subject's state, the other disavows a claim
         -- and a row satisfying both sets of rules at once is not sound.
 
         r1 IS PROVEN, so it is safe (and legal) to name as a reversal target.
-        r2 IS DELIBERATELY LEFT UNPROVEN: retraction_is_sound (0238 C)
+        r2 IS DELIBERATELY LEFT UNPROVEN: retraction_is_sound (0263 C)
         refuses outright to retract a PROVEN receipt ('is proven and cannot
         be retracted'), and that guard fires alphabetically BEFORE the xor
         CHECK constraint is ever reached. Naming a proven receipt as
         retracts_receipt_id would therefore be refused for the WRONG reason.
         Leaving r2 unproven is safe here: retractions are excluded from both
-        ops.receipt_conflicts and ops.continuity_reducer entirely (0238
+        ops.receipt_conflicts and ops.continuity_reducer entirely (0263
         rules 6/7), so nothing downstream can collide with it, and any later
         global sweep is free to retract r2 on its own account."""
         sid, key, digest, subject, r1_material = receipt_fixture()
@@ -1453,13 +1453,13 @@ def main(dsn):  # noqa: C901
           receipt_cannot_reverse_and_retract)
 
     def call_digest_is_subject_bound():
-        """0238's core guarantee. The call digest now covers the receipt's OWN
+        """0263's core guarantee. The call digest now covers the receipt's OWN
         subject_type/subject_id, so a digest computed honestly for one subject
         must not be able to prove a receipt that names a different one --
         otherwise a digest is transferable between subjects and the conflict
         detector can be fed borrowed proof.
 
-        SUBJECT B GETS ITS OWN EVENT UNDER THE SAME CALL (0238 F rule 1):
+        SUBJECT B GETS ITS OWN EVENT UNDER THE SAME CALL (0263 F rule 1):
         event.idempotency_key is non-unique, so one call may honestly write
         about more than one subject. Its material_digest is computed for
         subject B specifically (rule 2), so the INSERT itself succeeds
@@ -1499,7 +1499,7 @@ def main(dsn):  # noqa: C901
           "naming another", call_digest_is_subject_bound)
 
     def verb_mismatch_refuses_by_the_verb_guard():
-        """0238 section (F) hardened this further than its own name promises.
+        """0263 section (F) hardened this further than its own name promises.
         THE CONTRACT'S MEANING CHANGED HERE, and it is worth saying plainly:
         before section F, a receipt claiming 'log-activity' over evidence
         that actually recorded a different verb could be FILED, and only
@@ -1536,7 +1536,7 @@ def main(dsn):  # noqa: C901
           "different verb", verb_mismatch_refuses_by_the_verb_guard)
 
     def prior_state_must_have_existed():
-        """0238 section (E). A FABRICATED prior names a state this subject
+        """0263 section (E). A FABRICATED prior names a state this subject
         NEVER REACHED, and nothing honest produces one -- it is refused, not
         merely left unproven, because the whole point of checking existence
         is to force an evader who wants to avoid conflicting with a real
@@ -1558,7 +1558,7 @@ def main(dsn):  # noqa: C901
           prior_state_must_have_existed)
 
     def stale_but_real_prior_still_reduces_to_broken():
-        """0238 section (E)'s whole point: the rule is EXISTENCE, never
+        """0263 section (E)'s whole point: the rule is EXISTENCE, never
         RECENCY. r4 repeats r2's transition (prior='X' again, after the head
         already moved on to 'Y') -- its prior is real, so the guard admits
         it; it is not the head, so the fold finds a gap; and it AGREES with
@@ -1641,7 +1641,7 @@ def main(dsn):  # noqa: C901
           "reduces to broken", stale_but_real_prior_still_reduces_to_broken)
 
     def origin_remains_acceptable_after_receipts_exist():
-        """0238 section (E). 'origin' stays ALWAYS-ACCEPTABLE, deliberately,
+        """0263 section (E). 'origin' stays ALWAYS-ACCEPTABLE, deliberately,
         even for a subject that already has receipts -- refusing it would
         turn an ordinary race (the producer reads no previous receipt, a
         concurrent transaction commits one, this insert lands second) into a
@@ -1750,7 +1750,7 @@ def main(dsn):  # noqa: C901
         """REJECTION 1. The session is the APPLICATION session, held to the same
         standard as evidence: live, unexpired, unrevoked, matching actor and
         tenant. Not the database backend that happened to write it."""
-        # Minted with a real future expiry and then waited out: 0232 refuses to
+        # Minted with a real future expiry and then waited out: 0257 refuses to
         # mint a session that is already dead, so an expired one can only be
         # produced the way time produces it.
         sid = mint(conn, joe, expires="now() + interval '1 second'")
@@ -1774,7 +1774,7 @@ def main(dsn):  # noqa: C901
           receipt_cannot_cross_actors)
 
     def receipt_cannot_prove_another_sessions_evidence():
-        """REJECTION 1, HARDENED FURTHER BY 0238 SECTION (F). THE CONTRACT'S
+        """REJECTION 1, HARDENED FURTHER BY 0263 SECTION (F). THE CONTRACT'S
         MEANING CHANGED HERE, stated plainly: before section F this guard
         fired only at PROVE time. write_receipt_says_what_its_call_wrote
         duplicates the exact same check ('receipt names evidence written by
@@ -1797,8 +1797,8 @@ def main(dsn):  # noqa: C901
           receipt_cannot_prove_another_sessions_evidence)
 
     def legacy_evidence_cannot_be_read_back():
-        """A proof about a row 0232 says proves nothing is not a proof.
-        HARDENED FURTHER BY 0238 SECTION (F): THE CONTRACT'S MEANING CHANGED
+        """A proof about a row 0257 says proves nothing is not a proof.
+        HARDENED FURTHER BY 0263 SECTION (F): THE CONTRACT'S MEANING CHANGED
         HERE too. write_receipt_says_what_its_call_wrote duplicates this
         exact legacy-evidence check and now fires at INSERT time, so a
         receipt naming legacy evidence can no longer be FILED, not merely
@@ -1816,7 +1816,7 @@ def main(dsn):  # noqa: C901
           legacy_evidence_cannot_be_read_back)
 
     def reversal_must_be_exact():
-        """REJECTION 3, corrected by 0238. 'This undoes that' is checked, not
+        """REJECTION 3, corrected by 0263. 'This undoes that' is checked, not
         believed: an exact reversal is one whose MATERIAL claim equals the
         state its target built on -- never its call digest, which is proof of
         attachment and says nothing about subject state.
@@ -1825,14 +1825,14 @@ def main(dsn):  # noqa: C901
         old single-digest scheme made that impossible by construction (a
         reversal's claimed digest had to equal both the target's prior state
         AND the call readback, which can never be the same value). That defect
-        is exactly what 0238 removes, so this contract now asserts BOTH
+        is exactly what 0263 removes, so this contract now asserts BOTH
         halves: an inexact reversal is still refused, and an EXACT one is
         accepted AND proves.
 
         THE TARGET IS ALSO PROVEN, here, which the earlier draft of this
         contract did not do. Left permanently unproven, the target would sit
         on a subject with a real successor (the reversal) sharing its exact
-        material as that successor's prior -- and 0238's global, unscoped
+        material as that successor's prior -- and 0263's global, unscoped
         acceptance-bar sweep would eventually have to retract the target
         using that SAME material, colliding with the reversal that already
         claims it. Proving both removes either row from ever being swept."""
@@ -1889,7 +1889,7 @@ def main(dsn):  # noqa: C901
             with contextlib.suppress(Exception), conn.cursor() as cur:
                 cur.execute("reset role")
                 conn.commit()
-        # And the exact one is accepted AND proves -- the headline fix 0238
+        # And the exact one is accepted AND proves -- the headline fix 0263
         # exists for. A reversal's material equals the target's OWN prior
         # state (pred_material, the real state rid built on), and its call
         # digest is computed for THIS call and THIS subject, so nothing
@@ -1916,7 +1916,7 @@ def main(dsn):  # noqa: C901
             proved = cur.fetchone()[0]
             conn.commit()
         assert proved is True, (
-            "an EXACT reversal did not prove -- the defect 0238 exists to remove "
+            "an EXACT reversal did not prove -- the defect 0263 exists to remove "
             "is still present")
     check("req 6: a reversal must land exactly where its target began, and an "
           "exact one proves", reversal_must_be_exact)
@@ -1924,13 +1924,13 @@ def main(dsn):  # noqa: C901
     def conflicts_are_derived_not_declared():
         """REJECTION 3. Two receipts conflict when they build on the same prior
         state and produce different MATERIAL claims — evaluated, never
-        asserted. 0238 moves this comparison from claimed_digest (a digest of
+        asserted. 0263 moves this comparison from claimed_digest (a digest of
         the CALL) to material_digest (the claim about the SUBJECT).
 
         EVERY RECEIPT BELOW IS PROVEN. Not because ops.receipt_conflicts cares
         about is_proven (it does not check it at all), but because an
         unproven receipt sharing a subject with a real successor is exactly
-        the shape 0238's global, unscoped acceptance-bar sweep would later
+        the shape 0263's global, unscoped acceptance-bar sweep would later
         retract using that successor's own prior value — and if this subject
         already has a receipt claiming that exact (prior, different material)
         pair, the sweep's retraction and that receipt would conflict for
@@ -1938,7 +1938,7 @@ def main(dsn):  # noqa: C901
         ever being swept, so this contract's own fixture cannot become
         tomorrow's unreconcilable conflict.
 
-        THE ONLY LEGAL PRIOR FOR A SUBJECT'S FIRST RECEIPT IS 'ORIGIN' (0238
+        THE ONLY LEGAL PRIOR FOR A SUBJECT'S FIRST RECEIPT IS 'ORIGIN' (0263
         section E), so the shared prior below is 'origin' itself -- which is
         exactly the case section E carves out as always acceptable, even
         though it makes two receipts on one subject share it deliberately."""
@@ -2058,7 +2058,7 @@ def main(dsn):  # noqa: C901
         cleanup_unproven_receipt(rid, "deal", subject, sess=sid)
     check("req 6: carr_writer cannot delete a receipt", receipts_are_frozen)
 
-    # ------------------------- 0236: the reducer and Phase 4 acceptance ----
+    # ------------------------- 0261: the reducer and Phase 4 acceptance ----
     def reducer_reports_the_worst_thing_it_finds():
         """A fold, not a flag. The state is derived from the causal chain every
         time it is asked, so it cannot drift from the evidence — and it reports
@@ -2098,14 +2098,14 @@ def main(dsn):  # noqa: C901
         """A gap is not merely reported, it is located. 'Something is wrong with
         this subject' is not actionable; 'the chain broke at this receipt' is.
 
-        THE BREAK IS A STALE-BUT-REAL PRIOR (0238 section E), not a
+        THE BREAK IS A STALE-BUT-REAL PRIOR (0263 section E), not a
         fabricated one: a3 repeats the transition a1->a2 already made
         (prior='bm1' again, after the head moved on to 'bm2'), which the
         guard admits because 'bm1' really existed on this subject -- it is
         simply not the LATEST state. Every receipt here is proven, both
         because that is what an honest producer would do and because an
         unproven receipt sharing this subject with a real successor is
-        exactly what 0238's global, unscoped acceptance-bar sweep would
+        exactly what 0263's global, unscoped acceptance-bar sweep would
         later collide with."""
         subject = uuid.uuid4()
         a1_sid, a1_key, a1_digest, _sa1, a1_material = receipt_fixture(
@@ -2157,7 +2157,7 @@ def main(dsn):  # noqa: C901
 
         EVERY RECEIPT HERE IS PROVEN, for the same reason as the conflict
         contract above: an unproven receipt sharing a subject with a real
-        successor is exactly what 0238's global sweep would later have to
+        successor is exactly what 0263's global sweep would later have to
         retract using that successor's own prior, colliding with it for
         real. The shared prior for r1/r2 is 'origin' (always legal, per
         section E, even though two receipts deliberately share it here); r3
@@ -2393,7 +2393,7 @@ def main(dsn):  # noqa: C901
         values (%s,%s,%s,%s,%s,%s,'carr-internal',%s)"""
 
 
-    # ------------------------------------- 0237: Drive retirement ----------
+    # ------------------------------------- 0262: Drive retirement ----------
     # The static preflight (ops/drive-retirement-readiness-gate.py) refuses to
     # close Phase 4 on inventory alone, in its own words: it "cannot resolve
     # immutable repoint receipts, recovery receipts, or Joe's authority
@@ -2513,7 +2513,7 @@ def main(dsn):  # noqa: C901
         assertions. Letting one receipt stand for both is how 'we checked'
         becomes 'we checked once, sort of'.
 
-        THE RECEIPT MUST NAME THE DEPENDENCY (0238) before this contract can
+        THE RECEIPT MUST NAME THE DEPENDENCY (0263) before this contract can
         even reach the table-level distinct-receipts constraint it used to be
         about, so the dependency is created FIRST and the receipt is filed
         against it -- naming a 'deal' subject here would be refused earlier,
@@ -2521,7 +2521,7 @@ def main(dsn):  # noqa: C901
 
         THE GUARD THAT ACTUALLY FIRES ALSO CHANGED. Passing the SAME receipt
         id for both roles trivially means they share one call AND one
-        material claim, and 0238's new same-call check now fires -- inside
+        material claim, and 0263's new same-call check now fires -- inside
         the BEFORE INSERT trigger -- before the row is ever validated against
         the table's drive_retirement_distinct_receipts CHECK. That older
         constraint is not gone, but this exact input can no longer reach it;
@@ -2557,7 +2557,7 @@ def main(dsn):  # noqa: C901
     # RENAMED (per adversarial-review addendum): this used to be named around
     # "one receipt serving as both roles", but passing the SAME receipt id for
     # both roles trivially shares one call AND one material, so what actually
-    # refuses it is 0238's same-call guard -- the identical guard
+    # refuses it is 0263's same-call guard -- the identical guard
     # retirement_receipts_cannot_share_a_call already exercises with two
     # DISTINCT rows. This contract is a SHADOW of that one, through a
     # different input shape (one row reused for both roles, rather than two
@@ -2567,9 +2567,9 @@ def main(dsn):  # noqa: C901
           one_receipt_cannot_make_both_claims)
 
     def retirement_receipts_must_name_the_dependency():
-        """0238 (D). Each receipt must NAME the dependency being retired, or a
+        """0263 (D). Each receipt must NAME the dependency being retired, or a
         reviewer could retire a dependency with receipts that had never heard
-        of it -- 0237's two-receipt gate separated its two receipts by
+        of it -- 0262's two-receipt gate separated its two receipts by
         nothing but row ids until this migration."""
         subj_1, subj_2 = uuid.uuid4(), uuid.uuid4()
         sid, key1, digest1, _s1, material1 = receipt_fixture(subject_id=subj_1)
@@ -2606,7 +2606,7 @@ def main(dsn):  # noqa: C901
           retirement_receipts_must_name_the_dependency)
 
     def retirement_receipts_cannot_share_a_call():
-        """0238 (D). Two receipts describing ONE call are one piece of
+        """0263 (D). Two receipts describing ONE call are one piece of
         evidence counted twice, even when they are two distinct rows.
 
         r2 NAMES THE SAME CALL AS r1 (same key, same session, same subject),
@@ -2660,7 +2660,7 @@ def main(dsn):  # noqa: C901
           retirement_receipts_cannot_share_a_call)
 
     def retirement_receipts_cannot_share_material():
-        """0238 (D). Different calls, but asserting the SAME material state,
+        """0263 (D). Different calls, but asserting the SAME material state,
         is still one piece of work counted twice -- repointing and recovering
         are two claims, not one claim made from two calls.
 
@@ -2712,7 +2712,7 @@ def main(dsn):  # noqa: C901
           retirement_receipts_cannot_share_material)
 
     def recovery_must_build_on_the_repoint():
-        """0238 (D). Recovery is only meaningful from the state the repoint
+        """0263 (D). Recovery is only meaningful from the state the repoint
         produced; a recovery resting on some other state recovers something
         else entirely.
 
@@ -2777,10 +2777,10 @@ def main(dsn):  # noqa: C901
         """A function over the rows, not a flag, and it will not read ready
         without an acceptance only the authority identity can create.
 
-        THE TWO RECEIPTS MUST BE HONEST NOW (0238): each must name the
+        THE TWO RECEIPTS MUST BE HONEST NOW (0263): each must name the
         dependency, rest on DIFFERENT calls, assert DIFFERENT material
         claims, and the recovery must build on what the repoint produced.
-        Sharing one call/material (as this contract's setup did before 0238)
+        Sharing one call/material (as this contract's setup did before 0263)
         is now refused before ever reaching drive_retirement_readiness."""
         with conn.cursor() as cur:
             cur.execute("""insert into ops.drive_dependency
@@ -2995,7 +2995,7 @@ def main(dsn):  # noqa: C901
     check("every session trigger, AND every ops.write_receipt / drive_retirement_"
           "withdrawal trigger, is ENABLE ALWAYS", triggers_enable_always)
 
-    # ============================================================ 0238 (F)/(G) ==
+    # ============================================================ 0263 (F)/(G) ==
     # THE NEW GUARDS, one contract per rule, each asserting WHICH guard
     # refused by matching message text -- plus the adversarial-review
     # addendum's previously-untested guards.
@@ -3038,7 +3038,7 @@ def main(dsn):  # noqa: C901
           "is refused", ordinary_receipt_material_must_match_computed)
 
     def material_digest_is_scoped_to_its_session():
-        """0238 (F)'s material recipe folds events matched on (idempotency_
+        """0263 (F)'s material recipe folds events matched on (idempotency_
         key, session, subject_type, subject_id) -- ALL FOUR, not three. Drop
         the 'and e.application_session_id = p_session' clause from ops.
         write_receipt_material_digest's own query and two different
@@ -3437,7 +3437,7 @@ def main(dsn):  # noqa: C901
         detects), turning the reduced state 'conflicted' before it ever gets
         to 'broken' -- the wrong finding for this contract. So the damage
         (b) is a STALE-BUT-REAL restatement of a1->a2's own transition
-        (0238 section E): a1 (origin->X), a2 (X->Y, head), a3 (Y->Z, head
+        (0263 section E): a1 (origin->X), a2 (X->Y, head), a3 (Y->Z, head
         moves on) are a clean, continuous, PROVEN chain; b restates X->Y
         with a2's EXACT material (forced via new_value), arriving after the
         head moved on to Z. It shares a2's prior AND a2's material, so it is
@@ -3871,7 +3871,7 @@ def main(dsn):  # noqa: C901
           "deleted", withdrawal_cannot_cross_tenants_or_be_rewritten)
 
     def immutability_covers_material_digest_and_retracts_receipt_id():
-        """Adversarial-review addendum item 2. 0238 added material_digest and
+        """Adversarial-review addendum item 2. 0263 added material_digest and
         retracts_receipt_id to the identity tuple ops.refuse_receipt_rewrite
         checks, and neither was tested. Driven AS THE OWNER (no role
         switch): carr_writer holds no UPDATE on ops.write_receipt at all, so
@@ -3932,7 +3932,7 @@ def main(dsn):  # noqa: C901
 
     def five_arg_write_receipt_digest_is_dropped():
         """Adversarial-review addendum item 4. The five-argument
-        ops.write_receipt_digest is DROPPED by 0238, not merely superseded --
+        ops.write_receipt_digest is DROPPED by 0263, not merely superseded --
         leaving it callable would leave the exact defect (a call digest not
         bound to a subject) callable, and the drop itself was never tested.
 
@@ -4242,7 +4242,7 @@ def main(dsn):  # noqa: C901
         acceptance state and no completion claim existed anywhere. That was not
         bureaucracy: a system that can declare itself finished before it can
         prove anything will do exactly that, and the declaration is what
-        everyone downstream trusts. 0236 introduces the surface deliberately,
+        everyone downstream trusts. 0261 introduces the surface deliberately,
         and only after receipts could prove themselves.
 
         So the contract flips from "this must not exist" to "this exists and is

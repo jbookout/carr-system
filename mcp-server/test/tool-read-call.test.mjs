@@ -49,7 +49,7 @@ test("readCallInsertSQL: the session id is carried when the door set one", () =>
 
 test("readCallInsertSQL: null session is the legacy path, not a hole to backfill", () => {
   // A door that authenticates against a static shared secret leaves this null on
-  // purpose. Migration 0232 makes such a row permanently non-qualifying and
+  // purpose. Migration 0257 makes such a row permanently non-qualifying and
   // refuses to let it be promoted later, so null here is a durable statement
   // rather than missing data.
   const { params } = readCallInsertSQL(JOE, "standing-context", true, null);
