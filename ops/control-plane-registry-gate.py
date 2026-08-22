@@ -38,14 +38,39 @@ def main() -> int:
                               legacy_schedule from ops.job_definition""")
         live = {(r[0],r[1]):r for r in cur.fetchall()}
         expected = {(w["key"],w["version"]):w for w in manifest["workflows"]}
+        # The manifest's false is the safe bootstrap default.  The Joe
+        # prebrief is the sole authority-managed exception: it may be true
+        # only when the latest immutable activation receipt still names the
+        # current allowlist revision.  This prevents a later generic registry
+        # reconciliation from treating the activated runtime as drift.
+        cur.execute("select to_regclass('ops.calendar_prebrief_runtime_activation_receipt')")
+        managed_joe_enabled = False
+        if fetchone_required(cur.fetchone(), "calendar prebrief activation receipt relation")[0] is not None:
+            cur.execute("""select exists(
+                select 1 from ops.calendar_prebrief_allowed_calendar a
+                join lateral (
+                  select r.allowlist_revision_id
+                    from ops.calendar_prebrief_runtime_activation_receipt r
+                   where r.sponsor='joe'
+                   order by r.activated_at desc,r.id desc limit 1
+                ) latest on latest.allowlist_revision_id=a.active_revision_id
+                join ops.calendar_prebrief_allowlist_receipt l
+                  on l.id=a.active_revision_id and l.sponsor='joe'
+                 and l.configuration_digest=a.configuration_digest
+               where a.sponsor='joe')""")
+            managed_joe_enabled = bool(fetchone_required(
+                cur.fetchone(), "Joe calendar prebrief activation receipt")[0])
         if set(live) != set(expected):
             failures.append(f"workflow keys differ missing={sorted(set(expected)-set(live))} extra={sorted(set(live)-set(expected))}")
         for identity, workflow in expected.items():
             row = live.get(identity)
             if row is None:
                 continue
+            expected_enabled = workflow["enabled"]
+            if identity == ("calendar-prebrief-projection-joe-daily", 1) and managed_joe_enabled:
+                expected_enabled = True
             comparisons = {
-                "enabled": (row[2],workflow["enabled"]), "risk": (row[3],workflow["risk"]),
+                "enabled": (row[2],expected_enabled), "risk": (row[3],workflow["risk"]),
                 "execution_kind": (row[4],workflow["execution"]["kind"]),
                 "execution": (normalized(row[5]),{k:v for k,v in workflow["execution"].items() if k!="kind"}),
                 "inventory": (normalized(row[6]),workflow["inventory"]),

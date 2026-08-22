@@ -33,6 +33,9 @@ FACT_NAMES = frozenset(
 # replacement above must not accidentally drop the system-sweep predicate.
 FACT_NAMES = frozenset(FACT_NAMES | {
     "proposal.input_reconciled_contract",
+    "renewal.pool_imported",
+    "renewal.source_complete",
+    "renewal.source_run_sealed",
     "system_sweep.measured_stale_duplicate_or_oversized",
 })
 

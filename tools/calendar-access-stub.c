@@ -10,15 +10,10 @@
  *     main executable = Mach-O      -> launched, exit 0
  *
  * So the fix is ONLY about the executable's FORMAT. This stub is a Mach-O, which
- * satisfies Launch Services, and it immediately execs the same zsh script with
- * the same arguments. Behavior is unchanged; the bundle is launchable again.
- *
- * WHY exec RATHER THAN spawn-and-wait. The whole point of the bundle is TCC
- * identity: macOS attributes the calendar grant to the RESPONSIBLE process, which
- * is the app that Launch Services started. execv replaces this image in place, so
- * the PID and its responsible-process attribution are unchanged — which is
- * exactly the arrangement that already worked on Joe's Mac, where the launched
- * image simply happened to be zsh from the start.
+ * satisfies Launch Services and spawns the same zsh script with the same
+ * arguments. The Mach-O parent remains alive until its child exits: macOS 26
+ * otherwise re-validates the provenance after `execv(/bin/zsh)` and a second
+ * LaunchServices launch fails with kLSNoExecutableErr.
  *
  * Built by bin/build-calendar-access.sh. The compiled binary and the bundle's
  * signature are deliberately NOT tracked in git: both are per-machine. A signed
@@ -31,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 int main(int argc, char **argv) {
     char exe[PATH_MAX];
@@ -75,7 +71,11 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) args[i + 1] = argv[i];
     args[argc + 1] = NULL;
 
-    execv("/bin/zsh", args);
-    fprintf(stderr, "carr-calendar-access: exec failed\n");
+    pid_t child = fork();
+    if (child < 0) { fprintf(stderr, "carr-calendar-access: fork failed\n"); return 71; }
+    if (child == 0) { execv("/bin/zsh", args); _exit(71); }
+    int status = 0;
+    if (waitpid(child, &status, 0) < 0) { fprintf(stderr, "carr-calendar-access: wait failed\n"); return 71; }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
     return 71;
 }
