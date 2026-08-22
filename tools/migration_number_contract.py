@@ -45,18 +45,6 @@ FROZEN_COLLISIONS: dict[str, tuple[str, ...]] = {
         "0169_hermes_pilot_actor.sql",
         "0169_program5_release_binding.sql",
     ),
-    # Merged to main within minutes of each other on 2026-08-22 by two sessions
-    # that each allocated 0248 against a main neither had refetched: PR #452
-    # (Control Plane source activation boundaries) and PR #453 (register the
-    # conduct-stop gate). Both are already applied, so renumbering either would
-    # rewrite history that production has run. Registering the pair is what this
-    # module exists for, and it is what unblocked every push from this machine —
-    # tools/next-migration.py refuses to allocate at all while an unregistered
-    # collision stands on main, so an unrelated branch cannot even reach CI.
-    "0248": (
-        "0248_register_conduct_stop_control.sql",
-        "0248_renewal_signed_source_ingress.sql",
-    ),
 }
 
 # These twelve filenames were applied to isolated Control Plane staging before
