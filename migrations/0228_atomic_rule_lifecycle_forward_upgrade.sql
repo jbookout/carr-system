@@ -46,7 +46,10 @@ end $$;
 -- They are different rules backed by different decisions and controls. Pin
 -- every UUID, decision event, title, quote and statement digest so deployment
 -- cannot bless arbitrary text at a familiar UUID or cross-wire governance to
--- the cost gate. Fresh databases contain neither row and remain a no-op.
+-- the cost gate.  The exact legacy cost-policy row below was retired before
+-- this migration reached Production; its separately pinned retirement event
+-- makes it a no-op tombstone, never a binding or activation candidate. Fresh
+-- databases contain neither row and remain a no-op.
 create or replace function ops.sync_system_rule_control_bindings()
 returns integer
 language plpgsql security definer set search_path=ops,public,pg_temp
@@ -80,6 +83,56 @@ begin
   loop
     select * into v_rule from rule where id=v_expected.rule_id;
     if not found then continue; end if;
+    if v_rule.id='a57d981a-8f6d-4c18-95ee-0e63a5a90b89'::uuid
+       and exists (select 1 from public.event
+                     where id='34f34e23-225b-4d0f-946f-478b59fbce63'::uuid) then
+      -- This is not a general retired-rule escape hatch.  0228 was delayed
+      -- after this one proposed legacy cost rule was truthfully retired.  Its
+      -- whole observed rule/event provenance must match before it may be
+      -- skipped; otherwise a retired or altered row remains a hard refusal.
+      if not exists (
+        select 1
+          from rule r
+          join public.actor taught_by on taught_by.id=r.taught_by
+          join public.event e on e.id='34f34e23-225b-4d0f-946f-478b59fbce63'::uuid
+          join public.actor event_actor on event_actor.id=e.actor_id
+         where r.id='a57d981a-8f6d-4c18-95ee-0e63a5a90b89'::uuid
+           and r.status='retired' and r.version=2
+           and encode(digest(r.statement,'sha256'),'hex')='c6fd62eb91d3f03b21a6098a6fd6b2848b902a45b8c0430b1717edf4e143f668'
+           and r.human_quote=$q$Also, how does this budgeting plan become impossible to overlook? If it’s just prose the system won’t remember it$q$
+           and r.scope='{"domain":"system","applies_to":["github","neon","cloudflare","anthropic","openai","google","healthchecks","blotato","make"]}'::jsonb
+           and r.personal_to is null and r.enforcement='prose'
+           and r.activated_by is null and r.activated_at is null
+           and r.supersedes is null
+           and r.created_at='2026-08-17T08:29:06.905178Z'::timestamptz
+           and r.updated_at='2026-08-21T21:38:29.049309Z'::timestamptz
+           and taught_by.id='b6c38b27-d006-4fad-9c38-49edf3130a07'::uuid
+           and taught_by.slug='joe' and taught_by.kind='human' and taught_by.active
+           and not exists (select 1 from rule successor where successor.supersedes=r.id)
+           and e.actor_id='b6c38b27-d006-4fad-9c38-49edf3130a07'::uuid
+           and event_actor.slug='joe' and event_actor.kind='human' and event_actor.active
+           and e.verb='retire-rule' and e.subject_type='rule' and e.subject_id=r.id
+           and e.field='status'
+           and e.old_value='{"status":"proposed"}'::jsonb
+           and e.new_value='{"status":"retired"}'::jsonb
+           and e.cause='automation_job'
+           and e.human_quote is null
+           and e.occurred_at='2026-08-21T21:38:29.049309Z'::timestamptz
+           and e.recorded_at='2026-08-21T21:38:29.049309Z'::timestamptz
+           and e.via='oauth-google'
+           and e.client_id='https://claude.ai/oauth/mcp-oauth-client-metadata'
+           and e.sponsoring_human_slug='joe'
+           and e.personal_scope='joe-personal'
+           and e.authorization_class='verified_partner'
+           and e.organization_tenant_id='carr-internal'
+           and e.correlation_id='6923f7f8-4ae6-4db0-93ab-9424d5aea0f1'::uuid
+           and e.idempotency_key='c4ad90f7-d8dd-4bf3-8785-659bae3d3f27'
+           and encode(digest(coalesce(e.agent_rationale,''),'sha256'),'hex')='82cf84d571cbe49eb61bf9570e2c8f86a114fa216e9ab1b3799181045c881137'
+      ) then
+        raise exception 'legacy retired system cost rule does not match its exact retirement tombstone preimage';
+      end if;
+      continue;
+    end if;
     if v_rule.status not in ('proposed','active') then
       raise exception 'system rule % is %, expected proposed or active',v_rule.id,v_rule.status;
     end if;
@@ -108,8 +161,8 @@ begin
     -- means a ruling Joe made is inadmissible as evidence of his own authority
     -- because of which client happened to be open when it was written down.
     -- Verified 2026-08-21 against production: neither decision has ever
-    -- carried author='joe', so this migration could not apply anywhere, and it
-    -- had not — pending on production and on staging alike.
+    -- carried author='joe', so the original migration could not apply. The
+    -- isolated staging rehearsal is rebuildable; Production remains pending.
     --
     -- What proves the ruling is Joe's is still demanded in full: the decision's
     -- own id, the event that carried it, its exact title, and human_quote
