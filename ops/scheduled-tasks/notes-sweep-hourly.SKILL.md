@@ -17,6 +17,22 @@ iOS files every recorded call into an Apple Notes folder called **Call Recording
 
 **Your entire job is one command and one summary line.** The script does the reading, the queueing and the posting itself. That is deliberate: an earlier design had this session read the notes through the Apple Notes MCP and write a payload file per note, and every one of those writes is another tool call that can stall on an approval prompt at an unattended hour. On 2026-07-31 exactly that cost the nightly chain five hours and fifty-eight minutes — its first tool call sat unapproved while the schedule record claimed the job had run. One byte-stable command carries one persisted approval.
 
+## If the LaunchAgent is missing on a machine
+
+`com.carr.notes-sweep` is what actually runs this lane. To install just that one
+job — after a fresh clone, or when the job has been unloaded:
+
+    ./bin/install-notes-sweep.sh
+
+It templates `ops/launchd/com.carr.notes-sweep.plist` with this checkout's path,
+lints it, installs it and proves launchd accepted it. It is deliberately narrow:
+`ops/config-as-code.py install --apply` is the broad reconciler and takes no
+per-job filter, so running that to fix this one job also rewrites every other
+hook and LaunchAgent on the machine.
+
+Pointer added 2026-08-22 (open loop 503, item 4): the script had zero callers
+and nothing anywhere led to it, so the one lane that needs it could not find it.
+
 ## The command
 
 Execute EXACTLY this via Bash, VERBATIM, character for character — do not paraphrase it, do not add flags, do not substitute paths, do not re-quote it, do not split it into steps. Permission approval matches the exact command string, and a reworded command is an unapproved command:

@@ -554,11 +554,29 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # them repeatedly costs nothing.
     #
     # SELF-REGISTERING, by the marker `# ci: db-gate` in the file itself. A new
-    # gate is wired by writing it, not by remembering to edit this list. Any
-    # ops/*-gate.py that reads DATABASE_URL and carries no marker is NAMED in
-    # the output rather than quietly skipped — an unrun gate that nobody can
-    # see is how this situation arose in the first place.
-    local db_gate_failures="" db_gate_count=0 db_gate_unmarked=""
+    # gate is wired by writing it, not by remembering to edit this list.
+    #
+    # WHAT COUNTS AS A DB-GATE, and why the old test was wrong (open loop 503,
+    # item 1, 2026-08-22). This used to flag any ops/*-gate.py MENTIONING the
+    # string DATABASE_URL. Two files mention it without ever consuming it:
+    # ops/p1-rebuild-gate.py and ops/p1-integration-gate.py only SET it in the
+    # environment of subprocesses they point at a Neon branch they created
+    # themselves. So both were named "not run" on every single push — a true
+    # sentence reached by a wrong test, for gates that could never take CI's
+    # throwaway DSN in the first place.
+    #
+    # THE COST OF GETTING IT WRONG THIS WAY. A yellow line that prints on every
+    # push and names something CI genuinely cannot fix is invisible within a
+    # week, and it is invisible in exactly the way the comment above warns
+    # about. The heuristic was importing a gate's real problem into the wrong
+    # lane and then shrugging at it in colour.
+    #
+    # So the test is now an actual READ of a DSN from the environment. Checked
+    # against all 32 gates when this was written, it agrees with the `# ci:
+    # db-gate` marker exactly: 25 marked, 25 reading, no gate on either side
+    # alone. That agreement is what makes the two rules below safe.
+    local dsn_read='environ\.get\("(CARR_CI_)?DATABASE_URL"|environ\["(CARR_CI_)?DATABASE_URL"\]|getenv\("(CARR_CI_)?DATABASE_URL"'
+    local db_gate_failures="" db_gate_count=0 db_gate_unmarked="" db_gate_declared=""
     for g in ops/*-gate.py; do
       [ -f "$g" ] || continue
       if grep -q '^# ci: db-gate' "$g"; then
@@ -568,13 +586,27 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
           db_gate_failures="$db_gate_failures $(basename "$g")"
           tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
         fi
-      elif grep -q 'DATABASE_URL' "$g"; then
+      elif grep -qE "$dsn_read" "$g"; then
+        # A gate that reads a DSN and carries no marker really is unrun, and
+        # this is now a FAILURE rather than a line in the margin. The whole
+        # lesson of the three gates that prompted this loop is that nobody
+        # reads a warning; the only reliable way to make an unrun gate visible
+        # is to stop the push that added it.
         db_gate_unmarked="$db_gate_unmarked $(basename "$g")"
+      elif grep -q '^# ci: runs-outside-ci' "$g"; then
+        # Declared, not forgotten. Printed with its stated reason so the state
+        # is legible rather than merely quiet — a gate that runs nowhere should
+        # say so out loud every time, in its own words.
+        db_gate_declared="$db_gate_declared\n            $(basename "$g"): $(sed -n 's/^# ci: runs-outside-ci *— *//p' "$g" | head -1)"
       fi
     done
+    if [ -n "$db_gate_declared" ]; then
+      printf '        \033[33moutside CI\033[0m  gate(s) declared to run elsewhere:%b\n' \
+        "$db_gate_declared" >&2
+    fi
     if [ -n "$db_gate_unmarked" ]; then
-      printf '        \033[33mnot run\033[0m  db-gates without the `# ci: db-gate` marker:%s\n' \
-        "$db_gate_unmarked" >&2
+      bad migration "gate(s) read a database URL but carry no \`# ci: db-gate\` marker, so nothing runs them:$db_gate_unmarked (add the marker, or declare \`# ci: runs-outside-ci — why\`)"
+      return
     fi
     if [ -n "$db_gate_failures" ]; then
       bad migration "database acceptance gate(s) failed:$db_gate_failures"

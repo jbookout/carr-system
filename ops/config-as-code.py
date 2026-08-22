@@ -210,9 +210,13 @@ TOKENS = [(tok, real) for tok, real in
 # inherited from the nightly chain.
 PRIMARY_ONLY = {
     "com.carr.videopipeline.plist",
-    # Watches DELL's migration packet FROM Joe's Mac, and removes itself once
-    # his A15 closes. Installing it on his machine would be circular.
-    "com.carr.preflight-watch.plist",
+    # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched
+    # DELL's migration packet from Joe's Mac and was built to remove itself once
+    # his A15 closed. A15 is closed, the watcher unloaded and deleted its own
+    # plist as designed, and bin/preflight-watch.sh is retired with this entry —
+    # which had been naming a plist that exists in neither ops/launchd/ nor
+    # ~/Library/LaunchAgents. A lifecycle that completes should leave nothing
+    # behind pointing at it (rule 61c64d91).
     "com.carr.nightly-record-layer.plist",
     "com.carr.rules-refresh.plist",
     "com.carr.local-briefs.plist",
