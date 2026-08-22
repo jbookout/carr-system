@@ -265,6 +265,30 @@ LEDGER_COPY = "COPY public.schema_migrations (filename, sha256, applied_at) FROM
 SAFE_NAME = r"[a-z_][a-z0-9_$]*"
 SAFE_QUALIFIED = rf"(?:{SAFE_NAME}\.)?{SAFE_NAME}"
 ACL_STATEMENT = re.compile(r"\b(?:grant|revoke)\b[^;]*;", re.IGNORECASE)
+# STATEMENTS THAT NAME A ROLE AND CONFER NOTHING. The occurrence count in
+# _migration_acl_statements exists so unrecognised syntax becomes a review stop
+# rather than silently omitting authority from the plan, and it was right to
+# stop on these two — both are new, arriving with the authenticated-session
+# substrate. Reviewed, and neither carries authority:
+#
+#   create role <name> [attributes]  brings a role into existence. It confers no
+#   privilege on any object. The clauses that WOULD confer authority — in role,
+#   role, admin, in group, user, superuser, createrole, createdb, bypassrls —
+#   are deliberately NOT matched, so a create that grants membership or a system
+#   attribute still stops the check exactly as before.
+#
+#   set [local] role <name>  assumes a role for the current transaction. It is
+#   how a migration's own apply-time proof tests as the credential it
+#   constrains, and it can only ever narrow what the session may do.
+#
+# Anything else naming a role still raises. That is the point of the count.
+ROLE_MENTION_WITHOUT_AUTHORITY = re.compile(
+    r"\bcreate\s+role\s+[a-z_][a-z0-9_$]*"
+    r"(?:\s+(?:nologin|login|inherit|noinherit|nosuperuser|nocreatedb"
+    r"|nocreaterole|nobypassrls|noreplication|noreplication))*\s*;"
+    r"|\bset\s+(?:local\s+)?role\s+[a-z_][a-z0-9_$]*\s*;",
+    re.IGNORECASE,
+)
 ACL_SHAPE = re.compile(
     r"^(?P<action>grant|revoke)\s+(?P<privileges>.+?)\s+on\s+"
     r"(?:(?P<kind>schema|table|sequence|function)\s+)?(?P<objects>.+?)\s+"
@@ -438,6 +462,12 @@ def _migration_acl_statements(sql: str, role: str) -> list[str]:
     statement_occurrences = sum(
         len(re.findall(rf"\b{re.escape(role)}\b", statement))
         for statement in statements
+    )
+    # See ROLE_MENTION_WITHOUT_AUTHORITY: creating a role and assuming one are
+    # the two ways a migration names a role without granting it anything.
+    statement_occurrences += sum(
+        len(re.findall(rf"\b{re.escape(role)}\b", mention))
+        for mention in ROLE_MENTION_WITHOUT_AUTHORITY.findall(scrubbed)
     )
     if named_occurrences != statement_occurrences:
         raise SnapshotGrantError(

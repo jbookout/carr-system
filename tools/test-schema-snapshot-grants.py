@@ -62,12 +62,24 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
 #
+# carr_session_minter and carr_session_issuer joined on 2026-08-20 and 2026-08-21,
+# by way of 0231 and 0239, and they are the fifth and sixth to age out. The
+# minter is the ONLY role permitted to mint an authenticated application
+# session, so a snapshot that rebuilds a cluster without it rebuilds one with no
+# separation to enforce; the issuer is the login credential the authentication
+# layer holds to reach the minter. As with every role above, this list and the
+# preamble in bin/schema-snapshot.sh are the same set written twice and have to
+# move together — a role in one and not the other reports its own grants as
+# strays, which is how this was caught.
+#
 # The role preamble deliberately creates bundles before their migration runs so
 # a pending migration may grant to them on a fresh cluster. Their ACLs, however,
 # may appear only after the source snapshot ledger has absorbed that migration.
 # Keep this mapping explicit so a production-truth pre-release snapshot does not
 # pretend a pending bundle already has privileges.
 ROLE_GRANT_MIGRATIONS = {
+    "carr_session_minter": "0231_authenticated_application_session.sql",
+    "carr_session_issuer": "0239_session_issuer_credential.sql",
     "carr_calendar_prebrief_jobs": "0229_calendar_prebrief_projection.sql",
     "carr_calendar_prebrief_canary_jobs": "0229_calendar_prebrief_projection.sql",
     "carr_calendar_prebrief_attestors": "0229_calendar_prebrief_projection.sql",
@@ -75,6 +87,7 @@ ROLE_GRANT_MIGRATIONS = {
 }
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence",
+             "carr_session_minter", "carr_session_issuer",
              "carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
              "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
