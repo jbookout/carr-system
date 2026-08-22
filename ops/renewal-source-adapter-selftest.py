@@ -39,8 +39,22 @@ def signed(rows: list[dict[str, object]], *, key: str, fingerprint: str) -> dict
     }
     unsigned["payload_sha256"] = hashlib.sha256(adapter.canonical_payload(unsigned)).hexdigest()
     signed_payload = adapter.signing_payload(unsigned)
-    proc = subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", key, "-rawin", "-in", "/dev/stdin"], input=signed_payload,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    # Ed25519 is a one-shot operation.  OpenSSL on Linux therefore requires a
+    # seekable input rather than /dev/stdin, even though macOS accepts the pipe.
+    # Keep the payload anonymous while exercising the same portable FD shape as
+    # the runtime verifier.
+    with tempfile.TemporaryFile() as payload_file:
+        payload_file.write(signed_payload)
+        payload_file.flush()
+        payload_file.seek(0)
+        payload_fd = payload_file.fileno()
+        proc = subprocess.run(
+            ["openssl", "pkeyutl", "-sign", "-inkey", key, "-rawin", "-in", f"/dev/fd/{payload_fd}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=(payload_fd,),
+            check=True,
+        )
     unsigned["signature"] = base64.b64encode(proc.stdout).decode("ascii")
     return unsigned
 
