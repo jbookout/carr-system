@@ -1957,10 +1957,12 @@ end $$;
 -- Name: completion_capsule(jsonb); Type: FUNCTION; Schema: ops; Owner: -
 --
 
-CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_predicates jsonb, change_ref text, user_facing boolean, user_journey_ref text, attestor text, decision_ref text)
+CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_predicates jsonb, change_ref text, user_facing boolean, user_journey_ref text, attestor text)
     LANGUAGE sql IMMUTABLE
     AS $$
   select
+    -- The council's "acceptance predicates". The capability lane states them as
+    -- the acceptance tests it actually ran; an ordinary row states them directly.
     coalesce(
       case when jsonb_typeof(evidence #> '{candidate,acceptance_test_refs}') = 'array'
            then evidence #> '{candidate,acceptance_test_refs}' end,
@@ -1968,14 +1970,15 @@ CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_
            then evidence -> 'acceptance_predicates' end),
     coalesce(evidence #>> '{candidate,candidate_commit_sha}',
              evidence ->> 'change_ref'),
+    -- Null when absent, and null is refused below. It is NOT coalesced to false:
+    -- "nobody said" and "somebody said no" are different states and only one of
+    -- them is an answer.
     coalesce((evidence #>> '{candidate,user_facing}')::boolean,
              (evidence ->> 'user_facing')::boolean),
     coalesce(evidence #>> '{candidate,user_journey_ref}',
              evidence ->> 'user_journey_ref'),
     coalesce(evidence #>> '{attestation,verifier_actor_id}',
-             evidence ->> 'attested_by'),
-    coalesce(evidence #>> '{candidate,decision_ref}',
-             evidence ->> 'decision_ref')
+             evidence ->> 'attested_by')
 $$;
 
 
@@ -1983,7 +1986,7 @@ $$;
 -- Name: FUNCTION completion_capsule(evidence jsonb); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.completion_capsule(evidence jsonb) IS 'The tune-up council 2026-08-21 completion capsule, read from either the capability lane shape (candidate/attestation) or a plain one. ONE definition so the closing trigger and any reader cannot disagree about what done means. 0281 added decision_ref, which is what a DECLINED closure turns on instead of a change reference.';
+COMMENT ON FUNCTION ops.completion_capsule(evidence jsonb) IS 'The tune-up council 2026-08-21 completion capsule, read from either the capability lane shape (candidate/attestation) or a plain one. ONE definition so the closing trigger and any reader cannot disagree about what done means.';
 
 
 --
@@ -2557,86 +2560,72 @@ CREATE FUNCTION ops.enforce_completion_capsule() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 declare
-  cap         record;
+  cap        record;
   implementer text;
   n_predicates int;
-  declining   boolean;
 begin
   if new.state <> 'confirmed_closed' then
     return new;
   end if;
   if tg_op = 'UPDATE' and old.state = 'confirmed_closed' then
-    return new;
+    return new;   -- already closed under whatever contract applied then
   end if;
 
   if new.completion_evidence is null
      or jsonb_typeof(new.completion_evidence) <> 'object' then
     raise exception
-      'closing %: done needs an evidence capsule, and completion_evidence is not an object.',
-      new.ref using errcode = 'check_violation';
+      'closing %: done needs an evidence capsule, and completion_evidence is not an object. '
+      'The council''s price for leaving the queue is acceptance predicates, a change reference, '
+      'whether it is user-facing, and who checked it.', new.ref
+      using errcode = 'check_violation';
   end if;
 
   select * into cap from ops.completion_capsule(new.completion_evidence);
 
-  -- KEYED ON THE DECLARED KIND, never on the capsule looking thin. If a missing
-  -- change reference were itself the signal, "I have no change reference" would
-  -- become the way to buy the cheaper close.
-  declining := (new.completion_kind = 'declined');
-
-  if declining then
-    -- A DECLINE HAS NO CHANGE, NO ACCEPTANCE TESTS AND NO JOURNEY. What it has
-    -- is a decision, and someone other than the implementer who checked it.
-    if coalesce(btrim(cap.decision_ref),'') = '' then
-      raise exception
-        'closing %: a decline needs the DECISION that made it. Nothing else here is '
-        'evidence — there is no change to point at and no test that passed.',
-        new.ref using errcode = 'check_violation';
-    end if;
-  else
-    select count(*) into n_predicates
-      from jsonb_array_elements_text(coalesce(cap.acceptance_predicates,'[]'::jsonb)) p
-     where btrim(p) <> '';
-    if n_predicates = 0 then
-      raise exception
-        'closing %: the evidence capsule states no acceptance predicates. What would have '
-        'made this done had to be sayable before it was done.', new.ref
-        using errcode = 'check_violation';
-    end if;
-
-    if coalesce(btrim(cap.change_ref),'') = '' then
-      raise exception
-        'closing %: the evidence capsule names no change reference, so nothing ties this '
-        'closure to what actually shipped.', new.ref
-        using errcode = 'check_violation';
-    end if;
-
-    if cap.user_facing is null then
-      raise exception
-        'closing %: the evidence capsule does not say whether this is user-facing. Say so '
-        'explicitly — silence here is how a capability gets reported live before a human '
-        'has used it.', new.ref
-        using errcode = 'check_violation';
-    end if;
-
-    if cap.user_facing and coalesce(btrim(cap.user_journey_ref),'') = '' then
-      raise exception
-        'closing %: this is declared user-facing, so the capsule must name an EXERCISED user '
-        'journey. A user-facing thing nobody has used is not done.', new.ref
-        using errcode = 'check_violation';
-    end if;
+  select count(*) into n_predicates
+    from jsonb_array_elements_text(coalesce(cap.acceptance_predicates,'[]'::jsonb)) p
+   where btrim(p) <> '';
+  if n_predicates = 0 then
+    raise exception
+      'closing %: the evidence capsule states no acceptance predicates. What would have '
+      'made this done had to be sayable before it was done.', new.ref
+      using errcode = 'check_violation';
   end if;
 
-  -- IDENTICAL FOR BOTH KINDS, and that is the point. A decline waved through on
-  -- the implementer's own say-so is exactly as unaccountable as a self-attested
-  -- build. The uuid-or-slug resolution stays too: every capability-lane
-  -- attestation records a uuid, so a slug-only comparison would pass every
-  -- self-attestation ever made.
+  if coalesce(btrim(cap.change_ref),'') = '' then
+    raise exception
+      'closing %: the evidence capsule names no change reference, so nothing ties this '
+      'closure to what actually shipped.', new.ref
+      using errcode = 'check_violation';
+  end if;
+
+  if cap.user_facing is null then
+    raise exception
+      'closing %: the evidence capsule does not say whether this is user-facing. Say so '
+      'explicitly — silence here is how a capability gets reported live before a human '
+      'has used it.', new.ref
+      using errcode = 'check_violation';
+  end if;
+
+  if cap.user_facing and coalesce(btrim(cap.user_journey_ref),'') = '' then
+    raise exception
+      'closing %: this is declared user-facing, so the capsule must name an EXERCISED user '
+      'journey. A user-facing thing nobody has used is not done.', new.ref
+      using errcode = 'check_violation';
+  end if;
+
   if coalesce(btrim(cap.attestor),'') = '' then
     raise exception
       'closing %: no attestor. Done requires somebody who did not build it saying it is done.',
       new.ref using errcode = 'check_violation';
   end if;
 
+  -- THE ATTESTOR IS NOT THE IMPLEMENTER. Compared against the same
+  -- executor-then-owner fallback the work-in-progress limit uses, so the two
+  -- controls cannot disagree about who is responsible for a row. The attestor may
+  -- be recorded as an actor uuid (the capability lane) or a slug, so both are
+  -- resolved to a slug before comparing — otherwise a uuid would never equal a
+  -- slug and this check would pass for every self-attestation ever made.
   implementer := coalesce(new.executor_actor, new.owner_actor);
   if implementer is not null then
     if lower(btrim(cap.attestor)) = lower(btrim(implementer))
@@ -2658,7 +2647,7 @@ end $$;
 -- Name: FUNCTION enforce_completion_capsule(); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.enforce_completion_capsule() IS 'Tune-up council 2026-08-21: a Work Request cannot reach confirmed_closed on a timestamp alone. Fires on the TRANSITION into confirmed_closed. A BUILT closure pays acceptance predicates, a change reference, an explicit user-facing boolean and a journey where that is true; a DECLINED closure pays the decision that made it, because there is no change and no test (0281). The independent-attestor test is identical for both.';
+COMMENT ON FUNCTION ops.enforce_completion_capsule() IS 'Tune-up council 2026-08-21: a Work Request cannot reach confirmed_closed on a timestamp alone. Fires on the TRANSITION into confirmed_closed, so the one row closed before this contract existed stands as recorded. The owner batch sign-off and the 48-hour attestor-green auto-close are NOT here: they need a scheduled job, not a constraint, and are tracked in loop 504.';
 
 
 --
@@ -28881,7 +28870,6 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0278_completion_needs_a_capsule_and_a_second_pair_of_eyes.sql	1eb6de438dea6e8bf61bdee40f8aa9cc9d6424217cc93a73c6896ab86f5ac088	2026-08-22 13:37:09.424356+00
 0279_carr_lease_renewal_provider.sql	0fbdb9c026aabb34b9c5ca17644ad4b1c2e32b2357008356f1487a23f1013585	2026-08-22 15:16:52.168053+00
 0280_control_catalog_workflow_manifest.sql	204acaa7bdd419acd749db373dacdcff4de828ce84204f371bd35486d9b50bcf	2026-08-22 15:38:56.495239+00
-0281_a_decline_is_not_built_work.sql	eba7d5356775835fe67c89c96e1bbbc43f4535a200f9a7abe2639364d51cbd8a	2026-08-22 16:32:29.91838+00
 \.
 
 
@@ -29184,7 +29172,6 @@ d5f92043-e10b-435d-bbaa-ab3d8c393657	phrase	{"phrase": "review cycle after a rec
 7edd92a9-a803-4bff-a543-bda5a6ef2416	phrase	{"phrase": "how the operating playbook learns from mistakes", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-002", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000007	1	2026-08-16 14:49:59.066172+00	\N
 b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a record layer outage playbook", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-AMB-001 explicit review-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000010	1	2026-08-16 14:49:59.066172+00	\N
 6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000008	1	2026-08-16 14:49:59.066172+00	\N
-227897ce-1025-42d6-b96f-f9338fac3197	concept	{"label": "Relationship path finding", "definition": "Finding who can introduce whom: walking the party intro graph to answer 'who do we know that can reach X'. Served by the who-do-we-know verb over v_party_graph edges; distinct from name lookup (find) and from deal context (catch-me-up).", "concept_key": "relationship-path-finding", "review_after": null}	Golden-miss probe 2026-08-22: partner-phrased question 'who can introduce me to a hospital decision maker' returned ZERO hits on search-doctrine despite a live who-do-we-know verb and doctrine covering the intro graph.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	1743e0b3-0b23-4bf0-947e-017a9853f3c0	1	2026-08-22 16:32:49.703719+00	\N
 \.
 
 
