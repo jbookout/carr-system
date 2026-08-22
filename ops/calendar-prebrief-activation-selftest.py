@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hermetic adversarial checks for local calendar-prebrief activation inputs."""
 from __future__ import annotations
-import importlib.util, os, tempfile
+import importlib.util, os, tempfile, uuid
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -91,7 +91,7 @@ with tempfile.TemporaryDirectory() as raw:
   def fetchone(self):
    if "session_user,current_user" in self.query: return (self.user,self.user)
    if "pg_has_role" in self.query: return (True,)
-   if "activate_calendar_prebrief" in self.query: return ("00000000-0000-4000-8000-000000000099",)
+   if "activate_calendar_prebrief" in self.query: return (uuid.UUID("00000000-0000-4000-8000-000000000099"),)
    return ({"sponsor":"joe","app_evidence_digest":"e"*64,"id":"00000000-0000-4000-8000-000000000099"},)
   def __enter__(self): return self
   def __exit__(self,*_): return False
