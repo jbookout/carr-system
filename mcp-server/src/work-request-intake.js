@@ -142,6 +142,101 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         })) };
       },
     },
+    "current-work-item": {
+      write: false,
+      description:
+        "What is being worked right now: every Work Request a person or session is actually holding, " +
+        "each with its owner, the predicate that would make it done, and its blocker or null. Answers in " +
+        "one call the question that previously needed a read of the engineering suite, a read of the " +
+        "sourced queue, and a guess. Also reports the work-in-progress limit and whether it is exceeded, " +
+        "because a queue that silently runs six-wide is the condition this verb exists to make visible. " +
+        "Takes no arguments: it never accepts a caller-selected tenant, owner, state or filter.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      handler: async (c, actor, args) => {
+        if (Object.keys(args).length) throw new ToolError({ error: "invalid_current_work_item_fields" });
+        const tenant = organizationTenantForActor(actor);
+        // HELD, not merely open. claimed/in_progress/verification is somebody's
+        // hands on the work; needs_joe and blocked are held too — the council was
+        // explicit that a blocked row stays current and can never be skipped,
+        // which is exactly why they belong in an answer to "what is current".
+        // ready and captured are the queue, not the current item.
+        const held = await c.query(
+          `select ref, title, state, owner_actor, executor_actor,
+                  acceptance_criteria, project_context, blocker_code, blocker_detail,
+                  program_key, program_ordinal, claimed_at, started_at, updated_at,
+                  extract(epoch from (now() - updated_at))/3600.0 as hours_since_change
+             from ops.work_request
+            where state in ('claimed','in_progress','verification','needs_joe','blocked')
+              and (organization_tenant_id is null or organization_tenant_id = $1::text)
+            order by (state in ('needs_joe','blocked')) desc, updated_at asc
+             /* work-request-intake:current-item */`, [tenant]);
+
+        const items = held.rows.map(row => {
+          const ctx = row.project_context || {};
+          const criteria = Array.isArray(row.acceptance_criteria) ? row.acceptance_criteria : [];
+          return {
+            human_ref: row.ref,
+            title: row.title,
+            state: row.state,
+            // Owner is who answers for it; executor is who has their hands on it.
+            // They are different questions and a single "assignee" field loses one.
+            owner: row.owner_actor || null,
+            executor: row.executor_actor || null,
+            // THE DONE PREDICATE, in the order the council asked for it: the
+            // acceptance predicates if the row carries them, else the written
+            // completion definition, else null — never an invented one.
+            done_predicate: criteria.length
+              ? criteria.map(c => (typeof c === "string" ? c : (c && c.text) || null)).filter(Boolean)
+              : (ctx.completion_definition ? [ctx.completion_definition] : null),
+            // Blocker OR NULL, never absent: a row with no blocker has to say so
+            // out loud, because "no blocker field" and "not blocked" read the
+            // same in a payload and mean different things.
+            blocker: row.blocker_code
+              ? { code: row.blocker_code, detail: row.blocker_detail || null }
+              : null,
+            program: row.program_key ? { key: row.program_key, sequence: Number(row.program_ordinal) } : null,
+            held_since: row.claimed_at || row.started_at || null,
+            hours_since_last_change: Math.round(Number(row.hours_since_change || 0) * 10) / 10,
+          };
+        });
+
+        // The council set the limit at two system-wide and one per executor. This
+        // verb REPORTS it; enforcing it belongs in the claim path, and saying so
+        // here keeps the two from being confused for each other.
+        const inFlight = items.filter(i => i.state === "claimed" || i.state === "in_progress");
+        const perExecutor = {};
+        for (const i of inFlight) {
+          const who = i.executor || i.owner || "unassigned";
+          perExecutor[who] = (perExecutor[who] || 0) + 1;
+        }
+        const overCommitted = Object.entries(perExecutor)
+          .filter(([, n]) => n > 1).map(([who, n]) => ({ executor: who, in_flight: n }));
+
+        // An item nobody has touched for two days is not current, whatever its
+        // state says. The council's rule is that it gets forced to blocked, split
+        // or closed; surfacing it is the half this read owes.
+        const stale = items.filter(i => i.hours_since_last_change >= 48)
+          .map(i => ({ human_ref: i.human_ref, hours_since_last_change: i.hours_since_last_change }));
+
+        return {
+          ok: true,
+          current: items,
+          count: items.length,
+          wip: {
+            limit_system_wide: 2,
+            limit_per_executor: 1,
+            in_flight: inFlight.length,
+            over_system_limit: inFlight.length > 2,
+            executors_over_limit: overCommitted,
+            note: "reported here, enforced in the claim path",
+          },
+          unchanged_over_48h: stale,
+          say: items.length
+            ? "these are held right now; a blocked or needs-Joe row is still current and is never skipped"
+            : "nothing is held — the queue may still have ready work, which this verb deliberately does not show",
+        };
+      },
+    },
     "report-problem": {
       write: true,
       description: "Capture one operational problem from the current deterministic situation source. It only creates a captured Work Request; it never triages, assigns, dispatches, approves, executes, or changes an existing request.",
