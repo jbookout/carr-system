@@ -32,6 +32,33 @@ DEFAULT_RECOVERY_VAULT = (
     "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
 )
 
+# ── the active-rule-gap acceptance ──────────────────────────────────────────
+# A PERMANENTLY CHOSEN STATE MUST NOT READ AS A PERMANENT FAILURE — rule
+# bd4a6d22, which this check was breaking. It counted every active rule whose
+# enforcement_status was not exactly 'hard_enforced', so it flagged two rules
+# that are working as designed and left a ⚠︎ nobody could ever clear.
+#
+# Two separate corrections, and they are different mistakes:
+#
+# 1. 'authority_enforced' IS enforced. migrations/0194_atomic_rule_approval.sql
+#    allows exactly three values — hard_enforced, authority_enforced, blocked —
+#    and treating the second as a gap miscounts a rule that has real enforcement
+#    behind it, just not a local one.
+#
+# 2. A judgment rule cannot be hard-enforced, and saying so is a DECISION, not a
+#    gap. ops/config/rule-enforcement-map.json records these with a written
+#    why_unenforceable — for bd4a6d22 itself: "No control can judge whether a
+#    human chose a state on purpose." 'blocked' is also simply the column
+#    default from 0194, so an unset row and a deliberate one looked identical.
+#
+# THE ACCEPTANCE IS NAMED, NARROW, AND STILL PRINTS. Only this one class is
+# accepted; every other class with an unenforced status still counts and still
+# fails. The accepted count is printed on the passing line rather than dropped,
+# so the state stays visible instead of becoming silence. Widening either
+# constant is what ops/health-rule-gap-selftest.py exists to catch.
+RULE_ENFORCED_STATES = ("hard_enforced", "authority_enforced")
+RULE_UNENFORCEABLE_CLASS = "judgment_advisory"
+
 
 def _reader_args(argv):
     """Return the Drive boundary without letting normal mode inherit a vault."""
@@ -246,10 +273,27 @@ def _canonical_snapshot():
     snapshot = {"exports": None, "job_definitions": None, "jobs": None,
                 "controls": None, "errors": []}
     if CANONICAL_SECTION in ("all", "exports"):
+        # THE CUTOFF (fired 2026-08-19) IS CARRIED HERE TOO. A retired .md target
+        # stops producing export_run rows at all, so 26 hours later every one of
+        # them trips the STALE branch below — 88 amber lines on this machine,
+        # prescribing a re-export of targets the exporter now refuses to write.
+        # A state chosen on purpose was reading as a permanent failure, which is
+        # the thing rule bd4a6d22 forbids and the same defect this file already
+        # carried for active rule gaps.
+        #
+        # The register further down this file (the "a target nobody registered is
+        # not a target that failed" block) already had this right. It is a
+        # different section and does not run in a normal `run.sh health`, so its
+        # correctness never reached the line Joe and Dell actually read. Same
+        # flag function the exporter itself gates on — one contract, no second
+        # opinion, and no second place to decide what "retired" means.
         probe = r'''
 import json
 from exporters.targets import TARGETS
 from exporters.common import connect
+from exporters.run_exports import md_renders_retired
+retired = sorted(k for k, (rel, _fn) in TARGETS.items()
+                 if rel.lower().endswith(".md")) if md_renders_retired() else []
 with connect() as c, c.cursor() as cur:
     cur.execute("""select target,
                           max(ran_at) filter (where status='ok'),
@@ -257,7 +301,7 @@ with connect() as c, c.cursor() as cur:
                      from export_run group by target""")
     rows = [{"target": t, "last_ok": x.isoformat() if x else None,
              "latest_status": s} for t, x, s in cur.fetchall()]
-print(json.dumps({"registered": sorted(TARGETS), "rows": rows}))
+print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retired}))
 '''
         _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
         _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
@@ -330,7 +374,11 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows}))
             snapshot["job_definitions"] = definitions
             snapshot["jobs"] = rows
     if CANONICAL_SECTION == "all":
-        sql = """select
+        # Built from the named constants rather than spelled inline, so the
+        # acceptance and the query can never drift apart. Both values are fixed
+        # identifiers defined in this file, never caller input.
+        _enforced = "', '".join(RULE_ENFORCED_STATES)
+        sql = f"""select
           (select count(*) from doctrine_gate_run
             where result='fail' and dry_run=false
               and started_at > now() - interval '24 hours'),
@@ -342,7 +390,13 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows}))
           (select count(*) from doctrine_section
             where status='active' and review_after < now()),
           (select count(*) from ops.v_rule_enforcement_status
-            where policy_status='active' and enforcement_status <> 'hard_enforced')"""
+            where policy_status='active'
+              and enforcement_status not in ('{_enforced}')
+              and enforcement_class <> '{RULE_UNENFORCEABLE_CLASS}'),
+          (select count(*) from ops.v_rule_enforcement_status
+            where policy_status='active'
+              and enforcement_status not in ('{_enforced}')
+              and enforcement_class = '{RULE_UNENFORCEABLE_CLASS}')"""
         _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
         _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
         p = subprocess.run(
@@ -357,12 +411,13 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows}))
         else:
             for line in p.stdout.splitlines():
                 cols = [c.strip() for c in line.split("|")]
-                if len(cols) == 4 and all(c.isdigit() for c in cols):
+                if len(cols) == 5 and all(c.isdigit() for c in cols):
                     snapshot["controls"] = {
                         "doctrine_gate_failures_24h": int(cols[0]),
                         "doctrine_never_reviewed": int(cols[1]),
                         "doctrine_stale_sections": int(cols[2]),
                         "active_rules_not_hard_enforced": int(cols[3]),
+                        "active_rules_accepted_unenforceable": int(cols[4]),
                     }
                     break
     return snapshot
@@ -543,6 +598,11 @@ def _canonical_health():
             rc = 1
         else:
             registered = set(exports.get("registered") or [])
+            # A RETIRED TARGET IS NOT A MISSED CHAIN. Subtracted before the loop
+            # rather than filtered out of `bad` afterwards, so a retired target
+            # cannot reach any of the four failure branches by another route.
+            retired = set(exports.get("retired") or [])
+            registered -= retired
             rows = {r.get("target"): r for r in exports.get("rows") or [] if isinstance(r, dict)}
             bad = []
             for target in sorted(registered):
@@ -567,10 +627,19 @@ def _canonical_health():
             for finding in bad:
                 print(f"  ⚠︎ {finding}")
                 _canonical_finding("export_receipt", finding)
+            # THE RETIRED COUNT RIDES ON THE LINE EITHER WAY. Rule bd4a6d22 asks
+            # for a chosen state to stay visible rather than become silence, so
+            # the reader is told how many targets are carried and why they have
+            # no receipt — never left to infer it from a number that shrank.
+            _carried = (f", {len(retired)} retired at the 2026-08-19 cutoff and "
+                        f"correctly unreceipted" if retired else "")
             if bad:
                 rc = 1
+                if retired:
+                    print(f"  -- RETIRED {len(retired)} md render target(s) not counted above")
             else:
-                print(f"  OK {len(registered)} registered target(s), all receipted inside 26h")
+                print(f"  OK {len(registered)} registered target(s), "
+                      f"all receipted inside 26h{_carried}")
 
     if CANONICAL_SECTION in ("all", "jobs"):
         print("Schedule drift — durable Control Plane job state")
@@ -644,14 +713,22 @@ def _canonical_health():
             never_reviewed = int(controls.get("doctrine_never_reviewed", 0))
             stale = int(controls.get("doctrine_stale_sections", 0))
             rule_gaps = int(controls.get("active_rules_not_hard_enforced", 0))
+            accepted = int(controls.get("active_rules_accepted_unenforceable", 0))
             print(f"  {'OK' if not gate_failures else '⚠︎'} gate-blocks-24h      "
                   f"{gate_failures}")
             print(f"  {'OK' if not never_reviewed else '⚠︎'} never-reviewed       "
                   f"{never_reviewed} policy-bearing sections")
             print(f"  {'OK' if not stale else '⚠︎'} stale-sections       "
                   f"{stale} past review_after")
+            # The accepted count RIDES ON THE PASSING LINE. Rule bd4a6d22 asks
+            # for the chosen state to stay visible rather than become silence,
+            # so a green line still says how many rules are carried as
+            # unenforceable by design and how many would have to change for that
+            # to be wrong.
+            _carried = (f", {accepted} carried as unenforceable by design"
+                        if accepted else "")
             print(f"  {'OK' if not rule_gaps else '⚠︎'} active-rule-gaps      "
-                  f"{rule_gaps} active admitted rules not hard-enforced")
+                  f"{rule_gaps} active admitted rules unenforced{_carried}")
             if gate_failures or never_reviewed or stale or rule_gaps:
                 if gate_failures:
                     _canonical_finding("doctrine_gate", f"{gate_failures} failures in 24h")
@@ -750,46 +827,13 @@ WATCH = [
     # `--only compiled-rules`, so the hourly refresh reaches it as well.
     ("GEN rules intro",     "DNA/Network/introduction-rules.md",         26/24, [],
      "nightly chain (bin/nightly.sh) + hourly bin/refresh-rules.sh"),
-    # --- the Wave 2 job reports (added 2026-07-31 with ORDER 19a) ---------------
-    # These five live in the REPO's out/, not the vault, so their patterns are
-    # absolute — os.path.join returns an absolute second argument unchanged.
-    # 26h each, per the ORDER 19 ruling: the two digests ride the nightly chain
-    # (7 days), and the brief pack plus the queue are rebuilt by the heartbeat.
-    # WHAT A FAILURE HERE MEANS, so nobody debugs the wrong end: cadence and
-    # matcher going stale means the nightly chain SKIPPED them, which until Joe's
-    # role tap lands is the DESIGNED state (exit 78, not a fault).
-    #
-    # CORRECTED TWICE ON 2026-08-04, and the second correction is the one to read.
-    #
-    # This comment first said these rows going stale "is the weekends-off rule
-    # showing through, since the heartbeat stands down Sat/Sun". That was never
-    # the mechanism: Monday 2026-08-03 was a full business day, npi-sweep-weekly
-    # fired at 12:31Z and the vault took writes that morning, while brief-pack
-    # and review-queue did not. Their last write was an ad-hoc session run, Sun
-    # 2026-08-02 15:18, which is not the heartbeat's ~08:00 CT slot.
-    #
-    # The replacement text then claimed THE HEARTBEAT HAS NO SCHEDULE AT ALL,
-    # having checked the Claude scheduler, launchd and cron. Joe corrected that
-    # the same day: the heartbeat is scheduled in COWORK, which a local Claude
-    # Code session cannot enumerate. Both the subagent and the main session named
-    # Cowork as unreachable and then wrote the negative anyway — rule 2b889e80
-    # says an unreachable collection makes a finding partial BY DEFINITION.
-    #
-    # SO THE STATE IS: the trigger fires every morning and these two jobs do not
-    # run. Leading hypothesis, UNTESTED — a Cowork session cannot reach
-    # ~/carr-system, so it cannot execute `run.sh brief-pack` at all. Do not
-    # re-explain these rows as a weekend artifact, and do not assert a cause
-    # until someone reads the Cowork task's own run history. Tracked as loop 181.
-    #
-    # The Monday brief (monday-brief-task.md) is unscheduled by the same gap and
-    # has NO row here at all, so it fails silently — the one failure mode with no
-    # detector. Tracked as an open loop; do not re-explain these rows as a
-    # weekend artifact until a schedule actually exists.
-    ("JOB brief-pack",    os.path.expanduser("~/carr-system/out/brief-pack/brief-pack-latest.md"), 26/24, [],
-     "run.sh brief-pack (heartbeat JOB 4b)"),
-    ("JOB monday-agenda", os.path.expanduser("~/carr-system/out/brief-pack/monday-agenda.md"), 26/24, [],
-     "run.sh brief-pack — the Monday brief's own input, watched separately because "
-     "it has its own consumer"),
+    # --- the remaining repo-local job reports ----------------------------------
+    # The review queue is still refreshed by the weekday local schedule. Legacy
+    # brief-pack and Monday-agenda files are intentionally absent from this
+    # dead-man list: normal delivery is the on-demand record-native
+    # `morning-brief` composite, whose sections expose ready/empty/unavailable
+    # source state instead of borrowing a local file mtime.
+    # Cadence and matcher remain credential-gated nightly diagnostics.
     ("JOB review-queue",  os.path.expanduser("~/carr-system/out/review-queue/review-queue.html"), 26/24, [],
      "run.sh review-queue (heartbeat JOB 4b)"),
     ("JOB matcher",       os.path.expanduser("~/carr-system/out/availability-matches.md"), 26/24, [],

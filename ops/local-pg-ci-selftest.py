@@ -115,6 +115,16 @@ check("server output is detached from runner pipes", "-l" in events[1] and "post
 check("database is created locally", events[2][0] == "/fake/createdb")
 check("fixture owner role is created", events[3][0] == "/fake/psql" and "neondb_owner" in events[3][-1])
 check("migration class runs through canonical CI", events[4][-2:] == ("--only", "migration"))
+check(
+    "atomic Joe lifecycle runs after canonical CI",
+    events[5][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+)
+check(
+    "authority acceptance receives only the local disposable DSN",
+    child_envs[5].get("CARR_LOCAL_PG_DSN")
+    == "postgres://carr_ci@127.0.0.1:55432/carr_ci"
+    and "CARR_CI_DATABASE_URL" not in child_envs[5],
+)
 check("server always stops", events[-1][0] == "/fake/pg_ctl" and events[-1][-1] == "stop")
 check("temporary cluster is always removed", remove.call_count == 1)
 check("ordinary children receive no ambient secrets", all(
@@ -131,6 +141,10 @@ with (
 ):
     result = mod.run_local_ci(repo=REPO, ci_class="strict", port=55432, runner=FakeRunner())
 check("strict lane uses canonical strict CI", result == 0 and events[4][-1] == "--strict")
+check(
+    "strict lane also proves atomic Joe lifecycle",
+    events[5][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+)
 
 
 class FailingRunner(FakeRunner):
@@ -159,6 +173,10 @@ with (
     result = mod.run_local_ci(repo=REPO, ci_class="migration", port=55432,
                               runner=FailingRunner())
 check("CI failure is preserved", result == 7)
+check(
+    "authority acceptance never runs after CI failure",
+    not any(event[-1].endswith("atomic-rule-approval-local-pg-acceptance.py") for event in events),
+)
 check("failure still stops server", events[-1][0] == "/fake/pg_ctl" and events[-1][-1] == "stop")
 check("failure still removes cluster", remove_failure.call_count == 1)
 

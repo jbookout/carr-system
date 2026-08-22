@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import pathlib
 import subprocess
@@ -21,6 +22,16 @@ try:
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
 except ImportError:
     sys.exit("staging-release-readback-gate: psycopg not installed")
+
+# The postgres CLIENT lookup, shared with ops/p1-rebuild-gate.py. Loading the
+# module by path is how every ops gate reaches tools/db-tap.py, whose filename
+# has a hyphen and cannot be imported normally.
+_REPO = pathlib.Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("db_tap", _REPO / "tools" / "db-tap.py")
+if _spec is None or _spec.loader is None:
+    sys.exit("staging-release-readback-gate: could not load tools/db-tap.py")
+db_tap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(db_tap)
 
 
 PASSES: list[str] = []
@@ -266,7 +277,9 @@ def raw_0222_capture_fixture(dsn: str) -> None:
     isolated = make_conninfo(dsn, dbname=name)
     admin = make_conninfo(dsn, dbname="postgres")
     repo = pathlib.Path(__file__).resolve().parent.parent
-    psql = "psql"
+    # Not the bare name: with no client installed that failed as FileNotFoundError
+    # from inside subprocess, naming neither the missing dependency nor the fix.
+    psql = db_tap.psql_bin()
     try:
         with psycopg.connect(admin, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute(sql.SQL("create database {}").format(sql.Identifier(name)))
@@ -297,9 +310,15 @@ def raw_0222_capture_fixture(dsn: str) -> None:
             cur.execute(prepare_sql(), prepare_params(fixture, pre_attempt, "prior", pre_idem)); one(cur)
             owner(cur)
             conn.commit()
-        env = {**os.environ, "DATABASE_URL": isolated}
-        subprocess.run([sys.executable, str(repo / "tools/migrate.py"), "--apply", "--yes"],
-                       cwd=repo, env=env, check=True, capture_output=True, text=True)
+        # Apply the raw historical migration itself. A current snapshot can
+        # legitimately contain later ledger rows, and the production runner
+        # correctly refuses an artificial earlier hole; this fixture is about
+        # 0222's migration-time capture, not bypassing ledger ordering.
+        subprocess.run(
+            [psql, "-v", "ON_ERROR_STOP=1", "-q", "-d", isolated,
+             "-f", str(repo / "migrations/0222_legacy_prior_staging_readback.sql")],
+            cwd=repo, check=True, capture_output=True, text=True,
+        )
         with psycopg.connect(isolated, autocommit=False) as conn, conn.cursor() as cur:
             cur.execute("select deployment_attempt_id from ops.legacy_prior_staging_readback_allowlist where idempotency_key=%s", (pre_idem,))
             captured = one(cur)[0] is not None

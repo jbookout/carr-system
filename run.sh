@@ -1,10 +1,11 @@
 #!/bin/zsh
 # carr-system run entry point (phase 2, 2026-07-24).
-# The ONE command SOPs call on Joe's Mac. Runs the repo generators against the vault.
+# The ONE command SOPs call on Joe's Mac. Normal paths use canonical records;
+# Drive-backed legacy inputs are available only through explicit recovery.
 #   ./run.sh deal-room     — rebuild the Deal Room HTML from the deal record (--files for the json)
-#   ./run.sh lead-board    — rebuild the Lead Board HTML from the registry + feeds
-#   ./run.sh renewal-feed  — rebuild renewal-radar.json from the newest radar xlsx
-#   ./run.sh all           — all three, renewal-feed before lead-board (feed order matters)
+#   ./run.sh lead-board    — rebuild the canonical record-backed Lead Board HTML
+#   ./run.sh renewal-feed  — recovery-only MLS feed rebuild (normal mode refuses)
+#   ./run.sh all           — rebuild the canonical Lead Board, then the Deal Room
 #   ./run.sh review-queue  — rebuild the ONE review queue (out/review-queue/), a surface only
 #   ./run.sh brief-pack    — the four brief sections as callable units (out/brief-pack/)
 #   ./run.sh restore-rehearse — prove the encrypted backups actually restore (needs the age key)
@@ -27,13 +28,9 @@ PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
 
 deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" "$@"; }
-# ORDER 26(b): the board gained --files/--records. The DEFAULT IS STILL FILES and
-# the chain still calls this with no arguments, so `run.sh all` is byte-for-byte
-# what it was. Records mode is reachable by hand — and needs the repo venv (it
-# speaks to Neon through psycopg) plus a DSN that can read candidate_pool, which
-# `tools/db-tap.py run` supplies. Parity passed 2026-07-31; the default flip waits
-# on a pool read surface the exporter credential can reach (parked, see the
-# ORDER 26 execution log).
+# The default Lead Board path is canonical records (including candidate_pool's
+# renewal-radar rows). It needs the repo venv because it reads through psycopg;
+# normal mode fails closed rather than falling back to Drive.
 lead_board()   { "$PY" "$REPO/generators/build-lead-board.py" "$@"; }
 lead_promote() { "$PY" "$REPO/pipelines/lead-promote.py" "$@"; }  # ORDER 29b flip: venv, records-mode reads (parity byte-identical 2026-08-05)
 renewal_feed() { "$PY" "$REPO/generators/build-renewal-feed.py" "$@"; }  # external MLS ingress: explicit recovery only until canonical intake exists
@@ -86,7 +83,7 @@ case "${1:-}" in
   lead-board)   shift; lead_board "$@" ;;
   lead-promote) shift; lead_promote "$@" ;;
   renewal-feed) shift; renewal_feed "$@" ;;
-  all)          shift; renewal_feed "$@"; lead_board "$@"; deal_room "$@" ;;
+  all)          shift; lead_board "$@"; deal_room "$@" ;;
   corroborate)  shift; corroborate "$@" ;;
   space-search) space_search "$@" ;;
   graph)        shift; graph "$@" ;;

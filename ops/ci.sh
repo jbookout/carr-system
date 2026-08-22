@@ -614,12 +614,51 @@ check_artifact() {
     bad artifact "registry did not import — refusing to call it unmeasured-but-fine"
     return
   fi
-  marker="$(tr -dc '0-9' < mcp-server/.last-deployed-verb-count 2>/dev/null)"
-  if [ -n "$marker" ] && [ "$shipping" -lt "$marker" ]; then
-    bad artifact "would REMOVE $((marker - shipping)) verb(s): deployed $marker, tree has $shipping"
-  else
-    ok artifact "$shipping verbs, no loss against deployed ${marker:-none}"
-  fi
+  # THE BASELINE COMES FROM THE LEDGER, NOT A FILE — defect d737c09c, 2026-08-16.
+  # This line read mcp-server/.last-deployed-verb-count until 2026-08-21, five
+  # days after the deploy stopped writing it. The file is gitignored and nothing
+  # creates it any more, so `marker` was always empty, the shrink comparison was
+  # never once performed, and the class still printed OK: "no loss against
+  # deployed none" — a loss guard asserting no loss having compared against
+  # nothing. The shell also reported the failed redirect on every run, because
+  # `2>/dev/null` silences tr and not the `<` that fails before tr starts.
+  #
+  # ops/last-deployed-verb-count.py is the one query, and its header names this
+  # caller: "the deploy asks this, and so can CI or a human. A second copy of the
+  # query in shell would be free to drift." This is that drift, closed.
+  local rc=0
+  marker="$("$PY" ops/last-deployed-verb-count.py carr-mcp production 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0)
+      if [ -n "$marker" ] && [ "$shipping" -lt "$marker" ]; then
+        bad artifact "would REMOVE $((marker - shipping)) verb(s): deployed $marker, tree has $shipping"
+      else
+        ok artifact "$shipping verbs, no loss against deployed $marker"
+      fi
+      ;;
+    3)
+      ok artifact "$shipping verbs; no prior deployment recorded, this would set the baseline"
+      ;;
+    78)
+      # NO LEDGER CREDENTIAL. In the GitHub runner that is BY DESIGN — ci.yml
+      # grants a throwaway loopback Postgres and sets CARR_CI_PORTABLE_ONLY=1,
+      # and no production credential belongs on a PR runner. Saying SKIP there
+      # would fail every pull request under --strict, so the portable runner gets
+      # a named exclusion instead. Anywhere else a missing credential is a real
+      # gap in coverage and reports SKIP, which --strict escalates. Either way
+      # this NEVER claims "no loss" — bin/deploy-worker.sh runs the same guard
+      # against the same ledger and fails closed, so the deploy is where a shrink
+      # is actually stopped.
+      if [ "${CARR_CI_PORTABLE_ONLY:-0}" = "1" ]; then
+        ok artifact "$shipping verbs; shrink guard not run here (portable runner has no ledger credential — the deploy enforces it)"
+      else
+        skip artifact "$shipping verbs counted, but no ledger credential — the shrink comparison did not run"
+      fi
+      ;;
+    *)
+      bad artifact "could not read the deployed verb count from the ledger (exit $rc) — refusing to call it unmeasured-but-fine"
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------- run

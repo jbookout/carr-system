@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Subprocess proof for the signed EventKit collector with no live Calendar."""
+from __future__ import annotations
+
+import json
+import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+# EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE — the convention ops/ci.sh's
+# gate loop already honours (it prints the last line below as the reason), and
+# the same one bin/type-check.sh uses. Apple ships LibreSSL as /usr/bin/openssl
+# and LibreSSL has no Ed25519, so on a stock Mac this proof died with a bare
+# CalledProcessError and read as a red gate that no amount of fixing could
+# clear — which is what pushed a real session to CARR_SKIP_CI on 2026-08-21.
+#
+# DELIBERATELY NARROW. This declines only when the machine cannot mint the
+# keypair the proof is built on. On CI, and on any machine carrying OpenSSL 3,
+# every assertion still runs and still has to pass; nothing here weakens what is
+# being proved, and no other failure is swallowed.
+def _require_ed25519() -> None:
+    # ASK THE QUESTION THE PROOF ITSELF ASKS. The first version of this grepped
+    # `openssl list -public-key-algorithms` for the name, which would have
+    # skipped all three proofs anywhere that output was worded differently — a
+    # probe that silently disables the very thing it guards, on the machine that
+    # matters most. Minting a throwaway key is the exact question, so a build
+    # that CAN do Ed25519 never skips, whatever its text output looks like.
+    with tempfile.TemporaryDirectory() as probe_dir:
+        attempt = subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "ED25519",
+             "-out", str(Path(probe_dir) / "probe.pem")],
+            capture_output=True, text=True)
+    if attempt.returncode == 0:
+        return
+    build = subprocess.run(["openssl", "version"], capture_output=True, text=True)
+    print(f"openssl here cannot mint an Ed25519 key "
+          f"({(build.stdout or '').strip() or 'unknown build'}); this proof needs OpenSSL 3")
+    sys.exit(78)
+
+
+_require_ed25519()
+
+ROOT = Path(__file__).resolve().parents[1]
+COLLECTOR = ROOT / "tools/calendar-prebrief-collector.py"
+spec = importlib.util.spec_from_file_location("calendar_prebrief_collector", COLLECTOR)
+assert spec and spec.loader
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+bad: list[str] = []
+
+
+def check(name: str, value: bool) -> None:
+    print(("  ok " if value else "  FAIL ") + name)
+    if not value:
+        bad.append(name)
+
+
+def contract() -> dict[str, object]:
+    return {"challenge_id": "00000000-0000-4000-8000-000000000003", "sponsor": "joe", "job_id": "00000000-0000-4000-8000-000000000001", "attempt": 1, "lease_token": "00000000-0000-4000-8000-000000000002", "scheduled_for": "2026-08-20T06:30:00Z", "window_starts_at": "2026-08-13T06:30:00Z", "window_ends_at": "2026-10-04T06:30:00Z", "mode": "live", "destination": "live", "allowlist_revision_id": "00000000-0000-4000-8000-000000000004", "allowlist_digest": "d" * 64, "calendar_keys": ["f491ebbaf3343e0567f64d1f04a34fab8d4a145936a2ba3a2df0577680288b36"]}
+
+
+with tempfile.TemporaryDirectory() as raw:
+    root = Path(raw)
+    fake = root / "fake"
+    fake.mkdir()
+    # The fake bundle implements the EventKit methods the real collector calls;
+    # its attendee string must reach only the collector stdout pipe.
+    (fake / "EventKit.py").write_text('''
+class URL:
+ def resourceSpecifier(self): return "mailto:raw.attendee@example.test"
+class Attendee:
+ def URL(self): return URL()
+class Calendar:
+ def calendarIdentifier(self): return "calendar-joe"
+class Event:
+ def calendar(self): return Calendar()
+ def eventIdentifier(self): return "event-1"
+ def startDate(self): from datetime import datetime,timezone; return datetime(2026,8,20,8,tzinfo=timezone.utc)
+ def endDate(self): from datetime import datetime,timezone; return datetime(2026,8,20,9,tzinfo=timezone.utc)
+ def title(self): return "Meeting"
+ def location(self): return None
+ def attendees(self): return [Attendee()]
+ def organizer(self): return None
+class Store:
+ def requestFullAccessToEventsWithCompletion_(self, done): done(True,None)
+ def calendarsForEntityType_(self, _): return [Calendar()]
+ def predicateForEventsWithStartDate_endDate_calendars_(self,*args): return args
+ def eventsMatchingPredicate_(self,_): return [Event()]
+class EKEventStore:
+ @classmethod
+ def alloc(cls): return cls()
+ def init(self): return Store()
+''')
+    (fake / "Foundation.py").write_text("class NSDate:\n @staticmethod\n def dateWithTimeIntervalSince1970_(value): return value\n")
+    allowlist = root / "joe.json"
+    allowlist.write_text('{"version":1,"calendars":[{"identifier":"calendar-joe","sponsor":"joe"}]}')
+    allowlist.chmod(0o600)
+    key = root / "collector.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    key.chmod(0o600)
+    if not hasattr(collector.os, "memfd_create"):
+        def fixture_memfd(_name: str) -> int:
+            with tempfile.TemporaryFile() as anonymous:
+                return os.dup(anonymous.fileno())
+        collector.os.memfd_create = fixture_memfd
+        try:
+            portable_signature = collector.sign(key, b"portable fixture")
+        finally:
+            delattr(collector.os, "memfd_create")
+    else:
+        portable_signature = collector.sign(key, b"portable fixture")
+    check("anonymous seekable Ed25519 input is portable", bool(portable_signature))
+    environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(fake), "CARR_CALENDAR_PREBRIEF_ALLOWLIST": str(allowlist), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY": str(key), "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION": "fixture-1"}
+    run = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(contract()), text=True, capture_output=True, env=environment, check=False)
+    envelope = json.loads(run.stdout) if run.returncode == 0 else {}
+    check("real collector subprocess signs DB-bound EventKit capture", bool(run.returncode == 0 and envelope.get("challenge_id") == contract()["challenge_id"] and envelope.get("raw_payload_count") == 1 and envelope.get("signature")))
+    check("raw attendee appears only in the allowed collector stdout pipe", "raw.attendee@example.test" not in run.stderr and "raw.attendee@example.test" in run.stdout)
+    changed = contract(); changed["calendar_keys"] = ["a" * 64]
+    mismatch = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(changed), text=True, capture_output=True, env=environment, check=False)
+    check("DB/local allowlist mismatch refuses before raw output", mismatch.returncode == 78 and "raw.attendee@example.test" not in mismatch.stdout + mismatch.stderr)
+    bad_window = contract(); bad_window["window_starts_at"] = "2026-08-12T06:30:00Z"
+    window = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(bad_window), text=True, capture_output=True, env=environment, check=False)
+    check("noncanonical DB scheduled window refuses before EventKit", window.returncode == 78 and "raw.attendee@example.test" not in window.stdout + window.stderr)
+    key.chmod(0o644)
+    insecure = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(contract()), text=True, capture_output=True, env=environment, check=False)
+    check("insecure private key refuses before raw output", insecure.returncode == 78 and "raw.attendee@example.test" not in insecure.stdout + insecure.stderr)
+
+print("OK" if not bad else "FAIL " + ", ".join(bad))
+raise SystemExit(bool(bad))

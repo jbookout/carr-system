@@ -61,8 +61,22 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # age out of the snapshot. This list and the preamble in bin/schema-snapshot.sh
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
+#
+# The role preamble deliberately creates bundles before their migration runs so
+# a pending migration may grant to them on a fresh cluster. Their ACLs, however,
+# may appear only after the source snapshot ledger has absorbed that migration.
+# Keep this mapping explicit so a production-truth pre-release snapshot does not
+# pretend a pending bundle already has privileges.
+ROLE_GRANT_MIGRATIONS = {
+    "carr_calendar_prebrief_jobs": "0229_calendar_prebrief_projection.sql",
+    "carr_calendar_prebrief_canary_jobs": "0229_calendar_prebrief_projection.sql",
+    "carr_calendar_prebrief_attestors": "0229_calendar_prebrief_projection.sql",
+    "carr_calendar_prebrief_email_resolver": "0229_calendar_prebrief_projection.sql",
+}
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
-             "carr_authority", "carr_device_evidence"]
+             "carr_authority", "carr_device_evidence",
+             "carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
+             "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
 failures: list[str] = []
@@ -119,7 +133,19 @@ def main():
     check("multi-statement/comment SQL disguised as a writer GRANT is refused",
           destructive_refused)
 
+    applied_migrations = {
+        migration for migration in ROLE_GRANT_MIGRATIONS.values()
+        if re.search(rf"^{re.escape(migration)}\t", sql, re.M)
+    }
+    pending_grant_roles = {
+        role for role, migration in ROLE_GRANT_MIGRATIONS.items()
+        if migration not in applied_migrations
+    }
     for role in APP_ROLES:
+        if role in pending_grant_roles:
+            check(f"pending role {role} has no premature grant",
+                  not any(re.search(rf"\bto {role}\b", ln) for _, ln in grant_lines))
+            continue
         check(f"at least one grant names {role}",
               any(re.search(rf"\bto {role}\b", ln) for _, ln in grant_lines))
 
@@ -166,6 +192,15 @@ def main():
               for _, ln in grant_lines))
 
     generator = open(GENERATOR).read()
+    check("function ACL renderer uses a qualification-neutral search path",
+          re.search(r"cat > \"\$GRANTS_SQL\" <<'GRANTSQL'\n.*?set search_path = '';",
+                    generator, re.S) is not None)
+    renewal_delivery_applied = bool(re.search(
+        r"^0230_renewal_decision_delivery\.sql\t", sql, re.M))
+    check("composite function arguments stay schema-qualified in ACL statements",
+          (not renewal_delivery_applied)
+          or ("ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool)" in sql
+              and "ops.renewal_decision_candidate_digest(p_candidate candidate_pool)" not in sql))
     membership_query = re.search(
         r"select distinct format\('grant %s to %s;', gr\.rolname, mem\.rolname\)"
         r".*?from pg_auth_members m.*?order by 1;",
