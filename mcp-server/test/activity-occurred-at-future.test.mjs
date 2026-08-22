@@ -132,7 +132,7 @@ test("the tolerance is minutes, not hours — it cannot be used to schedule", as
 
 test("stamp-touch is covered too, since it routes through the same handler", async () => {
   const fake = new Fake();
-  await assert.rejects(() => TOOLS["stamp-touch"].handler(fake, joe, {
+  await assert.rejects(() => TOOLS["log-touch"].handler(fake, joe, {
     idempotency_key: "k-stamp", ref: "V-SUP-007", summary: "called",
     occurred_at: iso(5 * DAY),
   }), /occurred_at_in_future/,

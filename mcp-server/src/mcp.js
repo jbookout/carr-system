@@ -12,7 +12,7 @@
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { neon, Pool } from "@neondatabase/serverless";
-import { TOOLS, ToolError, executeRegisteredTool, auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
+import { TOOLS, ToolError, executeRegisteredTool, auditIdentity, assertNoCallerAuthorityFields, resolveVerb } from "./tools.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 
@@ -53,7 +53,7 @@ export const PROFILES = {
   // and 0 of 207 leads with a last touch, found 2026-08-02) is not fixed by a
   // profile that can only read.
   capture: new Set([
-    "log-activity", "stamp-touch", "add-loop", "update-loop",
+    "log-activity", "log-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-signal", "record-branch-evidence",
     "report-problem",
@@ -95,11 +95,11 @@ export const PROFILES = {
   // are away is exactly the wrong direction of error.
   away: new Set([
     // everything capture holds
-    "log-activity", "stamp-touch", "add-loop", "update-loop",
+    "log-activity", "log-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-signal", "record-branch-evidence", "record-defect",
     // plus: close what it opened, advance the book, draft, and keep the record honest
-    "close-loop", "update-deal", "add-premises", "record-counter",
+    "close-loop", "update-deal", "add-premises", "record-counteroffer",
     "prepare-document", "update-document-status",
     "log-decision", "update-decision",
     "open-investigation", "open-investigation-branch",
@@ -208,7 +208,7 @@ export const PROFILES = {
   // touch a rule, draft a client document, or send anything. Every verb is
   // additive and idempotency-keyed.
   hermes: new Set([
-    "log-activity", "stamp-touch", "add-loop", "update-loop",
+    "log-activity", "log-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-defect",
   ]),
@@ -430,8 +430,14 @@ export async function callTool(env, actor, name, args, profile = "full") {
         hint: "call-verb takes {verb, args} where args is the inner verb's own argument object" });
     return callTool(env, actor, inner, innerArgs, profile);
   }
-  const tool = TOOLS[name];
-  if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  // One alias hop, so the seven renamed verbs keep answering to the names that
+  // are written into skills, job files and docs. The profile gate below is
+  // applied to the RESOLVED name, never the alias — otherwise an old name would
+  // be a way around a scoped session's allow-list.
+  const resolved = resolveVerb(name);
+  if (!resolved) throw new ToolError({ error: "unknown_tool", name });
+  const tool = resolved.tool;
+  name = resolved.name;
   // ENFORCED AT CALL TIME, not just filtered out of tools/list. Removing a verb
   // from the list is a hint; a model that has seen the full list in an earlier
   // turn, or guesses a name, would otherwise still reach it.

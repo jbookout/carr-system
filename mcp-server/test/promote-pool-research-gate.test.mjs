@@ -23,10 +23,10 @@ class PoolFake {
   }
 }
 
-test("promote-pool refuses a pool row without sourced contact research before party creation", async () => {
+test("promote-candidate-to-lead refuses a pool row without sourced contact research before party creation", async () => {
   const db = new PoolFake();
-  await assert.rejects(() => TOOLS["promote-pool"].handler(db, joe, {
+  await assert.rejects(() => TOOLS["promote-candidate-to-lead"].handler(db, joe, {
     idempotency_key: "promote-pool-no-research", pool_id: "pool-id", base_version: 1, stage: "new",
-  }), e => e instanceof ToolError && e.payload.error === "research_evidence_required" && e.payload.gate === "promote-pool");
+  }), e => e instanceof ToolError && e.payload.error === "research_evidence_required" && e.payload.gate === "promote-candidate-to-lead");
   assert.equal(db.partyInserts, 0);
 });

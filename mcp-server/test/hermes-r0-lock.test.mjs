@@ -163,14 +163,14 @@ test("HERMES-CASE-006 — the consequential write verbs still refuse", () => {
   // out, and they are the substance of the boundary: destroy, re-point
   // ownership, create a party, advance a deal, touch a rule, draft for a client.
   for (const verb of ["update-deal", "new-client", "new-lead", "new-vendor", "add-party",
-                      "confirm-merge", "reassign-deal", "set-lead", "log-decision",
+                      "confirm-merge", "reassign-deal", "assign-lead-agent", "log-decision",
                       "activate-rule", "retire-rule", "prepare-document", "close-loop"]) {
     assert.equal(allowedIn("hermes", verb, WRITE), false, `${verb} must refuse under hermes`);
   }
 });
 
 test("the granted additive verbs are allowed", () => {
-  for (const verb of ["log-activity", "stamp-touch", "add-loop", "update-loop",
+  for (const verb of ["log-activity", "log-touch", "add-loop", "update-loop",
                       "set-next-action", "complete-action", "add-critical-date",
                       "record-finding", "record-defect"]) {
     assert.equal(allowedIn("hermes", verb, WRITE), true, `${verb} should be callable`);
@@ -215,6 +215,6 @@ test("HERMES-CASE-011/012 — request creation and engineering dispatch refuse",
 // ---------- the fullOnly carve-out ----------
 
 test("sensitive operational reads stay off R0", () => {
-  assert.equal(allowedIn("hermes", "integrity-digest", FULL_ONLY), false,
+  assert.equal(allowedIn("hermes", "data-health-check", FULL_ONLY), false,
     "fullOnly reads are withheld from every locked profile, R0 included");
 });

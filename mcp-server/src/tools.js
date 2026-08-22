@@ -1857,6 +1857,53 @@ function findCatchUpCandidates(found) {
 // ---------- the registry ----------
 // Each: { description, inputSchema, write: bool, humanOnly?: bool, handler(client, actor, args) }
 
+// ── VERB ALIASES (loop #150, the rename audit) ──────────────────────────────
+// Seven names did not say what the verb does. They are renamed here and the old
+// names keep working as aliases, because these strings are referenced across
+// skills, scheduled-job files, agent definitions and docs, and the record layer
+// ships as a deployed Worker — a hard rename is a deploy that strands every
+// existing caller at the instant it lands, with `unknown_tool` as the only
+// symptom a session would see.
+//
+// ALIASES ARE RESOLVED AT DISPATCH AND NEVER ENTER `TOOLS`. That is deliberate:
+// the deploy preflight compares the verb COUNT against the last shipped deploy
+// and refuses a drop, so seven extra registry entries would read as a surface
+// change nobody asked for. Resolving instead keeps the count honest at 45.
+//
+// Retiring an old name later is a separate, deliberate act — delete its row
+// here once nothing calls it, which `list-verbs` deprecation warnings make
+// visible rather than guesswork.
+export const VERB_ALIASES = {
+  // sets a deal's lead AGENT; read as though it created a lead, and collided
+  // with new-lead in any list a human was scanning. The strongest case of the
+  // seven.
+  "set-lead": "assign-lead-agent",
+  // means counteroffer; read as a counting device.
+  "record-counter": "record-counteroffer",
+  // means: log that we contacted someone.
+  "stamp-touch": "log-touch",
+  // machine-speak for a data health check.
+  "integrity-digest": "data-health-check",
+  // inverted English.
+  "lead-hot": "hot-leads",
+  // analytics jargon for how we found them.
+  "source-attribution": "how-we-found-them",
+  // opaque without naming the pool and the destination, which the new name does.
+  "promote-pool": "promote-candidate-to-lead",
+};
+
+// Resolve a verb name a caller sent to the tool that should run, following one
+// alias hop. Returns null rather than guessing at an unknown name — a fuzzy
+// match here would turn a typo into a write against the wrong record.
+export function resolveVerb(name) {
+  if (!name || typeof name !== "string") return null;
+  if (TOOLS[name]) return { name, tool: TOOLS[name], deprecated: false };
+  const next = VERB_ALIASES[name];
+  if (next && TOOLS[next])
+    return { name: next, tool: TOOLS[next], deprecated: true, was: name };
+  return null;
+}
+
 export const TOOLS = {
 
   // ===== reads (carr_reader connection) =====
@@ -2366,7 +2413,7 @@ export const TOOLS = {
 
   // [ORDER 33 (b)] Which lane has ever produced a commission. Reads
   // v_source_attribution; the honest-limits note travels with every answer.
-  "source-attribution": {
+  "how-we-found-them": {
     write: false,
     description: "Prospecting ROI: per source lane, the funnel pool -> promoted -> leads -> clients -> deals -> commissions. Answers 'which radar lane has ever produced a commission'. Reads acquisition_source per lane. Optional lane filter.",
     inputSchema: { type: "object", properties: {
@@ -2702,7 +2749,7 @@ export const TOOLS = {
     },
   },
 
-  "lead-hot": {
+  "hot-leads": {
     write: false,
     description: "Scored, unsuppressed leads (score, lane, est_lease_event, next_action_date). ALL of them surface — qualification is the human's job, never pre-filtered.",
     inputSchema: { type: "object", properties: { limit: { type: "integer", default: 30 } } },
@@ -2756,7 +2803,7 @@ export const TOOLS = {
     handler: async (c) => ({ stale: (await c.query("select * from v_stale_records order by days_quiet desc nulls first")).rows }),
   },
 
-  "integrity-digest": {
+  "data-health-check": {
     write: false,
     description: "The heartbeat's lines: row counts, export freshness (dead-man; stale/last_ok per target), writes_by_dell_24h, norm_owed_open, merge_queue, triage queue.",
     inputSchema: { type: "object", properties: {} },
@@ -2931,7 +2978,7 @@ export const TOOLS = {
     }),
   },
 
-  "stamp-touch": {
+  "log-touch": {
     write: true,
     description: "Truck shorthand for log-activity: one-line call/text stamp. 'Called Hughes, going well' and done. Sets last_touch. Contact kinds only — a note is annotation, not a touch (it would not move Last Touch since 0017); use log-activity kind:note or an event for annotation.",
     inputSchema: { type: "object", properties: {
@@ -3260,7 +3307,7 @@ export const TOOLS = {
     }),
   },
 
-  "set-lead": {
+  "assign-lead-agent": {
     write: true, humanOnly: true,
     description: "THE human ownership handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Ownership is a matter between the two humans, never a machine's call. Requires base_version from a fresh read; the locked deal version makes simultaneous handoffs conflict instead of silently replacing one another. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
     inputSchema: { type: "object", properties: {
@@ -3268,7 +3315,7 @@ export const TOOLS = {
       new_lead: { type: "string", enum: ["joe","dell"] },
       base_version: { type: "integer" } },
       required: ["idempotency_key","deal","new_lead","base_version"] },
-    handler: async (c, actor, args) => withEnvelope(c, actor, "set-lead", args, async () => {
+    handler: async (c, actor, args) => withEnvelope(c, actor, "assign-lead-agent", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       await versionGuard(c, "deal", s.id, args.base_version);
@@ -3280,7 +3327,7 @@ export const TOOLS = {
         "insert into deal_participant (deal_id, actor_id, role, set_by) values ($1,$2,'lead',$3)",
         [s.id, na.rows[0].id, actor.id]);
       await c.query("update deal set owner=$1, updated_by=$2 where id=$3", [args.new_lead, actor.id, s.id]);
-      await writeEvent(c, actor, "set-lead", "deal", s.id,
+      await writeEvent(c, actor, "assign-lead-agent", "deal", s.id,
         { old: { lead: prev.rows[0]?.actor_id || null }, new: { lead: args.new_lead }, idempotency_key: args.idempotency_key });
       return { ok: true, new_lead: args.new_lead };
     }),
@@ -3563,7 +3610,7 @@ export const TOOLS = {
     }),
   },
 
-  "promote-pool": {
+  "promote-candidate-to-lead": {
     write: true,
     description: "Promote a candidate_pool row into a real lead: mints the party, mints the next L-ref, copies the identity, contact and est-lease-event stamps across, points the pool row at the new lead and flips it to 'promoted'. ONE-WAY BY DESIGN — there is no demote verb; a lead created in error is worked through the lead's own lifecycle. Only a row whose status is still 'pool' can promote: a 'promoted' row would duplicate, and a 'suppressed_dup' row already points at the record it duplicates. A dup_tier 'review' row IS promotable — that tier exists precisely so a weak match never silently blocks Joe. Read the row from v_pool first and pass its version as base_version.",
     inputSchema: { type: "object", properties: {
@@ -3575,7 +3622,7 @@ export const TOOLS = {
       source_detail: { type: "string", description: "why this one, now — free text provenance" },
       research_evidence: RESEARCH_EVIDENCE_SCHEMA },
       required: ["idempotency_key","pool_id","base_version","stage","research_evidence"] },
-    handler: async (c, actor, args) => withEnvelope(c, actor, "promote-pool", args, async () => {
+    handler: async (c, actor, args) => withEnvelope(c, actor, "promote-candidate-to-lead", args, async () => {
       await versionGuard(c, "candidate_pool", args.pool_id, args.base_version);
       const p = (await c.query(
         `select id, source, source_key, status, dup_tier, dup_ref, name, org_name, vertical,
@@ -3587,7 +3634,7 @@ export const TOOLS = {
             ? "this row already became a lead; read v_pool for its promoted_ref"
             : "this row is marked as a duplicate of an existing record — work that record instead" });
       const evidence = researchEvidence(args.research_evidence,
-        ["name", "company", "phone", "specialty", "market"], "promote-pool");
+        ["name", "company", "phone", "specialty", "market"], "promote-candidate-to-lead");
 
       // The org, when the source named one, becomes its own party so the lead
       // hangs off a person who belongs to a practice — the shape add-party and
@@ -3625,7 +3672,7 @@ export const TOOLS = {
         `update candidate_pool set status='promoted', promoted_lead_id=$1, updated_by=$2
           where id=$3 and status='pool'`, [lead, actor.id, args.pool_id]);
 
-      await writeEvent(c, actor, "promote-pool", "lead", lead,
+      await writeEvent(c, actor, "promote-candidate-to-lead", "lead", lead,
         { new: { ref, from_pool: p.source_key, est_lease_event: p.est_lease_event },
           idempotency_key: args.idempotency_key });
       await writeEvent(c, actor, "promote-pool", "candidate_pool", args.pool_id,
@@ -4037,7 +4084,7 @@ export const TOOLS = {
     }),
   },
 
-  "record-counter": {
+  "record-counteroffer": {
     write: true,
     description: "Log a negotiation round: whose paper (side), the economics (rate REQUIRES its basis — never a bare number), TI, free rent, term, PLUS what that side CLAIMED about its own position (\"best and final\", \"the owner won't go below 18\", \"we walk Friday\") and how the submarket stood when they said it. Use it after every counter, and log the claims at the same time — a claim is only ever falsifiable against the rounds that come after it, so a claim not captured now is uncomputable for ever. Round number auto-increments per deal+side if omitted. Out-of-band rates ask for confirm. NOT a place for a characterisation of a human being: 'aggressive', 'bluffs', 'reasonable' have no field here and never will — claims[] records what was SAID, and whether it was later contradicted is computed at read time.",
     inputSchema: { type: "object", properties: {
@@ -4061,7 +4108,7 @@ export const TOOLS = {
           note: { type: "string" } }, required: ["type"] } },
       note: { type: "string" }, confirm: { type: "boolean" } },
       required: ["idempotency_key","deal","side"] },
-    handler: async (c, actor, args) => withEnvelope(c, actor, "record-counter", args, async () => {
+    handler: async (c, actor, args) => withEnvelope(c, actor, "record-counteroffer", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       if (args.rate_amount != null && !args.rate_basis)
@@ -4124,7 +4171,7 @@ export const TOOLS = {
                          falsifiable: t.falsifiable, reversal_test: t.reversal_test });
       }
 
-      await writeEvent(c, actor, "record-counter", "deal", s.id,
+      await writeEvent(c, actor, "record-counteroffer", "deal", s.id,
         { new: { round, side: args.side, rate: args.rate_amount, basis: args.rate_basis,
                  submarket_condition: submarket, claims: claimsOut.map(x => x.type) },
           idempotency_key: args.idempotency_key });
@@ -6924,8 +6971,13 @@ export function assertNoCallerAuthorityFields(args) {
 // the first gate here makes direct MCP, call-verb recursion, and composites
 // fail closed before a handler or database client can be used.
 export async function executeRegisteredTool(client, actor, name, args = {}) {
-  const tool = TOOLS[name];
-  if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  // Same one alias hop as the MCP door, so call-verb and the composite verbs
+  // accept an old name too. Both doors resolve before any gate runs, so a
+  // deprecated name is never a route around one.
+  const resolved = resolveVerb(name);
+  if (!resolved) throw new ToolError({ error: "unknown_tool", name });
+  const tool = resolved.tool;
+  name = resolved.name;
   assertNoCallerAuthorityFields(args);
   // Phase 1, 2026-08-13 (decision 97e76a2f): the hint now names the remedy,
   // not just the refusal. Every non-human door (probe/reviewer/agent-token,
