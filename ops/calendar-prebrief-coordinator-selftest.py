@@ -12,6 +12,32 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+# EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE — see the same preflight in
+# ops/calendar-prebrief-collector-selftest.py for the full reasoning. Short
+# version: Apple's /usr/bin/openssl is LibreSSL, LibreSSL has no Ed25519, and
+# without this the proof died with a bare CalledProcessError on any stock Mac.
+# Narrow on purpose — it declines only when the keypair cannot be minted at all,
+# and every assertion still runs wherever OpenSSL 3 is present.
+def _require_ed25519() -> None:
+    # Minting a throwaway key IS the question, so a build that can do Ed25519
+    # never skips regardless of how its text output is worded. See the collector
+    # selftest for why the earlier text-grep version was the wrong probe.
+    with tempfile.TemporaryDirectory() as probe_dir:
+        attempt = subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "ED25519",
+             "-out", str(Path(probe_dir) / "probe.pem")],
+            capture_output=True, text=True)
+    if attempt.returncode == 0:
+        return
+    build = subprocess.run(["openssl", "version"], capture_output=True, text=True)
+    print(f"openssl here cannot mint an Ed25519 key "
+          f"({(build.stdout or '').strip() or 'unknown build'}); this proof needs OpenSSL 3")
+    sys.exit(78)
+
+
+_require_ed25519()
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools/calendar-prebrief-coordinator.py"
 spec = importlib.util.spec_from_file_location("coordinator", SCRIPT)

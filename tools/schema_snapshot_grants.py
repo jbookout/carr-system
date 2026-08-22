@@ -27,8 +27,9 @@ IDENT = r"[a-z_][a-z0-9_$]*"
 ROLE = rf"(?P<grantee>{IDENT})"
 PRIVILEGES = r"[a-z_]+(?:, [a-z_]+)*"
 COLUMNS = rf"{IDENT}(?:, {IDENT})*"
-FUNCTION_ARGS = rf"(?:{IDENT} [a-z_][a-z0-9_ ]*(?:\[\])?(?:, {IDENT} [a-z_][a-z0-9_ ]*(?:\[\])?)*)?"
-FUNCTION_TYPE_ARGS = r"(?:[a-z_][a-z0-9_ ]*(?:\[\])?(?:, [a-z_][a-z0-9_ ]*(?:\[\])?)*)?"
+FUNCTION_TYPE = rf"(?:{IDENT}\.)?{IDENT}(?: {IDENT})*(?:\[\])?"
+FUNCTION_ARGS = rf"(?:{IDENT} {FUNCTION_TYPE}(?:, {IDENT} {FUNCTION_TYPE})*)?"
+FUNCTION_TYPE_ARGS = rf"(?:{FUNCTION_TYPE}(?:, {FUNCTION_TYPE})*)?"
 GRANT_PATTERNS = (
     re.compile(
         rf"^grant (?P<privileges>{PRIVILEGES}) on schema (?P<schema>{IDENT}) to {ROLE};$"
@@ -55,7 +56,7 @@ GRANT_PATTERNS = (
     # a privileged provisioner consumes is safe.
     re.compile(
         rf"^revoke all on function (?P<schema>{IDENT})\.(?P<object>{IDENT})"
-        rf"\((?P<function_type_args>{FUNCTION_TYPE_ARGS})\) from public;$"
+        rf"\((?P<function_args>{FUNCTION_ARGS})\) from public;$"
     ),
 )
 REVOKE_FROM_PUBLIC = re.compile(r"^revoke all on function .* from public;$")
@@ -105,7 +106,17 @@ def _snapshot_function_identity(schema: str, name: str, arguments: str) -> str:
                 raise SnapshotGrantError(
                     f"generated function argument has no name/type pair: {argument}"
                 ) from exc
-            types.append(" ".join(argument_type.split()))
+            normalized_type = " ".join(argument_type.split())
+            # The snapshot SQL must qualify public composite types so it loads
+            # under an empty/default search_path. PostgreSQL's ACL catalog
+            # renderer (oidvectortypes) reports public/pg_catalog types without
+            # those prefixes on the provisioner's normal connection. Normalize
+            # only those two implicit schemas for a stable authority identity.
+            for implicit_schema in ("public.", "pg_catalog."):
+                if normalized_type.startswith(implicit_schema):
+                    normalized_type = normalized_type[len(implicit_schema):]
+                    break
+            types.append(normalized_type)
     return f"{schema}.{name}({', '.join(types)})"
 
 

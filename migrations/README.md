@@ -116,7 +116,7 @@ not aliases and receive no exemption.
 
 ## The application-session substrate has a gate that CI does not run (2026-08-20)
 
-`0231_authenticated_application_session.sql` is the authenticated application-session
+`0250_authenticated_application_session.sql` is the authenticated application-session
 floor. Its guarantees are database-level — trigger shapes, role separation, expiry and
 revocation — and they are proven by executing them, not by reading the SQL:
 

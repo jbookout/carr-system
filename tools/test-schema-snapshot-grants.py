@@ -62,16 +62,26 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
 #
-# carr_calendar_prebrief_jobs, carr_calendar_prebrief_attestors, and
-# carr_calendar_prebrief_email_resolver are known here while 0229 remains pending. The
-# generator deliberately excludes it from its active catalog query and role
-# preamble so the current snapshot cannot leak a 0229 artifact.
-# Move it into APP_ROLES and the generator together on the snapshot refresh
-# that records 0229 as applied.
-PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
-                        "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver"]
+# The role preamble deliberately creates bundles before their migration runs so
+# a pending migration may grant to them on a fresh cluster. Their ACLs, however,
+# may appear only after the source snapshot ledger has absorbed that migration.
+# Keep this mapping explicit so a production-truth pre-release snapshot does not
+# pretend a pending bundle already has privileges.
+ROLE_GRANT_MIGRATIONS = {
+    "carr_calendar_prebrief_jobs": "0229_calendar_prebrief_projection.sql",
+    "carr_calendar_prebrief_canary_jobs": "0229_calendar_prebrief_projection.sql",
+    "carr_calendar_prebrief_attestors": "0229_calendar_prebrief_projection.sql",
+    "carr_calendar_prebrief_email_resolver": "0229_calendar_prebrief_projection.sql",
+    # The application-session substrate's minting role. Its grants cannot appear
+    # in the snapshot until 0231 is applied to the database the snapshot renders,
+    # which is exactly what this mapping exists to express.
+    "carr_session_minter": "0250_authenticated_application_session.sql",
+}
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
-             "carr_authority", "carr_device_evidence", "carr_session_minter"]
+             "carr_authority", "carr_device_evidence",
+             "carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
+             "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver",
+             "carr_session_minter"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
 failures: list[str] = []
@@ -94,13 +104,6 @@ def main():
         return 1
     sql = open(SNAPSHOT).read()
     lines = sql.split("\n")
-
-    executable_lines = [line for line in lines
-                        if line.strip() and not line.lstrip().startswith("--")]
-    for role in PENDING_ROLE_BUNDLES:
-        check(f"pending role {role} is absent from executable snapshot SQL",
-              not any(role in line for line in executable_lines),
-              "pending migration roles must not leak into the applied-only baseline")
 
     check("the snapshot carries a CARR GRANTS section",
           "CARR GRANTS" in sql)
@@ -135,26 +138,21 @@ def main():
     check("multi-statement/comment SQL disguised as a writer GRANT is refused",
           destructive_refused)
 
-    # A role the generator creates but PRODUCTION has not seen yet carries no
-    # grants in the snapshot, and cannot: the grants section is rendered from
-    # the live database, so a role whose creating migration is still pending
-    # appears with none. Demanding a grant for it fails a branch for being
-    # early rather than for being wrong, and the only ways to satisfy it are to
-    # deploy first or to hand-write a grant into a generated file — the second
-    # of which is what this whole test exists to prevent.
-    #
-    # So the assertion holds for every role the snapshot already knows, and
-    # states the pending ones rather than failing on them.
-    known = {role for role in APP_ROLES
-             if any(re.search(rf"\b{role}\b", ln) for _, ln in grant_lines)}
+    applied_migrations = {
+        migration for migration in ROLE_GRANT_MIGRATIONS.values()
+        if re.search(rf"^{re.escape(migration)}\t", sql, re.M)
+    }
+    pending_grant_roles = {
+        role for role, migration in ROLE_GRANT_MIGRATIONS.items()
+        if migration not in applied_migrations
+    }
     for role in APP_ROLES:
-        if role in known:
-            check(f"at least one grant names {role}",
-                  any(re.search(rf"\bto {role}\b", ln) for _, ln in grant_lines))
-        else:
-            print(f"  note  {role} has no grants in this snapshot yet — its "
-                  f"creating migration is still pending, so the live database "
-                  f"it is rendered from has never seen it")
+        if role in pending_grant_roles:
+            check(f"pending role {role} has no premature grant",
+                  not any(re.search(rf"\bto {role}\b", ln) for _, ln in grant_lines))
+            continue
+        check(f"at least one grant names {role}",
+              any(re.search(rf"\bto {role}\b", ln) for _, ln in grant_lines))
 
     # The PR #75 question, answerable at last: may the writer insert into
     # lead? The emitter aggregates privileges per (table, grantee), so insert
@@ -199,6 +197,15 @@ def main():
               for _, ln in grant_lines))
 
     generator = open(GENERATOR).read()
+    check("function ACL renderer uses a qualification-neutral search path",
+          re.search(r"cat > \"\$GRANTS_SQL\" <<'GRANTSQL'\n.*?set search_path = '';",
+                    generator, re.S) is not None)
+    renewal_delivery_applied = bool(re.search(
+        r"^0230_renewal_decision_delivery\.sql\t", sql, re.M))
+    check("composite function arguments stay schema-qualified in ACL statements",
+          (not renewal_delivery_applied)
+          or ("ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool)" in sql
+              and "ops.renewal_decision_candidate_digest(p_candidate candidate_pool)" not in sql))
     membership_query = re.search(
         r"select distinct format\('grant %s to %s;', gr\.rolname, mem\.rolname\)"
         r".*?from pg_auth_members m.*?order by 1;",

@@ -1,8 +1,8 @@
 import { createSystemWorkClient } from "./system-work-client.js";
-import { actionForCard, renderSystemWorkCard, validateHumanRef } from "./system-work-view.js";
+import { actionForCard, renderCurrentWorkRequests, renderSystemWorkCard, validateHumanRef } from "./system-work-view.js";
 
 const client = createSystemWorkClient();
-const state = { card: null, proposed: null };
+const state = { card: null, proposed: null, current: [] };
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -16,7 +16,7 @@ function alert(message, kind = "error") {
 }
 
 function render() {
-  $("#systemWorkStage").innerHTML = renderSystemWorkCard(state.card);
+  $("#systemWorkStage").innerHTML = state.card ? renderSystemWorkCard(state.card) : renderCurrentWorkRequests(state.current);
   const ref = state.card?.human_ref;
   if (ref) {
     history.replaceState(null, "", `/system-work.html?work_request=${encodeURIComponent(ref)}`);
@@ -157,12 +157,15 @@ async function boot() {
     try { await refresh(new FormData(event.currentTarget).get("human_ref")); alert(""); }
     catch (error) { alert(refusal(error)); } };
   $("#systemWorkStage").onclick = (event) => {
+    const open = event.target.closest("[data-open-work-request]");
+    if (open) { refresh(open.dataset.openWorkRequest).catch((error) => alert(refusal(error))); return; }
     const button = event.target.closest("[data-system-action]");
     if (button) actionForms[button.dataset.systemAction]?.();
   };
   document.querySelectorAll("[data-system-cancel]").forEach((button) => { button.onclick = () => $("#systemWorkDialog").close(); });
   const requested = new URLSearchParams(location.search).get("work_request");
-  if (requested) await refresh(requested); else render();
+  if (requested) await refresh(requested);
+  else { state.current = (await client.current()).items || []; render(); }
 }
 
 boot().catch((error) => alert(refusal(error)));

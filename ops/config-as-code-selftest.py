@@ -266,7 +266,98 @@ def main():
         definition_only_absent = not (
             Path(mod.LAUNCHD_SRC) / "com.carr.control-plane-tick.plist"
         ).exists()
+
+        # THE TWO SCHEDULED-TASK GUARDS LANDED WITHOUT COVERAGE (PR 430). Both
+        # decide whether a file is CARR configuration at all, so a silent
+        # regression in either does not fail loudly — it re-arms the chronically
+        # red pre-push gate those guards were written to stop, and that failure
+        # arrives on somebody else's unrelated push.
+        #
+        # The frontmatter restriction is the part worth pinning. The marker is
+        # honoured ONLY inside the opening frontmatter block, so a task cannot
+        # exempt itself by mentioning the phrase in prose, and a genuine CARR
+        # task that someone forgot to commit still shows up as drift.
+        ephemeral_cases = {
+            "spaced marker in frontmatter": "---\nname: t\nephemeral: true\n---\nbody\n",
+            "unspaced marker in frontmatter": "---\nname: t\nephemeral:true\n---\nbody\n",
+            "capitalised marker in frontmatter": "---\nname: t\nEphemeral: True\n---\nbody\n",
+        }
+        non_ephemeral_cases = {
+            # THE CASE THE GUARD EXISTS TO GET RIGHT, and it has to be a line
+            # that is EXACTLY the marker. The comparison is line equality, so a
+            # marker used mid-sentence never matches and would pass even with
+            # the frontmatter boundary deleted — such a fixture tests nothing.
+            # A task documenting the convention is the realistic shape.
+            "marker alone on a prose line below frontmatter":
+                "---\nname: t\n---\nTo mark scaffolding, add to the frontmatter:\n\n"
+                "ephemeral: true\n\nThat is the only place it counts.\n",
+            "marker in prose mid-sentence":
+                "---\nname: t\n---\nThis task is ephemeral: true only in spirit.\n",
+            "marker with no frontmatter at all": "ephemeral: true\n",
+            "marker before the frontmatter opens": "ephemeral: true\n---\nname: t\n---\n",
+            "ordinary tracked task": "---\nname: t\n---\nCARR managed\n",
+            "empty body": "",
+        }
+        ephemeral_marker_honoured = all(
+            mod.is_ephemeral_scheduled_task(body) for body in ephemeral_cases.values()
+        )
+        ephemeral_prose_ignored = not any(
+            mod.is_ephemeral_scheduled_task(body) for body in non_ephemeral_cases.values()
+        )
+        definition_only_detected = (
+            mod.is_definition_only_task(
+                "---\nname: t\n---\nThis definition is disabled. Do not create it.\n")
+            and not mod.is_definition_only_task("---\nname: t\n---\nCARR managed\n")
+            and not mod.is_definition_only_task("")
+        )
+
+        # END TO END, because a correct predicate wired into the wrong place is
+        # the failure this pair actually had: the checker honoured
+        # "definition only" while the installer did not, and would have written
+        # four contracts whose own text forbids creating them.
+        mod.IS_PRIMARY = True
+        machine_ephemeral = Path(mod.TASKS_SRC) / "handoff-continuation" / "SKILL.md"
+        machine_ephemeral.parent.mkdir(parents=True, exist_ok=True)
+        machine_ephemeral.write_text(
+            "---\nname: handoff-continuation\nephemeral: true\n---\n"
+            "Session scaffolding, not tracked configuration.\n",
+            encoding="utf-8",
+        )
+        (tasks / "calendar-prebrief-am.SKILL.md").write_text(
+            "---\nname: calendar-prebrief-am\n---\n"
+            "This definition is disabled. Do not create, enable, or invoke any scheduler.\n",
+            encoding="utf-8",
+        )
+        guard_labels = [label for label, _live, _repo in mod.pairs()]
+        with contextlib.redirect_stdout(io.StringIO()) as guard_out:
+            guard_install_rc = mod.cmd_install(True)
+        guard_output = guard_out.getvalue()
+        mod.IS_PRIMARY = original_primary
+        ephemeral_excluded_from_drift = (
+            not any("handoff-continuation" in label for label in guard_labels)
+            and machine_ephemeral.is_file()
+        )
+        definition_only_excluded_from_drift = not any(
+            "calendar-prebrief-am" in label for label in guard_labels
+        )
+        definition_only_not_installed = (
+            guard_install_rc == 0
+            and "SKIP  scheduled task calendar-prebrief-am (definition only:" in guard_output
+            and not (Path(mod.TASKS_SRC) / "calendar-prebrief-am" / "SKILL.md").exists()
+        )
     cases = [
+        ("ephemeral marker is honoured inside frontmatter",
+         ephemeral_marker_honoured),
+        ("ephemeral marker in prose does not exempt a tracked task",
+         ephemeral_prose_ignored),
+        ("a disabled definition is recognised, an ordinary body is not",
+         definition_only_detected),
+        ("an ephemeral machine task is excluded from drift and left alone",
+         ephemeral_excluded_from_drift),
+        ("a definition-only task is not reported as missing from the machine",
+         definition_only_excluded_from_drift),
+        ("the installer skips a definition-only scheduled task",
+         definition_only_not_installed),
         ("unrelated top-level key preserved", merged.get("user_setting") == {"keep": True}),
         ("unrelated event preserved", "PostToolUse" in merged["hooks"] and "/Users/booko/other/hooks/post.py" in commands(merged)),
         ("unrelated Stop hook preserved", "/Users/booko/other/hooks/keep.py" in names),

@@ -7,6 +7,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 LEGACY_MIGRATION = REPO / "migrations" / "0194_atomic_rule_approval.sql"
 MIGRATION = REPO / "migrations" / "0228_atomic_rule_lifecycle_forward_upgrade.sql"
+SCOPE_FIX = REPO / "migrations" / "0247_system_rule_scope_binding.sql"
 TOOLS = REPO / "mcp-server" / "src" / "tools.js"
 DB_GATE = REPO / "ops" / "control-plane-db-gate.py"
 LOCAL_ACCEPTANCE = REPO / "ops" / "atomic-rule-approval-local-pg-acceptance.py"
@@ -14,6 +15,7 @@ LOCAL_ACCEPTANCE = REPO / "ops" / "atomic-rule-approval-local-pg-acceptance.py"
 
 def main() -> int:
     forward_sql = MIGRATION.read_text(encoding="utf-8").lower()
+    scope_fix = SCOPE_FIX.read_text(encoding="utf-8").lower() if SCOPE_FIX.exists() else ""
     catalog_seed = forward_sql.split("-- two joe-approved system rules", 1)[0]
     sql = LEGACY_MIGRATION.read_text(encoding="utf-8").lower() + forward_sql
     tools = TOOLS.read_text(encoding="utf-8")
@@ -100,9 +102,28 @@ def main() -> int:
           and "select ops.sync_system_rule_control_bindings()" in sql
           and "does not match joe-approved preimage" in sql
           and "lacks its exact joe decision evidence" in sql
-          and "must retain exact shared system-wide scope" in sql
+          and "must retain shared system-wide scope" in sql
           and "narrowed_system_rule_scope" in gate
           and "personal_system_rule_audience" in gate)
+    check("forward scope repair pins both system rules without rewriting their records",
+          bool(scope_fix)
+          and "create or replace function ops.sync_system_rule_control_bindings()" in scope_fix
+          and "v_rule.scope is distinct from v_expected.rule_scope" in scope_fix
+          and "'{}'::jsonb" in scope_fix
+          and "github" in scope_fix and "neon" in scope_fix and "cloudflare" in scope_fix
+          and "anthropic" in scope_fix and "openai" in scope_fix and "google" in scope_fix
+          and "healthchecks" in scope_fix and "blotato" in scope_fix and "make" in scope_fix
+          and "select ops.sync_system_rule_control_bindings()" in scope_fix
+          and "update rule" not in scope_fix
+          and "from public,carr_reader,carr_writer,carr_jobs,carr_authority" in scope_fix)
+    check("retired cost restriction stays an exact inert tombstone in both sync passes",
+          "legacy retired system cost rule does not match its exact retirement tombstone preimage" in forward_sql
+          and "legacy retired system cost rule does not match its exact retirement tombstone preimage" in scope_fix
+          and "34f34e23-225b-4d0f-946f-478b59fbce63" in forward_sql
+          and "34f34e23-225b-4d0f-946f-478b59fbce63" in scope_fix
+          and "82cf84d571cbe49eb61bf9570e2c8f86a114fa216e9ab1b3799181045c881137" in forward_sql
+          and "82cf84d571cbe49eb61bf9570e2c8f86a114fa216e9ab1b3799181045c881137" in scope_fix
+          and "continue;" in forward_sql and "continue;" in scope_fix)
     check("routine roles cannot approve rules",
           "from public,carr_reader,carr_writer,carr_jobs" in sql
           and "grant execute on function ops.approve_rule" in sql
