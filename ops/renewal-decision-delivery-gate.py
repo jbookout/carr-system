@@ -96,6 +96,25 @@ def main() -> int:
             if actual != relation.startswith("public.v_renewal_decision"):
                 fail(f"unexpected {role} select boundary on {relation}")
 
+        # 0279 replaces the scheduled signed-market source as the live reader
+        # with CARR's authenticated executed-lease ledger. Its full adversarial
+        # lifecycle is exercised by renewal-lease-ledger-local-pg-gate.py; keep
+        # this historical signed-ingress gate from asserting retired view
+        # semantics after that forward migration has applied.
+        if "owner_slug" in columns:
+            status_columns = {row[0] for row in cur.execute(
+                "select column_name from information_schema.columns "
+                "where table_schema='public' and table_name='v_renewal_decision_queue_status'"
+            ).fetchall()}
+            if "owner_slug" not in status_columns:
+                fail("lease-ledger queue is sponsor-scoped but its status view is not")
+            if one(cur, "select has_table_privilege('carr_reader','lease','select')")[0]:
+                fail("lease-ledger reader can bypass the safe views")
+            if one(cur, "select count(*) from v_renewal_decision_queue_status where owner_slug in ('joe','dell')")[0] != 2:
+                fail("lease-ledger status does not cover both partner scopes")
+            print("renewal decision delivery gate: PASS (0279 lease-ledger reader)")
+            return 0
+
         suffix = uuid.uuid4().hex
         fixtures = [
             source_row(f"Renewal T1 {suffix}", "T1", "", suffix),

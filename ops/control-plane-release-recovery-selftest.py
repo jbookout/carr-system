@@ -21,6 +21,7 @@ MIGRATIONS = [
     "0227_nightly_availability_canary_record_layer", "0228_atomic_rule_lifecycle_forward_upgrade",
     "0229_calendar_prebrief_projection", "0230_renewal_decision_delivery",
     "0249_renewal_signed_source_ingress", "0250_calendar_prebrief_joe_runtime",
+    "0279_carr_lease_renewal_provider",
 ]
 STEPS = [
     {"id": "contain", "action_kind": "contain"},

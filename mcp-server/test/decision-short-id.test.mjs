@@ -48,7 +48,7 @@ class Fake {
   }
   async query(text, params) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
 
     // The prefix resolver.
     if (sql.includes("subject_id::text like")) {
@@ -146,7 +146,7 @@ class DetachFake extends Fake {
         ? [{ id: "event-ptr", new_value: { summary: "decided: a thing" } }] : [] };
     }
     if (sql.includes("subject_id::text like")) return super.query(text, params);
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     this.writes.push({ sql, params });
     return { rows: [{ id: "C-127", type: "client", ref: "C-127" }] };
   }
