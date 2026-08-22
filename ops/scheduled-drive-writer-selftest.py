@@ -8,6 +8,7 @@ the invoked scheduler route rather than merely inspecting source text.
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -142,9 +143,30 @@ def main() -> int:
         normal, _recovery = nightly.split('if [ "$RECOVERY" -eq 1 ]; then\n  export CARR_EXPORT_LIVE=1', 1)
         check("nightly normal route clears ambient Drive before its first child",
               "unset CARR_VAULT CARR_EXPORT_LIVE" in normal)
-        check("nightly Drive projections are routed through the recovery envelope",
-              nightly.count("drive_projection ") >= 11 and "RECOVERY NONCANONICAL" in nightly
-              and "routine-canonical-seam-refusal.sh" in nightly)
+        # AN EXACT COUNT, NOT A FLOOR (changed 2026-08-22). This asserted at
+        # least eleven Drive projections, which was the wrong shape twice over.
+        # A floor cannot notice a projection being REMOVED once the total is
+        # comfortably above it, and removal is the direction this file has been
+        # moving all week as classes retire. It also counted every mention of
+        # the helper's name, including its own definition and the prose about
+        # it, so the number never meant what it looked like.
+        #
+        # Counting step invocations exactly means any change in either
+        # direction fails here and gets read by a person — which is what you
+        # want, because adding a Drive projection and retiring one are both
+        # decisions rather than housekeeping. When this fails, update the number
+        # in the same commit that changes the chain and say which step moved.
+        #
+        # Six as of 2026-08-22, down from thirteen: the exports gained a
+        # canonical destination (CARR OneDrive, decision bdbb7441), the section
+        # index and system graph were found already writing inside the repo and
+        # only unmarked, and four retired outright — cutover readiness, the
+        # vault drift watch at both ends, and the settings mirror.
+        projections = len(re.findall(r'^drive_projection "', nightly, re.M))
+        check("every remaining Drive projection is routed through the recovery envelope",
+              projections == 6 and "RECOVERY NONCANONICAL" in nightly
+              and "routine-canonical-seam-refusal.sh" in nightly,
+              f"{projections} drive_projection step(s) in bin/nightly.sh")
         check("nightly recognizes the record-native dashboard replacement",
               "open-items dashboard replaced by record-native Front Door" in nightly
               and 'drive_projection "open-items dashboard' not in nightly)
