@@ -1,4 +1,4 @@
--- 0237 — Drive retirement, resolved from receipts rather than from a report
+-- 0262 — Drive retirement, resolved from receipts rather than from a report
 --
 -- WHAT THE EXISTING PREFLIGHT ALREADY SAYS, IN ITS OWN WORDS. Asked whether a
 -- static inventory can close Phase 4, ops/drive-retirement-readiness-gate.py
@@ -8,7 +8,7 @@
 -- JSON supplied by a caller is not an immutable receipt.
 --
 -- This migration is the record layer that answer points at. It exists only
--- because 0235 gave us receipts that prove themselves by readback and 0236 gave
+-- because 0260 gave us receipts that prove themselves by readback and 0261 gave
 -- us an acceptance the runtime cannot make. Without those two, every table here
 -- would be a place to write "yes, it is fine".
 --
@@ -171,7 +171,7 @@ grant select, insert on ops.drive_retirement to carr_writer;
 grant select on ops.drive_retirement to carr_reader;
 grant execute on function ops.drive_retirement_readiness() to carr_writer, carr_reader;
 -- Retiring a dependency is operational work the runtime may do, ONCE it holds
--- two proven receipts. Declaring the phase closed is not, and lives in 0236's
+-- two proven receipts. Declaring the phase closed is not, and lives in 0261's
 -- acceptance, which carr_writer cannot execute.
 revoke update, delete on ops.drive_retirement from carr_writer;
 revoke update, delete on ops.drive_dependency from carr_writer;
@@ -192,13 +192,13 @@ declare
 begin
   select id into probe_actor from public.actor where kind = 'human' order by slug limit 1;
   if probe_actor is null then
-    raise exception '0237 FAILED: need a human actor for the retirement probe';
+    raise exception '0262 FAILED: need a human actor for the retirement probe';
   end if;
 
   -- An empty inventory must NOT read as ready.
   select * into rdy from ops.drive_retirement_readiness();
   if rdy.ready then
-    raise exception '0237 FAILED: an empty inventory reported READY; nothing proven '
+    raise exception '0262 FAILED: an empty inventory reported READY; nothing proven '
                     'about nothing is not proof';
   end if;
 
@@ -228,10 +228,10 @@ begin
        qualifying_tool_calls, qualifying_events, qualifying_read_calls,
        proven_receipts, unproven_receipts, open_conflicts, note)
     values (gen_random_uuid(), sid, probe_actor, 'carr-internal',
-            1, 1, 1, 1, 0, 0, '0237 empty-case probe');
+            1, 1, 1, 1, 0, 0, '0262 empty-case probe');
     select * into rdy from ops.drive_retirement_readiness();
     if rdy.ready then
-      raise exception '0237 FAILED: an empty inventory with an acceptance on record '
+      raise exception '0262 FAILED: an empty inventory with an acceptance on record '
                       'reported READY';
     end if;
     raise exception 'ROLLBACK_EMPTY_CASE';
@@ -264,11 +264,11 @@ begin
   exception when others then
     failed := true;
     if position('is not proven' in sqlerrm) = 0 then
-      raise exception '0237 FAILED: unproven-receipt retirement refused by the WRONG guard: %', sqlerrm;
+      raise exception '0262 FAILED: unproven-receipt retirement refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0237 FAILED: a dependency was retired on UNPROVEN receipts';
+    raise exception '0262 FAILED: a dependency was retired on UNPROVEN receipts';
   end if;
 
   perform ops.prove_write_receipt(r1);
@@ -284,11 +284,11 @@ begin
   exception when others then
     failed := true;
     if position('drive_retirement_distinct_receipts' in sqlerrm) = 0 then
-      raise exception '0237 FAILED: same-receipt retirement refused by the WRONG guard: %', sqlerrm;
+      raise exception '0262 FAILED: same-receipt retirement refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0237 FAILED: one receipt was accepted for BOTH the repoint and the recovery';
+    raise exception '0262 FAILED: one receipt was accepted for BOTH the repoint and the recovery';
   end if;
 
   -- The honest path.
@@ -301,10 +301,10 @@ begin
   -- Every dependency retired, but NO authority acceptance yet.
   select * into rdy from ops.drive_retirement_readiness();
   if rdy.remaining <> 0 then
-    raise exception '0237 FAILED: a retired dependency still counted as remaining';
+    raise exception '0262 FAILED: a retired dependency still counted as remaining';
   end if;
   if rdy.ready then
-    raise exception '0237 FAILED: retirement read as READY without an authority acceptance';
+    raise exception '0262 FAILED: retirement read as READY without an authority acceptance';
   end if;
 
   -- AND THE HAPPY PATH MUST BE REACHABLE. A gate that can only ever say no is
@@ -315,10 +315,10 @@ begin
      qualifying_tool_calls, qualifying_events, qualifying_read_calls,
      proven_receipts, unproven_receipts, open_conflicts, note)
   values (gen_random_uuid(), sid, probe_actor, 'carr-internal',
-          1, 1, 1, 1, 0, 0, '0237 probe acceptance');
+          1, 1, 1, 1, 0, 0, '0262 probe acceptance');
   select * into rdy from ops.drive_retirement_readiness();
   if not rdy.ready then
-    raise exception '0237 FAILED: every dependency retired on proven receipts and an '
+    raise exception '0262 FAILED: every dependency retired on proven receipts and an '
                     'acceptance on record, and readiness still said no';
   end if;
 
@@ -329,17 +329,17 @@ begin
   exception when others then
     failed := true;
     if position('cannot be rewritten' in sqlerrm) = 0 then
-      raise exception '0237 FAILED: retirement rewrite refused by the WRONG guard: %', sqlerrm;
+      raise exception '0262 FAILED: retirement rewrite refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0237 FAILED: a retirement record was rewritten';
+    raise exception '0262 FAILED: a retirement record was rewritten';
   end if;
 
-  raise notice '0237 apply-time proof passed';
-  raise exception 'ROLLBACK_0237_PROBE';
+  raise notice '0262 apply-time proof passed';
+  raise exception 'ROLLBACK_0262_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0237_PROBE' then
+  if sqlerrm = 'ROLLBACK_0262_PROBE' then
     return;
   end if;
   raise;
