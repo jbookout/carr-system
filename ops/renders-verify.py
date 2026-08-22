@@ -18,9 +18,21 @@ Prints ONE line. Exit 0 OK / 1 mismatch / 2 SKIP.
 import hashlib
 import os
 import sys
+import pathlib as _PATHLIB
 
-VAULT = os.path.expanduser(
-    "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+# PHASE 4 GATE (2026-08-22). This tool's whole job is the legacy Drive vault, so
+# it has no canonical mode: without a Drive root there is nothing for it to look
+# at. It used to reach for a hardcoded root with no flag, no reason and no
+# refusal, which is the ambient Drive selection Phase 4 exists to remove. Normal
+# operation now refuses with the seam named (exit 69, which the nightly chain
+# reads as BLOCKED); an acknowledged recovery exercise passes
+# --recovery --reason WHY [--vault PATH].
+sys.path.insert(0, str(_PATHLIB.Path(__file__).resolve().parents[1]))
+from lib.drive_recovery import require_legacy_vault  # noqa: E402
+
+_RECOVERY = require_legacy_vault('record-native render verification (this compares vault renders against the record)')
+sys.argv = [sys.argv[0], *_RECOVERY.args]
+VAULT = str(_RECOVERY.vault)
 ENV = os.path.expanduser("~/.config/carr/db.env")
 
 

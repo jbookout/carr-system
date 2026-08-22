@@ -33,6 +33,23 @@ class RecoveryContext:
     args: tuple[str, ...]
 
 
+
+@dataclass(frozen=True)
+class LegacyVault:
+    """A resolved legacy Drive root, plus whatever arguments the caller still owns.
+
+    Separate from RecoveryContext because the guarantee is different and the
+    type should say so: RecoveryContext.vault is optional, since normal mode
+    legitimately has no Drive root. A caller that reached this type has already
+    passed the refusal, so its root is never None and a type checker can see
+    that without an assert at every call site.
+    """
+
+    vault: Path
+    reason: str
+    args: tuple[str, ...]
+
+
 def parse_recovery_controls(argv: list[str] | tuple[str, ...], seam: str) -> RecoveryContext:
     """Strip only recovery controls while preserving all surface arguments.
 
@@ -104,6 +121,53 @@ def parse_recovery_controls(argv: list[str] | tuple[str, ...], seam: str) -> Rec
     print(f"RECOVERY MODE - NONCANONICAL Drive root: {vault}", file=sys.stderr)
     return RecoveryContext(True, reason, vault, tuple(args))
 
+
+
+# Exit 69 (EX_UNAVAILABLE) is the repo's "canonical seam missing" code:
+# bin/nightly.sh's step() maps 69 to BLOCKED rather than FAIL, so a vault-only
+# tool that refuses reads as a deliberate refusal in the chain log instead of a
+# broken step. Same code bin/routine-canonical-seam-refusal.sh uses.
+SEAM_MISSING_EXIT = 69
+
+
+class LegacyVaultRefused(SystemExit):
+    """A vault-only tool asked to run without explicit, reasoned recovery."""
+
+    def __init__(self, seam: str) -> None:
+        super().__init__(SEAM_MISSING_EXIT)
+        self.seam = seam
+
+
+def require_legacy_vault(seam: str, argv: list[str] | tuple[str, ...] | None = None) -> LegacyVault:
+    """Gate a tool whose ENTIRE job is reading or writing the legacy vault.
+
+    parse_recovery_controls is for a tool that has canonical work to do and a
+    legacy fallback. These callers have no canonical mode at all: without a
+    Drive root there is nothing for them to look at. So the boundary is the
+    same explicit three-part act, but the normal path REFUSES rather than
+    continuing in records mode.
+
+    Before this existed each such tool carried its own hardcoded Drive root and
+    reached for it with no flag, no reason and no refusal, which is exactly the
+    ambient Drive selection the rest of this module removes. Six of them were
+    found on 2026-08-22 during Phase 4.
+
+    Returns the parsed context so the caller can hand the REMAINING arguments to
+    its own parser; the recovery controls are already stripped out of
+    ``context.args``.
+    """
+    raw = list(sys.argv[1:] if argv is None else argv)
+    context = parse_recovery_controls(raw, seam)
+    if not context.recovery:
+        print(f"MISSING_CANONICAL_SEAM: {seam}", file=sys.stderr)
+        print("This tool reads or writes the legacy Drive vault and has no canonical mode. "
+              "Normal operation refuses it. To run it as an acknowledged recovery exercise, "
+              "pass --recovery --reason WHY [--vault PATH].", file=sys.stderr)
+        raise LegacyVaultRefused(seam)
+    # parse_recovery_controls always sets both on the recovery branch; assert the
+    # invariant here once so no caller has to.
+    assert context.vault is not None and context.reason is not None
+    return LegacyVault(context.vault, context.reason, context.args)
 
 def add_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--recovery", action="store_true",

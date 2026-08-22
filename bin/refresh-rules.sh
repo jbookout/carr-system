@@ -74,8 +74,14 @@ if run_export >> "$LOG" 2>&1; then
   # (DNA/Network/introduction-rules.md), so the job rewrote five files, the
   # rebaseline covered three, and the next check called the other two TAMPER.
   # One selector, one registry, no hand-kept list to drift.
-  "$REPO/.venv/bin/python" "$REPO/ops/vault-drift-watch.py" --rebaseline \
-    --only-target compiled-rules >> "$LOG" 2>&1 || true
+  # The drift watch is gated behind explicit recovery (Phase 4, 2026-08-22):
+  # it reads the legacy vault and has no canonical mode, so it refuses unless
+  # the caller says why. This IS an acknowledged legacy-render touch -- it
+  # rebaselines the compiled-rules renders this job just rewrote -- so the
+  # reason is fixed here rather than left to whoever runs the refresh.
+  "$REPO/.venv/bin/python" "$REPO/ops/vault-drift-watch.py" \
+    --recovery --reason "compiled-rules render rebaseline (bin/refresh-rules.sh)" \
+    --rebaseline --only-target compiled-rules >> "$LOG" 2>&1 || true
 else
   rc=$?  # capture BEFORE the date subshell resets $? — the old line always logged rc=0
   echo "$(date -u +%FT%TZ) FAIL rules refresh rc=$rc" >> "$LOG"

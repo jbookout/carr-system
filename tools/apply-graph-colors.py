@@ -11,8 +11,19 @@ Idempotent — re-running does not duplicate groups.
 """
 import json, sys, os, subprocess
 
-vault = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser(
-    "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+# PHASE 4 GATE (2026-08-22). This tool's whole job is the legacy Drive vault, so
+# it has no canonical mode. It used to reach for a hardcoded root with no flag,
+# no reason and no refusal. Normal operation now refuses with the seam named
+# (exit 69, which the nightly chain reads as BLOCKED); an acknowledged recovery
+# exercise passes --recovery --reason WHY [--vault PATH].
+import pathlib as _PATHLIB
+sys.path.insert(0, str(_PATHLIB.Path(__file__).resolve().parents[1]))
+from lib.drive_recovery import require_legacy_vault  # noqa: E402
+
+_RECOVERY = require_legacy_vault(
+    "record-native graph presentation (this writes Obsidian's graph config inside the vault)")
+sys.argv = [sys.argv[0], *_RECOVERY.args]
+vault = _RECOVERY.args[0] if _RECOVERY.args else str(_RECOVERY.vault)
 p = os.path.join(vault, ".obsidian", "graph.json")
 
 if subprocess.run(["pgrep", "-x", "Obsidian"], capture_output=True).returncode == 0:
