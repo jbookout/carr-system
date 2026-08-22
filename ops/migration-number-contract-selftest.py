@@ -38,13 +38,6 @@ FROZEN_0169 = (
     "0169_program5_release_binding.sql",
 )
 EXPECTED_LEGACY_ALIASES = {
-    # Added 2026-08-22, deliberately, because this pin is the review point for
-    # the alias table: 0272 seeded the enforcement-control catalog with a
-    # blanket `on conflict do update`, which Production refuses through the
-    # active_approved_control_immutable trigger. It had already applied to the
-    # staging project, and an applied migration's sha256 is checked, so the file
-    # could not be corrected in place. 0274 does the same seeding insert-only.
-    "0272_control_catalog_from_enforcement_map.sql": "0274_control_catalog_seed_guarded.sql",
     "0134_control_plane_admission.sql": "0148_control_plane_admission.sql",
     "0135_control_plane_jobs.sql": "0149_control_plane_jobs.sql",
     "0136_control_plane_job_fixes.sql": "0150_control_plane_job_fixes.sql",

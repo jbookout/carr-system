@@ -1628,6 +1628,54 @@ async function resolveRuleId(c, value, field = "rule_id") {
   return m.rows[0].id;
 }
 
+// ---------- following a decision pointer the system itself printed ----------
+//
+// SAME DEFECT CLASS AS resolveRuleId ABOVE, and the same day (defect 69fb49b1,
+// 2026-08-22). `update-decision` took `decision_id` straight into `where
+// subject_id = $1`, a uuid column, so the EIGHT-CHARACTER form this system
+// prints everywhere — loop source_notes cite "decisions f58ffba8, 91020f79",
+// log-decision's own envelope, decision-history's rendered index — could not be
+// passed back into the verb that corrects them. It died as 22P02, which until
+// pull request 465 surfaced as a bare "internal error" naming nothing.
+//
+// A pointer nobody can follow is not a pointer. That reasoning is written out at
+// length above resolveRuleId and applies here unchanged; the only reason this is
+// a second function rather than one shared one is that rules and decisions live
+// in different tables and a prefix must be matched against the right one.
+//
+// AMBIGUITY IS REPORTED, NEVER GUESSED, for a sharper reason than the rules
+// case: amending the wrong decision rewrites a settled ruling's stated
+// rationale, and the entry it overwrote gives no sign it was ever different.
+async function resolveDecisionId(c, value, field = "decision_id") {
+  const raw = String(value || "").trim();
+  if (!raw) throw new ToolError({ error: "decision_id_required", field });
+
+  if (UUID_RE.test(raw)) return raw;
+
+  if (!/^[0-9a-f]{4,}$/i.test(raw))
+    throw new ToolError({ error: "decision_id_malformed", field, got: raw,
+      hint: "a decision id is either the full 36-character uuid or the 8-character short " +
+            "form this system prints, e.g. 'f58ffba8'" });
+
+  const m = await c.query(
+    `select distinct on (subject_id) subject_id::text as id,
+            left(coalesce(new_value->>'title', '(untitled)'), 70) as title,
+            recorded_at
+       from event
+      where verb = 'log-decision' and subject_id::text like $1 || '%'
+      order by subject_id, recorded_at`, [raw.toLowerCase()]);
+  if (!m.rows.length)
+    throw new ToolError({ error: "decision_not_found", field, got: raw,
+      hint: "no decision id begins with that prefix — check decision-history, and note " +
+            "that the id log-decision returns is the decision_id, not the event_id" });
+  if (m.rows.length > 1)
+    throw new ToolError({ error: "ambiguous_decision_id", field, got: raw,
+      candidates: m.rows.map(r => ({ decision_id: r.id, title: r.title })),
+      hint: "that prefix matches more than one decision; pass more characters or the full uuid" });
+  return m.rows[0].id;
+}
+
+
 // ---------- the deferral gate (add-loop; migration 0081, Joe 2026-08-09) ----------
 //
 // Every class below is a state of the world OUTSIDE the session. That is the
@@ -5640,7 +5688,7 @@ export const TOOLS = {
     description: "Correct a decision entry already recorded by log-decision — a wrong or missing title, rationale, human_quote or provenance — or ATTACH it to the record(s) it governs after the fact with `about`. Use for a DEFECTIVE record (a quote that was lost, a rationale that stated something untrue), never to rewrite what was actually decided: a decision that CHANGED is a new log-decision, because the old one really was the call at the time. Attaching is different from correcting and is always safe: it adds a pointer on the record's timeline, changes nothing about the entry itself, and re-attaching the same record is a no-op rather than a second pointer. Pass only the fields you are correcting. Re-derives quote_absent from whether a quote is present afterwards, and appends an amend-decision event recording the change.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
-      decision_id: { type: "string", description: "the decision_id returned by log-decision" },
+      decision_id: { type: "string", description: "the decision this corrects — the full uuid log-decision returned, OR the 8-character short form this system prints in loop source_notes and decision-history, e.g. 'f58ffba8'. A prefix matching more than one decision is refused with the candidates listed rather than guessed at." },
       title: { type: "string" }, rationale: { type: "string" },
       about: { description: "attach this ruling to the record(s) it is ABOUT, now — one ref or several: \"C-063\" or [\"V-GC-001\",\"V-MSC-024\",\"T-004\"]. This is how a decision logged without `about` gets connected later. Only pass records the ruling is genuinely ABOUT: a session-level build decision that merely MENTIONS a ref in its rationale is not about that record, and attaching it there puts noise on a timeline a human reads before a client conversation.",
         oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
@@ -5651,9 +5699,12 @@ export const TOOLS = {
       reason: { type: "string", description: "why the entry needed correcting — recorded on the amendment" } },
       required: ["idempotency_key","decision_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-decision", args, async () => {
+      // Resolved BEFORE the read, so the short form the system prints is a first-class
+      // argument rather than a 22P02 on a uuid column (defect 69fb49b1).
+      const decisionId = await resolveDecisionId(c, args.decision_id);
       const cur = (await c.query(
         `select id, new_value, human_quote, agent_rationale from event
-          where subject_id = $1 and verb = 'log-decision' limit 1`, [args.decision_id])).rows[0];
+          where subject_id = $1 and verb = 'log-decision' limit 1`, [decisionId])).rows[0];
       if (!cur) throw new ToolError({ error: "decision_not_found", decision_id: args.decision_id,
         hint: "pass the decision_id log-decision returned, not the event_id" });
 
@@ -5692,20 +5743,20 @@ export const TOOLS = {
       // carries the CURRENT title, which is right: an entry corrected here should not
       // leave the old wording sitting on a record's timeline.
       const attached = await mirrorDecision(c, actor, {
-        about: args.about, decision_id: args.decision_id, decision_event_id: cur.id,
+        about: args.about, decision_id: decisionId, decision_event_id: cur.id,
         title: next.title, human_quote: quote,
         rationale: args.rationale !== undefined ? args.rationale : cur.agent_rationale,
         idempotency_key: args.idempotency_key });
 
       const changed = ["title","rationale","human_quote","provenance","cost_delta","quality_delta"]
         .filter(f => args[f] !== undefined);
-      await writeEvent(c, actor, "amend-decision", "decision", args.decision_id,
+      await writeEvent(c, actor, "amend-decision", "decision", decisionId,
         { old: { quote_absent: nv.quote_absent },
           new: { fields: changed, quote_absent: !quote,
                  ...(attached.length ? { attached_to: attached.map(a => a.ref) } : {}) },
           agent_rationale: args.reason || null, idempotency_key: args.idempotency_key });
 
-      return { ok: true, decision_id: args.decision_id, amended: changed, quote_absent: !quote,
+      return { ok: true, decision_id: decisionId, amended: changed, quote_absent: !quote,
                about: attached.map(a => ({ type: a.type, id: a.id, ref: a.ref, already_attached: a.already })) };
     }),
   },
@@ -5728,7 +5779,7 @@ export const TOOLS = {
     description: "Take a decision back off a record it was wrongly attached to. NOTHING IS DELETED: the pointer stays on the timeline as a permanent audit row, restated so a reader sees at a glance that it was retracted and why — a wrong attachment is a thing that happened, and hiding it would be the worse record. Use when a ruling was attached to a client, lead, vendor or party it is not actually about. NOT for a decision that has CHANGED (that is a new log-decision) and NOT for fixing the entry's own wording (that is update-decision). Re-attaching afterwards is allowed and writes a fresh live pointer beside the retracted one, so the timeline shows attached → retracted → attached rather than a row quietly coming back to life.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
-      decision_id: { type: "string", description: "the decision_id the pointer carries" },
+      decision_id: { type: "string", description: "the decision the pointer carries — the full uuid, or the 8-character short form this system prints. Resolved the same way update-decision resolves it, so a ref read off a timeline can be passed straight back." },
       from: { type: "string", description: "the record to take it off — C-127 / L-204 / V-CPA-006 / P-0948 / a deal name" },
       reason: { type: "string", description: "why it does not belong there. REQUIRED — this is what the retracted row shows a future reader, and 'wrong' with no cause is how the same mistake gets made again." } },
       required: ["idempotency_key","decision_id","from","reason"] },
@@ -5737,6 +5788,11 @@ export const TOOLS = {
         throw new ToolError({ error: "missing_reason",
           hint: "say why the ruling does not belong on this record; the retracted row carries it forward" });
 
+      // The pointer stores the decision_id as TEXT, so a short form here never
+      // raised 22P02 the way update-decision did — it simply matched nothing and
+      // reported not_attached, which reads as "no such pointer" rather than "wrong
+      // form of id". Same defect, quieter symptom, same one-line resolution.
+      const decisionId = await resolveDecisionId(c, args.decision_id);
       const s = await resolveSubject(c, args.from);
       const ptr = (await c.query(
         `select id, new_value from event
@@ -5744,13 +5800,13 @@ export const TOOLS = {
             and new_value->>'decision_id' = $3
           order by coalesce((new_value->>'retracted')::boolean, false), recorded_at desc
           limit 1`,
-        [s.type, s.id, args.decision_id])).rows[0];
-      if (!ptr) throw new ToolError({ error: "not_attached", decision_id: args.decision_id, from: args.from,
+        [s.type, s.id, decisionId])).rows[0];
+      if (!ptr) throw new ToolError({ error: "not_attached", decision_id: decisionId, from: args.from,
         hint: "this decision has no pointer on that record — check catch-me-up on it first" });
 
       const nv = ptr.new_value || {};
       if (nv.retracted)
-        return { ok: true, decision_id: args.decision_id, from: args.from,
+        return { ok: true, decision_id: decisionId, from: args.from,
                  already_retracted: true, reason: nv.retracted_reason || null,
                  hint: "this pointer was already retracted; nothing changed" };
 
@@ -5770,11 +5826,11 @@ export const TOOLS = {
 
       await writeEvent(c, actor, "detach-decision", s.type, s.id, {
         field: "decision_retracted",
-        old: { summary: original, decision_id: args.decision_id },
-        new: { summary: `retracted a decision pointer: ${args.reason}`, decision_id: args.decision_id },
+        old: { summary: original, decision_id: decisionId },
+        new: { summary: `retracted a decision pointer: ${args.reason}`, decision_id: decisionId },
         agent_rationale: args.reason, idempotency_key: args.idempotency_key });
 
-      return { ok: true, decision_id: args.decision_id,
+      return { ok: true, decision_id: decisionId,
                from: { type: s.type, id: s.id, ref: args.from },
                retracted: true, retained_as_audit_row: true, pointer_event_id: ptr.id };
     }),

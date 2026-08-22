@@ -52,16 +52,6 @@ FROZEN_COLLISIONS: dict[str, tuple[str, ...]] = {
 # their mapped forward migrations are idempotent convergence files and must
 # remain present. No other missing ledger filename is grandfathered.
 LEGACY_APPLIED_ALIASES: dict[str, str] = {
-    # 0272 seeded the enforcement-control catalog with a blanket
-    # `on conflict do update`, which rewrites every existing row. Production
-    # refuses that outright and correctly: active_approved_control_immutable
-    # raises when an UPDATE touches a control backing an active approved rule,
-    # and conduct_stop backs the autonomy rule approved 2026-08-22. It applied
-    # to the staging project before that was known, so the file cannot simply be
-    # edited — an applied migration's sha256 is checked. 0274 does the same
-    # seeding insert-only, and this alias lets a database that already ran 0272
-    # count it as satisfied instead of demanding a file that no longer exists.
-    "0272_control_catalog_from_enforcement_map.sql": "0274_control_catalog_seed_guarded.sql",
     "0134_control_plane_admission.sql": "0148_control_plane_admission.sql",
     "0135_control_plane_jobs.sql": "0149_control_plane_jobs.sql",
     "0136_control_plane_job_fixes.sql": "0150_control_plane_job_fixes.sql",

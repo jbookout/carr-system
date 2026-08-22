@@ -54,6 +54,30 @@ bin/run-scheduled.sh already use for "not configured here").
 
 Fixtures: ops/p1-integration-gate-selftest.py.
 """
+# ci: runs-outside-ci — needs a Neon API credential and vendor branch create/delete, which CI has by construction and by choice not got
+#
+# WHY THIS CANNOT CARRY `# ci: db-gate` — the same reasoning as
+# ops/p1-rebuild-gate.py, and stated here too rather than cross-referenced,
+# because these two files keep their guards duplicated on purpose (see THE
+# GUARDS above) and a reader who opens only one should get the whole answer.
+#
+# CI's db-gate lane supplies a DATABASE_URL for a throwaway local Postgres. This
+# gate never reads that variable; it only SETS it for subprocesses it points at
+# a Neon branch of staging that it creates and destroys. Handed CI's DSN it
+# would look for NEON_API_KEY, find none, and exit 78 on every push.
+#
+# And a container would be the wrong substrate anyway. What this gate proves is
+# that the APPLICATION works on the environment the rebuild gate just built —
+# grants, roles and sequences as the VENDOR creates them. The failure it exists
+# for is 2026-08-16's "permission denied for table release" against a schema
+# that was structurally perfect. A local Postgres whose roles CI made itself
+# cannot stage that failure, so passing here would mean less than nothing.
+#
+# WHAT ACTUALLY RUNS IT: the nightly chain, where its step is currently
+# `bin/routine-admin-refusal.sh`, an unconditional exit 78, for want of the same
+# provisioned Neon admin capability. Loops 497 and 499 carry that. Until it is
+# granted this gate executes nowhere, which is a fact worth printing on every
+# push rather than a marker worth faking.
 from __future__ import annotations
 
 import argparse

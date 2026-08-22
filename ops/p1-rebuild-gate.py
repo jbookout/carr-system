@@ -59,6 +59,33 @@ USAGE
 
 It writes to NOTHING that already existed. Everything it creates it destroys.
 """
+# ci: runs-outside-ci — needs a Neon API credential and vendor branch create/delete, which CI has by construction and by choice not got
+#
+# WHY THIS CANNOT CARRY `# ci: db-gate`, stated plainly because open loop 503
+# asked for exactly that (item 1, 2026-08-22). CI's db-gate lane hands each gate
+# a DATABASE_URL pointing at a throwaway local Postgres with the committed
+# schema loaded. This gate does not consume that variable at all — it only SETS
+# it, in the environment of subprocesses it aims at a Neon branch it created
+# itself. Given CI's DSN it would ignore it, look for NEON_API_KEY, find none,
+# and exit 78 on every push. Marking it would turn a green class red daily while
+# proving nothing, and the marker would be a false statement about what the gate
+# needs.
+#
+# It is also the wrong thing to want. The point of this gate is that the
+# reconstruction happens ON NEON, where the roles, grants and extensions are the
+# vendor's rather than a container's — which is the whole distinction between it
+# and the schema load ops/ci.sh already performs. Running it against a container
+# would be running a different, weaker test under this file's name.
+#
+# WHAT ACTUALLY RUNS IT, AND WHY THAT IS CURRENTLY NOTHING. Its runner is the
+# nightly chain, where it was wired on 2026-08-15. That step is presently
+# `bin/routine-admin-refusal.sh` — an unconditional exit 78 — because the Neon
+# admin capability it needs is not provisioned for the unattended chain. So this
+# gate really does execute nowhere today, and that is a capability Joe has to
+# grant rather than a wiring a session can fix. Open loop 497 carries the three
+# Program 1 environment proofs stubbed this way; loop 499 carries the rulings
+# only he can give. Restoring the real step in bin/nightly.sh is the one-line
+# change once the credential exists.
 
 import argparse
 import json

@@ -72,15 +72,28 @@ SUNDAY = "2026-08-16T10:00:00-05:00"
 MONDAY = "2026-08-17T10:00:00-05:00"
 
 
-def run(tool, when, human_spoke, tool_input=None):
+# THE SHAPE A REAL TYPED TURN HAS ON THIS HARNESS, copied from a transcript
+# rather than invented. The previous fixture wrote {"kind": "user"} — a value
+# the harness has never produced — so the suite proved the gate agreed with the
+# test's guess while the gate rejected every actual keystroke (defect 16291f00).
+# Change this only against a freshly read transcript.
+HUMAN_ORIGIN = {"kind": "human"}
+
+# A distinct sentinel, because `origin=None` already means "use the default".
+None_ORIGIN = "__omit__"
+
+
+def run(tool, when, human_spoke, tool_input=None, origin=None, text=None):
     """Drive the real hook. `when` is injected so the test is date-stable."""
     fd, path = tempfile.mkstemp(suffix=".jsonl")
     try:
         with os.fdopen(fd, "w") as fh:
             if human_spoke:
-                fh.write(json.dumps({"type": "user", "origin": {"kind": "user"},
+                fh.write(json.dumps({"type": "user",
+                                     **({} if origin is None_ORIGIN
+                                        else {"origin": HUMAN_ORIGIN if origin is None else origin}),
                                      "message": {"content": [{"type": "text",
-                                     "text": "working through the weekend on this"}]}}) + "\n")
+                                     "text": text or "working through the weekend on this"}]}}) + "\n")
             fh.write(json.dumps({"type": "assistant",
                                  "message": {"content": [{"type": "text",
                                  "text": "on it"}]}}) + "\n")
@@ -126,6 +139,38 @@ for tool in ("PushNotification", "mcp__mail__send_message"):
     blocked, _ = run(tool, SATURDAY, human_spoke=True)
     check(f"a weekend {tool.split('__')[-1]} IS allowed once he is here", not blocked,
           "a partner typing on a Sunday is the election the rule names")
+
+# ── 3b. the carve-out reads the origin shape the harness ACTUALLY writes ────
+# Defect 16291f00: the accepted set was guessed ("user", "keyboard"), the
+# harness writes "human", and so the carve-out never fired once. Each case below
+# is scoped to the origin kind alone — same day, same tool, same text — so a
+# pass cannot come from anything else in the payload.
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True, origin={"kind": "human"})
+check("a turn whose origin kind is the harness's own 'human' counts as present",
+      not blocked, "this is the exact value a typed turn carries; it was refused")
+
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True, origin=None_ORIGIN)
+check("a turn carrying no origin key at all still counts as present", not blocked,
+      "the older record shape is judged on its content")
+
+# The other half of the same allowlist: an injected turn must NEVER count, or
+# the gate becomes something a session can talk itself past.
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True,
+                 origin={"kind": "task-notification"})
+check("a task notification does NOT count as the partner speaking", blocked,
+      "ledger-sweep.py made exactly this mistake on 2026-08-05")
+
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True,
+                 origin={"kind": "some-kind-invented-next-quarter"})
+check("an origin kind nobody has seen does NOT count as the partner speaking",
+      blocked, "an unknown kind must fail closed, and be logged")
+
+# The prefix filter still earns its place: the harness marks its own injected
+# system reminders with the human origin kind, so origin alone is not enough.
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True,
+                 text="<system-reminder>\nThe user started your suggested background task\n</system-reminder>")
+check("a system reminder wearing the human origin kind is still not a keystroke",
+      blocked, "origin alone cannot be the whole test")
 
 # ── 4. everything else is untouched, whatever the day ───────────────────────
 for tool in ("Read", "Bash", "mcp__carr__add-loop", "mcp__mail__search_threads",
