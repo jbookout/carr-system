@@ -43,6 +43,8 @@ declare
   r text;
   jobs_can_login boolean;
   jobs_placeholder text;
+  issuer_can_login boolean;
+  issuer_placeholder text;
 begin
   foreach r in array array[
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
@@ -61,6 +63,27 @@ begin
     jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
+  -- THE SESSION ROLES ARE NOT CREATED HERE, and that is an ordering fact
+  -- rather than an oversight. This preamble exists so a rebuilt cluster has
+  -- the roles PRODUCTION ALREADY HAS, and production has neither
+  -- carr_session_minter nor carr_session_issuer until the Phase 4 migrations
+  -- are applied. Creating them early breaks the grants test, which requires
+  -- every role it knows to be named by at least one grant in this snapshot --
+  -- and no such grant exists until those migrations land and this file is
+  -- regenerated. The migrations create both roles themselves.
+  -- THE ROLE ONLY, NEVER THE MEMBERSHIP, and the reason is about what the
+  -- tests then prove. 0232 no longer objects to a purpose-built issuer holding
+  -- the membership, so this is a choice on the merits rather than a workaround.
+  --
+  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0233
+  -- having run, and the contracts that assert the membership graph would pass
+  -- against the preamble instead of against the migration they exist to test --
+  -- a suite testing its own fixture. Establishing the membership is 0233's
+  -- whole job, so 0233 is where it happens and where a test can see it happen.
+  --
+  -- Creating the role here is still required and is a different question: the
+  -- grant-whitelist gates name it, and has_function_privilege RAISES on a
+  -- missing role rather than returning false.
 end $$;
 
 --
