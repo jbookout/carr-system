@@ -65,11 +65,37 @@ test("loop-board summary returns counts and slim rows only", async () => {
   assert.deepEqual(result.by_status, { open: 2 });
   assert.deepEqual(result.by_blocker_class, { human_only: 1, none: 1 });
   assert.deepEqual(result.by_owner, { claude: 1, joe: 1 });
+  // THE PAYLOAD IS COMPARED TO THE DECLARATION, not to a second hand-written
+  // list. The previous version asserted a required-keys list plus a forbidden
+  // list, which is inclusion-only: any EXTRA key passed. That is how the summary
+  // rows shipped carrying an undeclared due_on while the flag's own description
+  // promised seven keys and the query selected eight, and why a Codex review
+  // caught it rather than this test. Reading the promise out of the schema means
+  // the two cannot drift again in either direction — adding a column to the
+  // query without declaring it fails here, and so does declaring one the query
+  // does not return.
+  const promise = TOOLS["loop-board"].inputSchema.properties.summary.description;
+  const inner = promise.slice(promise.indexOf("{") + 1, promise.indexOf("}"));
+  const declared = [];
+  let depth = 0, token = "";
+  for (const ch of inner) {
+    if (ch === "(") depth += 1;
+    if (ch === ")") depth -= 1;
+    if (ch === "," && depth === 0) { declared.push(token); token = ""; continue; }
+    token += ch;
+  }
+  declared.push(token);
+  const declaredKeys = declared.map(t => t.trim().split(/[\s(]/)[0]).filter(Boolean).sort();
+  assert.ok(declaredKeys.length >= 5, `parsed too few declared keys: ${declaredKeys}`);
+
   for (const loop of result.loops) {
+    assert.deepEqual(Object.keys(loop).sort(), declaredKeys,
+      "summary rows must carry EXACTLY what the summary flag promises — no extra key, no missing one");
+    // Kept as a named guard on top of the exact match: these are the heavy
+    // columns the budget exists to exclude, and naming them makes a regression
+    // read as what it is rather than as an anonymous key-set difference.
     for (const forbidden of ["body", "blocker_detail", "domain", "marker", "joint_owner"])
       assert.equal(forbidden in loop, false, `summary rows must not carry ${forbidden}`);
-    for (const required of ["number", "kind", "label", "blocker_class", "owner", "since_text", "version"])
-      assert.ok(required in loop, `summary rows must carry ${required}`);
   }
   assert.match(queries[queries.length - 1], /left\(/i, "labels are truncated in SQL");
   assert.doesNotMatch(queries[queries.length - 1], /blocker_detail|coalesce\(body/i,
