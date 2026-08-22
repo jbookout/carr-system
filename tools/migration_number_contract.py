@@ -45,22 +45,6 @@ FROZEN_COLLISIONS: dict[str, tuple[str, ...]] = {
         "0169_hermes_pilot_actor.sql",
         "0169_program5_release_binding.sql",
     ),
-    # Both merged to main on 2026-08-21, hours apart, from branches that never
-    # saw each other: the renewal ingress with #452 and the conduct-stop
-    # registration with #453. Each passed CI before the other landed, so no
-    # check either one ran could have seen the collision -- the allocator reads
-    # the tree, and neither tree contained the other file yet.
-    #
-    # FROZEN RATHER THAN RENAMED, which is the whole point of this table. By the
-    # time a collision is visible both files are already on main, and
-    # 0248_register_conduct_stop_control.sql is applied to production besides;
-    # renaming an applied migration is the one thing the runner refuses
-    # outright. They sort deterministically by full filename, which is the
-    # identity PostgreSQL actually keys on.
-    "0248": (
-        "0248_register_conduct_stop_control.sql",
-        "0248_renewal_signed_source_ingress.sql",
-    ),
 }
 
 # These twelve filenames were applied to isolated Control Plane staging before
