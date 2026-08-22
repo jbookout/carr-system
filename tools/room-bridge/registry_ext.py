@@ -91,5 +91,22 @@ def stamp_heartbeat(name: str, *, live: bool, path: Path = DEFAULT_REGISTRY) -> 
     return entry
 
 
+def stamp_auth(name: str, *, auth: bool | None, path: Path = DEFAULT_REGISTRY) -> dict:
+    """Record this cycle's sign-in probe for one desk (spec section 17). Stored
+    beside last_seen for the same reason: the heartbeat receipt reads the
+    registry file, so a probe result has to LAND there to reach the wire. Three
+    valued — None means the vendor CLI could not answer, which is written as a
+    null rather than collapsed to false (see auth_control's own header). Same
+    no-op-on-forgotten-desk stance as stamp_heartbeat."""
+    data = _load(path)
+    entry = data.get("desks", {}).get(name)
+    if entry is None:
+        return {}
+    entry["last_auth"] = auth if isinstance(auth, bool) else None
+    entry["last_auth_at"] = _now()
+    _save(path, data)
+    return entry
+
+
 def all_desks(path: Path = DEFAULT_REGISTRY) -> dict:
     return _load(path).get("desks", {})

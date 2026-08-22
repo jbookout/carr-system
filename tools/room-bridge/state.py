@@ -39,7 +39,22 @@ SHAPE, persisted as JSON:
         "source_seq": 0
       }
     }
-  }
+  },
+  "last_heartbeat_at": null,     # when this bridge last posted its own
+                                  # heartbeat receipt to the room (the
+                                  # observatory's only source of desk state);
+                                  # null until the first one goes out
+  "control_logins": {"<desk>": "iso"},   # last sign-in flow launched per desk;
+                                          # THE THROTTLE for the observatory's
+                                          # RECONNECT button, persisted here
+                                          # because the bridge exits between
+                                          # cycles and an in-memory timer would
+                                          # never fire twice
+  "awaiting_login": {"<desk>": "iso"}    # a login was launched and this desk is
+                                          # waiting for the probe to read signed
+                                          # in, at which point its PROCESS is
+                                          # restarted (a running desk holds its
+                                          # token in memory)
 }
 """
 
@@ -52,7 +67,8 @@ DELIVERED_CAP = 4000  # per desk; oldest dropped first — a dedup memory, not a
 
 
 def default_state() -> dict:
-    return {"last_seq": 0, "desks": {}}
+    return {"last_seq": 0, "desks": {}, "last_heartbeat_at": None,
+            "control_logins": {}, "awaiting_login": {}}
 
 
 def load_state(path: Path) -> dict:
@@ -62,7 +78,21 @@ def load_state(path: Path) -> dict:
         return default_state()
     data.setdefault("last_seq", 0)
     data.setdefault("desks", {})
+    # A state file written before the observatory heartbeat existed has no such
+    # key; absent means "never posted", which correctly makes the first cycle
+    # after an upgrade publish one immediately.
+    data.setdefault("last_heartbeat_at", None)
+    data.setdefault("control_logins", {})
+    data.setdefault("awaiting_login", {})
     return data
+
+
+def get_heartbeat_at(state: dict) -> str | None:
+    return state.get("last_heartbeat_at")
+
+
+def set_heartbeat_at(state: dict, when: str) -> None:
+    state["last_heartbeat_at"] = when
 
 
 def save_state(path: Path, state: dict) -> None:

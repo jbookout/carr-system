@@ -24,12 +24,74 @@
 
 import { personalScopeForActor } from "./identity.js";
 
-const DEFAULT_ROOM = "partner-line";
+export const DEFAULT_ROOM = "partner-line";
 const SLUG = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const UUID = /^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
-const BODY_MAX = 20000;
-const READ_DEFAULT = 50;
-const READ_MAX = 200;
+export const ROOM_BODY_MAX = 20000;
+export const ROOM_READ_DEFAULT = 50;
+export const ROOM_READ_MAX = 200;
+export const ROOM_KINDS = ["turn", "system", "receipt"];
+
+/** null when the name is not a room slug; the normalized name otherwise. */
+export function normalizeRoomName(value) {
+  const room = value === undefined || value === null ? DEFAULT_ROOM : String(value).trim().toLowerCase();
+  return SLUG.test(room) ? room : null;
+}
+
+/** Clamp a caller's paging arguments to the room's own read contract. */
+export function normalizeRoomPaging({ after_seq, limit }) {
+  const after = Number.isInteger(after_seq) && after_seq > 0 ? after_seq : 0;
+  const capped = Number.isInteger(limit)
+    ? Math.min(Math.max(limit, 1), ROOM_READ_MAX) : ROOM_READ_DEFAULT;
+  return { after, limit: capped };
+}
+
+// THE ONE ROOM READ (rule a8c55a47 — a manual path and an automated path that
+// do the same job must be the same code). The read-room verb and the Deal
+// Room's /api/room/turns endpoint are two doors onto the same wire; if the
+// query were copied into the browser endpoint, the observatory could quietly
+// drift from what every desk and every session sees. Both call this.
+export async function readRoomTurns(c, args = {}) {
+  const room = normalizeRoomName(args.room);
+  if (room === null) return { ok: false, error: "room_invalid" };
+  const { after, limit } = normalizeRoomPaging(args);
+  const r = await c.query(
+    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id
+       from v_partner_room_turn
+      where room_id=$1 and id > $2
+      order by id asc limit $3 /* partner-room:read */`,
+    [room, after, limit],
+  );
+  const turns = r.rows;
+  return { ok: true, room, turns,
+    latest_seq: turns.length ? turns[turns.length - 1].seq : after,
+    more: turns.length === limit };
+}
+
+// THE ONE ROOM APPEND, for the same reason. Sponsor is always resolved by the
+// CALLER from a verified credential and passed in — this function never reads
+// it off an argument object that came from a request body.
+export async function appendRoomTurn(c, { room, sponsor, seat, kind, body, msgId }) {
+  const ins = await c.query(
+    `insert into partner_room_turn (room_id, sponsor, seat, kind, body, msg_id)
+     values ($1,$2,$3,$4,$5,$6)
+     on conflict (msg_id) do nothing
+     returning id, to_jsonb(at)#>>'{}' as at /* partner-room:say */`,
+    [room, sponsor, seat, kind, body, msgId],
+  );
+  if (!ins.rows.length) {
+    const prior = await c.query(
+      "select id, room_id, sponsor, seat from partner_room_turn where msg_id=$1 /* partner-room:dedup-read */",
+      [msgId],
+    );
+    if (!prior.rows.length) return { ok: false, error: "dedup_row_vanished", msg_id: msgId };
+    const p = prior.rows[0];
+    return { ok: true, deduplicated: true, room: p.room_id, seq: p.id,
+      sponsor: p.sponsor, seat: p.seat, msg_id: msgId };
+  }
+  return { ok: true, room, seq: ins.rows[0].id, at: ins.rows[0].at,
+    sponsor, seat, kind, msg_id: msgId };
+}
 
 export function partnerRoomTools({ withEnvelope, ToolError }) {
   return {
@@ -49,14 +111,14 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
         if (!SLUG.test(seat))
           throw new ToolError({ error: "seat_invalid",
             hint: "a seat is a plain slug: claude, human, grok, sol, hermes, codex" });
-        const room = args.room === undefined ? DEFAULT_ROOM : String(args.room).trim().toLowerCase();
-        if (!SLUG.test(room)) throw new ToolError({ error: "room_invalid" });
+        const room = normalizeRoomName(args.room);
+        if (room === null) throw new ToolError({ error: "room_invalid" });
         const kind = args.kind ?? "turn";
-        if (!["turn", "system", "receipt"].includes(kind)) throw new ToolError({ error: "kind_invalid" });
+        if (!ROOM_KINDS.includes(kind)) throw new ToolError({ error: "kind_invalid" });
         const body = typeof args.body === "string" ? args.body : "";
         if (!body.trim()) throw new ToolError({ error: "body_required" });
-        if (body.length > BODY_MAX)
-          throw new ToolError({ error: "body_too_long", limit: BODY_MAX, got: body.length });
+        if (body.length > ROOM_BODY_MAX)
+          throw new ToolError({ error: "body_too_long", limit: ROOM_BODY_MAX, got: body.length });
         if (args.msg_id !== undefined && !UUID.test(String(args.msg_id)))
           throw new ToolError({ error: "msg_id_invalid", hint: "msg_id must be a UUID" });
 
@@ -66,25 +128,9 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
             hint: "the room only takes turns from a credential a partner sponsors; this one has no partner behind it" });
 
         const msgId = args.msg_id === undefined ? crypto.randomUUID() : String(args.msg_id).toLowerCase();
-        const ins = await c.query(
-          `insert into partner_room_turn (room_id, sponsor, seat, kind, body, msg_id)
-           values ($1,$2,$3,$4,$5,$6)
-           on conflict (msg_id) do nothing
-           returning id, to_jsonb(at)#>>'{}' as at /* partner-room:say */`,
-          [room, scope.sponsor, seat, kind, body, msgId],
-        );
-        if (!ins.rows.length) {
-          const prior = await c.query(
-            "select id, room_id, sponsor, seat from partner_room_turn where msg_id=$1 /* partner-room:dedup-read */",
-            [msgId],
-          );
-          if (!prior.rows.length) throw new ToolError({ error: "dedup_row_vanished", msg_id: msgId });
-          const p = prior.rows[0];
-          return { ok: true, deduplicated: true, room: p.room_id, seq: p.id,
-            sponsor: p.sponsor, seat: p.seat, msg_id: msgId };
-        }
-        return { ok: true, room, seq: ins.rows[0].id, at: ins.rows[0].at,
-          sponsor: scope.sponsor, seat, kind, msg_id: msgId };
+        const appended = await appendRoomTurn(c, { room, sponsor: scope.sponsor, seat, kind, body, msgId });
+        if (appended.ok !== true) { const { ok: _ok, ...failure } = appended; throw new ToolError(failure); }
+        return appended;
       }),
     },
 
@@ -96,22 +142,9 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
         limit: { type: "integer", description: "max turns to return; default 50, cap 200" },
       } },
       handler: async (c, _actor, args) => {
-        const room = args.room === undefined ? DEFAULT_ROOM : String(args.room).trim().toLowerCase();
-        if (!SLUG.test(room)) throw new ToolError({ error: "room_invalid" });
-        const after = Number.isInteger(args.after_seq) && args.after_seq > 0 ? args.after_seq : 0;
-        const limit = Number.isInteger(args.limit)
-          ? Math.min(Math.max(args.limit, 1), READ_MAX) : READ_DEFAULT;
-        const r = await c.query(
-          `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id
-             from v_partner_room_turn
-            where room_id=$1 and id > $2
-            order by id asc limit $3 /* partner-room:read */`,
-          [room, after, limit],
-        );
-        const turns = r.rows;
-        return { ok: true, room, turns,
-          latest_seq: turns.length ? turns[turns.length - 1].seq : after,
-          more: turns.length === limit };
+        const read = await readRoomTurns(c, args);
+        if (read.ok !== true) { const { ok: _ok, ...failure } = read; throw new ToolError(failure); }
+        return read;
       },
     },
   };

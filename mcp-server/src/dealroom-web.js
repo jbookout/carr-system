@@ -11,7 +11,8 @@ import {
   randomString,
   verifyGoogleIdToken,
 } from "./google-oidc.js";
-import { actorFromProps, propsForSlug, slugForEmail } from "./identity.js";
+import { actorFromProps, personalScopeForActor, propsForSlug, slugForEmail } from "./identity.js";
+import { normalizeRoomPaging, ROOM_BODY_MAX } from "./partner-room.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
 
@@ -30,6 +31,21 @@ const REAUTH_TTL = 10 * 60;
 const ACTION_CHALLENGE_TTL = 5 * 60;
 const SYSTEM_WORK_MAX_BODY = 16 * 1024;
 const SYSTEM_WORK_PREFIX = "/api/system-work";
+// The Model Room observatory (Joe's ruling 0892c539). One read door onto the
+// partner-room wire and one write door back into it, both behind the same
+// cookie session the rest of this host uses.  The room's own body cap is
+// counted in CHARACTERS; a request carrying 20,000 characters of UTF-8 can be
+// several times that in bytes, so the transport cap is deliberately larger and
+// the character cap is enforced separately below.
+const ROOM_PREFIX = "/api/room";
+const ROOM_MAX_BODY = 96 * 1024;
+// The RECONNECT button's control turn (complete spec section 17). The panel
+// names an ACTION and a DESK; it never supplies the JSON, the seat, the kind or
+// the sponsor. This Worker mints the whole receipt body from the two validated
+// values, so the widest thing a compromised page could ask for is a sign-in
+// flow on a desk name that the bridge then has to find in its own registry.
+const ROOM_CONTROL_ACTIONS = new Set(["login"]);
+const ROOM_DESK_NAME = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const APPROVAL_ACTIONS = new Map([
   ["accept-ready-plan", "plan_hash"],
   ["accept-outcome-feedback", "feedback_hash"],
@@ -43,10 +59,10 @@ const PUBLIC_SHELL = new Map([
 ]);
 const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEALROOM_EXACT_PATHS = new Set([
-  "/", "/index.html", "/system-work.html",
+  "/", "/index.html", "/system-work.html", "/room.html",
   "/manifest.webmanifest", "/sw.js", "/offline.html",
 ]);
-const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/css/", "/js/", "/data/", "/icons/"];
+const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", "/css/", "/js/", "/data/", "/icons/"];
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -336,28 +352,135 @@ function equalStrings(left, right) {
   return mismatch === 0;
 }
 
-async function systemWorkBody(request) {
+async function systemWorkBody(request, maxBytes = SYSTEM_WORK_MAX_BODY) {
   const length = Number(request.headers.get("content-length"));
-  if (Number.isFinite(length) && (length < 0 || length > SYSTEM_WORK_MAX_BODY)) return { error: json({ error: "payload_too_large" }, 413) };
+  if (Number.isFinite(length) && (length < 0 || length > maxBytes)) return { error: json({ error: "payload_too_large" }, 413) };
   const raw = await request.clone().text();
-  if (new TextEncoder().encode(raw).byteLength > SYSTEM_WORK_MAX_BODY) return { error: json({ error: "payload_too_large" }, 413) };
+  if (new TextEncoder().encode(raw).byteLength > maxBytes) return { error: json({ error: "payload_too_large" }, 413) };
   try { return { value: JSON.parse(raw) }; }
   catch { return { error: json({ error: "invalid_json" }, 400) }; }
 }
 
-async function guardSystemWorkPost(request, env, session, { readBody = false } = {}) {
+// One browser-POST guard for every authenticated write on this host: JSON only,
+// same origin, same-site fetch metadata, and a synchronizer token that never
+// enters the cookie.  The Model Room composer reuses it verbatim rather than
+// growing a second, subtly different door.
+async function guardSystemWorkPost(request, env, session, { readBody = false, maxBytes = SYSTEM_WORK_MAX_BODY } = {}) {
   const contentType = request.headers.get("content-type") || "";
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) return { error: json({ error: "unsupported_media_type" }, 415) };
   if (!sameOrigin(request, env)) return { error: json({ error: "forbidden", reason: "origin_mismatch" }, 403) };
   if (request.headers.get("sec-fetch-site") !== "same-origin") return { error: json({ error: "forbidden", reason: "fetch_metadata_mismatch" }, 403) };
   if (!equalStrings(request.headers.get("x-carr-csrf"), session.csrfToken)) return { error: json({ error: "forbidden", reason: "csrf_mismatch" }, 403) };
   const length = Number(request.headers.get("content-length"));
-  if (Number.isFinite(length) && (length < 0 || length > SYSTEM_WORK_MAX_BODY)) return { error: json({ error: "payload_too_large" }, 413) };
+  if (Number.isFinite(length) && (length < 0 || length > maxBytes)) return { error: json({ error: "payload_too_large" }, 413) };
   // Typed controllers parse their own request body.  Do not clone/read here:
   // cloning after request.json() is a Worker error and would make the security
   // guard depend on handler order.  The challenge endpoint is the one route
   // that owns its body, so it opts into the exact byte-length check below.
-  return readBody ? systemWorkBody(request) : { value: null };
+  return readBody ? systemWorkBody(request, maxBytes) : { value: null };
+}
+
+// ---------------------------------------------------------------- Model Room
+//
+// THE PANEL READS ONLY THE WIRE (Joe's ruling 0892c539, single-source posture).
+// There is no second API for desk state, no Worker read of a local file, and no
+// caller-supplied identity anywhere below: the roster, liveness, cursor lag and
+// cycle age all come out of the same turns these two endpoints move, and the
+// bridge's heartbeat receipt is what makes that sufficient.
+
+/** GET /api/room/turns — the read-room verb's own query, one door over. */
+async function roomTurns(request, env, session, dependencies) {
+  if (typeof dependencies.roomReadFn !== "function") return json({ error: "not_found" }, 404);
+  const url = new URL(request.url);
+  const rawAfter = url.searchParams.get("after_seq");
+  const rawLimit = url.searchParams.get("limit");
+  if (rawAfter !== null && !/^\d{1,15}$/.test(rawAfter)) return json({ error: "after_seq_invalid" }, 400);
+  if (rawLimit !== null && !/^\d{1,15}$/.test(rawLimit)) return json({ error: "limit_invalid" }, 400);
+  // Clamped by the room's own normalizer so the browser cursor and the verb
+  // cursor can never mean two different things.
+  const paging = normalizeRoomPaging({
+    after_seq: rawAfter === null ? 0 : Number(rawAfter),
+    limit: rawLimit === null ? undefined : Number(rawLimit),
+  });
+  let read;
+  try {
+    read = await dependencies.roomReadFn(env, { after_seq: paging.after, limit: paging.limit });
+  } catch (error) {
+    return json({ error: "wire_unavailable", detail: String(error?.message || error).slice(0, 200) }, 503);
+  }
+  if (!read || read.ok !== true) return json({ error: read?.error || "wire_unavailable" }, 503);
+  // The CSRF token rides the authenticated read so the composer needs no second
+  // bootstrap call.  A cross-origin page cannot read this response at all — the
+  // host sets no CORS headers — so it stays a same-origin secret.
+  return json({ ...read,
+    actor: { slug: session.actor.slug, display: session.actor.display },
+    csrf_token: session.csrfToken });
+}
+
+/**
+ * POST /api/room/turn — Joe speaking into the room from the panel.
+ *
+ * ATTRIBUTION IS SERVER-DERIVED AND THE SEAT IS FIXED. The body is the only
+ * thing read off the request: seat is always "human", kind always "turn", the
+ * sponsor comes from the verified session, and the idempotency/msg id is minted
+ * here.  A request that supplies seat, sponsor, kind, room or msg_id is not
+ * rejected — those fields are simply never consulted, which is the same refusal
+ * add-room-turn makes and the reason the panel has no seat selector.
+ */
+export function roomControlTurn(control) {
+  if (!control || typeof control !== "object") return null;
+  const action = typeof control.action === "string" ? control.action : "";
+  const desk = typeof control.desk === "string" ? control.desk : "";
+  if (!ROOM_CONTROL_ACTIONS.has(action) || !ROOM_DESK_NAME.test(desk)) return null;
+  // Rebuilt from validated parts, never echoed: nothing a caller wrote reaches
+  // the wire verbatim, so the receipt the bridge parses cannot smuggle a field.
+  return { kind: "receipt", body: JSON.stringify({ control: { action, desk } }) };
+}
+
+async function roomTurnPost(request, env, session, dependencies) {
+  if (typeof dependencies.roomWriteFn !== "function") return json({ error: "not_found" }, 404);
+  const guard = await guardSystemWorkPost(request, env, session, { readBody: true, maxBytes: ROOM_MAX_BODY });
+  if (guard.error) return guard.error;
+
+  let kind = "turn";
+  let body = typeof guard.value?.body === "string" ? guard.value.body : "";
+  if (guard.value?.control !== undefined) {
+    const control = roomControlTurn(guard.value.control);
+    if (!control) return json({ error: "control_not_allowed" }, 400);
+    ({ kind, body } = control);
+  }
+  if (!body.trim()) return json({ error: "body_required" }, 400);
+  if (body.length > ROOM_BODY_MAX) return json({ error: "body_too_long", limit: ROOM_BODY_MAX, got: body.length }, 413);
+
+  const scope = personalScopeForActor(session.actor);
+  if (scope.status !== "personal") {
+    return json({ error: "no_sponsoring_partner",
+      hint: "the room only takes turns from a credential a partner sponsors" }, 403);
+  }
+  let posted;
+  try {
+    posted = await dependencies.roomWriteFn(env, {
+      sponsor: scope.sponsor, seat: "human", kind, body,
+      msgId: crypto.randomUUID(),
+    });
+  } catch (error) {
+    return json({ error: "wire_unavailable", detail: String(error?.message || error).slice(0, 200) }, 503);
+  }
+  if (!posted || posted.ok !== true) return json({ error: posted?.error || "wire_unavailable" }, 503);
+  return json(posted);
+}
+
+async function roomRequest(request, env, session, dependencies) {
+  const pathname = new URL(request.url).pathname;
+  if (pathname === `${ROOM_PREFIX}/turns`) {
+    if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    return roomTurns(request, env, session, dependencies);
+  }
+  if (pathname === `${ROOM_PREFIX}/turn`) {
+    if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    return roomTurnPost(request, env, session, dependencies);
+  }
+  return json({ error: "not_found" }, 404);
 }
 
 function approvalTarget(action, args) {
@@ -521,14 +644,17 @@ async function handleRequest(request, env, ctx, dependencies) {
 
       const session = await sessionFor(request, env, dependencies);
       if (!session) {
-        if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" || url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
+        if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
+            url.pathname.startsWith(SYSTEM_WORK_PREFIX) || url.pathname.startsWith(ROOM_PREFIX)) {
           return json({ error: "unauthorized", state: "sign_in_required" }, 401);
         }
         return redirect(`${origin}/auth/login?return_to=${encodeURIComponent(url.pathname + url.search)}`);
       }
 
       let response;
-      if (url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
+      if (url.pathname.startsWith(ROOM_PREFIX)) {
+        response = await roomRequest(request, env, session, dependencies);
+      } else if (url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
         if (!program6ActionsEnabled(env)) return json({ error: "program6_actions_disabled" }, 404);
         if (url.pathname === `${SYSTEM_WORK_PREFIX}/session` && request.method === "GET") response = await systemWorkSession(session, dependencies);
         else if (url.pathname === `${SYSTEM_WORK_PREFIX}/challenge` && request.method === "POST") response = await createActionChallenge(request, env, session, dependencies);
