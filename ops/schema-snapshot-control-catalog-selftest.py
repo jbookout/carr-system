@@ -47,7 +47,7 @@ assert "ops.rule_retirement_receipt" not in tables
 assert "ops.rule_control_binding" not in match.group("tables")
 
 # The verify-then-render shape, unchanged.
-assert "CONTROL_CATALOG_VERIFY" in SCRIPT
+assert "$carr_control_catalog$" in SCRIPT
 assert "CARR REVIEWED CONTROL CATALOG" in SCRIPT
 assert "schema snapshot refused: exact reviewed control catalog is missing or drifted" in SCRIPT
 assert "never dump arbitrary ops.enforcement_control_catalog rows" in SCRIPT
@@ -68,23 +68,56 @@ assert "DECLARED_KEYS" in SCRIPT
 assert "could not compile the declared control keys" in SCRIPT
 # An empty or truncated list must refuse rather than silently carry nothing.
 assert "declared control key list is implausibly short" in SCRIPT
-assert "__DECLARED_KEYS__" in SCRIPT and "__DECLARED_COUNT__" in SCRIPT
-# Every declared key must be present in the source before any row is rendered.
-assert "present <> __DECLARED_COUNT__" in SCRIPT
+assert "__DECLARED_KEYS__" in SCRIPT
 assert "where control_key in (__DECLARED_KEYS__)" in SCRIPT
 # Deterministic order, so two snapshots of the same database are byte-identical.
 assert "order by control_key;" in SCRIPT
 
-# The two controls that predate the declaration files are still pinned by their
-# FULL identity, because no repository file generates them, so a drift in either
-# would otherwise be silent.
-# Once each now, in the verify block, rather than twice: the render no longer
-# names any key, because it selects the compiled declared list. Pinning the full
-# identity is what matters, and that is asserted on the next two lines.
-assert SCRIPT.count("'human_authority_runtime'") >= 1
-assert SCRIPT.count("'platform_metering_pre_dispatch'") >= 1
-assert "migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js" in SCRIPT
-assert "lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py" in SCRIPT
+# EVERY DECLARED CONTROL IS NOW COMPARED FIELD BY FIELD, which retires the two
+# hand-written full-identity pins that used to stand here.
+#
+# WHAT THOSE PINS WERE COVERING (loop #506 finding 2 — the record of the first
+# independent review of a Production release). The key list came from the
+# repository, but only those two rows had their CONTENTS checked. For every
+# other declared control the implementation reference, test reference, class and
+# installed flag were copied out of the source database and rendered as though
+# they matched the declaration, so a declared control whose Production row had
+# drifted rode into a tracked file unreviewed. Pinning two rows by hand also
+# meant the guarantee stopped growing the moment anyone added a third.
+#
+# Both of those controls are inside the compiled set, so they are now covered by
+# the same comparison as the other sixty. Asserting their literal strings here
+# would pin today's declaration text and fail on any legitimate re-reference.
+for column in ("implementation_ref", "test_ref", "enforcement_class", "installed"):
+    assert f"c.{column}" in SCRIPT, (
+        f"the catalog verification no longer compares {column}, so a declared "
+        "control whose source row drifted on that field would be rendered as "
+        "though it matched")
+
+# verified_at IS A JOIN CONDITION, NEVER A WHERE CLAUSE. As a WHERE clause it
+# silently drops the unverified row instead of reporting it as drifted — the
+# check would pass while hiding the exact thing it was added to catch.
+assert "and (not d.installed or c.verified_at is not null)" in SCRIPT
+
+# The declared side is CAST. A VALUES list takes its column types from the first
+# row, so without the casts the join compares unknown against text and the
+# behaviour changes with row order.
+for column in ("control_key", "implementation_ref", "test_ref", "enforcement_class"):
+    assert f"d.{column}::text" in SCRIPT
+
+# VERIFY BEFORE RENDER, asserted by position rather than by presence. A DO block
+# writes nothing to stdout, so a refusal appends no rows; render first and a
+# drifted catalog appends half a file before anything raises. Compared by index
+# because both halves would still be "present" in the wrong order.
+verify_at = SCRIPT.index("$carr_control_catalog$")
+render_at = SCRIPT.index("insert into ops.enforcement_control_catalog")
+assert verify_at < render_at, (
+    "the catalog renders before it is verified, so a drifted catalog would be "
+    "partly written to the snapshot before the refusal fired")
+
+# The comparison is driven by the compiled rows, not by a hand-kept list.
+assert "DECLARED_ROWS" in SCRIPT
+assert "could not compile the declared controls" in SCRIPT
 
 # And the snapshot it produces must actually carry more than those two, or the
 # widening did not take and the rebuild trap is still open.
