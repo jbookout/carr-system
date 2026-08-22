@@ -2,7 +2,7 @@
 --
 -- THE HOLE, AS FOUND. ops.drive_retirement_readiness() answers "is Drive
 -- retirement done?" with `op.n > 0 and op.n = ret.n and auth.n > 0`, where op.n
--- is `select count(*) from ops.drive_dependency where operational`. 0214 granted
+-- is `select count(*) from ops.drive_dependency where operational`. 0243 granted
 -- carr_writer INSERT on that table, and NOTHING IN THE REPOSITORY EVER
 -- POPULATES IT. So the denominator of the completion test was whatever the
 -- runtime credential happened to have written, and the cheapest possible route
@@ -16,7 +16,7 @@
 -- Every downstream guard was real. ops.require_proven_retirement_receipts
 -- genuinely checks proof; the receipts genuinely prove by readback. They were
 -- all guarding a number the guarded party supplied. This is the same shape as
--- the defect 0214 itself was written against — a static report saying "yes, it
+-- the defect 0243 itself was written against — a static report saying "yes, it
 -- is fine" — moved one table to the left.
 --
 -- WHY A DIGEST AND NOT JUST A PRIVILEGE. Taking INSERT away from carr_writer is
@@ -34,7 +34,7 @@
 -- a digest and then quietly change the rows, or load a partial inventory that
 -- matches a digest computed over the full one. The fabrication has to be
 -- CONSISTENT and it has to happen at the authority identity rather than at the
--- credential every verb already holds — which is exactly the reduction 0213
+-- credential every verb already holds — which is exactly the reduction 0242
 -- made for acceptance, applied to the denominator acceptance is measured over.
 
 -- ================================ (A) what this database says its inventory is
@@ -92,7 +92,7 @@ comment on table ops.drive_inventory_manifest is
   'digest to ops.drive_dependency_digest() over this database''s own rows, so a '
   'declaration and the rows it describes cannot drift apart unnoticed.';
 
--- SEQ, NOT declared_at. The same reasoning 0220 applied to the receipt fold:
+-- SEQ, NOT declared_at. The same reasoning 0244 applied to the receipt fold:
 -- declared_at is clock_timestamp() and two declarations inside one tick would
 -- tie, leaving "which manifest is current" to be settled by a primary key that
 -- is a random uuid. An identity column is monotonic and no caller can write it.
@@ -150,7 +150,7 @@ begin
 end $$;
 
 -- SUPERSEDED, NEVER EDITED. A wrong manifest is corrected by declaring another
--- one, which is the same posture 0220 gave a wrong retirement: the mistake and
+-- one, which is the same posture 0244 gave a wrong retirement: the mistake and
 -- its correction both stay on the record, and "what did we believe on Tuesday"
 -- remains answerable.
 create trigger drive_inventory_manifest_immutable
@@ -212,7 +212,7 @@ comment on function ops.drive_retirement_readiness() is
 -- migration. carr_writer keeps everything it needs to do the WORK of retiring a
 -- dependency -- it still inserts ops.drive_retirement and ops.write_receipt --
 -- and loses the ability to decide how many dependencies there were, which is
--- the same division 0213 drew when it put accept_phase4 on carr_authority: do
+-- the same division 0242 drew when it put accept_phase4 on carr_authority: do
 -- the work with the ordinary credential, declare what the work amounts to with
 -- the authority one.
 revoke insert on ops.drive_dependency from carr_writer;
