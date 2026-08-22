@@ -136,7 +136,7 @@ def main() -> int:
                                        REPO / "tools" / "calendar-prebrief-coordinator.py")
         loaded_runtime = runtime_module.load_profile(paths.runtime, home=root)
         loaded_child = coordinator_module._profile_file(paths.child, "joe", "live")
-        check("written profiles satisfy the dedicated 0249 runtime and child interfaces",
+        check("written profiles satisfy the dedicated 0250 runtime and child interfaces",
               loaded_runtime["CARR_DB_JOBS_URL"] == all_dsns["CARR_DB_JOBS_URL"]
               and set(loaded_child) == {"CARR_DB_CALENDAR_PREBRIEF_ATTESTOR_JOE_URL",
                                         "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_JOE_URL",

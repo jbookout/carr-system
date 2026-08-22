@@ -55,11 +55,11 @@ EXCLUDED = {
 }
 
 # role -> why it must be known but absent from the current active preamble.
-# 0248 is pending in the production-derived snapshot. Its NOLOGIN bundle must
+# 0249 is pending in the production-derived snapshot. Its NOLOGIN bundle must
 # remain absent until that migration is actually applied and the snapshot is
 # regenerated from production.
 PENDING: dict[str, str] = {
-    "carr_renewal_source_attestors": "owned by pending 0248; do not leak it into the pre-0248 snapshot",
+    "carr_renewal_source_attestors": "owned by pending 0249; do not leak it into the pre-0249 snapshot",
 }
 
 CREATE_ROLE = re.compile(r"\bcreate\s+role\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
