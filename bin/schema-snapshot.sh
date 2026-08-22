@@ -180,7 +180,7 @@ cat > "$TMP" <<'ROLES'
 --
 -- All privilege bundles whose creating migrations are in the snapshot ledger
 -- are created here. Among them, carr_session_minter joined on 2026-08-20 with
--- migration 0231: it is the ONLY role permitted to mint an authenticated
+-- migration 0264: it is the ONLY role permitted to mint an authenticated
 -- application session, which is the whole of that migration's separation
 -- argument, so a rebuilt cluster missing it would have no separation to
 -- enforce. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
@@ -223,7 +223,7 @@ begin
     jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
-  -- carr_session_issuer (migration 0239) is the SECOND login role, and it is
+  -- carr_session_issuer (migration 0265) is the SECOND login role, and it is
   -- added the way carr_jobs is added rather than by widening the NOLOGIN array
   -- above -- which is what the note further up asks for. It is the credential
   -- the authentication layer holds to mint an application session, so it must
@@ -238,10 +238,10 @@ begin
     execute format('alter role %I login password %L', 'carr_session_issuer', issuer_placeholder);
   end if;
   -- THE ROLE ONLY, NEVER THE MEMBERSHIP, and the reason is about what the
-  -- tests then prove. 0231 no longer objects to a purpose-built issuer holding
+  -- tests then prove. 0264 no longer objects to a purpose-built issuer holding
   -- the membership, so this is a choice on the merits rather than a workaround.
   --
-  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0239
+  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0265
   -- having run, and the contracts that assert the membership graph would pass
   -- against the preamble instead of against the migration they exist to test --
   -- a suite testing its own fixture. Establishing the membership is 0233's

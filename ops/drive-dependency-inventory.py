@@ -346,11 +346,11 @@ def matches(entry: dict[str, Any], reference: Reference) -> bool:
 
 # ---------------------------------------------------------------- manifest
 #
-# THE OTHER HALF OF MIGRATION 0246. ops.drive_retirement_readiness() used to
+# THE OTHER HALF OF MIGRATION 0271. ops.drive_retirement_readiness() used to
 # divide by `select count(*) from ops.drive_dependency where operational`, a
 # table carr_writer could insert into and nothing in this repository ever
 # populated -- so the denominator of the Drive-retirement completion test was
-# supplied by the party being tested. 0246 requires readiness to find a manifest
+# supplied by the party being tested. 0271 requires readiness to find a manifest
 # whose digest equals ops.drive_dependency_digest() over the rows actually
 # present. This is where that digest is computed from the REPOSITORY, so the two
 # sides are independent and can only agree by actually describing the same rows.
@@ -373,7 +373,7 @@ def canonical_rows(refs: list[Reference], entries: list[dict[str, Any]]) -> list
     A reference whose classification is ambiguous or absent never reaches here:
     audit() reports those as MULTIPLE/UNCOVERED and main() fails before emitting
     a manifest. Emitting a digest over a partially classified tree would be the
-    same defect as the one 0246 closes, moved into this file.
+    same defect as the one 0271 closes, moved into this file.
     """
     rows: dict[tuple[str, str], tuple[str, bool]] = {}
     for ref in refs:
@@ -435,12 +435,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--registry", type=Path)
     parser.add_argument("--audit-only", action="store_true", help="print references without failing uncovered rows")
     parser.add_argument("--emit-manifest", action="store_true",
-                        help="print the JSON manifest migration 0246 binds retirement to")
+                        help="print the JSON manifest migration 0271 binds retirement to")
     args = parser.parse_args(argv)
     if args.emit_manifest and args.audit_only:
         print("drive-dependency-inventory FAILED: --emit-manifest cannot be combined "
               "with --audit-only; a manifest over an unaudited tree is exactly the "
-              "unchecked denominator 0246 exists to remove", file=sys.stderr)
+              "unchecked denominator 0271 exists to remove", file=sys.stderr)
         return 2
     root = args.root.resolve()
     registry_path = args.registry or root / DEFAULT_REGISTRY

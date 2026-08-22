@@ -8,7 +8,7 @@
 -- mutation survived a gate that checked only the exit code. That is precisely
 -- the "clauses mask each other" shape the review found in the acceptance bar.
 --
--- The state this builds is the one 0243 calls "the dangerous empty case":
+-- The state this builds is the one 0269 calls "the dangerous empty case":
 -- everything else satisfied -- qualifying evidence, a proven receipt, an
 -- authority acceptance, a bound inventory manifest -- and NOT ONE Drive
 -- dependency ever recorded. A verifier without the empty-inventory clause reads
@@ -27,7 +27,7 @@ declare
   -- FIXED, NOT RANDOM. The acceptance below runs after `set role
   -- carr_authority`, and carr_authority holds no SELECT on
   -- ops.application_session -- so it cannot look this id up and must be handed
-  -- one. (0242 grants that identity EXECUTE on accept_phase4 and nothing else,
+  -- one. (0268 grants that identity EXECUTE on accept_phase4 and nothing else,
   -- which is a tight grant and correct; it just means the caller resolves ids.)
   sid         uuid := '4e3d0000-0000-4000-8000-000000000f17';
   subj        uuid := gen_random_uuid();
@@ -57,7 +57,7 @@ begin
      organization_tenant_id, application_session_id)
   values (key1, 'log-activity', probe_actor, 'rh-empty', '{}'::jsonb, 'carr-internal', sid);
 
-  -- The call must actually have written something about the subject: 0244(F)
+  -- The call must actually have written something about the subject: 0270(F)
   -- refuses a receipt whose call touched nothing.
   insert into public.event
     (occurred_at, actor_id, verb, subject_type, subject_id, field, new_value,
@@ -80,7 +80,7 @@ begin
                     'acceptance below would refuse for the wrong reason';
   end if;
 
-  -- A MANIFEST FOR AN EMPTY INVENTORY. 0246 hashes an empty inventory as the
+  -- A MANIFEST FOR AN EMPTY INVENTORY. 0271 hashes an empty inventory as the
   -- sha256 of the empty string, so a manifest CAN bind here -- which is what
   -- makes this fixture sharp: inventory_bound is true, and the only thing wrong
   -- is that there is nothing in the inventory to retire.
@@ -93,7 +93,7 @@ begin
   raise notice 'empty_inventory_fixture: session % ready for acceptance', sid;
 end $$;
 
--- ACCEPTANCE RUNS IN ITS OWN TRANSACTION, in a separate statement, because 0242
+-- ACCEPTANCE RUNS IN ITS OWN TRANSACTION, in a separate statement, because 0268
 -- refuses an acceptance that is not the first write in its transaction -- it may
 -- not count evidence it authored. Everything above is a separate transaction by
 -- the time this runs.

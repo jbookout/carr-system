@@ -63,7 +63,7 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # and not the other makes its own grants report as strays.
 #
 # carr_session_minter and carr_session_issuer joined on 2026-08-20 and 2026-08-21,
-# by way of 0231 and 0239, and they are the fifth and sixth to age out. The
+# by way of 0264 and 0265, and they are the fifth and sixth to age out. The
 # minter is the ONLY role permitted to mint an authenticated application
 # session, so a snapshot that rebuilds a cluster without it rebuilds one with no
 # separation to enforce; the issuer is the login credential the authentication
@@ -78,8 +78,8 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # Keep this mapping explicit so a production-truth pre-release snapshot does not
 # pretend a pending bundle already has privileges.
 ROLE_GRANT_MIGRATIONS = {
-    "carr_session_minter": "0231_authenticated_application_session.sql",
-    "carr_session_issuer": "0239_session_issuer_credential.sql",
+    "carr_session_minter": "0264_authenticated_application_session.sql",
+    "carr_session_issuer": "0265_session_issuer_credential.sql",
     "carr_calendar_prebrief_jobs": "0229_calendar_prebrief_projection.sql",
     "carr_calendar_prebrief_canary_jobs": "0229_calendar_prebrief_projection.sql",
     "carr_calendar_prebrief_attestors": "0229_calendar_prebrief_projection.sql",

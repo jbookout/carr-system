@@ -1,8 +1,8 @@
--- 0246 — the Drive retirement denominator stops being the runtime's to choose
+-- 0271 — the Drive retirement denominator stops being the runtime's to choose
 --
 -- THE HOLE, AS FOUND. ops.drive_retirement_readiness() answers "is Drive
 -- retirement done?" with `op.n > 0 and op.n = ret.n and auth.n > 0`, where op.n
--- is `select count(*) from ops.drive_dependency where operational`. 0243 granted
+-- is `select count(*) from ops.drive_dependency where operational`. 0269 granted
 -- carr_writer INSERT on that table, and NOTHING IN THE REPOSITORY EVER
 -- POPULATES IT. So the denominator of the completion test was whatever the
 -- runtime credential happened to have written, and the cheapest possible route
@@ -16,7 +16,7 @@
 -- Every downstream guard was real. ops.require_proven_retirement_receipts
 -- genuinely checks proof; the receipts genuinely prove by readback. They were
 -- all guarding a number the guarded party supplied. This is the same shape as
--- the defect 0243 itself was written against — a static report saying "yes, it
+-- the defect 0269 itself was written against — a static report saying "yes, it
 -- is fine" — moved one table to the left.
 --
 -- WHY A DIGEST AND NOT JUST A PRIVILEGE. Taking INSERT away from carr_writer is
@@ -34,7 +34,7 @@
 -- a digest and then quietly change the rows, or load a partial inventory that
 -- matches a digest computed over the full one. The fabrication has to be
 -- CONSISTENT and it has to happen at the authority identity rather than at the
--- credential every verb already holds — which is exactly the reduction 0242
+-- credential every verb already holds — which is exactly the reduction 0268
 -- made for acceptance, applied to the denominator acceptance is measured over.
 
 -- ================================ (A) what this database says its inventory is
@@ -92,7 +92,7 @@ comment on table ops.drive_inventory_manifest is
   'digest to ops.drive_dependency_digest() over this database''s own rows, so a '
   'declaration and the rows it describes cannot drift apart unnoticed.';
 
--- SEQ, NOT declared_at. The same reasoning 0244 applied to the receipt fold:
+-- SEQ, NOT declared_at. The same reasoning 0270 applied to the receipt fold:
 -- declared_at is clock_timestamp() and two declarations inside one tick would
 -- tie, leaving "which manifest is current" to be settled by a primary key that
 -- is a random uuid. An identity column is monotonic and no caller can write it.
@@ -150,7 +150,7 @@ begin
 end $$;
 
 -- SUPERSEDED, NEVER EDITED. A wrong manifest is corrected by declaring another
--- one, which is the same posture 0244 gave a wrong retirement: the mistake and
+-- one, which is the same posture 0270 gave a wrong retirement: the mistake and
 -- its correction both stay on the record, and "what did we believe on Tuesday"
 -- remains answerable.
 create trigger drive_inventory_manifest_immutable
@@ -212,7 +212,7 @@ comment on function ops.drive_retirement_readiness() is
 -- migration. carr_writer keeps everything it needs to do the WORK of retiring a
 -- dependency -- it still inserts ops.drive_retirement and ops.write_receipt --
 -- and loses the ability to decide how many dependencies there were, which is
--- the same division 0242 drew when it put accept_phase4 on carr_authority: do
+-- the same division 0268 drew when it put accept_phase4 on carr_authority: do
 -- the work with the ordinary credential, declare what the work amounts to with
 -- the authority one.
 revoke insert on ops.drive_dependency from carr_writer;
@@ -234,7 +234,7 @@ grant execute on function ops.drive_retirement_readiness()
 
 -- --------------------------------------------------------------- apply-time
 --
--- WHAT THIS BLOCK CAN AND CANNOT PROVE, because 0242's rule now binds it: an
+-- WHAT THIS BLOCK CAN AND CANNOT PROVE, because 0268's rule now binds it: an
 -- acceptance may not count evidence its own transaction wrote, so anything here
 -- that needs ops.phase4_acceptance has to write evidence first and is therefore
 -- refused. The clauses of the acceptance BAR are contract-suite work. What is
@@ -252,7 +252,7 @@ declare
 begin
   select id into probe_actor from public.actor where kind = 'human' order by slug limit 1;
   if probe_actor is null then
-    raise exception '0246 FAILED: need a human actor for the manifest probe';
+    raise exception '0271 FAILED: need a human actor for the manifest probe';
   end if;
 
   -- AN EMPTY INVENTORY HASHES THE EMPTY STRING, and that value must be stable:
@@ -260,17 +260,17 @@ begin
   -- because the repository has references in it.
   if ops.drive_dependency_digest()
      <> encode(sha256(convert_to('', 'UTF8')), 'hex') then
-    raise exception '0246 FAILED: an empty inventory did not hash the empty string';
+    raise exception '0271 FAILED: an empty inventory did not hash the empty string';
   end if;
 
   -- NO MANIFEST MEANS NOT BOUND, whatever else is true.
   select * into rdy from ops.drive_retirement_readiness();
   if rdy.inventory_bound then
-    raise exception '0246 FAILED: readiness reported the inventory BOUND with no '
+    raise exception '0271 FAILED: readiness reported the inventory BOUND with no '
                     'manifest on record';
   end if;
   if rdy.ready then
-    raise exception '0246 FAILED: readiness said yes with no manifest on record';
+    raise exception '0271 FAILED: readiness said yes with no manifest on record';
   end if;
 
   -- THE DIGEST MUST ACTUALLY DEPEND ON THE ROWS. A function that returned a
@@ -281,7 +281,7 @@ begin
   returning id into dep;
   d_after := ops.drive_dependency_digest();
   if d_after = d_before then
-    raise exception '0246 FAILED: adding a dependency did not change the inventory digest';
+    raise exception '0271 FAILED: adding a dependency did not change the inventory digest';
   end if;
 
   -- AND IT MUST DEPEND ON THE operational FLAG, not merely on row identity.
@@ -290,11 +290,11 @@ begin
   -- while the binding still reported a match.
   update ops.drive_dependency set operational = false where id = dep;
   if ops.drive_dependency_digest() = d_after then
-    raise exception '0246 FAILED: flipping operational did not change the digest';
+    raise exception '0271 FAILED: flipping operational did not change the digest';
   end if;
   update ops.drive_dependency set operational = true where id = dep;
   if ops.drive_dependency_digest() <> d_after then
-    raise exception '0246 FAILED: the digest is not a function of the rows alone';
+    raise exception '0271 FAILED: the digest is not a function of the rows alone';
   end if;
 
   insert into ops.application_session
@@ -313,11 +313,11 @@ begin
   exception when others then
     failed := true;
     if position('drive_inventory_manifest_digest_is_sha256' in sqlerrm) = 0 then
-      raise exception '0246 FAILED: a malformed digest was refused by the WRONG guard: %', sqlerrm;
+      raise exception '0271 FAILED: a malformed digest was refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0246 FAILED: a manifest carrying a non-sha256 digest was accepted';
+    raise exception '0271 FAILED: a manifest carrying a non-sha256 digest was accepted';
   end if;
 
   -- A MANIFEST THAT DESCRIBES DIFFERENT ROWS DOES NOT BIND. This is the clause
@@ -327,13 +327,13 @@ begin
     (id, inventory_digest, application_session_id, declared_by_actor_id,
      organization_tenant_id, note)
   values (gen_random_uuid(), encode(sha256(convert_to('some other inventory', 'UTF8')), 'hex'),
-          sid, probe_actor, 'carr-internal', '0246 probe: a manifest for other rows');
+          sid, probe_actor, 'carr-internal', '0271 probe: a manifest for other rows');
   select * into rdy from ops.drive_retirement_readiness();
   if rdy.inventory_bound then
-    raise exception '0246 FAILED: a manifest describing OTHER rows reported BOUND';
+    raise exception '0271 FAILED: a manifest describing OTHER rows reported BOUND';
   end if;
   if rdy.ready then
-    raise exception '0246 FAILED: readiness said yes on a manifest that does not '
+    raise exception '0271 FAILED: readiness said yes on a manifest that does not '
                     'describe this database''s inventory';
   end if;
 
@@ -343,20 +343,20 @@ begin
     (id, inventory_digest, application_session_id, declared_by_actor_id,
      organization_tenant_id, note)
   values (gen_random_uuid(), ops.drive_dependency_digest(), sid, probe_actor,
-          'carr-internal', '0246 probe: the manifest for these rows');
+          'carr-internal', '0271 probe: the manifest for these rows');
   select * into rdy from ops.drive_retirement_readiness();
   if not rdy.inventory_bound then
-    raise exception '0246 FAILED: a manifest matching these exact rows did not bind';
+    raise exception '0271 FAILED: a manifest matching these exact rows did not bind';
   end if;
   if rdy.declared_digest is distinct from rdy.observed_digest then
-    raise exception '0246 FAILED: readiness reported a bound inventory whose two '
+    raise exception '0271 FAILED: readiness reported a bound inventory whose two '
                     'digests differ';
   end if;
 
   -- THE HIGHEST SEQ WINS, so a correction supersedes rather than edits.
   if (ops.current_drive_inventory_manifest()).note
-     <> '0246 probe: the manifest for these rows' then
-    raise exception '0246 FAILED: the current manifest is not the most recent one';
+     <> '0271 probe: the manifest for these rows' then
+    raise exception '0271 FAILED: the current manifest is not the most recent one';
   end if;
 
   -- AND CHANGING THE ROWS AFTER DECLARING BREAKS THE BINDING AGAIN.
@@ -364,7 +364,7 @@ begin
   values ('tools/probe.py:2', '{{VAULT}}', 'vault-path', true);
   select * into rdy from ops.drive_retirement_readiness();
   if rdy.inventory_bound then
-    raise exception '0246 FAILED: rows changed after the manifest was declared and '
+    raise exception '0271 FAILED: rows changed after the manifest was declared and '
                     'the binding still reported a match';
   end if;
 
@@ -375,17 +375,17 @@ begin
   exception when others then
     failed := true;
     if position('cannot be rewritten' in sqlerrm) = 0 then
-      raise exception '0246 FAILED: manifest rewrite refused by the WRONG guard: %', sqlerrm;
+      raise exception '0271 FAILED: manifest rewrite refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0246 FAILED: an inventory manifest was rewritten';
+    raise exception '0271 FAILED: an inventory manifest was rewritten';
   end if;
 
-  raise notice '0246 apply-time proof passed';
-  raise exception 'ROLLBACK_0246_PROBE';
+  raise notice '0271 apply-time proof passed';
+  raise exception 'ROLLBACK_0271_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0246_PROBE' then
+  if sqlerrm = 'ROLLBACK_0271_PROBE' then
     return;
   end if;
   raise;

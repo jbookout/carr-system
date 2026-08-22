@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""grandfathered_receipt_contract.py — what 0244's backfill did to receipts that
+"""grandfathered_receipt_contract.py — what 0270's backfill did to receipts that
 already existed, proven against a database where some actually did.
 
-WHY THIS FILE EXISTS, AND WHY IT COULD NOT LIVE IN THE MIGRATION. 0244 adds
+WHY THIS FILE EXISTS, AND WHY IT COULD NOT LIVE IN THE MIGRATION. 0270 adds
 ops.write_receipt.material_digest and backfills it:
 
     alter table ops.write_receipt disable trigger write_receipt_immutable;
@@ -10,14 +10,14 @@ ops.write_receipt.material_digest and backfills it:
     alter table ops.write_receipt enable always trigger write_receipt_immutable;
 
 Three statements that stand the immutability guard down and rewrite every
-pre-existing row, one way, with no reverse. 0244's own apply-time proof cannot
+pre-existing row, one way, with no reverse. 0270's own apply-time proof cannot
 see any of it: that block runs inside a transaction it deliberately rolls back,
 so every receipt it can observe is one IT created AFTER the backfill already
 ran. The backfill's actual subject -- a row that existed BEFORE the migration --
 is unreachable from inside the migration by construction.
 
 ops/check-application-session.sh therefore builds a second database: a template
-copy taken after 0243 and before 0244, seeded with receipts under the PRE-SPLIT
+copy taken after 0269 and before 0270, seeded with receipts under the PRE-SPLIT
 rules, and only then brought forward. That is the only place in this repository
 where a grandfathered row exists, and this is what it asserts about one.
 
@@ -25,7 +25,7 @@ WHAT THE BACKFILL LEAVES BEHIND, stated plainly because it is a live exposure
 and not a defect this file is asking anyone to fix:
 
   A GRANDFATHERED ROW CARRIES A VALUE THE CURRENT RULES WOULD REFUSE. After
-  0244(F), an ordinary receipt must carry the material its call actually wrote,
+  0270(F), an ordinary receipt must carry the material its call actually wrote,
   recomputed by ops.write_receipt_material_digest. A backfilled row carries its
   own CALL digest instead -- a digest of (verb, actor, tenant, session,
   request_hash, subject) -- which that recipe can never produce. Insert the same
@@ -43,7 +43,7 @@ and not a defect this file is asking anyone to fix:
   THERE IS NO DOWN PATH. migrations/README.md is forward-only -- there are no
   down files in this series and tools/migrate.py refuses any applied file whose
   content changed -- so this is not a gap someone forgot to fill, it is the
-  repository's model. What it means concretely: after 0244 there is no statement
+  repository's model. What it means concretely: after 0270 there is no statement
   that restores the pre-split shape, and no record anywhere of which rows the
   UPDATE touched. Only its SIGNATURE survives, and that signature is exactly the
   one thing a new row can never have: material_digest = call_digest. Asserted
@@ -51,7 +51,7 @@ and not a defect this file is asking anyone to fix:
   more than a comment claiming they are identifiable.
 
 Usage:
-  grandfathered_receipt_contract.py seed   <dsn>   # BEFORE 0244 is applied
+  grandfathered_receipt_contract.py seed   <dsn>   # BEFORE 0270 is applied
   grandfathered_receipt_contract.py verify <dsn>   # AFTER
 """
 import sys
@@ -85,13 +85,13 @@ def check(name, fn):
 # ─────────────────────────────────────────────────────────────────── seed ────
 
 def seed(dsn):
-    """Write receipts under the PRE-SPLIT rules, as 0241 left them.
+    """Write receipts under the PRE-SPLIT rules, as 0267 left them.
 
-    Deliberately NOT written through any helper that knows about 0244: the
+    Deliberately NOT written through any helper that knows about 0270: the
     whole point is a row shaped the way rows were shaped before it. At this
     point ops.write_receipt still has claimed_digest (not call_digest), has no
     material_digest, and carries neither the says-what-its-call-wrote guard nor
-    the prior-state guard, both of which 0244 adds. A row like this is
+    the prior-state guard, both of which 0270 adds. A row like this is
     unreproducible five statements later, which is why it is made here.
     """
     refuse_non_disposable(dsn)
@@ -143,7 +143,7 @@ def seed(dsn):
             prior = claimed
     conn.commit()
     conn.close()
-    print(f"seeded {len(made)} pre-0244 receipts on subject {subject}: {', '.join(made)}")
+    print(f"seeded {len(made)} pre-0270 receipts on subject {subject}: {', '.join(made)}")
     return 0
 
 
@@ -151,7 +151,7 @@ def seed(dsn):
 
 def verify(dsn):
     refuse_non_disposable(dsn)
-    print("grandfathered receipts — what 0244's backfill did to rows that already existed")
+    print("grandfathered receipts — what 0270's backfill did to rows that already existed")
     print(f"target: {dsn}\n")
     conn = psycopg.connect(dsn)
 
@@ -162,7 +162,7 @@ def verify(dsn):
             return [r[0] for r in cur.fetchall()]
 
     def the_backfill_ran():
-        """The literal effect. If 0244's UPDATE were deleted, material_digest
+        """The literal effect. If 0270's UPDATE were deleted, material_digest
         would be NULL for these rows and the `set not null` two statements later
         would fail the migration -- but only on a database that HAS pre-existing
         rows, which is exactly the database nothing else builds."""
@@ -173,7 +173,7 @@ def verify(dsn):
                             where verb='log-activity' and tool_call_idempotency_key
                                   like 'grandfathered-%'""")
             total, filled, matching = cur.fetchone()
-        assert total == 2, f"expected the 2 seeded pre-0244 receipts, found {total}"
+        assert total == 2, f"expected the 2 seeded pre-0270 receipts, found {total}"
         assert filled == 2, f"{total - filled} grandfathered rows have a NULL material digest"
         assert matching == 2, (
             f"only {matching} of {total} grandfathered rows carry material_digest = "
@@ -182,7 +182,7 @@ def verify(dsn):
           "its material digest", the_backfill_ran)
 
     def immutability_was_restored_to_enable_always():
-        """THE SHARPEST MUTANT IN THE WHOLE BACKFILL, and the one 0244's own
+        """THE SHARPEST MUTANT IN THE WHOLE BACKFILL, and the one 0270's own
         comment warns about: restoring the trigger with a plain ENABLE instead
         of ENABLE ALWAYS silently downgrades it to origin-only, so it stops
         firing for replication and for any session_replication_role=replica
@@ -206,7 +206,7 @@ def verify(dsn):
           "plain ENABLE", immutability_was_restored_to_enable_always)
 
     def a_grandfathered_value_would_be_refused_today():
-        """THE CONSEQUENCE, made concrete. 0244(F) requires an ordinary receipt
+        """THE CONSEQUENCE, made concrete. 0270(F) requires an ordinary receipt
         to carry the material its call actually wrote. A backfilled row carries
         its CALL digest, which that recipe cannot produce. So these rows hold a
         value the database would now refuse -- proven here by trying it."""
@@ -259,7 +259,7 @@ def verify(dsn):
             conn.rollback()
             text = str(exc)
             assert "receipt material does not match what its call wrote" in text, (
-                f"refused, but by a DIFFERENT guard than 0244(F): {text.strip().splitlines()[0]}")
+                f"refused, but by a DIFFERENT guard than 0270(F): {text.strip().splitlines()[0]}")
     check("a grandfathered value is one the current rules REFUSE — the same row "
           "cannot be written today", a_grandfathered_value_would_be_refused_today)
 
@@ -283,7 +283,7 @@ def verify(dsn):
             f"the seeded grandfathered receipts are not proven "
             f"({proven_grandfathered} proven)")
         conn.rollback()
-        # ACCEPTANCE MUST BE THE FIRST WRITE IN ITS TRANSACTION (0242), so this
+        # ACCEPTANCE MUST BE THE FIRST WRITE IN ITS TRANSACTION (0268), so this
         # runs alone on a connection that has written nothing.
         acc = psycopg.connect(dsn)
         try:
@@ -301,7 +301,7 @@ def verify(dsn):
                             (uuid.uuid4(), row[0], "grandfathered-row accounting probe"))
                 acc.commit()
             with acc.cursor() as cur:
-                # 0242 grants SELECT on ops.phase4_acceptance to carr_reader and
+                # 0268 grants SELECT on ops.phase4_acceptance to carr_reader and
                 # carr_writer but NOT to carr_authority -- the identity that can
                 # create one cannot read one back. Noted, not changed here: it is
                 # a grant asymmetry in another slice's migration, not this
@@ -410,14 +410,14 @@ def verify(dsn):
         assert not_wearing >= 1, (
             "EVERY receipt in this database carries material_digest = "
             "call_digest, so the signature separates nothing and cannot identify "
-            "a backfilled row — check that the post-0244 receipts were written")
+            "a backfilled row — check that the post-0270 receipts were written")
         # And the pre-split column name is gone for good.
         with conn.cursor() as cur:
             cur.execute("""select count(*) from information_schema.columns
                             where table_schema='ops' and table_name='write_receipt'
                               and column_name='claimed_digest'""")
             assert cur.fetchone()[0] == 0, (
-                "ops.write_receipt.claimed_digest still exists; 0244 renamed it, so "
+                "ops.write_receipt.claimed_digest still exists; 0270 renamed it, so "
                 "its presence means the split did not actually happen here")
     check("there is no down path — only a signature, and it discriminates",
           there_is_no_down_path_only_a_signature)

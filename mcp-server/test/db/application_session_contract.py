@@ -200,9 +200,9 @@ def mint(conn, actor, expires="now() + interval '1 hour'", sponsor="joe", tenant
 
 
 def declare_inventory_manifest(conn, actor, note="contract suite: these rows"):
-    """Declare a 0246 inventory manifest describing the rows that exist NOW.
+    """Declare a 0271 inventory manifest describing the rows that exist NOW.
 
-    0246 made ops.drive_retirement_readiness()'s `ready` require a manifest
+    0271 made ops.drive_retirement_readiness()'s `ready` require a manifest
     whose digest matches ops.drive_dependency_digest() over this database's own
     drive_dependency rows, because before it the retirement DENOMINATOR was
     whatever carr_writer had inserted. Every contract below that asserts `ready
@@ -2944,7 +2944,7 @@ def main(dsn):  # noqa: C901
             (total, retired, remaining, has_authority, declared, observed,
              bound, ready) = cur.fetchone()
 
-        # 0246 ADDED A FOURTH TERM, and it belongs in this rule rather than
+        # 0271 ADDED A FOURTH TERM, and it belongs in this rule rather than
         # beside it. The whole point of this contract is that the formula is
         # checked from readiness's OWN outputs, so a term the function computes
         # and this assertion ignores would be a term nothing checks.
@@ -3666,7 +3666,7 @@ def main(dsn):  # noqa: C901
         # a drive_dependency having already closed it out honestly (every one
         # of them now does, via complete_honest_retirement or its own honest
         # pair) -- otherwise remaining would never reach 0 here at all.
-        # 0246: and on the inventory being BOUND, which file_retirement above
+        # 0271: and on the inventory being BOUND, which file_retirement above
         # just un-bound by recording a new dependency.
         declare_inventory_manifest(conn, joe, "rule 8 withdrawal contract: before")
         _tot0, _ret0, remaining_before, has_auth_before, ready_before = readiness()
@@ -3707,7 +3707,7 @@ def main(dsn):  # noqa: C901
         file_retirement("second", base=material_after_first)
         assert retired_count() == 1, (
             "the dependency could not be retired again after its withdrawal")
-        # 0246: ready also needs the inventory bound, and this contract created
+        # 0271: ready also needs the inventory bound, and this contract created
         # a dependency since any earlier manifest was declared.
         declare_inventory_manifest(conn, joe, "rule 8 withdrawal contract")
         _tot2, _ret2, remaining_final, _ha2, ready_final = readiness()
@@ -4324,7 +4324,7 @@ def main(dsn):  # noqa: C901
         """Execute with exactly one role's privileges. as_writer, generalised.
 
         carr_authority is a real credential in this substrate -- 0236 put
-        accept_phase4 on it and 0246 puts the Drive inventory there -- and
+        accept_phase4 on it and 0271 puts the Drive inventory there -- and
         nothing here could reach it before.
         """
         with conn.cursor() as cur:
@@ -4360,7 +4360,7 @@ def main(dsn):  # noqa: C901
     # ---- item 5: the retirement denominator is not the runtime's to write ----
 
     def writer_cannot_record_a_drive_dependency():
-        """0246. THE HOLE THIS CLOSES, restated as a test.
+        """0271. THE HOLE THIS CLOSES, restated as a test.
 
         ops.drive_retirement_readiness() divides by the count of operational
         ops.drive_dependency rows. 0237 granted carr_writer INSERT on that
@@ -4523,7 +4523,7 @@ def main(dsn):  # noqa: C901
           manifests_are_immutable)
 
     def manifest_needs_a_live_session():
-        """0246's own copy of the session guard. Written here rather than
+        """0271's own copy of the session guard. Written here rather than
         assumed: three other tables in this substrate carry this guard and the
         review found two of them unproven, so a fourth uncovered copy would be
         the same finding again."""
@@ -4535,7 +4535,7 @@ def main(dsn):  # noqa: C901
                 (uuid.uuid4(), observed_digest(), revoked, joe, TENANT, "revoked"),
                 expect_message="is revoked",
                 because="a revoked session must not be able to declare the inventory")
-        # 0231 refuses to mint a session that is already dead, so an expired one
+        # 0264 refuses to mint a session that is already dead, so an expired one
         # can only be produced the way time produces it.
         expired = mint(conn, joe, expires="now() + interval '1 second'")
         time.sleep(1.5)
@@ -4587,7 +4587,7 @@ def main(dsn):  # noqa: C901
         THE SORT IS THE SUBTLE HALF. SQL orders with `collate "C"` (byte order);
         Python's sorted() over str is code point order; for UTF-8 those agree.
         Under the database's default collation on a non-C cluster they do not,
-        which is why 0246 pins the collation and why this test exists.
+        which is why 0271 pins the collation and why this test exists.
         """
         import importlib.util
         root = pathlib.Path(__file__).resolve().parents[3]

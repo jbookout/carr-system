@@ -1,4 +1,4 @@
--- 0244 — the receipt digest was two different facts wearing one name
+-- 0270 — the receipt digest was two different facts wearing one name
 --
 -- WHAT WAS WRONG, in one sentence: ops.write_receipt.claimed_digest served BOTH
 -- as proof-of-attachment (a function of the CALL, recomputed by the database in
@@ -10,13 +10,13 @@
 -- THREE FAILURES FELL OUT OF THAT ONE CONFLATION, each reproduced by execution
 -- against a disposable cluster before this file was written:
 --
---   1. A REVERSAL RECEIPT COULD NEVER PROVE. 0241 defines exact reversal as
+--   1. A REVERSAL RECEIPT COULD NEVER PROVE. 0267 defines exact reversal as
 --      claimed_digest = target.prior_digest, but claimed_digest must ALSO equal
 --      the readback, which is always the digest of the frozen call. The two
 --      requirements are mutually exclusive, so closing a conflict guaranteed a
 --      permanently unproven receipt.
 --
---   2. ONE UNPROVEN RECEIPT BRICKED ACCEPTANCE FOR THE WHOLE DATABASE. 0242
+--   2. ONE UNPROVEN RECEIPT BRICKED ACCEPTANCE FOR THE WHOLE DATABASE. 0268
 --      bars acceptance on unproven_receipts = 0, counted globally with no
 --      scoping, and a receipt can be neither deleted, re-proven, nor repaired.
 --      Combined with (1), the only mechanism that closes a conflict guaranteed
@@ -27,7 +27,7 @@
 --      touched the receipt's own verb, subject_type or subject_id — the fields
 --      the reducer, the conflict detector and Drive retirement all key on. A
 --      receipt claiming verb 'retire-the-entire-drive' over a log-activity row
---      proved cleanly, and 0243's two-receipt gate separated its two receipts
+--      proved cleanly, and 0269's two-receipt gate separated its two receipts
 --      by nothing but their row ids.
 --
 -- WHAT THIS MIGRATION DOES, and nothing else:
@@ -51,7 +51,7 @@
 --      an exact reversal. Unproven retractions clear nothing, so the escape
 --      hatch cannot be opened from inside.
 --
---   D. MAKES 0243'S TWO-RECEIPT GATE MEAN SOMETHING. Each receipt must NAME the
+--   D. MAKES 0269'S TWO-RECEIPT GATE MEAN SOMETHING. Each receipt must NAME the
 --      dependency being retired, the two must rest on DIFFERENT calls and make
 --      DIFFERENT material claims, and the recovery must build on the state the
 --      repoint produced.
@@ -66,10 +66,10 @@
 -- cluster, where a half-applied database is thrown away rather than kept.
 --
 -- APPLYING THIS IS NOT A ROLLING DEPLOY, and an operator needs to know before
--- they start. 0244 drops the five-argument ops.write_receipt_digest and renames
+-- they start. 0270 drops the five-argument ops.write_receipt_digest and renames
 -- a column the producer writes, so there is no ordering in which a Worker built
--- against the other side of this migration keeps working: old code against 0244
--- fails on the dropped signature, and new code against 0243 fails on the missing
+-- against the other side of this migration keeps working: old code against 0270
+-- fails on the dropped signature, and new code against 0269 fails on the missing
 -- seven-argument one. Both failures land inside the receipt producer, which runs
 -- after the tool_call insert, so the whole verb rolls back and every qualified
 -- write returns an error.
@@ -78,7 +78,7 @@
 -- whose Worker does not yet file receipts at all (which is production's state
 -- today, since no Worker on main references these objects); or deploy and
 -- migrate together. The unsafe ones are applying only part of the chain --
--- `bin/migrate-prod.sh --through 0243_drive_retirement.sql` is exactly that --
+-- `bin/migrate-prod.sh --through 0269_drive_retirement.sql` is exactly that --
 -- and deploying the new Worker before the migrations land.
 --
 -- WHAT THIS MIGRATION DELIBERATELY DOES NOT DO, so the next reader does not
@@ -86,7 +86,7 @@
 -- verified against any existing receipt. Enforcing it would make the reducer's
 -- 'broken' state unreachable, and 'broken' is a finding the system is supposed
 -- to be able to report. Causal continuity therefore remains an honest-caller
--- integrity check, exactly as 0241 left it. It is recorded here as a known
+-- integrity check, exactly as 0267 left it. It is recorded here as a known
 -- limitation rather than fixed by a change that would blind the reducer.
 
 -- ============================================================ (A) the split
@@ -107,7 +107,7 @@ alter table ops.write_receipt add column material_digest text;
 -- BACKFILL, and the reason the immutability trigger has to stand down for it.
 -- ops.refuse_receipt_rewrite permits exactly one update — recording a readback —
 -- so it would refuse this backfill. It is disabled for the statement and
--- restored to ENABLE ALWAYS, which is the state 0241 left it in; restoring it
+-- restored to ENABLE ALWAYS, which is the state 0267 left it in; restoring it
 -- with a plain ENABLE would quietly downgrade it to origin-only.
 --
 -- ═══ THERE IS NO DOWN PATH, AND THESE THREE STATEMENTS ARE WHY IT MATTERS ═══
@@ -144,7 +144,7 @@ alter table ops.write_receipt add column material_digest text;
 -- unreachable from inside the migration by construction. The coverage therefore
 -- lives in mcp-server/test/db/grandfathered_receipt_contract.py, which
 -- ops/check-application-session.sh runs against a database forked from `subject`
--- after 0243 and seeded under the pre-split rules — the only place in this
+-- after 0269 and seeded under the pre-split rules — the only place in this
 -- repository where a grandfathered receipt exists.
 alter table ops.write_receipt disable trigger write_receipt_immutable;
 update ops.write_receipt set material_digest = call_digest where material_digest is null;
@@ -161,7 +161,7 @@ comment on column ops.write_receipt.material_digest is
 
 -- --------------------------------------------------- a deterministic order
 -- THE FOLD ORDER WAS DECIDED BY A RANDOM NUMBER, in the one case that matters.
--- 0242 folds a subject's receipts by (recorded_at, id) and its comment defends
+-- 0268 folds a subject's receipts by (recorded_at, id) and its comment defends
 -- the tiebreak, but recorded_at is clock_timestamp() and id is gen_random_uuid()
 -- -- so two receipts written inside one clock tick fold in whichever order two
 -- random uuids happen to sort. Measured on this machine the gaps are tens of
@@ -182,7 +182,7 @@ create index write_receipt_subject_seq_idx
   on ops.write_receipt (subject_type, subject_id, seq);
 
 -- ------------------------------------------------------------- retraction
--- The acceptance bar in 0242 counts unproven receipts globally and a receipt
+-- The acceptance bar in 0268 counts unproven receipts globally and a receipt
 -- can never be deleted, re-proven or repaired. Without a way to disavow one,
 -- a single bad receipt is permanent and the bar is a wall rather than a bar.
 alter table ops.write_receipt
@@ -284,7 +284,7 @@ begin
 end $$;
 
 -- ------------------------------------------------ exact reversal, corrected
--- THE BUG THIS FIXES. 0241 compared claimed_digest to target.prior_digest, and
+-- THE BUG THIS FIXES. 0267 compared claimed_digest to target.prior_digest, and
 -- claimed_digest was simultaneously required to equal the readback. No receipt
 -- could satisfy both, so every reversal was born unprovable. The comparison
 -- belongs to the MATERIAL claim, which is the only one of the two that is about
@@ -409,10 +409,10 @@ begin
   -- mark on the acceptance bar and a mislabelled one is the caller's error.
   --
   -- HONESTY ABOUT THE OTHER TWO: the actor and tenant clauses are UNREACHABLE
-  -- while 0231 stands, because 0231 already refuses a tool_call whose actor or
+  -- while 0264 stands, because 0264 already refuses a tool_call whose actor or
   -- tenant differs from its session's, and this receipt is already required to
   -- match that same session. No probe below exercises them and none can. They
-  -- are kept as depth against a future weakening of 0231, and they are named
+  -- are kept as depth against a future weakening of 0264, and they are named
   -- here as untested rather than counted as proven.
   if tc.verb is distinct from r.verb then
     raise exception 'receipt % claims verb % but its evidence records verb %',
@@ -483,7 +483,7 @@ as $$
      and a.id < b.id
    -- ONLY A PROVEN REVERSAL CLOSES ANYTHING. The earlier version accepted ANY
    -- row that named a side, with no test of proof and no test of whether that
-   -- row had itself been disavowed. Under 0242 that was self-punishing: an
+   -- row had itself been disavowed. Under 0268 that was self-punishing: an
    -- unproven reversal was a permanent wall on the acceptance bar, so nobody
    -- could profit from one. Section (C) removed the punishment by making
    -- unproven receipts retractable, and removing the punishment without
@@ -620,7 +620,7 @@ begin
   select count(*) into n_reads  from public.tool_read_call where application_session_id is not null;
 
   -- THE ONE CHANGE. An unproven receipt that a PROVEN receipt has retracted no
-  -- longer counts against the bar. Everything else about this count is as 0242
+  -- longer counts against the bar. Everything else about this count is as 0268
   -- left it: computed here, never supplied, and global rather than scoped.
   select count(*) filter (where w.is_proven),
          count(*) filter (where not w.is_proven and not exists (
@@ -710,7 +710,7 @@ begin
     raise exception 'the recovery receipt % is not proven', new.recovery_receipt_id;
   end if;
 
-  -- EACH RECEIPT MUST NAME THE DEPENDENCY BEING RETIRED. Without this, 0243
+  -- EACH RECEIPT MUST NAME THE DEPENDENCY BEING RETIRED. Without this, 0269
   -- accepted any two proven receipts about anything at all — the reviewer
   -- retired a dependency with receipts that had never heard of it.
   if repoint.subject_type is distinct from 'drive_dependency'
@@ -729,7 +729,7 @@ begin
   -- from it are two pieces of work, and two rows describing one piece of work
   -- are one piece of evidence counted twice.
   --
-  -- THIS SHADOWS 0243's drive_retirement_distinct_receipts CHECK, and the next
+  -- THIS SHADOWS 0269's drive_retirement_distinct_receipts CHECK, and the next
   -- reader should know that rather than discover it. A receipt trivially shares
   -- its own call with itself, so passing one receipt for both roles now trips
   -- the same-call clause below, and a BEFORE trigger runs ahead of any check
@@ -921,9 +921,9 @@ grant execute on function ops.write_receipt_material_digest(text,uuid,text,uuid)
 
 -- ===== (G) A WRONG RETIREMENT MUST BE CORRECTABLE
 
--- THE DEFECT THIS CLOSES IS THE MIRROR OF THE ONE 0244 EXISTS FOR. The original
+-- THE DEFECT THIS CLOSES IS THE MIRROR OF THE ONE 0270 EXISTS FOR. The original
 -- bug was a permanent REFUSAL: one unproven receipt barred acceptance forever
--- with no way back. 0243 shipped the opposite and nobody noticed, because it
+-- with no way back. 0269 shipped the opposite and nobody noticed, because it
 -- only bites once something is wrong: ops.drive_retirement rows cannot be
 -- updated, cannot be deleted, and one row per dependency was unique, so a
 -- dependency retired in error stayed retired forever and readiness went on
@@ -1193,7 +1193,7 @@ declare
 begin
   select id into probe_actor from public.actor where kind = 'human' order by slug limit 1;
   if probe_actor is null then
-    raise exception '0244 FAILED: need a human actor to exercise the split';
+    raise exception '0270 FAILED: need a human actor to exercise the split';
   end if;
 
   select count(*) filter (where not w.is_proven and not exists (
@@ -1229,7 +1229,7 @@ begin
                               k, 'deal', subj)
    = ops.write_receipt_digest('log-activity', probe_actor, 'carr-internal', sid,
                               k, 'deal', other_subj) then
-    raise exception '0244 FAILED: the call digest is identical for two different subjects';
+    raise exception '0270 FAILED: the call digest is identical for two different subjects';
   end if;
 
   insert into ops.write_receipt
@@ -1241,7 +1241,7 @@ begin
                                    sid, k, 'deal', subj),
           mat_a, 'origin');
   if not ops.prove_write_receipt(r1) then
-    raise exception '0244 FAILED: an honest receipt did not prove after the split';
+    raise exception '0270 FAILED: an honest receipt did not prove after the split';
   end if;
 
   -- (2) A RECEIPT MUST SAY WHAT ITS OWN CALL WROTE. Three separate refusals,
@@ -1262,11 +1262,11 @@ begin
   exception when others then
     failed := true;
     if position('wrote nothing about that subject' in sqlerrm) = 0 then
-      raise exception '0244 FAILED: untouched-subject receipt refused by the WRONG guard: %', sqlerrm;
+      raise exception '0270 FAILED: untouched-subject receipt refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0244 FAILED: a receipt named a subject its call never wrote to';
+    raise exception '0270 FAILED: a receipt named a subject its call never wrote to';
   end if;
 
   -- (2b) the material is not what the call wrote
@@ -1284,11 +1284,11 @@ begin
   exception when others then
     failed := true;
     if position('does not match what its call wrote' in sqlerrm) = 0 then
-      raise exception '0244 FAILED: false-material receipt refused by the WRONG guard: %', sqlerrm;
+      raise exception '0270 FAILED: false-material receipt refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0244 FAILED: a receipt carried material its call never wrote';
+    raise exception '0270 FAILED: a receipt carried material its call never wrote';
   end if;
 
   -- (2c) the verb disagrees with the frozen evidence
@@ -1318,11 +1318,11 @@ begin
     exception when others then
       failed := true;
       if position('claims verb' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: verb mismatch refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: verb mismatch refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: a receipt claimed a verb its evidence does not record';
+      raise exception '0270 FAILED: a receipt claimed a verb its evidence does not record';
     end if;
   end;
 
@@ -1339,7 +1339,7 @@ begin
           'stage', '"closed"'::jsonb, 'system', k, 'carr-internal', sid);
   mat_b := ops.write_receipt_material_digest(k, sid, 'deal', subj);
   if mat_b = mat_a then
-    raise exception '0244 FAILED: two DIFFERENT changes hashed to the same material';
+    raise exception '0270 FAILED: two DIFFERENT changes hashed to the same material';
   end if;
   insert into ops.write_receipt
     (id, application_session_id, actor_id, organization_tenant_id, verb,
@@ -1350,7 +1350,7 @@ begin
                                    sid, k, 'deal', subj),
           mat_b, mat_a);
   if not ops.prove_write_receipt(r2) then
-    raise exception '0244 FAILED: the second honest receipt did not prove';
+    raise exception '0270 FAILED: the second honest receipt did not prove';
   end if;
 
   -- A reversal restores the state its target built on. Its material is by
@@ -1376,7 +1376,7 @@ begin
                                    sid, k, 'deal', subj),
           mat_a, mat_b, r2);
   if not ops.prove_write_receipt(rev) then
-    raise exception '0244 FAILED: an EXACT REVERSAL still cannot prove -- the '
+    raise exception '0270 FAILED: an EXACT REVERSAL still cannot prove -- the '
                     'defect this migration exists to remove is still present';
   end if;
 
@@ -1395,7 +1395,7 @@ begin
   exception when others then
     failed := true;
     if position('reversal is not exact' in sqlerrm) = 0 then
-      raise exception '0244 FAILED: inexact reversal refused by the WRONG guard: %', sqlerrm;
+      raise exception '0270 FAILED: inexact reversal refused by the WRONG guard: %', sqlerrm;
     end if;
     -- AND THE MESSAGE MUST NOT HAND BACK THE SECRET. It used to print the
     -- target's prior digest, which turned this guard into an oracle: anyone
@@ -1403,11 +1403,11 @@ begin
     -- deliberately wrong reversal. Naming which guard refused never requires
     -- disclosing the value that made it refuse.
     if position(mat_a in sqlerrm) > 0 then
-      raise exception '0244 FAILED: the reversal refusal disclosed its target''s prior state';
+      raise exception '0270 FAILED: the reversal refusal disclosed its target''s prior state';
     end if;
   end;
   if not failed then
-    raise exception '0244 FAILED: an inexact reversal was accepted';
+    raise exception '0270 FAILED: an inexact reversal was accepted';
   end if;
 
   -- AND THE SAME-SUBJECT CLAUSE ON REVERSAL, which had no probe at all while
@@ -1440,11 +1440,11 @@ begin
     exception when others then
       failed := true;
       if position('same subject as the receipt it reverses' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: cross-subject reversal refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: cross-subject reversal refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: a reversal named a different subject than its target';
+      raise exception '0270 FAILED: a reversal named a different subject than its target';
     end if;
   end;
 
@@ -1480,7 +1480,7 @@ begin
     mb3 := ops.write_receipt_material_digest(kb3, sid, 'deal', brk_subj);
     mb4 := ops.write_receipt_material_digest(kb4, sid, 'deal', brk_subj);
     if mb4 is distinct from mb2 then
-      raise exception '0244 FAILED: the same change written twice hashed differently, '
+      raise exception '0270 FAILED: the same change written twice hashed differently, '
                       'so an idempotent restatement would read as a new link';
     end if;
 
@@ -1508,7 +1508,7 @@ begin
 
     select * into r from ops.continuity_reducer('deal', brk_subj);
     if r.state <> 'continuous' then
-      raise exception '0244 FAILED: an unbroken chain did not reduce to continuous (got %)', r.state;
+      raise exception '0270 FAILED: an unbroken chain did not reduce to continuous (got %)', r.state;
     end if;
 
     -- The refusal path is caught and RENAMED on purpose. A rule demanding the
@@ -1523,7 +1523,7 @@ begin
               ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kb4,'deal',brk_subj),
               mb4,mb1);
     exception when others then
-      raise exception '0244 FAILED: a STALE BUT REAL prior state was refused (%), '
+      raise exception '0270 FAILED: a STALE BUT REAL prior state was refused (%), '
                       'which makes the reducer''s BROKEN state unreachable. The '
                       'prior guard must check that a state EXISTED, never that '
                       'it is the latest one.', sqlerrm;
@@ -1532,16 +1532,16 @@ begin
 
     select * into r from ops.continuity_reducer('deal', brk_subj);
     if r.state <> 'broken' then
-      raise exception '0244 FAILED: a stale-but-real prior no longer produces a BROKEN chain (got %)', r.state;
+      raise exception '0270 FAILED: a stale-but-real prior no longer produces a BROKEN chain (got %)', r.state;
     end if;
     if r.break_at is distinct from b4 then
-      raise exception '0244 FAILED: the reducer did not name where the chain broke';
+      raise exception '0270 FAILED: the reducer did not name where the chain broke';
     end if;
     if r.conflict_count <> 0 then
-      raise exception '0244 FAILED: a restatement that AGREES about material was counted as a conflict';
+      raise exception '0270 FAILED: a restatement that AGREES about material was counted as a conflict';
     end if;
     if r.head_digest is distinct from mb2 then
-      raise exception '0244 FAILED: the reducer head is not the last MATERIAL claim';
+      raise exception '0270 FAILED: the reducer head is not the last MATERIAL claim';
     end if;
 
     -- (7) A FABRICATED PRIOR IS REFUSED, and so is the bootstrap that used to
@@ -1559,11 +1559,11 @@ begin
     exception when others then
       failed := true;
       if position('never reached' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: a fabricated prior refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: a fabricated prior refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: a receipt built on a state its subject never reached';
+      raise exception '0270 FAILED: a receipt built on a state its subject never reached';
     end if;
 
     declare
@@ -1584,7 +1584,7 @@ begin
       values (junk,sid,probe_actor,'carr-internal','log-activity','deal',brk_subj,kj,
               'a-digest-i-never-computed', mj, mb2);
       if ops.prove_write_receipt(junk) then
-        raise exception '0244 FAILED: the bootstrap fixture proved';
+        raise exception '0270 FAILED: the bootstrap fixture proved';
       end if;
       failed := false;
       begin
@@ -1597,11 +1597,11 @@ begin
       exception when others then
         failed := true;
         if position('never reached' in sqlerrm) = 0 then
-          raise exception '0244 FAILED: the bootstrap refused by the WRONG guard: %', sqlerrm;
+          raise exception '0270 FAILED: the bootstrap refused by the WRONG guard: %', sqlerrm;
         end if;
       end;
       if not failed then
-        raise exception '0244 FAILED: an UNPROVEN receipt was usable as a prior state, '
+        raise exception '0270 FAILED: an UNPROVEN receipt was usable as a prior state, '
                         'so the prior guard can be bootstrapped with junk';
       end if;
     end;
@@ -1631,7 +1631,7 @@ begin
           'a-digest-nobody-wrote',
           ops.write_receipt_material_digest(k, sid, 'deal', ret_subj), 'origin');
   if ops.prove_write_receipt(bad) then
-    raise exception '0244 FAILED: a receipt claiming a digest it never wrote was PROVEN';
+    raise exception '0270 FAILED: a receipt claiming a digest it never wrote was PROVEN';
   end if;
 
   -- A PROVEN RECEIPT CANNOT BE RETRACTED. Retraction clears an unconfirmed
@@ -1652,11 +1652,11 @@ begin
   exception when others then
     failed := true;
     if position('is proven and cannot be retracted' in sqlerrm) = 0 then
-      raise exception '0244 FAILED: retracting a proven receipt refused by the WRONG guard: %', sqlerrm;
+      raise exception '0270 FAILED: retracting a proven receipt refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0244 FAILED: a PROVEN receipt was retracted';
+    raise exception '0270 FAILED: a PROVEN receipt was retracted';
   end if;
 
   -- A RETRACTION MUST NAME THE SAME SUBJECT AS WHAT IT RETRACTS. The call
@@ -1676,11 +1676,11 @@ begin
   exception when others then
     failed := true;
     if position('same subject as the receipt it retracts' in sqlerrm) = 0 then
-      raise exception '0244 FAILED: cross-subject retraction refused by the WRONG guard: %', sqlerrm;
+      raise exception '0270 FAILED: cross-subject retraction refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0244 FAILED: a retraction named a different subject than its target';
+    raise exception '0270 FAILED: a retraction named a different subject than its target';
   end if;
 
   -- A RETRACTION CANNOT CROSS TENANTS. carr_writer holds INSERT across the
@@ -1712,7 +1712,7 @@ begin
             'deal', tsubj, kt, 'not-the-right-digest',
             ops.write_receipt_material_digest(kt, sid2, 'deal', tsubj), 'origin');
     if ops.prove_write_receipt(foreign_receipt) then
-      raise exception '0244 FAILED: the cross-tenant fixture proved when it should not';
+      raise exception '0270 FAILED: the cross-tenant fixture proved when it should not';
     end if;
 
     insert into public.tool_call
@@ -1738,11 +1738,11 @@ begin
     exception when others then
       failed := true;
       if position('cannot cross tenants' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: cross-tenant retraction refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: cross-tenant retraction refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: one tenant disavowed another tenant''s receipt';
+      raise exception '0270 FAILED: one tenant disavowed another tenant''s receipt';
     end if;
 
     -- And the same boundary on reversal.
@@ -1760,11 +1760,11 @@ begin
     exception when others then
       failed := true;
       if position('cannot cross tenants' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: cross-tenant reversal refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: cross-tenant reversal refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: one tenant reversed another tenant''s receipt';
+      raise exception '0270 FAILED: one tenant reversed another tenant''s receipt';
     end if;
   end;
 
@@ -1789,21 +1789,21 @@ begin
                                    sid, k, 'deal', ret_subj),
           'a-retraction-states-no-material', 'origin', bad);
   if not ops.prove_write_receipt(ret) then
-    raise exception '0244 FAILED: an honest retraction could not prove';
+    raise exception '0270 FAILED: an honest retraction could not prove';
   end if;
 
   -- A RETRACTION IS NOT A PARTY TO A CONFLICT, and neither is what it retracts.
   -- bad and ret share the prior 'origin' and assert different material, which
   -- under the earlier definition made the repair itself a conflict.
   if (select count(*) from ops.receipt_conflicts('deal', ret_subj)) <> 0 then
-    raise exception '0244 FAILED: an honest retraction manufactured a conflict '
+    raise exception '0270 FAILED: an honest retraction manufactured a conflict '
                     'with the receipt it was repairing';
   end if;
 
   -- AND BOTH LEAVE THE FOLD. The chain must read as though neither happened.
   select * into r from ops.continuity_reducer('deal', ret_subj);
   if r.receipt_count <> 0 or r.state <> 'empty' then
-    raise exception '0244 FAILED: a retracted receipt and its retractor did not '
+    raise exception '0270 FAILED: a retracted receipt and its retractor did not '
                     'both leave the fold (count %, state %)', r.receipt_count, r.state;
   end if;
 
@@ -1850,7 +1850,7 @@ begin
                                      sid, kc2, 'deal', cnf_subj), m2, 'origin');
     perform ops.prove_write_receipt(c2);
     if (select count(*) from ops.receipt_conflicts('deal', cnf_subj)) <> 1 then
-      raise exception '0244 FAILED: two receipts disagreeing about material did not conflict';
+      raise exception '0270 FAILED: two receipts disagreeing about material did not conflict';
     end if;
 
     -- An UNPROVEN reversal of one side. Under the earlier definition this alone
@@ -1867,10 +1867,10 @@ begin
       values (fake_rev, sid, probe_actor, 'carr-internal', 'log-activity', 'deal',
               cnf_subj, kc3, 'I-NEVER-COMPUTED-THIS', 'origin', m2, c2);
       if ops.prove_write_receipt(fake_rev) then
-        raise exception '0244 FAILED: the unproven-reversal fixture proved';
+        raise exception '0270 FAILED: the unproven-reversal fixture proved';
       end if;
       if (select count(*) from ops.receipt_conflicts('deal', cnf_subj)) <> 1 then
-        raise exception '0244 FAILED: an UNPROVEN reversal silenced a real conflict';
+        raise exception '0270 FAILED: an UNPROVEN reversal silenced a real conflict';
       end if;
       -- and it may not be laundered away by retracting it either
       declare
@@ -1887,7 +1887,7 @@ begin
                 'a-retraction-states-no-material', 'origin', fake_rev);
         perform ops.prove_write_receipt(launder);
         if (select count(*) from ops.receipt_conflicts('deal', cnf_subj)) <> 1 then
-          raise exception '0244 FAILED: retracting a lying reversal laundered the conflict away';
+          raise exception '0270 FAILED: retracting a lying reversal laundered the conflict away';
         end if;
       end;
     end;
@@ -1914,10 +1914,10 @@ begin
                                        sid, kc5, 'deal', cnf_subj),
               'origin', m2, c2);
       if not ops.prove_write_receipt(real_rev) then
-        raise exception '0244 FAILED: an honest reversal could not prove';
+        raise exception '0270 FAILED: an honest reversal could not prove';
       end if;
       if (select count(*) from ops.receipt_conflicts('deal', cnf_subj)) <> 0 then
-        raise exception '0244 FAILED: a PROVEN exact reversal did not close the conflict';
+        raise exception '0270 FAILED: a PROVEN exact reversal did not close the conflict';
       end if;
     end;
   end;
@@ -1956,7 +1956,7 @@ begin
             ops.write_receipt_material_digest(ky,sid2,'deal',shared),'origin');
     perform ops.prove_write_receipt(y1);
     if (select count(*) from ops.receipt_conflicts('deal', shared)) <> 0 then
-      raise exception '0244 FAILED: two TENANTS writing the same subject id were '
+      raise exception '0270 FAILED: two TENANTS writing the same subject id were '
                       'reported as being in conflict, so one tenant can block '
                       'another tenant''s phase acceptance';
     end if;
@@ -1989,12 +1989,12 @@ begin
       field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
     values (clock_timestamp(),probe_actor,'log-activity','deal',s2,'stage','"two"'::jsonb,'system',ks,'carr-internal',sid);
     if ops.write_receipt_material_digest(ks, sid, 'deal', s1) is distinct from before_other then
-      raise exception '0244 FAILED: an unrelated subject''s event under the same call '
+      raise exception '0270 FAILED: an unrelated subject''s event under the same call '
                       'changed this subject''s material digest, so the aggregate is '
                       'not scoped to its subject';
     end if;
     if ops.write_receipt_material_digest(ks, sid, 'deal', s2) = before_other then
-      raise exception '0244 FAILED: two different subjects under one call hashed the same';
+      raise exception '0270 FAILED: two different subjects under one call hashed the same';
     end if;
 
     -- AND IT MUST BE SCOPED TO ITS SESSION.
@@ -2003,7 +2003,7 @@ begin
     values (sid3, probe_actor, 'carr-internal', 'joe', 'probe', 'probe-issuer',
             'verified_partner', 'probe', clock_timestamp() + interval '1 hour');
     if ops.write_receipt_material_digest(ks, sid3, 'deal', s1) = before_other then
-      raise exception '0244 FAILED: the material digest ignores which session wrote the events';
+      raise exception '0270 FAILED: the material digest ignores which session wrote the events';
     end if;
 
     -- AND IT MUST NOT DEPEND ON THE ORDER THE ROWS WERE INSERTED IN.
@@ -2021,7 +2021,7 @@ begin
            (clock_timestamp(),probe_actor,'log-activity','deal',s1,'a_field','"alpha"'::jsonb,'system',kb,'carr-internal',sid);
     if ops.write_receipt_material_digest(ka, sid, 'deal', s1)
        is distinct from ops.write_receipt_material_digest(kb, sid, 'deal', s1) then
-      raise exception '0244 FAILED: the same two changes hashed differently depending on '
+      raise exception '0270 FAILED: the same two changes hashed differently depending on '
                       'the order their rows were written';
     end if;
   end;
@@ -2048,16 +2048,16 @@ begin
   exception when others then
     failed := true;
     if position('write_receipt_reverses_xor_retracts' in sqlerrm) = 0 then
-      raise exception '0244 FAILED: a reverse-and-retract receipt refused by the WRONG guard: %', sqlerrm;
+      raise exception '0270 FAILED: a reverse-and-retract receipt refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0244 FAILED: one receipt both reversed and retracted';
+    raise exception '0270 FAILED: one receipt both reversed and retracted';
   end if;
 
   -- ============================ (10) the immutability tuple covers the new fields
   -- The file's own rule is that a field left out of this tuple is a field a
-  -- receipt can be rewritten through. 0244 added two fields to the row and both
+  -- receipt can be rewritten through. 0270 added two fields to the row and both
   -- went untested. Rolled back, because the fixture must be an UNPROVEN receipt
   -- with no readback yet and leaving one behind would sit on the bar.
   begin
@@ -2092,11 +2092,11 @@ begin
       exception when others then
         failed := true;
         if position('identity is immutable' in sqlerrm) = 0 then
-          raise exception '0244 FAILED: rewriting material refused by the WRONG guard: %', sqlerrm;
+          raise exception '0270 FAILED: rewriting material refused by the WRONG guard: %', sqlerrm;
         end if;
       end;
       if not failed then
-        raise exception '0244 FAILED: a receipt''s MATERIAL CLAIM was rewritten in place';
+        raise exception '0270 FAILED: a receipt''s MATERIAL CLAIM was rewritten in place';
       end if;
 
       failed := false;
@@ -2108,11 +2108,11 @@ begin
       exception when others then
         failed := true;
         if position('identity is immutable' in sqlerrm) = 0 then
-          raise exception '0244 FAILED: rewriting the retraction link refused by the WRONG guard: %', sqlerrm;
+          raise exception '0270 FAILED: rewriting the retraction link refused by the WRONG guard: %', sqlerrm;
         end if;
       end;
       if not failed then
-        raise exception '0244 FAILED: a receipt was turned into a retraction after the fact';
+        raise exception '0270 FAILED: a receipt was turned into a retraction after the fact';
       end if;
     end;
     raise exception 'ROLLBACK_IMMUTABILITY_PROBE';
@@ -2130,11 +2130,11 @@ begin
   exception when others then
     failed := true;
     if position('does not exist' in sqlerrm) = 0 then
-      raise exception '0244 FAILED: the five-argument recipe refused for the WRONG reason: %', sqlerrm;
+      raise exception '0270 FAILED: the five-argument recipe refused for the WRONG reason: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0244 FAILED: the subject-blind five-argument digest is still callable';
+    raise exception '0270 FAILED: the subject-blind five-argument digest is still callable';
   end if;
 
   -- ================================================ (12) the acceptance bar
@@ -2186,7 +2186,7 @@ begin
                   r.organization_tenant_id, ssid, sk, r.subject_type, r.subject_id),
                 'a-retraction-states-no-material', 'origin', r.id);
         if not ops.prove_write_receipt(sweep_id) then
-          raise exception '0244 FAILED: a sweep retraction of % failed to prove', r.id;
+          raise exception '0270 FAILED: a sweep retraction of % failed to prove', r.id;
         end if;
       end;
     end loop;
@@ -2207,18 +2207,18 @@ begin
   if base_unproven = 0 and base_conflict = 0 then
     begin
       perform ops.accept_phase4(gen_random_uuid(), sid,
-        '0244 probe: acceptance must refuse a caller that authored its own evidence');
-      raise exception '0244 FAILED: acceptance ran in a transaction that had already '
+        '0270 probe: acceptance must refuse a caller that authored its own evidence');
+      raise exception '0270 FAILED: acceptance ran in a transaction that had already '
         'written, so it counted evidence it authored itself';
     exception
       when others then
-        if sqlerrm like '0244 FAILED%' then raise; end if;
+        if sqlerrm like '0270 FAILED%' then raise; end if;
         if position('first write in its transaction' in sqlerrm) = 0 then
-          raise exception '0244 FAILED: acceptance refused for the wrong reason: %', sqlerrm;
+          raise exception '0270 FAILED: acceptance refused for the wrong reason: %', sqlerrm;
         end if;
     end;
   else
-    raise notice '0244: acceptance-success probe SKIPPED -- this database already '
+    raise notice '0270: acceptance-success probe SKIPPED -- this database already '
                  'carries % unretracted unproven receipt(s) and % open conflict(s) '
                  'that predate the migration. The refusal half still ran.',
                  base_unproven, base_conflict;
@@ -2257,7 +2257,7 @@ begin
                 'nobody-computed-this',
                 ops.write_receipt_material_digest(ku, sid, 'deal', u_subj),'origin');
         if ops.prove_write_receipt(u1) then
-          raise exception '0244 FAILED: the three-level fixture proved when it should not';
+          raise exception '0270 FAILED: the three-level fixture proved when it should not';
         end if;
         insert into ops.write_receipt (id, application_session_id, actor_id,
           organization_tenant_id, verb, subject_type, subject_id,
@@ -2266,7 +2266,7 @@ begin
         values (ur,sid,probe_actor,'carr-internal','log-activity','deal',u_subj,ku,
                 'nor-this','a-retraction-states-no-material','origin',u1);
         if ops.prove_write_receipt(ur) then
-          raise exception '0244 FAILED: the unproven retraction proved';
+          raise exception '0270 FAILED: the unproven retraction proved';
         end if;
         insert into ops.write_receipt (id, application_session_id, actor_id,
           organization_tenant_id, verb, subject_type, subject_id,
@@ -2276,7 +2276,7 @@ begin
                 ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,ku,'deal',u_subj),
                 'a-retraction-states-no-material','origin',ur);
         if not ops.prove_write_receipt(ur2) then
-          raise exception '0244 FAILED: an honest second-level retraction could not prove';
+          raise exception '0270 FAILED: an honest second-level retraction could not prove';
         end if;
         failed := false;
         begin
@@ -2293,11 +2293,11 @@ begin
           -- probe honest means accepting either refusal and naming why.
           if position('phase4_acceptance_no_unproven_receipts' in sqlerrm) = 0
              and position('first write in its transaction' in sqlerrm) = 0 then
-            raise exception '0244 FAILED: acceptance refused by the WRONG bar: %', sqlerrm;
+            raise exception '0270 FAILED: acceptance refused by the WRONG bar: %', sqlerrm;
           end if;
         end;
         if not failed then
-          raise exception '0244 FAILED: an UNPROVEN retraction cleared the acceptance bar';
+          raise exception '0270 FAILED: an UNPROVEN retraction cleared the acceptance bar';
         end if;
       end;
       raise exception 'ROLLBACK_THREE_LEVEL';
@@ -2406,11 +2406,11 @@ begin
     exception when others then
       failed := true;
       if position('does not name dependency' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: unrelated-receipt retirement refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: unrelated-receipt retirement refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: a dependency was retired with receipts that never named it';
+      raise exception '0270 FAILED: a dependency was retired with receipts that never named it';
     end if;
 
     -- SAME CALL. p1b builds on the repoint and, being the same call, cannot
@@ -2424,11 +2424,11 @@ begin
     exception when others then
       failed := true;
       if position('rest on the SAME call' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: same-call retirement refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: same-call retirement refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: a dependency was retired on two receipts about ONE call';
+      raise exception '0270 FAILED: a dependency was retired on two receipts about ONE call';
     end if;
 
     -- SAME MATERIAL, different call, and it builds on the repoint, so only the
@@ -2442,11 +2442,11 @@ begin
     exception when others then
       failed := true;
       if position('assert the SAME material state' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: same-material retirement refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: same-material retirement refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: a dependency was retired on two receipts asserting the same thing';
+      raise exception '0270 FAILED: a dependency was retired on two receipts asserting the same thing';
     end if;
 
     -- A RECOVERY THAT IGNORED THE REPOINT: different call, different material.
@@ -2459,11 +2459,11 @@ begin
     exception when others then
       failed := true;
       if position('does not build on the repointed state' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: uncoupled-recovery retirement refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: uncoupled-recovery retirement refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: a recovery receipt that ignored the repoint was accepted';
+      raise exception '0270 FAILED: a recovery receipt that ignored the repoint was accepted';
     end if;
 
     -- THE HONEST PATH.
@@ -2474,7 +2474,7 @@ begin
             'probe: repointed, then recovered from the repointed state');
     select * into rdy from ops.drive_retirement_readiness();
     if rdy.remaining <> 0 then
-      raise exception '0244 FAILED: a retired dependency still counted as remaining';
+      raise exception '0270 FAILED: a retired dependency still counted as remaining';
     end if;
 
     -- AND A WRONG ONE MUST BE CORRECTABLE. Before this, a dependency retired in
@@ -2488,10 +2488,10 @@ begin
             'probe: the readers were never actually repointed');
     select * into rdy from ops.drive_retirement_readiness();
     if rdy.remaining <> 1 then
-      raise exception '0244 FAILED: a WITHDRAWN retirement still counted as retired';
+      raise exception '0270 FAILED: a WITHDRAWN retirement still counted as retired';
     end if;
     if rdy.ready then
-      raise exception '0244 FAILED: readiness said yes with a withdrawn retirement';
+      raise exception '0270 FAILED: readiness said yes with a withdrawn retirement';
     end if;
 
     -- A withdrawal is itself a record, not an edit.
@@ -2502,11 +2502,11 @@ begin
     exception when others then
       failed := true;
       if position('cannot be rewritten' in sqlerrm) = 0 then
-        raise exception '0244 FAILED: withdrawal rewrite refused by the WRONG guard: %', sqlerrm;
+        raise exception '0270 FAILED: withdrawal rewrite refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0244 FAILED: a withdrawal was rewritten';
+      raise exception '0270 FAILED: a withdrawal was rewritten';
     end if;
 
     -- AND THE DEPENDENCY CAN THEN BE RETIRED PROPERLY, which the old unique
@@ -2530,7 +2530,7 @@ begin
             'probe: retired again, properly, after the withdrawal');
     select * into rdy from ops.drive_retirement_readiness();
     if rdy.remaining <> 0 then
-      raise exception '0244 FAILED: a dependency could not be retired again after '
+      raise exception '0270 FAILED: a dependency could not be retired again after '
                       'its first retirement was withdrawn';
     end if;
     -- AND A SECOND LIVE ROW FOR THE SAME DEPENDENCY MUST STILL COUNT ONCE. The
@@ -2558,15 +2558,15 @@ begin
             'probe: a second live retirement row for the same dependency');
     select * into rdy from ops.drive_retirement_readiness();
     if rdy.retired_total <> 1 then
-      raise exception '0244 FAILED: two live retirement rows for one dependency inflated '
+      raise exception '0270 FAILED: two live retirement rows for one dependency inflated '
                       'the retired total (got %)', rdy.retired_total;
     end if;
   end;
 
-  raise notice '0244 apply-time proof passed';
-  raise exception 'ROLLBACK_0244_PROBE';
+  raise notice '0270 apply-time proof passed';
+  raise exception 'ROLLBACK_0270_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0244_PROBE' then
+  if sqlerrm = 'ROLLBACK_0270_PROBE' then
     return;
   end if;
   raise;

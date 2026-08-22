@@ -11,7 +11,7 @@
 # NOT WIRED INTO HOSTED CI, deliberately. It needs a live PostgreSQL, and this
 # repo's GitHub Actions minutes are metered and over the free allowance. Wiring
 # it there is a cost decision for Joe, not a default. Run it locally before
-# touching the substrate, and after any change to migration 0231.
+# touching the substrate, and after any change to migration 0264.
 #
 # Risk colour GREEN: entirely local. No network, no Neon, no staging, no
 # production, nothing metered.
@@ -30,45 +30,45 @@ fi
 "$PYBIN" -c "import psycopg" 2>/dev/null || {
   echo "psycopg is not importable under $PYBIN; set CARR_PYTHON to an interpreter that has it" >&2
   exit 1; }
-MIGRATION="$REPO/migrations/0231_authenticated_application_session.sql"
-# 0239 chooses the credential that joins carr_session_minter. It MUST be applied
-# after 0231 and never before: 0231 asserts the role is memberless, which is its
-# "inert by construction" contract, and 0239 is what ends that state.
+MIGRATION="$REPO/migrations/0264_authenticated_application_session.sql"
+# 0265 chooses the credential that joins carr_session_minter. It MUST be applied
+# after 0264 and never before: 0264 asserts the role is memberless, which is its
+# "inert by construction" contract, and 0265 is what ends that state.
 #
-# ROLE MEMBERSHIP IS CLUSTER-WIDE WHILE MIGRATIONS ARE PER-DATABASE. Once 0239
-# has run anywhere in this cluster, 0231 can no longer apply to a FRESH database
+# ROLE MEMBERSHIP IS CLUSTER-WIDE WHILE MIGRATIONS ARE PER-DATABASE. Once 0265
+# has run anywhere in this cluster, 0264 can no longer apply to a FRESH database
 # in the same cluster -- it will find the member it requires to be absent. That
 # is an artifact of one cluster hosting many test databases, not a production
 # path (each Neon database is its own cluster), but it means this script must
 # stand up its own cluster per run, which it does.
-MIGRATION_ISSUER="$REPO/migrations/0239_session_issuer_credential.sql"
-# 0240 lets the door mint from an actor SLUG. The door has no actor id --
+MIGRATION_ISSUER="$REPO/migrations/0265_session_issuer_credential.sql"
+# 0266 lets the door mint from an actor SLUG. The door has no actor id --
 # actor.id is not resolved until callTool, long after authentication -- and the
 # issuer holds no table privilege with which to resolve one.
-MIGRATION_SLUG_MINT="$REPO/migrations/0240_mint_session_by_actor_slug.sql"
-# 0241 adds write receipts: a session, a claimed digest, and a readback the
+MIGRATION_SLUG_MINT="$REPO/migrations/0266_mint_session_by_actor_slug.sql"
+# 0267 adds write receipts: a session, a claimed digest, and a readback the
 # DATABASE computes from the frozen evidence row rather than accepting.
-MIGRATION_RECEIPT="$REPO/migrations/0241_write_receipt.sql"
-# 0242 introduces the reducer and the acceptance surface — deliberately, and
+MIGRATION_RECEIPT="$REPO/migrations/0267_write_receipt.sql"
+# 0268 introduces the reducer and the acceptance surface — deliberately, and
 # only after receipts can prove themselves.
-MIGRATION_ACCEPT="$REPO/migrations/0242_continuity_reducer_and_acceptance.sql"
-# 0243 is the LAST slice: Drive retirement resolved from proven receipts plus
+MIGRATION_ACCEPT="$REPO/migrations/0268_continuity_reducer_and_acceptance.sql"
+# 0269 is the LAST slice: Drive retirement resolved from proven receipts plus
 # an authority acceptance, which is the record-layer verifier the static
 # preflight says it cannot be.
-MIGRATION_RETIRE="$REPO/migrations/0243_drive_retirement.sql"
-# 0244 splits the receipt digest. 0241 made claimed_digest carry both the proof
+MIGRATION_RETIRE="$REPO/migrations/0269_drive_retirement.sql"
+# 0270 splits the receipt digest. 0267 made claimed_digest carry both the proof
 # that a receipt is attached to a real call AND the claim about what a subject
 # now says; those are different facts, and one column could not be honest about
 # both. Under the old shape an exact reversal could never prove and a single
 # unproven receipt barred acceptance forever — this suite bricked itself on its
-# own first run. It applies AFTER 0243 because it rewrites 0243's retirement
-# trigger as well as 0241's and 0242's functions.
-MIGRATION_SPLIT="$REPO/migrations/0244_receipt_digest_split.sql"
-# 0246 takes the Drive retirement DENOMINATOR away from the runtime. 0243 granted
+# own first run. It applies AFTER 0269 because it rewrites 0269's retirement
+# trigger as well as 0267's and 0268's functions.
+MIGRATION_SPLIT="$REPO/migrations/0270_receipt_digest_split.sql"
+# 0271 takes the Drive retirement DENOMINATOR away from the runtime. 0269 granted
 # carr_writer INSERT on ops.drive_dependency and nothing in the repository ever
 # populated it, so the count readiness divides by was whatever the guarded party
-# had written. It applies last because it replaces 0244's readiness function.
-MIGRATION_INVENTORY="$REPO/migrations/0246_drive_inventory_is_not_the_runtime_s_to_declare.sql"
+# had written. It applies last because it replaces 0270's readiness function.
+MIGRATION_INVENTORY="$REPO/migrations/0271_drive_inventory_is_not_the_runtime_s_to_declare.sql"
 SUITE="$REPO/mcp-server/test/db/application_session_contract.py"
 GRANDFATHERED="$REPO/mcp-server/test/db/grandfathered_receipt_contract.py"
 export LC_ALL=C LANG=C
@@ -90,19 +90,19 @@ trap cleanup EXIT
 BASE="${DSN%/carr_h}"
 psql "$BASE/postgres" -q -c "create database subject template carr_h"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION"
-echo "migration 0231 applied (its own apply-time assertions passed)"
+echo "migration 0264 applied (its own apply-time assertions passed)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_ISSUER"
-echo "migration 0239 applied (the minting credential is chosen and asserted)"
+echo "migration 0265 applied (the minting credential is chosen and asserted)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SLUG_MINT"
-echo "migration 0240 applied (the door can mint without an actor id)"
+echo "migration 0266 applied (the door can mint without an actor id)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_RECEIPT"
-echo "migration 0241 applied (receipts bind a session and prove by readback)"
+echo "migration 0267 applied (receipts bind a session and prove by readback)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_ACCEPT"
-echo "migration 0242 applied (the reducer folds, and acceptance is gated)"
+echo "migration 0268 applied (the reducer folds, and acceptance is gated)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_RETIRE"
-echo "migration 0243 applied (retirement needs two proven receipts and authority)"
+echo "migration 0269 applied (retirement needs two proven receipts and authority)"
 
-# THE GRANDFATHERED DATABASE, forked HERE and nowhere else. 0244 backfills
+# THE GRANDFATHERED DATABASE, forked HERE and nowhere else. 0270 backfills
 # every pre-existing receipt's material digest with three statements that stand
 # the immutability trigger down, and its own apply-time proof cannot observe a
 # single one of them: that block runs in a transaction it rolls back, so every
@@ -110,23 +110,23 @@ echo "migration 0243 applied (retirement needs two proven receipts and authority
 # subject is a receipt that existed BEFORE the migration, and this is the only
 # place in the repository where one is made.
 #
-# The copy is taken from `subject` at exactly this point -- 0243 applied, 0244
+# The copy is taken from `subject` at exactly this point -- 0269 applied, 0270
 # not yet -- because a template copy taken any later has already been through
 # the backfill and proves nothing.
 psql "$BASE/postgres" -q -c "create database grandfathered template subject"
 "$PYBIN" "$GRANDFATHERED" seed "$BASE/grandfathered"
-echo "pre-0244 receipts seeded under the OLD rules"
+echo "pre-0270 receipts seeded under the OLD rules"
 
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SPLIT"
-echo "migration 0244 applied (the call digest and the material claim are two columns)"
+echo "migration 0270 applied (the call digest and the material claim are two columns)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_INVENTORY"
-echo "migration 0246 applied (the inventory is declared, not written by the runtime)"
+echo "migration 0271 applied (the inventory is declared, not written by the runtime)"
 
 # ...and now bring the grandfathered copy forward THROUGH the backfill, so the
 # contract below runs against rows the UPDATE actually rewrote.
 psql "$BASE/grandfathered" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SPLIT"
 psql "$BASE/grandfathered" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_INVENTORY"
-echo "grandfathered database brought forward through the 0244 backfill"
+echo "grandfathered database brought forward through the 0270 backfill"
 "$PYBIN" "$GRANDFATHERED" verify "$BASE/grandfathered"
 
 # THE PRODUCER, AGAINST A REAL DATABASE, before the contract suite runs. Its own
