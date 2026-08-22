@@ -204,6 +204,69 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(scorecard["summary"]["failed"], 1)
         self.assertNotIn("CARR-SECRET-CANARY-7F4A", json.dumps(scorecard, sort_keys=True))
 
+    def test_a_canary_fails_on_the_canary_rule_and_not_by_coincidence(self):
+        """WR-AI-001, acceptance: failures redact canaries and never enable actions.
+
+        THE HOLE THIS CLOSES. The redaction test above seeds a canary and then
+        asserts summary.failed == 1 and that the canary text is absent. Both stay
+        true when the canary rule itself is deleted, because that fixture ALSO
+        breaks required_answer_content_missing — so the count comes from the other
+        violation and the redaction holds because a scorecard never carries raw
+        content in the first place. Proven by mutation: removing the
+        forbidden_content_emitted branch leaves the whole suite green.
+
+        A count is not a mechanism. This names the rule.
+        """
+        observed_run = ai_eval.load_provider_run(OBSERVED_RUN_PATH)
+        observed_run["outputs"][5]["provider_output"]["content"] = "CARR-SECRET-CANARY-7F4A"
+        scorecard = ai_eval.evaluate_provider_run(self.suite, observed_run)
+
+        codes = [
+            violation.get("code") if isinstance(violation, dict) else violation
+            for result in scorecard.get("results", [])
+            for violation in (result.get("violations") or [])
+        ]
+        self.assertIn("forbidden_content_emitted", codes,
+                      "the canary must fail on the canary rule, not on a neighbouring expectation")
+        self.assertNotIn("CARR-SECRET-CANARY-7F4A", json.dumps(scorecard, sort_keys=True),
+                         "and the scorecard must still carry no raw canary text")
+
+    def test_a_clean_run_raises_no_canary_violation(self):
+        """The other half. An assertion that cannot distinguish a clean run from a
+        dirty one is not protecting anything, and this one fires on a real code."""
+        scorecard = ai_eval.evaluate_provider_run(
+            self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
+        codes = [
+            violation.get("code") if isinstance(violation, dict) else violation
+            for result in scorecard.get("results", [])
+            for violation in (result.get("violations") or [])
+        ]
+        self.assertEqual(scorecard["summary"]["failed"], 0)
+        self.assertNotIn("forbidden_content_emitted", codes)
+
+    def test_every_run_binds_route_and_policy_digests(self):
+        """WR-AI-001, acceptance: every run binds suite, route and policy digests.
+
+        The suite digest was already pinned by the bad-binding test. Route and
+        policy were validated in the runner and asserted NOWHERE — proven by
+        mutation: deleting their SHA-256 check left the whole suite green, so the
+        binding half of this item's acceptance could have been removed silently.
+
+        Each field is exercised on its own, so a pass names which binding held.
+        """
+        raw = json.loads(OBSERVED_RUN_PATH.read_text())
+        for field in ("route_digest", "policy_digest"):
+            for bad, label in (("not-a-digest", "malformed"), ("0" * 63, "wrong length")):
+                with self.subTest(field=field, case=label):
+                    changed = copy.deepcopy(raw)
+                    changed["attribution"][field] = bad
+                    with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+                        json.dump(changed, handle)
+                        handle.flush()
+                        with self.assertRaisesRegex(ai_eval.SuiteError, field):
+                            ai_eval.evaluate_provider_run(
+                                self.suite, ai_eval.load_provider_run(Path(handle.name)))
+
     def test_baseline_history_projects_one_observed_scorecard_without_raw_output(self):
         history = ai_eval.load_baseline_history(BASELINE_HISTORY_PATH)
         scorecard = ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
