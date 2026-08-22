@@ -11,7 +11,7 @@ class Fake {
   constructor() { this.flags = []; this.inserts = []; }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.startsWith("insert into record_flag")) { this.flags.push(params); return { rows: [] }; }
     if (sql.includes("nextval('ref_client_seq')")) return { rows: [{ r: "C-999" }] };
     if (sql.includes("nextval('ref_vendor_seq')")) return { rows: [{ r: "V-CPA-999" }] };

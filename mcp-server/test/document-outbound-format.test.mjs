@@ -58,7 +58,7 @@ class Fake {
 
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.startsWith("select * from document where id=")) return { rows: [this.row] };
     // the gate's own lookup: what kind of template is this document built from?
     if (sql.includes("outbound_template_kind")) return { rows: [{ template_kind: this.kind }] };

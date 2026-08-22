@@ -13,7 +13,7 @@ class AuthorityDb {
   constructor() { this.calls = []; }
   async query(sql, params = []) {
     this.calls.push({ sql, params });
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.includes("ops.decide_guidance_import_batch")) return { rows: [{ id: "decision-event" }] };
     if (sql.includes("ops.deactivate_guidance_registry")) return { rows: [{ id: "deactivation-event" }] };
     if (sql.startsWith("insert into event")) return { rows: [] };

@@ -57,7 +57,7 @@ class UpdateLeadFake {
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
 
-    if (sql.startsWith("select request_hash, response from tool_call"))
+    if (sql.startsWith("select request_hash, response"))
       return { rows: [] };
 
     if (sql.includes("from v_ref_index where subject_type='lead' and ref ilike"))
