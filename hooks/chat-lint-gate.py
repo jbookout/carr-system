@@ -280,6 +280,12 @@ def sentences(text):
 
 
 def bare_id_findings(prose):
+    """RETIRED 2026-08-22 — kept only so nothing importing it breaks.
+
+    The conduct stop gate's bare_id_hits is the one detector for this rule now;
+    see the note at its former call site in lint_findings. Do not re-wire this
+    into the findings list without deleting the other one in the same commit.
+    """
     found = []
     for sentence in sentences(prose):
         ids = [t for t in HEX_ID.findall(sentence) if not t.isdigit()]
@@ -410,10 +416,25 @@ def scan(assistant):
         if m:
             quote = prose[max(0, m.start() - 20):m.end() + 20].replace("\n", " ")
             findings.append((rid, quote.strip()[:90], fix))
-    for rid, ids, quote in bare_id_findings(prose):
-        findings.append((rid, quote,
-                         f"say what {ids} IS in the same sentence — the id "
-                         "rides with its gloss, or stays out of the message"))
+    # BARE IDS ARE CONDUCT'S, NOT THIS GATE'S (open loop 504, item three,
+    # 2026-08-22). Both gates detected the same fault by different algorithms
+    # and under two different class names — this one emitted "bare-id", the
+    # conduct stop gate emits "bare_id" — so one bare identifier blocked the
+    # turn TWICE, was counted as two separate faults in out/conduct-gate.jsonl,
+    # and no tally keyed on either spelling ever saw the whole picture.
+    #
+    # Measured over 1,449 real assistant turns from six transcripts before
+    # removing it: the conduct detector flagged 36, this one flagged 6, they
+    # agreed on 5, and this gate's UNIQUE coverage was a single turn — 0.1%.
+    # So the duplicate bought 0.1% recall and cost a second block on five of
+    # the six turns it fired on at all. Conduct's version also carries the
+    # explanation table Joe's own wording is quoted in, which is the half that
+    # actually teaches.
+    #
+    # Rule a8c55a47 is the general form: a manual path and an automated path
+    # that do the same job must be the same code. Two implementations of one
+    # rule do not double the enforcement, they double the noise and halve the
+    # accounting. The case this used to cover lives in the conduct selftest.
     for rid, paths, quote in unlinked_file_ask_findings(prose):
         findings.append((rid, quote,
                          f"make {paths} a clickable markdown link — he is being "

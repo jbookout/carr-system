@@ -15,6 +15,21 @@ import tempfile
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+
+def _normal_path(entry):
+    """What the registry says a Drive dependency's NORMAL path now does.
+
+    Accepting an entry for retirement sets replacement.status to "accepted"
+    and moves the descriptive value to replacement.normal_path, because one
+    field cannot carry both "what the normal path does" and "has Joe accepted
+    this for retirement". Reading both keys keeps these assertions true either
+    side of an acceptance, rather than passing only while the entry is
+    un-accepted and raising KeyError the day it is.
+    """
+    replacement = entry["replacement"]
+    return replacement.get("normal_path", replacement.get("status"))
+
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 SPEC = importlib.util.spec_from_file_location("retrieve_source_boundary", ROOT / "tools/retrieve.py")
@@ -336,7 +351,7 @@ exit 0
         registry = json.loads((ROOT / "ops/config/drive-dependencies.v1.json").read_text())
         registry_rows = {row["id"]: row for row in registry["entries"]}
         check("Drive registry names the record-native morning reader replacement",
-              registry_rows["scheduled-brief-render"]["replacement"]["status"]
+              _normal_path(registry_rows["scheduled-brief-render"])
               == "normal_path_repointed_to_record_mcp_reader")
         health_source = (ROOT / "tools/health-check.py").read_text()
         check("health does not require retired local brief mtimes",

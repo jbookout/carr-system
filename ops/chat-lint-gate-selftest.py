@@ -50,8 +50,15 @@ CASES = [
                          "render path.", True),
     ("contrast-split", "This isn't a bug. It's a feature of the exporter that "
                        "was chosen on purpose.", True),
-    ("bare-id-list", "Done today:\n- c0b38d80\n- 24e10ee8\nBoth landed.", True),
-    ("bare-loop-ref", "Close loop #250 and loop #251.", True),
+    # bare-id moved to the conduct stop gate 2026-08-22 (loop 504, item three):
+    # both gates flagged it under two class names, so one bare identifier blocked
+    # the turn twice. This gate must now stay SILENT on it, and the conduct
+    # selftest carries the case. Verified before the move: conduct flags this
+    # exact string as hex_alone on both ids.
+    ("bare-id-list", "Done today:\n- c0b38d80\n- 24e10ee8\nBoth landed.", False),
+    # Same move as bare-id-list above. Verified before flipping: the conduct
+    # detector flags this exact string as loop_num on both references.
+    ("bare-loop-ref", "Close loop #250 and loop #251.", False),
     ("glossed-id", "Rule c0b38d80 (re-bless the baseline in the same commit "
                    "as any gate change) is now enforced by the pre-commit "
                    "hook, so the next unblessed gate change cannot commit.",
