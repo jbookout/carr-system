@@ -48,6 +48,13 @@ export function createSystemWorkClient(options = {}) {
   return {
     get session() { return session; },
     bootstrap,
+    async current() {
+      const response = await fetchImpl("/api/system-work/current", {
+        credentials: "same-origin", headers: { accept: "application/json" },
+      });
+      const envelope = await decode(response);
+      return envelope.data ?? envelope;
+    },
     async read(humanRef) {
       const ref = validateHumanRef(humanRef);
       const response = await fetchImpl(`/api/system-work/${encodeURIComponent(ref)}`, {

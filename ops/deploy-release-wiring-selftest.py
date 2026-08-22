@@ -54,6 +54,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "bin" / "deploy-worker.sh"
 RECORD = REPO / "tools" / "ops-record.py"
+ROLLBACK_RUNBOOK = REPO / "runbooks" / "rollback-worker.md"
 
 FAILURES: list[str] = []
 
@@ -199,6 +200,35 @@ def main() -> int:
           and "Rolling back is bin/deploy-worker.sh --release-sha <sha>." not in source,
           "failure output tells Production to rebuild a SHA instead of promoting "
           "an approved provider version")
+
+    rollback_runbook = ROLLBACK_RUNBOOK.read_text(encoding="utf-8")
+    recovery_flags = (
+        "--release-key",
+        "--recovery-attempt-id",
+        "--recovery-prior-release-key",
+        "--recovery-step current_before",
+        "--recovery-step prior",
+        "--recovery-step current_after",
+        "--staging-receipt-idempotency-key",
+    )
+    check("8. rollback runbook uses the typed three-step recovery chain",
+          all(flag in rollback_runbook for flag in recovery_flags)
+          and "The final `current_after` step creates the recovery bundle" in rollback_runbook,
+          "the approved runbook can drift back to an unbound staging procedure")
+    check("8b. rollback runbook forbids the retired manual receipt path",
+          "ops-record.py run --kind check" not in rollback_runbook
+          and "do not create or approve separate staging releases" in rollback_runbook,
+          "manual or standalone staging receipts cannot satisfy the typed recovery bundle")
+    check("8c. rollback runbook pins recovery order and freshness windows",
+          "Run `current_before`, `prior`, and `current_after` in that order" in rollback_runbook
+          and "finish all\nthree within one hour" in rollback_runbook
+          and "within 24\nhours of the completed bundle" in rollback_runbook,
+          "the typed bundle and approval both fail closed when their timing windows expire")
+    check("8d. rollback runbook preserves the verb-loss guard",
+          "Run the guard first without an override" in rollback_runbook
+          and "If and only if the refusal reports the exact verb loss expected" in rollback_runbook
+          and "unexpected count is a stop condition" in rollback_runbook,
+          "an unconditional --allow-shrink can hide an unrelated verb loss")
 
     print()
     if FAILURES:

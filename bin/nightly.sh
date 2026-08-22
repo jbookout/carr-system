@@ -376,19 +376,45 @@ fi
 # before the chain risks stalling. The end-of-chain backup still runs and is still
 # the authoritative post-write snapshot; this only fires when we are ALREADY out
 # of contract, which on a healthy night is never.
+# THE RECOVERY POINT IS MEASURED ACROSS BOTH BACKUP PATHS, not just the local
+# one. Until 2026-08-21 this block read `ls -t backups/*.sql.age` and nothing
+# else, so it saw only the dump taken on this Mac. There are two paths, and
+# Program 4 built the second one precisely so the backup of last resort would
+# not depend on this machine: .github/workflows/backup-nightly.yml runs the
+# SAME bin/backup-dump.sh on GitHub's infrastructure with the same age key.
+#
+# WHAT THE ONE-PATH VIEW COST, measured the day this changed. The local
+# credential was absent, so the newest local dump was 104h old and this block
+# announced "objective is 24h" on every run. The cloud workflow had succeeded
+# that morning and every morning before it; the true recovery point was about
+# twelve hours, well inside the objective. Every local signal said otherwise.
+#
+# The alarm also pointed at a fix that would have made things worse. The role
+# comment in migrations/0119_backup_role.sql is explicit: the backup credential
+# is held "never on Joe's Mac and never in this repo". Adding it locally to
+# quiet this line would have put the credential on the exact machine the second
+# path exists to be independent of.
+#
+# ops/recovery-point.py keeps UNKNOWN separate from STALE, which is the whole
+# reason it is a script rather than another line of shell here: a path that
+# could not be read is not a path that reported a gap, and collapsing the two
+# is how a false alarm gets built in the first place.
+#   exit 0 = within objective · 1 = a real, verified gap · 2 = unknown
 RPO_HOURS=24
-newest_backup="$(ls -t "$REPO"/backups/*.sql.age 2>/dev/null | head -1)"
-if [ -z "$newest_backup" ]; then
-  say "CATCH-UP  no prior backup found — taking one before the chain begins"
-  step "recovery-point catch-up (no prior backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+recovery_report="$(./.venv/bin/python ops/recovery-point.py 2>&1)"
+recovery_rc=$?
+print -r -- "$recovery_report" >> "$LOG"
+if [ "$recovery_rc" -eq 1 ]; then
+  say "CATCH-UP  recovery point is out of contract on every readable path — taking one before the chain begins"
+  step "recovery-point catch-up (out of contract)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+elif [ "$recovery_rc" -eq 2 ]; then
+  # Deliberately NOT a catch-up. Unknown means we could not ask, so taking a
+  # dump here would be acting on an absence of evidence — and on a machine with
+  # no local credential it would only ever produce a SKIP line that reads like
+  # a gap, which is the noise this whole change removes.
+  say "UNKNOWN  recovery point could not be read on any path — see the lines above; not assuming a gap and not assuming a backup"
 else
-  backup_age_h=$(( ( $(date +%s) - $(stat -f %m "$newest_backup") ) / 3600 ))
-  if [ "$backup_age_h" -ge "$RPO_HOURS" ]; then
-    say "CATCH-UP  newest backup is ${backup_age_h}h old, objective is ${RPO_HOURS}h — taking one before the chain begins"
-    step "recovery-point catch-up (${backup_age_h}h since last backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
-  else
-    say "OK    recovery point intact (newest backup ${backup_age_h}h old, objective ${RPO_HOURS}h)"
-  fi
+  say "OK    recovery point intact (objective ${RPO_HOURS}h) — see the lines above for which path is newest"
 fi
 
 drive_projection "vault drift watch (check, first)" \

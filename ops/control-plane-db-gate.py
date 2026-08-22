@@ -371,10 +371,11 @@ def main() -> int:
             # pinned preimages to the cost gate; a familiar UUID with different
             # words or governance decision must never be blessed.
             cur.execute("""
-                insert into rule(id,statement,human_quote,taught_by,status)
+                insert into rule(id,statement,human_quote,taught_by,status,scope)
                 values ('a57d981a-8f6d-4c18-95ee-0e63a5a90b89',
                         'Every metered CARR execution must pass a machine-enforced pre-dispatch budget gate; prose or registry-only guidance does not count as enforcement, and Joe alone may approve exceeding a cap, buying usage credits, or enabling paid overage.',
-                        'fixture',%s,'proposed')
+                        'fixture',%s,'proposed',
+                        '{"domain":"system","applies_to":["github","neon","cloudflare","anthropic","openai","google","healthchecks","blotato","make"]}'::jsonb)
             """, (actor,))
             cur.execute("""
                 insert into event
