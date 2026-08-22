@@ -417,9 +417,13 @@ else
   say "OK    recovery point intact (objective ${RPO_HOURS}h) — see the lines above for which path is newest"
 fi
 
-drive_projection "vault drift watch (check, first)" \
-  "Drive drift-baseline verifier" \
-  env CARR_DRIFT_INGEST=1 ./.venv/bin/python ops/vault-drift-watch.py --check
+# VAULT DRIFT WATCH RETIRED, both ends — nothing writes to the vault to drift.
+# It existed because the vault accepted writes from more than one actor and a
+# client write door had been demonstrated open, so a generated markdown file
+# could be clobbered between runs. It watches tracked .md files under the vault.
+# The 2026-08-19 cutoff retired those renders and this chain no longer writes
+# there at all, so the watch guards a surface with no writers and no files. The
+# script and its manifests stay for the recovery envelope.
 
 # SCHEMA SNAPSHOT DRIFT, added 2026-08-13 with the snapshot itself. db/schema.sql
 # is now what builds staging AND what CI's migration check applies pending
@@ -539,9 +543,15 @@ EXPORTS_RC=$LAST_STEP_RC
 # cannot be proven from this machine on purpose (Phase 1 closed the caller-
 # supplied-identity hole in local-verb.mjs); this step correctly reports that
 # half PARTIAL rather than failing on it — see ops/cutover-readiness.py.
-drive_projection "cutover readiness (store-first boot predicate)" \
-  "record-native compiled-rule render verifier" \
-  ./.venv/bin/python ops/cutover-readiness.py
+# CUTOVER READINESS RETIRED — it verified a fallback that no longer exists.
+# Its job was to prove, before the August 21 cutover, that the store-first boot
+# path agreed with the generated compiled-rules markdown a partner still booted
+# from. The cutover happened, and the 2026-08-19 cutoff retired those renders;
+# ops/cutover-readiness.py reads DNA/compiled-rules-shared.md and
+# 00_Context/compiled-rules-joe.md out of the vault, so on the normal path it
+# was checking two files that are gone against a date that has passed. A check
+# whose subject has been retired is not a gap to reopen. The script stays in the
+# tree for the recovery envelope and for its history.
 
 # CODEX HOOK SMOKE (2026-08-14). Live negative proof that Codex's PreToolUse
 # hooks — this repo's OWN gate code, including guard-unattended.py — actually
@@ -631,12 +641,18 @@ drive_projection "graph (derived from the exported files)" \
 # before backup" is. Same $PY venv convention as every other DB-touching step
 # (run.sh's own graph_system/section_index functions already use $PY, not
 # plain python3, for the same psycopg reason as ORDER 29a).
-drive_projection "section index (retrieval-as-code layer)" \
-  "record-native section-index source" \
-  ./run.sh section-index
-drive_projection "system graph (Graph-System/, derived)" \
-  "record-native system-graph source" \
-  ./run.sh graph-system
+# NOT A DRIVE PROJECTION ANY MORE, and it had not been one for some time. The
+# builder reads the doctrine store and writes out/section-index.tsv inside this
+# repository; it names no Drive root and calls no recovery boundary that could
+# refuse for want of one. Exercised on the normal path 2026-08-22: 137 files
+# plus 234 store documents, 3,348 rows, exit 0. The wrapper was the only thing
+# refusing, which is the "repointed already, only unmarked" case the Drive
+# registry keeps finding.
+step "section index (retrieval-as-code layer)" ./run.sh section-index
+# Same case, same evidence. Writes out/Graph-System inside this repository and
+# reads the store. Exercised on the normal path 2026-08-22: 77 folders, 322
+# documents linked directly, ~486 edges of which 234 are store-read, exit 0.
+step "system graph (Graph-System/, derived)" ./run.sh graph-system
 
 # Added 2026-08-15 (rule faf1b643). Joe defined the vendor relationship levels by
 # COUNTABLE EVENTS so they stop being impressions — "you can email fifty people
@@ -690,9 +706,13 @@ step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 # failing the chain every time Joe approves a permission interactively. The
 # printed diff lands in nightly.log either way. Direction is Drive -> repo (the
 # opposite of sync-skills.sh) because Claude Code itself writes these files.
-drive_projection "settings mirror (permission surface -> git)" \
-  "repo-owned settings authority read route" \
-  ./bin/sync-settings.sh --apply
+# SETTINGS MIRROR RETIRED, and it had already retired itself everywhere else.
+# bin/sync-settings.sh opens by calling itself a retired live-settings mirror:
+# the repository owns CARR's hook configuration, normal operation is repo-only,
+# and the old import survives solely as an explicit reasoned recovery action.
+# ops/config-as-code.py is what checks and renders the managed hooks block now.
+# This chain was the last caller still treating a synced settings file as a
+# thing to read on the normal path.
 
 # Added 2026-08-06 (Joe's go, the Python-native answer to the Rust question,
 # loop #218): mypy over the whole repo, lenient config in mypy.ini. The legacy
@@ -782,9 +802,7 @@ step "golden workflow suite (read verbs, answer correctness)" ./bin/smoke-and-re
 # tamper would never be caught" gap this watch exists to close. Always exit 0
 # (it snapshots, it does not judge) unless the vault root itself is
 # unreachable.
-drive_projection "vault drift watch (rebaseline, last)" \
-  "Drive drift-baseline verifier" \
-  ./.venv/bin/python ops/vault-drift-watch.py --rebaseline
+# (rebaseline half of the retired vault drift watch — see the check above)
 
 # ── ORDER 5: dead-man pings LAST — a ping means the whole chain above ran ────
 #
