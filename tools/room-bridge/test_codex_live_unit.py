@@ -12,7 +12,7 @@ starting a fresh thread.
 Codex derived this protocol; see codex_wire.py. The live half is proven in
 test_codex_live_live.py, which needs a real app-server.
 
-Run:  python3 spikes/hermes-dispatch/test_codex_live_unit.py
+Run:  python3 tools/room-bridge/test_codex_live_unit.py
 """
 
 from __future__ import annotations
@@ -161,7 +161,11 @@ class FakeAppServer:
                         "item": {"type": "agentMessage", "text": self.answer}}})
 
     def methods(self) -> list[str]:
-        return [m.get("method") for m in self.seen if m.get("method")]
+        # str(...): the JSON-RPC `method` field is always a string when
+        # present; the explicit coercion is only here so mypy's comprehension
+        # narrowing (which does not apply the `if` filter to the element
+        # expression's type) does not read this as list[Any | None].
+        return [str(m.get("method")) for m in self.seen if m.get("method")]
 
     def close(self) -> None:
         try:

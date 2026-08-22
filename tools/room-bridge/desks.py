@@ -133,6 +133,11 @@ class Registry:
         if kind not in KINDS:
             raise DeskError("bad_kind", f"{kind!r} is not one of {', '.join(KINDS)}")
 
+        # dict[str, object]: a desk entry's values are a genuine mix (str,
+        # None, list[str]) depending on kind — a bare literal makes mypy infer
+        # the narrower type of whichever entry it sees first in each branch
+        # and then flag every other shape as incompatible.
+        entry: dict[str, object]
         if kind == "claude-session":
             if not socket:
                 raise DeskError("missing_socket", "a claude-session desk needs --socket")
