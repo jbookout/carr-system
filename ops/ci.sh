@@ -579,7 +579,7 @@ check_migration() {
 # Claude Code settings against the repo's declared baseline; on a runner there is
 # no live settings file, so that half skips and the wrangler half still runs.
 check_binding() {
-  local problems=""
+  local problems="" machine_drift=""
   run_quiet "$LOGDIR/binding-agent-boot.log" "$PY" ops/agent-boot-contract.py \
     || { problems="$problems agent-boot"; cat "$LOGDIR/binding-agent-boot.log" >&2; }
   if [ -f mcp-server/wrangler.toml ]; then
@@ -591,12 +591,51 @@ check_binding() {
       if(/DATABASE_URL\s*=/.test(t)){console.error("wrangler.toml declares a DATABASE_URL inline; it belongs in a secret");process.exit(1);}
     ' || { problems="$problems wrangler.toml"; cat "$LOGDIR/binding-wrangler.log" >&2; }
   fi
+  # CONFIG-AS-CODE IS SCOPED TO BRANCHES THAT ARE ACTUALLY IN THAT BUSINESS.
+  #
+  # This check compares the LIVE MACHINE — ~/.claude/settings.json and the
+  # installed launchd plists — against the repo's declarations. That makes it
+  # the one check here whose subject is not the branch. Any session installing
+  # a job on this Mac puts every OTHER session's push into drift, and the
+  # drifting branch cannot fix it: capturing the machine into an unrelated pull
+  # request means committing somebody else's in-flight work, which rule
+  # 308ef1de forbids and the git-writer gate blocks outright. The only remaining
+  # move was CARR_SKIP_CI=1, which skips the nine checks that WERE working.
+  #
+  # Observed twice on 2026-08-22, hours apart, on two different jobs, neither
+  # belonging to the branch being pushed. Same class the council ruled that day:
+  # a machine-global condition may open a loop, never veto unrelated work — the
+  # same reasoning that scoped tools/next-migration.py to the caller's own tree.
+  #
+  # So: drift still RUNS and is still printed in full on every push, because a
+  # silent drift is how five gates were off for a day in August. It fails the
+  # class only when this branch touches the declarations it is about. A branch
+  # that does change them is squarely in this business and must reconcile.
   if [ -f "$HOME/.claude/settings.json" ]; then
-    run_quiet "$LOGDIR/binding-config.log" "$PY" ops/config-as-code.py \
-      || { problems="$problems config-as-code"; tail -15 "$LOGDIR/binding-config.log" >&2; }
+    if ! run_quiet "$LOGDIR/binding-config.log" "$PY" ops/config-as-code.py; then
+      local cfg_changed=""
+      cfg_changed="$(git diff --name-only origin/main...HEAD 2>/dev/null \
+        | grep -E '^(ops/launchd/|ops/scheduled-tasks/|ops/config-as-code\.py|ops/config/settings)' || true)"
+      tail -15 "$LOGDIR/binding-config.log" >&2
+      if [ -n "$cfg_changed" ]; then
+        problems="$problems config-as-code"
+        printf '        this branch changes config-as-code declarations, so the drift above is yours:\n%s\n' "$cfg_changed" >&2
+      else
+        machine_drift="yes"
+        printf '        \033[33mnot fatal here\033[0m  config-as-code drift is on the MACHINE, and this branch changes no\n' >&2
+        printf '        declaration under ops/launchd/ or ops/scheduled-tasks/. Reported, not vetoed —\n' >&2
+        printf '        run `ops/config-as-code.py pull` on a branch that owns the change.\n' >&2
+      fi
+    fi
   fi
   if [ -n "$problems" ]; then
     bad binding "drift:$problems"
+  elif [ -n "$machine_drift" ]; then
+    # NEVER say the wiring matches when it does not. A class that reports a
+    # drift and then prints "installed wiring matches repo" is the false-green
+    # shape this repo has been bitten by repeatedly; the scoping decides whether
+    # drift BLOCKS THIS BRANCH, never whether it is true.
+    ok binding "worker config declared; MACHINE config-as-code drift reported above, not owned by this branch"
   else
     ok binding "worker config declared; installed wiring matches repo"
   fi

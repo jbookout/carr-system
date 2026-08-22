@@ -280,7 +280,91 @@ def strip_noise(text):
     return text
 
 
-def scan(assistant, human_last):
+# A tool result carrying one of these is the harness refusing the session
+# permission, not the session declining to act. Matched on the result text the
+# harness itself writes, so a session cannot manufacture the exemption by
+# talking about being denied — it has to actually have been denied.
+CLASSIFIER_DENIAL = re.compile(
+    r"(denied by the Claude Code auto mode classifier"
+    r"|Blocked by classifier"
+    r"|permission[s]? (?:for this action )?(?:was|were) denied"
+    r"|blocked by the CARR unattended guard"
+    r"|PreToolUse:.*hook error)", re.I)
+
+# Shell scaffolding carries no signal about WHICH command was denied.
+_CMD_NOISE = frozenset("""
+sudo the and for with from into then else done true false null echo cat sed awk
+grep find head tail sort uniq wc cut tee xargs bash zsh sh python python3 node
+npm cd ls rm cp mv mkdir chmod chown export local set unset print printf
+""".split())
+
+
+def denied_commands(recs, start):
+    """Commands the harness refused this session permission to run, this turn.
+
+    THE DEADLOCK THIS ENDS (2026-08-22). This gate's command-handoff class says
+    run it, never hand it over. The auto-mode classifier independently refuses
+    some commands. When both fire on the same command the session has no legal
+    move: it cannot run it, and it cannot say so. Joe personally broke that tie
+    twice in one night — which is exactly the babysitting the autonomy rule
+    exists to stop, produced by two controls that were each individually right.
+
+    A denial is only a carve-out for the command it actually denied, so the
+    denied text is returned for matching rather than setting a blanket flag.
+    """
+    out = []
+    pending = {}
+    for rec in recs[start:]:
+        msg = rec.get("message") or rec
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                cmd = (block.get("input") or {}).get("command")
+                if isinstance(cmd, str) and cmd.strip():
+                    pending[block.get("id")] = cmd
+            elif block.get("type") == "tool_result":
+                body = block.get("content")
+                if isinstance(body, list):
+                    body = " ".join(b.get("text", "") for b in body if isinstance(b, dict))
+                if not isinstance(body, str) or not CLASSIFIER_DENIAL.search(body):
+                    continue
+                cmd = pending.get(block.get("tool_use_id"))
+                if cmd:
+                    out.append(cmd)
+    return out
+
+
+def _signature(text):
+    """Distinctive tokens, so matching is on the command's substance."""
+    words = re.findall(r"[A-Za-z0-9_./-]{4,}", text or "")
+    return {w.lower() for w in words if w.lower() not in _CMD_NOISE}
+
+
+def handoff_was_denied(assistant, denied):
+    """True when what the session put in front of Joe is a command the harness
+    refused it. Requires real overlap on distinctive tokens, so an unrelated
+    handoff in the same turn is still caught."""
+    shown = "\n".join(re.findall(r"```(?:bash|sh|zsh|shell)?\n(.*?)```", assistant, re.S))
+    if not shown.strip():
+        return False
+    shown_sig = _signature(shown)
+    if not shown_sig:
+        return False
+    for cmd in denied:
+        cmd_sig = _signature(cmd)
+        if not cmd_sig:
+            continue
+        overlap = len(shown_sig & cmd_sig) / max(1, min(len(shown_sig), len(cmd_sig)))
+        if overlap >= 0.5:
+            return True
+    return False
+
+
+def scan(assistant, human_last, denied=()):
     """Return (fired, findings). findings = list of (klass, name)."""
     findings = []
     prose = strip_noise(assistant)
@@ -289,7 +373,11 @@ def scan(assistant, human_last):
     human_ok_choice = bool(human_last and HUMAN_WANTS_CHOICE.search(human_last))
     protected = bool(PROTECTED.search(prose))
 
-    # (2) COMMAND HANDOFF — exempt only if the human asked to see a command.
+    # (2) COMMAND HANDOFF — exempt if the human asked to see a command, or if
+    # the harness refused this session permission to run this very command.
+    if denied and handoff_was_denied(assistant, denied):
+        human_ok_cmd = True
+
     if not human_ok_cmd:
         if FENCE.search(assistant) or BARE_FENCE_CMD.search(assistant):
             findings.append(("command_handoff", "shell_fence"))
@@ -447,7 +535,7 @@ def main():
         if not assistant:
             sys.exit(0)
 
-        fired, findings = scan(assistant, last_human)
+        fired, findings = scan(assistant, last_human, denied_commands(recs, start))
         if not fired:
             sys.exit(0)
 

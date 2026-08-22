@@ -51,6 +51,75 @@ def run_case(human, assistant):
 
 
 
+def run_denied(human, denied_cmd, assistant):
+    """A turn in which the harness REFUSED a command, then the session showed it.
+
+    THE DEADLOCK (2026-08-22): the command-handoff class says run it, never hand
+    it over; the auto-mode classifier independently refuses some commands. When
+    both land on the same command the session has no legal move, and Joe had to
+    break the tie by hand twice in one night. The carve-out is deliberately
+    narrow — it keys on the DENIED COMMAND, so an unrelated handoff in the same
+    turn is still caught.
+    """
+    fd, path = tempfile.mkstemp(suffix=".jsonl")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"type":"user","origin":{"kind":"user"},
+                "message":{"content":[{"type":"text","text":human}]}}) + "\n")
+            fh.write(json.dumps({"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"t1","name":"Bash",
+                 "input":{"command":denied_cmd}}]}}) + "\n")
+            fh.write(json.dumps({"type":"user","origin":{"kind":"tool"},
+                "message":{"content":[
+                {"type":"tool_result","tool_use_id":"t1","content":[{"type":"text",
+                 "text":"Permission for this action was denied by the Claude Code "
+                        "auto mode classifier. Reason: Blocked by classifier."}]}]}}) + "\n")
+            fh.write(json.dumps({"type":"assistant",
+                "message":{"content":[{"type":"text","text":assistant}]}}) + "\n")
+        p = subprocess.run([sys.executable, HOOK],
+            input=json.dumps({"transcript_path": path, "stop_hook_active": False,
+                              "session_id": "selftest"}),
+            capture_output=True, text=True, timeout=30)
+        out = (p.stdout or "").strip()
+        if not out:
+            return False
+        try:
+            return json.loads(out).get("decision") == "block"
+        except Exception:
+            return False
+    finally:
+        try: os.unlink(path)
+        except Exception: pass
+
+
+def denial_cases():
+    return [
+        # The deadlock itself: refused, then reported with the command shown.
+        ("denied-then-shown", "fix the migration",
+         "psql -d carr_ci -f migrations/0248_register_conduct_stop_control.sql",
+         "The classifier refused this one, so it needs your hand:\n\n"
+         "```bash\npsql -d carr_ci -f migrations/0248_register_conduct_stop_control.sql\n```",
+         False),
+        # Same, with the command reformatted rather than pasted verbatim —
+        # matching is on substance, not on string equality.
+        ("denied-then-shown-reworded", "apply it",
+         "./.venv/bin/python ops/config-as-code.py pull --apply",
+         "Refused by the classifier. Yours to run:\n\n"
+         "```bash\n.venv/bin/python ops/config-as-code.py pull --apply\n```",
+         False),
+        # THE CARVE-OUT MUST NOT GENERALISE. A denial happened, but the command
+        # handed over is a different one the session could perfectly well run.
+        ("denied-but-unrelated-handoff", "fix the migration",
+         "psql -d carr_ci -f migrations/0248_register_conduct_stop_control.sql",
+         "Done there. Separately, run:\n\n```bash\ngit pull origin main\n```",
+         True),
+        # No denial at all in the turn — the ordinary handoff, still blocked.
+        ("no-denial-plain-handoff", "update the repo",
+         "", "Ready. Run:\n\n```bash\ngit pull\n```",
+         True),
+    ]
+
+
 def run_multi(human, assistants):
     """Two assistant messages in one window — the regression this exists for.
 
@@ -108,6 +177,13 @@ def main():
     passed = failed = 0; bad = []
     for name, human, assistant, expect in CASES:
         got = run_case(human, assistant)
+        ok = (got == expect)
+        passed, failed = (passed+1, failed) if ok else (passed, failed+1)
+        if not ok: bad.append(name)
+        print(f"  {'ok  ' if ok else 'FAIL'} {name:28} "
+              f"want={'BLOCK' if expect else 'allow'} got={'BLOCK' if got else 'allow'}")
+    for name, human, denied_cmd, assistant, expect in denial_cases():
+        got = run_denied(human, denied_cmd, assistant) if denied_cmd else run_case(human, assistant)
         ok = (got == expect)
         passed, failed = (passed+1, failed) if ok else (passed, failed+1)
         if not ok: bad.append(name)

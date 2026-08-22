@@ -199,8 +199,22 @@ def main() -> int:
     assert "frozen numeric collisions on origin/main" in allocation, allocation
     assert "0169: " + ", ".join(FROZEN_0169) in allocation, allocation
 
-    # The allocator must refuse a collision inside any peer worktree, not just
-    # report its filenames as in-flight claims.
+    # A COLLISION IN SOMEONE ELSE'S WORKTREE WARNS AND STILL RESERVES THE
+    # NUMBERS. It does not refuse.
+    #
+    # This assertion used to require rc 1, and that veto cost most of a night on
+    # 2026-08-22. Two branches merged 0248 twice; main resolved it by renumber;
+    # every other checkout on the machine still held the old filename on disk,
+    # as stale worktrees harmlessly do. The allocator then refused for everyone,
+    # this selftest failed, and the pre-push gate refused pushes from branches
+    # that touched no migration at all — three of them, whose only way through
+    # was skipping CI entirely, which is strictly worse than the thing being
+    # guarded. The council ruled the class the same day: a machine-global
+    # condition may open a loop, never veto unrelated work.
+    #
+    # What actually protects the caller is the claim merge, and that is asserted
+    # here: the colliding numbers must still be reported as in-flight, so the
+    # allocator never hands one out.
     with tempfile.TemporaryDirectory(prefix="migration-number-contract-") as tmp:
         migration_dir = Path(tmp) / "migrations"
         migration_dir.mkdir()
@@ -217,10 +231,42 @@ def main() -> int:
         finally:
             next_migration.run = original_run
             next_migration.worktree_paths = original_worktree_paths
-        assert allocator_rc == 1, (allocator_rc, stdout.getvalue(), stderr.getvalue())
-        assert "worktree" in stderr.getvalue() and "unregistered collision 0172" in stderr.getvalue()
+        assert allocator_rc == 0, (allocator_rc, stdout.getvalue(), stderr.getvalue())
+        assert "WARNING" in stderr.getvalue(), stderr.getvalue()
+        assert "unregistered collision 0172" in stderr.getvalue(), stderr.getvalue()
+        assert "another session's checkout" in stderr.getvalue(), stderr.getvalue()
+        # The load-bearing half: both names stay claimed, so 0172 is never
+        # handed to the caller as free.
+        assert "0172_first.sql" in stdout.getvalue(), stdout.getvalue()
+        assert "0172_second.sql" in stdout.getvalue(), stdout.getvalue()
 
-    print("migration number contract selftest: historical collisions frozen; new collisions refused")
+    # THE CALLER'S OWN TREE IS DIFFERENT, and still refuses. A collision here
+    # means the number about to be handed out may itself be wrong, and it is
+    # the caller's to fix rather than someone else's.
+    with tempfile.TemporaryDirectory(prefix="migration-number-contract-own-") as tmp:
+        migration_dir = Path(tmp) / "migrations"
+        migration_dir.mkdir()
+        (migration_dir / "0173_first.sql").touch()
+        (migration_dir / "0173_second.sql").touch()
+        original_run = next_migration.run
+        original_worktree_paths = next_migration.worktree_paths
+        original_repo = next_migration.REPO
+        try:
+            next_migration.run = lambda _args, cwd=None: "\n".join(actual)
+            next_migration.worktree_paths = lambda: [tmp]
+            next_migration.REPO = tmp          # the caller IS standing in this tree
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                own_rc = next_migration.main()
+        finally:
+            next_migration.run = original_run
+            next_migration.worktree_paths = original_worktree_paths
+            next_migration.REPO = original_repo
+        assert own_rc == 1, (own_rc, stdout.getvalue(), stderr.getvalue())
+        assert "this tree violates" in stderr.getvalue(), stderr.getvalue()
+
+    print("migration number contract selftest: historical collisions frozen; "
+          "own-tree collisions refused; a peer worktree's collision warns and still reserves")
     return 0
 
 
