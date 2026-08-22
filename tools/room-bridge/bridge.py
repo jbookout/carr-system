@@ -37,6 +37,11 @@ WHAT ONE CYCLE DOES, run_once() below, in order:
      "checked this cycle, found it live/dead" — regardless of whether it had
      traffic, so a desk that goes quiet is visible within one polling
      interval instead of only the next time work happens to route to it.
+  6. At most once every HEARTBEAT_INTERVAL_S (five minutes, throttle persisted
+     in the state file), post the roster itself INTO the room as a
+     kind="receipt" turn — the Model Room observatory's single source for desk
+     state, cursor position and cycle age. The panel reads only the wire, so
+     anything it needs to know about local desks has to arrive as a turn.
 
 CONSENT POSTURE (decision 351b9995) IS UNCHANGED BY THIS FILE. Every turn this
 bridge injects lands through dispatch.py's claude_wire, exactly the socket
@@ -61,6 +66,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import auth_control  # noqa: E402
 import desks  # noqa: E402
 import dispatch  # noqa: E402
 import grammar  # noqa: E402
@@ -75,6 +81,15 @@ DEFAULT_STATE = Path(
 DEFAULT_ROOM = os.environ.get("CARR_ROOM_BRIDGE_ROOM", "partner-line")
 PENDING_TIMEOUT_S = float(os.environ.get("CARR_ROOM_BRIDGE_PENDING_TIMEOUT", "1800"))
 READ_LIMIT = int(os.environ.get("CARR_ROOM_BRIDGE_READ_LIMIT", "50"))
+# THE OBSERVATORY HEARTBEAT (Joe's ruling 0892c539). The Model Room panel reads
+# ONLY the room wire — no second API for desk state, no Worker reach into a
+# local file — so the one fact the wire could not otherwise carry, "which desks
+# exist and were they alive at this cycle", is published INTO the wire as a
+# machine-readable receipt. Throttled, and the throttle is persisted in the
+# state file rather than inferred from the room, because launchd fires this
+# process far more often than five minutes and an unthrottled heartbeat would
+# bury the conversation it is supposed to annotate.
+HEARTBEAT_INTERVAL_S = float(os.environ.get("CARR_ROOM_BRIDGE_HEARTBEAT_INTERVAL", "300"))
 
 
 def _now() -> str:
@@ -201,11 +216,144 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
     return {"desk": name, "outcome": f"unsupported_kind:{kind}"}
 
 
+def heartbeat_due(state: dict, *, now: str | None = None,
+                  interval_s: float = HEARTBEAT_INTERVAL_S) -> bool:
+    """True when this cycle should publish a heartbeat receipt. Never posted
+    means due; otherwise due once `interval_s` has elapsed since the last one.
+    A clock that has gone backwards (or an unparseable stamp) reads as 0
+    elapsed and therefore NOT due — the throttle fails closed, so a bad
+    timestamp cannot turn the heartbeat into a flood."""
+    last = state_mod.get_heartbeat_at(state)
+    if not last:
+        return True
+    return _elapsed_seconds(last, now=now) >= interval_s
+
+
+def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str) -> str:
+    """The compact JSON the panel parses. `desks` carries every REGISTERED desk,
+    seated or not: a desk with no room_seat is exactly the panel's dormant
+    case, and omitting it would make an unwired desk indistinguishable from a
+    desk that was never registered.
+
+    `auth` is this cycle's own sign-in probe (spec section 17): true, false, or
+    null when the vendor CLI could not answer. Null is NOT signed-out — see
+    auth_control.probe_auth — and the panel renders it as unknown."""
+    rows = [
+        {
+            "name": name,
+            "seat": entry.get("room_seat"),
+            "live": bool(entry.get("last_live")),
+            "last_seen": entry.get("last_seen"),
+            "auth": entry.get("last_auth") if isinstance(entry.get("last_auth"), bool) else None,
+        }
+        for name, entry in sorted(desk_entries.items())
+    ]
+    return json.dumps(
+        {"heartbeat": {"desks": rows, "cursor": cursor, "cycle_at": cycle_at}},
+        separators=(",", ":"),
+    )
+
+
+def post_heartbeat(state: dict, desk_entries: dict, *, add_room_turn, cursor: int,
+                   now: str | None = None,
+                   interval_s: float = HEARTBEAT_INTERVAL_S) -> dict | None:
+    """Publish the roster receipt if the throttle allows, and record that it
+    went out. Returns None when throttled, so run_once's summary says honestly
+    whether this cycle spoke."""
+    if not heartbeat_due(state, now=now, interval_s=interval_s):
+        return None
+    stamp = now or _now()
+    body = heartbeat_body(desk_entries, cursor, stamp)
+    add_room_turn(body=body, seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()))
+    state_mod.set_heartbeat_at(state, stamp)
+    return {"posted_at": stamp, "desks": len(desk_entries), "cursor": cursor}
+
+
+def handle_control(turn: dict, control: dict, desk_entries: dict, state: dict, *,
+                    add_room_turn, registry, now: str | None = None,
+                    launch=auth_control.launch_login,
+                    throttle_s: float = auth_control.LOGIN_THROTTLE_S) -> dict:
+    """One control turn from the observatory's RECONNECT button, allowlisted
+    and then executed or refused — never silently dropped, because a control
+    nobody answers is indistinguishable from a bridge that is down.
+
+    Every refusal posts its reason back onto the wire, which is also how the
+    panel learns that a second click was throttled rather than lost."""
+    outcome, reason = auth_control.classify_control(
+        turn, control, registered=set(desk_entries), state=state, now=now, throttle_s=throttle_s)
+    desk = str(control.get("desk") or "")
+    if outcome != "ok":
+        add_room_turn(
+            body=json.dumps({"control_refused": {
+                "action": control.get("action"), "desk": desk, "reason": reason,
+                "source_seq": turn.get("seq"), "source_msg_id": turn.get("msg_id"),
+            }}, separators=(",", ":")),
+            seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+        )
+        return {"seq": turn.get("seq"), "outcome": "refused", "desk": desk, "reason": reason}
+
+    stamp = now or _now()
+    launched = launch(desk, desk_entries[desk])
+    if not launched.get("launched"):
+        add_room_turn(
+            body=json.dumps({"control_refused": {
+                "action": "login", "desk": desk, "reason": launched.get("reason"),
+                "source_seq": turn.get("seq"),
+            }}, separators=(",", ":")),
+            seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+        )
+        return {"seq": turn.get("seq"), "outcome": "launch_failed", "desk": desk,
+                "reason": launched.get("reason")}
+
+    auth_control.note_login_launched(state, desk, stamp)
+    add_room_turn(
+        body=json.dumps({"control_executed": {
+            "action": "login", "desk": desk, "at": stamp,
+            "note": "the vendor's own sign-in flow was opened on this Mac; approval "
+                    "happens in the browser and no credential passes through the bridge. "
+                    "The desk process restarts automatically once the probe reads signed in.",
+            "source_seq": turn.get("seq"),
+        }}, separators=(",", ":")),
+        seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+    )
+    return {"seq": turn.get("seq"), "outcome": "executed", "desk": desk}
+
+
+def settle_restarts(desk_entries: dict, auth_by_desk: dict, state: dict, *,
+                    add_room_turn, registry,
+                    stop=dispatch.desk_stop, start=dispatch.desk_start) -> list[dict]:
+    """A desk that was awaiting a login and now probes signed in gets its
+    PROCESS restarted, because a running desk holds its token in memory
+    (measured 2026-08-22). Restarting is what makes the reconnect button
+    actually reconnect rather than merely open a browser tab."""
+    settled: list[dict] = []
+    for desk in list(auth_control.awaiting_login(state)):
+        if desk not in desk_entries:
+            auth_control.clear_awaiting_login(state, desk)
+            continue
+        if auth_by_desk.get(desk) is not True:
+            continue
+        result = auth_control.restart_desk(desk, registry=registry, stop=stop, start=start)
+        auth_control.clear_awaiting_login(state, desk)
+        add_room_turn(
+            body=json.dumps({"desk_restarted": {
+                "desk": desk, "after": "login",
+                "restarted": bool(result.get("restarted")),
+                "reason": result.get("reason"),
+            }}, separators=(",", ":")),
+            seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+        )
+        settled.append({"desk": desk, **{k: v for k, v in result.items() if k != "detail"}})
+    return settled
+
+
 def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAULT_STATE,
              room: str = DEFAULT_ROOM, results_path: Path | None = None,
              pending_timeout_s: float = PENDING_TIMEOUT_S,
              read_room=verb_io.read_room, add_room_turn=verb_io.add_room_turn,
              dispatch_fn=dispatch.dispatch, desk_state_dir: Path = dispatch.DESK_STATE,
+             probe_auth=auth_control.probe_auth, launch_login=auth_control.launch_login,
+             desk_stop=dispatch.desk_stop, desk_start=dispatch.desk_start,
              log=print) -> dict:
     registry = registry or desks.Registry()
     results_path = Path(results_path or dispatch.DEFAULT_RESULTS)
@@ -219,8 +367,15 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
 
     routed: dict[str, list[str]] = {}
     assignments: list[dict] = []
+    controls: list[dict] = []
     for t in turns:
         routed[str(t.get("msg_id"))] = state_mod.route_turn(state, t, desk_seats)
+        control = auth_control.parse_control(t)
+        if control is not None:
+            controls.append(handle_control(
+                t, control, desk_entries, state, add_room_turn=add_room_turn,
+                registry=registry, launch=launch_login))
+            continue
         outcome, parsed, reason = grammar.classify(t)
         if outcome == "ok":
             assert parsed is not None  # guaranteed by classify() whenever outcome is "ok"
@@ -231,6 +386,16 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             grammar.reject(t, outcome, reason, add_room_turn=add_room_turn)
             assignments.append({"seq": t.get("seq"), "outcome": outcome, "reason": reason})
     state_mod.advance_seq(state, turns)
+
+    # SIGN-IN STATE, probed once per cycle for EVERY registered desk — seated or
+    # not, since an unseated desk can be signed out too and Joe's panel shows
+    # it. Stamped onto the registry so the heartbeat below carries this cycle's
+    # own answer rather than a stale one (spec section 17: no probe result older
+    # than one cycle is shown as current).
+    auth_by_desk: dict[str, bool | None] = {}
+    for name, entry in desk_entries.items():
+        auth_by_desk[name] = probe_auth(entry)
+        registry_ext.stamp_auth(name, auth=auth_by_desk[name], path=registry.path)
 
     delivered: list[dict] = []
     errors: list[dict] = []
@@ -259,14 +424,36 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             errors.append({"desk": name, "error": e.code, "detail": str(e)})
             registry_ext.stamp_heartbeat(name, live=False, path=registry.path)
 
+    restarts = settle_restarts(desk_entries, auth_by_desk, state,
+                                add_room_turn=add_room_turn, registry=registry,
+                                stop=desk_stop, start=desk_start)
+
+    # Read the registry back AFTER the heartbeat stamps above, so the roster the
+    # observatory sees carries this cycle's own liveness rather than the values
+    # this cycle started with.
+    heartbeat = None
+    try:
+        heartbeat = post_heartbeat(
+            state, registry_ext.all_desks(registry.path),
+            add_room_turn=add_room_turn, cursor=state["last_seq"],
+        )
+    except RuntimeError as e:
+        # A heartbeat that cannot be posted is a reportable cycle error, never a
+        # reason to lose the routing and delivery work this cycle already did.
+        errors.append({"desk": "(heartbeat)", "error": "heartbeat_post_failed", "detail": str(e)})
+
     state_mod.save_state(state_path, state)
 
     summary = {
         "turns_read": len(turns), "last_seq": state["last_seq"], "routed": routed,
         "assignments": assignments, "delivered": delivered, "errors": errors,
+        "heartbeat": heartbeat, "controls": controls, "restarts": restarts,
+        "auth": auth_by_desk,
     }
     log(f"room-bridge: {len(turns)} turn(s), {len(delivered)} desk action(s), "
-        f"{len(assignments)} assignment event(s), {len(errors)} error(s); "
+        f"{len(assignments)} assignment event(s), {len(controls)} control(s), "
+        f"{len(restarts)} restart(s), {len(errors)} error(s), "
+        f"heartbeat {'posted' if heartbeat else 'throttled'}; "
         f"cursor now {state['last_seq']}")
     return summary
 

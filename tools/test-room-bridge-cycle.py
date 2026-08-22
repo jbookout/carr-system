@@ -95,6 +95,7 @@ def full_cycle_routes_delivers_and_captures_both_reply_shapes():
             registry=reg, state_path=state_path, results_path=tdp / "results.jsonl",
             read_room=fake_read, add_room_turn=room.add_room_turn,
             dispatch_fn=fake_dispatch, desk_state_dir=desk_state_dir, log=lambda *a: None,
+            probe_auth=lambda entry: None,
         )
 
         assert summary1["turns_read"] == 1, summary1
@@ -137,6 +138,7 @@ def full_cycle_routes_delivers_and_captures_both_reply_shapes():
             registry=reg, state_path=state_path, results_path=tdp / "results.jsonl",
             read_room=fake_read, add_room_turn=room.add_room_turn,
             dispatch_fn=fake_dispatch, desk_state_dir=desk_state_dir, log=lambda *a: None,
+            probe_auth=lambda entry: None,
         )
         assert summary2["turns_read"] == 0, summary2
         outcomes2 = {d["desk"]: d["outcome"] for d in summary2["delivered"] if "desk" in d}
@@ -183,6 +185,7 @@ def a_pending_desk_is_never_offered_a_second_turn_before_it_answers():
             registry=reg, state_path=state_path, results_path=tdp / "results.jsonl",
             read_room=fake_read, add_room_turn=room.add_room_turn,
             dispatch_fn=counting_dispatch, desk_state_dir=desk_state_dir, log=lambda *a: None,
+            probe_auth=lambda entry: None,
         )
         # both turns were queued onto joe-desk, but only ONE was ever
         # actually dispatched this cycle — the second stays queued behind it.

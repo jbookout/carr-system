@@ -93,7 +93,11 @@ test("UI exposes two workspaces, explicit controls, mobile cards, and Call Mode"
   assert.match(app, /<select class="cell-select" data-owner/);
   assert.match(css, /@media\(max-width:680px\)/);
   assert.match(css, /min-height:44px/);
-  assert.match(sw, /dealroom-shell-v3/);
+  // The cache name must be VERSIONED — the activate handler purges every other
+  // key, so bumping it is how a bad cache gets cleared from installed apps. The
+  // exact number is not the contract and pinning it here only made this test
+  // fail every time the worker was legitimately corrected.
+  assert.match(sw, /dealroom-shell-v\d+/);
   assert.match(sw, /Deliberately no Cache API fallback/);
 });
 
