@@ -164,8 +164,9 @@ def main() -> int:
     class RoleCursor:
         def __init__(self, profile):
             self.profile, self.created, self.last, self.calls = profile, False, "", []
-        def execute(self, sql, args=None):
-            self.last = str(sql); self.calls.append((self.last, args))
+        def execute(self, query, args=None):
+            self.last = query.as_string(None) if hasattr(query, "as_string") else str(query)
+            self.calls.append((query, args))
             if self.last.startswith("create role "): self.created = True
         def fetchone(self):
             if "from pg_roles where rolname=%s" in self.last:
@@ -178,11 +179,18 @@ def main() -> int:
     profile = mod.NEW_PROFILES[0]
     role_cursor = RoleCursor(profile)
     mod.ensure_login_role(role_cursor, profile, "fixture-password")
-    rendered_sql = "\n".join(sql for sql, _ in role_cursor.calls)
-    check("fake DB proves role creation grants only its exact NOLOGIN bundle",
-          f"create role {profile.role}" in rendered_sql and f"grant {profile.bundle} to {profile.role}" in rendered_sql
-          and "fixture-password" not in rendered_sql
-          and all(args != "fixture-password" for _, args in role_cursor.calls))
+    rendered_sql = "\n".join(
+        query.as_string(None) if hasattr(query, "as_string") else str(query)
+        for query, _ in role_cursor.calls
+    )
+    create_calls = [(query, args) for query, args in role_cursor.calls
+                    if (query.as_string(None) if hasattr(query, "as_string") else str(query)).startswith("create role ")]
+    check("role creation uses a server-parsable composed password literal and grants only its exact NOLOGIN bundle",
+          f"create role \"{profile.role}\"" in rendered_sql
+          and f"grant {profile.bundle} to {profile.role}" in rendered_sql
+          and len(create_calls) == 1
+          and type(create_calls[0][0]).__name__ == "Composed"
+          and create_calls[0][1] is None)
 
     class MismatchedRoleCursor(RoleCursor):
         def __init__(self, profile): super().__init__(profile); self.created = True

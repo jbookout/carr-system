@@ -316,17 +316,26 @@ def _memberships(cur: Any, role: str) -> tuple[str, ...]:
 
 
 def ensure_login_role(cur: Any, profile: RoleProfile, password: str) -> None:
+    try:
+        from psycopg import sql
+    except ImportError as exc:
+        raise ProvisioningRefusal("psycopg is required for production provisioning") from exc
     state = _role_state(cur, profile.role)
     expected = (True, False, False, False, False, False, True)
     if state is None:
-        # Names here are fixed constants, never caller input. Password remains a
-        # bind parameter so it cannot enter SQL text or a diagnostic.
-        cur.execute(f"create role {profile.role} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit password %s", (password,))
+        # PostgreSQL's CREATE/ALTER ROLE password grammar does not accept a bind
+        # placeholder. Compose the fixed identifier and escaped literal without
+        # ever logging or returning the resulting statement.
+        cur.execute(sql.SQL(
+            "create role {} login nosuperuser nocreatedb nocreaterole "
+            "noreplication nobypassrls inherit password {}"
+        ).format(sql.Identifier(profile.role), sql.Literal(password)))
         cur.execute(f"grant {profile.bundle} to {profile.role}")
     elif state != expected or _memberships(cur, profile.role) != (profile.bundle,):
         raise ProvisioningRefusal("existing calendar prebrief login does not have the exact least-privilege shape")
     else:
-        cur.execute(f"alter role {profile.role} password %s", (password,))
+        cur.execute(sql.SQL("alter role {} password {}").format(
+            sql.Identifier(profile.role), sql.Literal(password)))
     if _role_state(cur, profile.role) != expected or _memberships(cur, profile.role) != (profile.bundle,):
         raise ProvisioningRefusal("calendar prebrief login role did not converge to its exact capability bundle")
 
