@@ -29,8 +29,9 @@
 //               decision 97e76a2f: a LOCAL_TOKENS bearer for this Mac's own
 //               `run.sh call` terminal (tools/call-verb.py ->
 //               mcp-server/local-verb.mjs), which used to bypass this Worker
-//               with a direct database connection. Resolves to the 'joe-local'
-//               actor, human:false, sponsored to 'joe' — full verb parity
+//               with a direct database connection. Resolves to the machine's
+//               own actor: 'joe-local' sponsored to 'joe', or 'dell-local'
+//               sponsored to 'dell'. Both are human:false — full verb parity
 //               minus humanOnly, same as the agent-token door, never a wider
 //               grant than that.
 //   /pipeline/changes  OAuth-protected Deal Room event cursor + live presence.
@@ -469,14 +470,13 @@ function agentActorFor(request, env) {
 // PROBE_TOKENS / REVIEW_TOKENS / AGENT_TOKENS: a JSON map of slug -> secret,
 // checked here before the OAuthProvider ever sees the request.
 //
-// THE ACTOR: 'joe-local', human:false, is the ONE slug LOCAL_TOKENS is
-// expected to hold a key for. Unlike the outside-model CLIs above, it carries
-// a server-derived sponsor (identity.js's LOCAL_SPONSOR map ties it to
-// 'joe') — this Mac's own `run.sh call` is Joe's terminal, not an unsponsored
-// outside tool, so its personal-scope reads and writes should land the same
-// way an interactive session's would. That resolution is entirely
-// identity.js's job (agentActorForToken, extended rather than duplicated —
-// see its own comment); nothing about it lives in this file.
+// THE ACTORS: 'joe-local' and 'dell-local', both human:false. Each machine
+// holds only its own key. Unlike the outside-model CLIs above, each carries a
+// server-derived sponsor: identity.js's LOCAL_SPONSOR map ties joe-local to
+// Joe and dell-local to Dell, so personal-scope reads and writes land with the
+// partner who owns that terminal. That resolution is entirely identity.js's
+// job (agentActorForToken, extended rather than duplicated — see its own
+// comment); nothing about it lives in this file.
 //
 // EVERY VERB EXCEPT humanOnly FALLS OUT OF EXISTING MECHANISMS, ON PURPOSE.
 // No profile lock here (unlike probe/reviewer): full parity minus humanOnly
@@ -497,11 +497,11 @@ function agentActorFor(request, env) {
 // but never human — and the humanOnly gate answers to `actor.human`, not to
 // whether a sponsor exists.
 //
-// The actor row ('joe-local', kind='automation') must exist before any write
-// verb runs, exactly like every other machine actor above — see
-// pipelines/provision-local-client.sql (prepared, mirrors
-// provision-smoke-probe.sql; JOE ONLY for the steps that touch the secret
-// itself, same division of labor as PROBE_TOKENS).
+// The machine's actor row (kind='automation') must exist before any write verb
+// runs, exactly like every other machine actor above. Joe's runbook is
+// pipelines/provision-local-client.sql; Dell's is
+// pipelines/provision-dell-local-client.sql. The steps that touch either
+// secret remain human-only, same division of labor as PROBE_TOKENS.
 //
 // Checked last among the token doors: probe and reviewer are the narrowest
 // (a locked profile), agent and local are both full-parity-minus-humanOnly,

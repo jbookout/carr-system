@@ -62,11 +62,11 @@ else
   PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY=python3
   "$PY" "$REPO/tools/health-check.py" --section exports || rc=1
 
-  echo "== Twin-copy identity (generator vs shared template) =="
-  if diff -q "$REPO/generators/build-lead-board.py" "$REPO/shared/build-lead-board-template.py" >/dev/null 2>&1; then
-    echo "  OK      build-lead-board (both copies identical)"
+  echo "== Lead Board runtime fork =="
+  if grep -Fq '# FORKED BY DESIGN 2026-08-11:' "$REPO/manifest.tsv"; then
+    echo "  OK      build-lead-board (intentional runtime fork; manifest-governed)"
   else
-    echo "  SPLIT   build-lead-board - the two copies diverged"; rc=1
+    echo "  BROKEN  build-lead-board fork lacks its manifest.tsv declaration"; rc=1
   fi
 
   echo "== Registry integrity (canonical v_export_leads) =="
@@ -164,14 +164,15 @@ for f in ${(k)OUT}; do
   fi
 done
 
-# Twin-copy identity (orchestrator-lane corrective #3, 2026-07-25): Joe's generator and
-# Dell's shared template are the SAME logic and were reconciled to identical on 2026-07-25.
-# A fix applied to one side only used to ship silently — now it flags here.
-echo "== Twin-copy identity (generator vs shared template) =="
-if diff -q "$REPO/generators/build-lead-board.py" "$REPO/shared/build-lead-board-template.py" >/dev/null 2>&1; then
-  echo "  OK      build-lead-board (both copies identical)"
+# The record-native generator and cloud-only shared helper are a deliberate
+# runtime fork (manifest.tsv, 2026-08-11), not twin copies.  The declaration is
+# the governing contract for a split that is required by their different
+# credential and source boundaries.
+echo "== Lead Board runtime fork =="
+if grep -Fq '# FORKED BY DESIGN 2026-08-11:' "$REPO/manifest.tsv"; then
+  echo "  OK      build-lead-board (intentional runtime fork; manifest-governed)"
 else
-  echo "  SPLIT   build-lead-board — the two copies have diverged; port the change to both or say why in manifest.tsv"; rc=1
+  echo "  BROKEN  build-lead-board fork lacks its manifest.tsv declaration"; rc=1
 fi
 
 # writing-lint fixtures (2026-07-25). The linter encodes DNA/writing-rules.md, so a
