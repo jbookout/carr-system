@@ -147,6 +147,35 @@ def main() -> int:
             if fetchone_required(cur.fetchone(), "jobs launchd observation privilege")[0]:
                 fail("carr_jobs can mint native launchd observations")
 
+            # Renewal source ingress is a separate capability: an externally
+            # provisioned LOGIN attestor, paired with one NOLOGIN bundle. The
+            # generic jobs identity must not be able to turn a mutable cache
+            # into a signed source receipt.
+            cur.execute("""
+                select
+                  (select not rolcanlogin from pg_roles where rolname='carr_renewal_source_attestors'),
+                  has_function_privilege('carr_renewal_source_attestors',
+                    'ops.ingest_renewal_signed_snapshot(uuid,uuid,uuid,text,text,timestamptz,text,text,jsonb)'::regprocedure,
+                    'execute'),
+                  has_function_privilege('carr_jobs',
+                    'ops.ingest_renewal_signed_snapshot(uuid,uuid,uuid,text,text,timestamptz,text,text,jsonb)'::regprocedure,
+                    'execute'),
+                  has_function_privilege('carr_jobs',
+                    'ops.seal_renewal_decision_source_run(uuid,uuid)'::regprocedure,'execute')
+            """)
+            renewal_acl = fetchone_required(cur.fetchone(), "renewal source attestor ACL")
+            if tuple(renewal_acl) != (True, True, False, False):
+                fail("renewal signed ingress is not confined to its exact attestor capability")
+            cur.execute("""
+                select pg_get_functiondef(
+                  'ops.ingest_renewal_signed_snapshot(uuid,uuid,uuid,text,text,timestamptz,text,text,jsonb)'::regprocedure)
+            """)
+            renewal_function = str(fetchone_required(
+                cur.fetchone(), "renewal source ingress definition")[0]).replace(" ", "").lower()
+            if ("session_user<>'carr_renewal_source_attestor'" not in renewal_function
+                    or "pg_has_role(session_user,'carr_renewal_source_attestors','member')" not in renewal_function):
+                fail("renewal signed ingress does not require exact attestor session and bundle")
+
             # The reaper must lock a finite expired-job set before it changes
             # attempt evidence.  Otherwise a heartbeat can renew the lease
             # between a broad attempt update and the later job transition.

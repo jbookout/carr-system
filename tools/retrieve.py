@@ -53,6 +53,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def refusal_detail(exc: Exception) -> str:
+    """Say WHY, not merely which exception class.
+
+    query_store already raises with the useful text — the verb subprocess's own
+    stderr, or a named envelope failure. Printing only type(exc).__name__ threw
+    all of it away and left the caller reading "(RuntimeError)", which names the
+    machinery and not the fault. That is the same refusal-must-name-itself rule
+    the doctrine search path already follows; this path had not been brought
+    along. Class name is kept as a prefix so an exception with an empty message
+    still identifies itself.
+    """
+    message = " ".join(str(exc).split())
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
 def query_store(words: list[str], top: int) -> list[Any]:
     """Use the authenticated local-token verb path; no actor is caller data."""
     repo = Path(__file__).resolve().parent.parent
@@ -109,7 +124,7 @@ def recovery_hits(vault: Path, query: str, top: int, store_available: bool) -> l
         except Exception as exc:
             print(
                 "retrieve: RECOVERY could not classify migrated file copies "
-                f"({type(exc).__name__}); refusing the Drive index",
+                f"({refusal_detail(exc)}); refusing the Drive index",
                 file=sys.stderr,
             )
             raise RuntimeError("recovery classification unavailable") from exc
@@ -140,14 +155,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.recovery:
             print(
                 "retrieve: canonical store unavailable "
-                f"({type(exc).__name__}); normal mode refuses Drive fallback. "
+                f"({refusal_detail(exc)}); normal mode refuses Drive fallback. "
                 "Use --recovery only for an acknowledged outage.",
                 file=sys.stderr,
             )
             return EX_UNAVAILABLE
         print(
             "retrieve: RECOVERY MODE - canonical store unavailable "
-            f"({type(exc).__name__}); reading the generated Drive index",
+            f"({refusal_detail(exc)}); reading the generated Drive index",
             file=sys.stderr,
         )
 

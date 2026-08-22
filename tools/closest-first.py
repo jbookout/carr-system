@@ -96,7 +96,8 @@ def main() -> int:
                 if marker and marker != "none":
                     flags.append(marker)
                 flag = f"  [{' '.join(flags)}]" if flags else ""
-                print(f"     #{num:<5} {dom:<12} {age:>3}d  {gist.strip()[:70]}{flag}")
+                domain = dom or "(unclassified)"
+                print(f"     #{num:<5} {domain:<12} {age:>3}d  {gist.strip()[:70]}{flag}")
                 if detail:
                     print(f"            waiting on: {detail.strip()[:150]}")
 
@@ -111,7 +112,8 @@ def main() -> int:
                   f"Not ranked, not deferred:\n  each is a candidate to DO or to CLOSE, "
                   f"because nobody ever established it needed waiting on anything.")
             for num, dom, age, gist in cur.fetchall():
-                print(f"     #{num:<5} {dom:<12} {age:>3}d  {gist.strip()[:70]}")
+                domain = dom or "(unclassified)"
+                print(f"     #{num:<5} {domain:<12} {age:>3}d  {gist.strip()[:70]}")
         elif unscored:
             print(f"\n  ({unscored} unscored rows hidden. --all to see them.)")
 

@@ -16,14 +16,15 @@
 // one all converge on the same code. See mcp-server/src/index.js's "local
 // token" comment and wrangler.toml's secrets header for the server side.
 //
-// THE ACTOR is 'joe-local' (identity.js DISPLAY), human:false, sponsored to
-// 'joe' (identity.js's LOCAL_SPONSOR) — full verb parity minus humanOnly
-// verbs (teach, retire-rule, confirm-merge, reassign-deal, …), which refuse
-// by construction wherever `tool.humanOnly && !actor.human` is checked. That
-// is a FEATURE, not a gap: a credential sitting in a 600 file on a Mac must
-// never be able to teach a rule that binds both partners, retire one, confirm
-// a merge, or reassign a deal on its own say-so. A humanOnly verb attempted
-// this way fails with a message naming the interactive OAuth route instead.
+// THE ACTOR is machine-specific: 'joe-local' sponsored to Joe, or 'dell-local'
+// sponsored to Dell (identity.js DISPLAY and LOCAL_SPONSOR). Both are
+// human:false with full verb parity minus humanOnly verbs (teach, retire-rule,
+// confirm-merge, reassign-deal, …), which refuse by construction wherever
+// `tool.humanOnly && !actor.human` is checked. That is a FEATURE, not a gap: a
+// credential sitting in a 600 file on a Mac must never be able to teach a rule
+// that binds both partners, retire one, confirm a merge, or reassign a deal on
+// its own say-so. A humanOnly verb attempted this way fails with a message
+// naming the interactive OAuth route instead.
 //
 // BREAK-GLASS, NOT A FALLBACK (DATABASE_URL set): the direct-database path
 // described above still exists, for the case a rehearsal branch needs proving
@@ -155,14 +156,15 @@ async function runViaWorker(verbName, verbArgs) {
   if (!token) {
     console.error(
       `no local MCP token — set ${LOCAL_TOKEN_VAR} in ${MCP_TOKENS_ENV} (600, outside the repo) ` +
-      `or export ${LOCAL_TOKEN_VAR} directly. Provisioning: pipelines/provision-local-client.sql + ` +
+      `or export ${LOCAL_TOKEN_VAR} directly. Provisioning: pipelines/provision-local-client.sql ` +
+      `(Joe) or pipelines/provision-dell-local-client.sql (Dell) + ` +
       "\"wrangler secret put LOCAL_TOKENS\" — see mcp-server/wrangler.toml's secrets header.\n" +
       "This is the default path failing VISIBLY, per design — it does not fall back to a direct " +
       "database connection. That path exists only as explicit break-glass; see this file's header."
     );
     process.exit(2);
   }
-  console.error(`local-verb identity -> joe-local (via local-token) -> ${CARR_MCP_URL}`);
+  console.error(`local-verb identity -> local machine actor (via local-token) -> ${CARR_MCP_URL}`);
 
   let res;
   try {

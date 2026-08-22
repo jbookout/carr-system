@@ -8,7 +8,7 @@
     "contract": {"const": "control-plane-release-recovery-procedure"},
     "candidate": {
       "type": "object", "required": ["migrations"], "additionalProperties": false,
-      "properties": {"migrations": {"type": "array", "const": ["0193_session_work", "0194_atomic_rule_approval", "0195_control_plane_cache_observations", "0199_guidance_standing_context_boundary", "0212_doctrine_meta_singleton", "0215_program5_completion_hash_grant", "0223_doctrine_search_reads_without_writing_or_reading_actor", "0225_ops_run_fixture_row_guard", "0226_calendar_canary_record_layer", "0227_nightly_availability_canary_record_layer", "0228_atomic_rule_lifecycle_forward_upgrade", "0229_calendar_prebrief_projection", "0230_renewal_decision_delivery"]}}
+      "properties": {"migrations": {"type": "array", "const": ["0193_session_work", "0194_atomic_rule_approval", "0195_control_plane_cache_observations", "0199_guidance_standing_context_boundary", "0212_doctrine_meta_singleton", "0215_program5_completion_hash_grant", "0223_doctrine_search_reads_without_writing_or_reading_actor", "0225_ops_run_fixture_row_guard", "0226_calendar_canary_record_layer", "0227_nightly_availability_canary_record_layer", "0228_atomic_rule_lifecycle_forward_upgrade", "0229_calendar_prebrief_projection", "0230_renewal_decision_delivery", "0248_renewal_signed_source_ingress", "0249_calendar_prebrief_joe_runtime"]}}
     },
     "database_down_migration": {"const": "does_not_exist"},
     "applied_schema_mutation": {"const": "never_by_this_procedure"},

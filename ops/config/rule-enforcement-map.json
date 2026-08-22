@@ -318,6 +318,19 @@
       ],
       "failure_mode": "PreToolUse deny"
     },
+    "close_before_open": {
+      "implementation": [
+        "hooks/close-before-open-gate.py",
+        "hooks/session-brief.py",
+        "ops/built_unclosed.py"
+      ],
+      "test": [
+        "ops/close-before-open-gate-selftest.py",
+        "ops/built-unclosed-selftest.py",
+        "ops/session-brief-selftest.py"
+      ],
+      "failure_mode": "PreToolUse deny"
+    },
     "blocker_decider": {
       "implementation": [
         "hooks/blocker-decider-gate.py"

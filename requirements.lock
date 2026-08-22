@@ -4,7 +4,7 @@
 # human-facing declaration with its environment markers; this is its
 # resolved output. Regenerate after changing requirements.txt:
 #     ops/ci-dep-check.py --write-lock
-# requirements.txt sha256: dd54370b37d2b04573bcdc6edff54b4bb7698a1019ecac9e366739d94771e60d
+# requirements.txt sha256: 3860690a259bd387c84c438776c38858a45d47a725666a025c436f4b8df566e8
 
 Pygments==2.20.0
 ast_serialize==0.7.0 ; python_version >= "3.10"
@@ -23,6 +23,7 @@ pillow==12.3.0
 pluggy==1.6.0
 psycopg-binary==3.3.4
 psycopg==3.3.4
+pymupdf==1.28.2
 pyobjc-core==12.2.2 ; sys_platform == "darwin"
 pyobjc-framework-Cocoa==12.2.2 ; sys_platform == "darwin"
 pyobjc-framework-EventKit==12.2.2 ; sys_platform == "darwin"

@@ -66,7 +66,7 @@ class LoopFake {
 
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) {
+    if (sql.startsWith("select request_hash, response")) {
       const prior = this.calls.get(params[0]);
       return { rows: prior ? [prior] : [] };
     }
@@ -87,7 +87,19 @@ class LoopFake {
       return { rows: [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      this.calls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
+      // BY POSITION, from the insert's own parameter order, because that is what
+      // the row coming back out of Postgres would carry. Storing only the hash
+      // and the response made every identity column read as undefined on replay,
+      // so a replay check comparing actor, tenant or session would judge the
+      // call against a row that had forgotten who made it -- and pass, which is
+      // the direction that does not announce itself.
+      this.calls.set(params[0], {
+        request_hash: params[3],
+        response: JSON.parse(params[4]),
+        actor_id: params[2],
+        organization_tenant_id: params[7] ?? null,
+        application_session_id: params[12] ?? null,
+      });
       return { rows: [] };
     }
     throw new Error(`unhandled fake query: ${sql}`);
@@ -192,7 +204,7 @@ class AddLoopFake {
   }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.startsWith("select id, rel_path, col_order from loop_block") ||
         sql.startsWith("select id, rel_path, renders_closed from loop_block") ||
         sql.startsWith("select id, rel_path from loop_block"))
