@@ -110,4 +110,8 @@ with tempfile.TemporaryDirectory() as raw:
  installer=(ROOT/"bin/install-calendar-prebrief-joe.sh").read_text()
  check("installer builds and copies the app from the same checked-out repository",
        'CARR_REPO="$REPO" "$REPO/bin/build-calendar-access.sh"' in installer)
+ check("installer renders launchd against the permanent carr-system code home",
+       'CANONICAL_REPO="$HOME/carr-system"' in installer
+       and 's|{{REPO}}|$CANONICAL_REPO|g' in installer
+       and 's|{{REPO}}|$REPO|g' not in installer)
 print("OK" if not bad else "FAIL "+", ".join(bad)); raise SystemExit(bool(bad))
