@@ -21,7 +21,7 @@ pytest>=9.0        # tools/test-doctrine-mirror.py; a test dependency is still a
 # UNDECLARED WHEN IT ARRIVED, and found by importing it rather than by any gate.
 # pipelines/check-brand.py reads a finished PDF back and checks every page
 # against the brand rules before a packet is delivered. It imports fitz, which
-# is this package, and nothing declared it — so the check standing between a
+# was this package, and nothing declared it — so the check standing between a
 # client and a mis-rendered tour packet died on ImportError the first time
 # anyone ran it. That is the failure the four lines above already record from
 # 2026-08-13: installed by hand on one Mac, written down nowhere, and a clean
@@ -30,7 +30,7 @@ pytest>=9.0        # tools/test-doctrine-mirror.py; a test dependency is still a
 # ci-dep-check.py cannot catch this class of gap. It proves declared packages
 # are pinned and that the lock matches this file; it never reads the source for
 # imports, so an undeclared one stays invisible to it.
-pymupdf>=1.28      # pipelines/check-brand.py, which imports it as fitz (legacy name)
+pymupdf>=1.28      # pipelines/check-brand.py, the pre-delivery brand reader
 
 # SYSTEM (non-pip) dependencies, documented here because nowhere else was:
 #   libreoffice  — shared/fill-engine/fill_deal_template.py renders via `libreoffice --headless`

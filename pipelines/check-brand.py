@@ -32,7 +32,7 @@ import os
 import re
 import sys
 
-import fitz
+import pymupdf
 
 
 NAVY = (0x00, 0x2F, 0x6C)
@@ -86,7 +86,7 @@ def is_accent(c):
 
 
 def check(path, max_accent_run):
-    doc = fitz.open(path)
+    doc = pymupdf.open(path)
     fails, warns = [], []
     faces = collections.Counter()
 
