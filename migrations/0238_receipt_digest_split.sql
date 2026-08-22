@@ -644,6 +644,27 @@ begin
     raise exception 'no such application session %', p_application_session_id;
   end if;
 
+  -- ACCEPTANCE MAY NOT COUNT EVIDENCE ITS OWN TRANSACTION WROTE. Settled ruling,
+  -- after an adversarial review reached Phase 4 accepted and Drive retirement
+  -- READY on a VIRGIN database inside one transaction: write the audit rows,
+  -- write the receipts, prove them, accept, all before anything committed. Every
+  -- count this function takes was then a measurement of its own caller's
+  -- uncommitted work, which is not evidence of anything having happened.
+  --
+  -- xmin on a row written by the current transaction equals the current
+  -- transaction id, so this asks the cheapest honest question available: has
+  -- this transaction already written any of the material I am about to count.
+  if exists (select 1 from public.tool_call t
+              where t.application_session_id is not null
+                and t.xmin = pg_current_xact_id()::xid)
+     or exists (select 1 from ops.write_receipt w
+                 where w.xmin = pg_current_xact_id()::xid)
+  then
+    raise exception
+      'acceptance must be the first write in its transaction; this one has '
+      'already written evidence it would then be counting';
+  end if;
+
   select count(*) into n_calls  from public.tool_call      where application_session_id is not null;
   select count(*) into n_events from public.event          where application_session_id is not null;
   select count(*) into n_reads  from public.tool_read_call where application_session_id is not null;
