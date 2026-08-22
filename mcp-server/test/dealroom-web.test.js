@@ -425,4 +425,13 @@ test("manifest and service worker are public with PWA-safe headers and offline t
   assert.match(sw, /DATA_PATHS/);
   assert.match(sw, /state: "reconnecting"/);
   assert.match(sw, /Deliberately no Cache API fallback/);
+  // EVERY live surface takes the no-cache path, not just the two that existed
+  // when this worker was written. A GET to /api/system-work/session or
+  // /api/room/turns used to fall through to the shell-asset branch, which
+  // caches the response and serves it back when the network fails — a Model
+  // Room showing an hour-old roster with a healthy pulse reads as live and is
+  // worse than showing nothing.
+  assert.match(sw, /function isLiveData/);
+  assert.match(sw, /pathname\.startsWith\("\/api\/"\)/);
+  assert.match(sw, /if \(isLiveData\(url\.pathname\)\)/);
 });
