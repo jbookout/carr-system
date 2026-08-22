@@ -100,6 +100,14 @@ def recovery_vault(explicit: str | None) -> Path:
 def print_store_hits(store_hits: list[Any]) -> None:
     if not store_hits:
         return
+    # Fallback rows only exist when no section matched every query word; the
+    # ranker marks each one, and the two lanes never mix in a single answer.
+    if all(isinstance(hit, dict) and (hit.get("provenance") or {}).get("fallback")
+           for hit in store_hits):
+        print(
+            "retrieve: no section matched every word; these are best-effort "
+            "any-word matches — treat as leads, not as the answer:"
+        )
     print("retrieve: STORE hits (live canonical copies):")
     for hit in store_hits:
         if isinstance(hit, dict):
