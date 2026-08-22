@@ -344,7 +344,18 @@ PYEOF
   # alone, before the pool starts. Sixteen of 226, selected by grepping for a
   # `git status` / --porcelain read rather than by guessing at names, because a
   # list assembled from intuition is a list that silently misses one.
-  local SERIAL_RE='^(commit-claims|delegation-gate|gate-baseline-cochange|git-writer-gate|machine-sync-audit|main-commit-gate|release-manifest|repo-config|session-brief|session-crm-neon|staging-attribution-gate|staging-observation-tracker|sync-enforcement-map-commit)-selftest\.py$|^test-(review-council|worktree-plumb|worktree-sweep)\.py$'
+  # TWO KINDS OF SHARED STATE, and the first list missed the second kind.
+  # Selected mechanically, by grepping the suites themselves rather than by
+  # reasoning about names: a `git status` / --porcelain read finds the ones that
+  # snapshot the working tree, and a HOME / expanduser / LaunchAgents reference
+  # finds the ones that read the real machine. The union is what runs alone.
+  #
+  # The tree list alone was not enough, and CI caught what this Mac could not:
+  # test-record-home-gate.py passed locally and failed on the runner, because
+  # locally the Drive vault exists and the suite takes a different path through
+  # itself. A check that only fails on the machine you are not standing on is
+  # exactly why the strict cloud run is the authority for this class.
+  local SERIAL_RE='^(commit-claims|config-as-code|context-handoff-gate|delegation-gate|export-vault-root|gate-baseline-cochange|gate-edit-gate|git-writer-gate|hermes-autonomy-check|launchd-scheduler-native|machine-converge|machine-sync-audit|main-commit-gate|release-manifest|repo-config|scheduled-run-record|session-brief|session-crm-neon|settings-change-gate|staging-attribution-gate|staging-observation-tracker|sync-enforcement-map-commit)-selftest\.py$|^test-(record-home-gate|review-council|worktree-plumb|worktree-sweep)\.py$'
   local -a serial=() parallel=()
   local t_split
   for t_split in "${to_run[@]}"; do
