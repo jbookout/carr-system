@@ -6229,7 +6229,25 @@ export const TOOLS = {
           hint: "already closed — this is what came of it" });
 
       const resolution = args.resolution || "done";
-      const bookkeeping = /\b(renumbered|superseded|merged|split)\b/i.test(outcome);
+      // BOOKKEEPING IS A CLAIM ABOUT ANOTHER LOOP, not a word that happens to
+      // appear in prose. Matching \b(renumbered|superseded|merged|split)\b
+      // anywhere in the outcome caught every close that described code landing,
+      // because "merged" is the only honest word for that. On 2026-08-22 closing
+      // two finished rows took four attempts: the third failed because the note
+      // written to EXPLAIN the false positive itself contained the word. The
+      // wording that finally passed worked around the check rather than
+      // answering it, which is how a guard teaches people to describe outcomes
+      // less accurately than they could.
+      //
+      // A real bookkeeping close is identifiable three ways, and all three are
+      // things this verb already demands of one: it opens with the word (the
+      // prefix check below requires exactly that), or it names the loop the work
+      // moved to, or it passes successor_loop. Prose about a branch reaching
+      // main does none of those.
+      const bookkeeping =
+        /^(renumbered|superseded)\b/i.test(outcome) ||
+        /\b(?:superseded\s+by|renumbered\s+(?:to|as)|merged\s+(?:into|with)|split\s+into)\s+(?:open\s+)?(?:loop\s*)?#?\d+/i.test(outcome) ||
+        Boolean(args.successor_loop);
       let successor = null;
       if (bookkeeping) {
         if (resolution !== "dropped")
