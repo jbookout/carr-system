@@ -373,6 +373,62 @@ test("a decline that WAS decided stops being a proposed decline", async () => {
   assert.equal(result.program_complete, true);
 });
 
+test("a settled decline may be closed out of order; build work may not", async () => {
+  // WHY THIS EXISTS. On 2026-08-22 Joe ruled on twelve declines in one sitting
+  // and not one could be recorded: the earliest sat at sequence 24, behind an
+  // unbuilt evaluation harness at sequence 2. Build ordering is about WORK, and
+  // a decline is never built — holding it in the lane is what makes the queue
+  // read fifty deep when twenty-one items are real.
+  const head = { id: "h", ref: "WR-AI-001", program_ordinal: 2, version: 3,
+    state: "ready", disposition: "extend", title: "LLM evaluation harness", project_context: {} };
+  const decline = { id: "d", ref: "WR-AI-024", program_ordinal: 24, version: 5,
+    state: "ready", disposition: "decline", title: "Feature store", project_context: {} };
+  const buildLater = { id: "b", ref: "WR-AI-007", program_ordinal: 7, version: 2,
+    state: "ready", disposition: "extend", title: "Something buildable", project_context: {} };
+
+  const dbFor = rows => ({ query: async (sql, params = []) => {
+    if (/order by w.program_ordinal limit 1/.test(sql)) return { rows: [head] };
+    if (/program_ordinal=\$2/.test(sql)) {
+      const wanted = Number(params[1]);
+      return { rows: rows.filter(r => Number(r.program_ordinal) === wanted) };
+    }
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }});
+
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+
+  // A DECLINE OUT OF ORDER IS REACHABLE. It must fail for a reason that is NOT
+  // out_of_order_project — reaching it is the whole point.
+  let err = null;
+  try {
+    await tools["start-capability-project"].handler(dbFor([decline]), actor,
+      { idempotency_key: "00000000-0000-4000-8000-000000000001", sequence: 24, base_version: 5, executor_actor: "claude", program_key: PROGRAM });
+  } catch (e) { err = e; }
+  assert.notEqual(err?.payload?.error, "out_of_order_project",
+    "a row already dispositioned decline must not be refused for being out of sequence");
+
+  // BUILD WORK OUT OF ORDER IS STILL REFUSED. This is the half that must not
+  // move: the exemption tests the row's disposition, never the caller's wish.
+  err = null;
+  try {
+    await tools["start-capability-project"].handler(dbFor([buildLater]), actor,
+      { idempotency_key: "00000000-0000-4000-8000-000000000002", sequence: 7, base_version: 2, executor_actor: "claude", program_key: PROGRAM });
+  } catch (e) { err = e; }
+  assert.equal(err?.payload?.error, "out_of_order_project",
+    "buildable work stays strictly ordered");
+
+  // A STALE READ IS STILL REFUSED even on the decline path, or the exemption
+  // would also be a way past the version guard.
+  err = null;
+  try {
+    await tools["start-capability-project"].handler(dbFor([decline]), actor,
+      { idempotency_key: "00000000-0000-4000-8000-000000000003", sequence: 24, base_version: 1, executor_actor: "claude", program_key: PROGRAM });
+  } catch (e) { err = e; }
+  assert.equal(err?.payload?.error, "version_conflict",
+    "the decline exemption must not smuggle a stale write past the version check");
+});
+
 class ToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
 }

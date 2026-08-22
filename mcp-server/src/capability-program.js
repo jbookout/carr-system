@@ -133,13 +133,50 @@ async function readCurrentSession(c, workRequest) {
   return session ? { id: session.id, state: session.state } : null;
 }
 
-async function requireCurrent(c, ToolError, sequence, baseVersion) {
-  const row = await readCurrent(c, true);
-  if (!row) throw new ToolError({ error: "capability_program_complete", program_key: DEFAULT_PROGRAM });
-  if (Number(row.program_ordinal) !== Number(sequence)) throw new ToolError({ error: "out_of_order_project", current_sequence: Number(row.program_ordinal), requested_sequence: Number(sequence) });
+// A DECLINE IS NOT SUBJECT TO BUILD ORDERING, because a decline is never built.
+//
+// The program is strictly ordered so a session cannot skip ahead to easy work
+// and leave the hard rows behind. That reasoning is about WORK. It does not
+// reach a row that will never be built: holding a settled decline behind
+// twenty-two build items does not protect the queue, it is what makes the queue
+// read fifty deep when twenty-one items are real — the dysfunction the tune-up
+// council named, and its ruling that the declines become a permanent register is
+// authority for them leaving the build lane.
+//
+// It cost something concrete. On 2026-08-22 Joe ruled on twelve declines in one
+// sitting, five of which needed only his decision, and NOT ONE could be recorded:
+// the earliest sat at sequence 24 behind an unbuilt evaluation harness at
+// sequence 2. His ruling would have waited weeks on work it does not depend on.
+//
+// WHAT IS NOT RELAXED. Buildable work stays strictly ordered — the exemption
+// tests the row's disposition, not the caller's convenience. The version check is
+// unchanged, so a stale read still refuses. The decline still pays the whole
+// completion price: a recorded decision, an independent attestor who is not the
+// implementer, and the same capsule the database enforces.
+async function requireProject(c, ToolError, sequence, baseVersion) {
+  const head = await readCurrent(c, true);
+  if (!head) throw new ToolError({ error: "capability_program_complete", program_key: DEFAULT_PROGRAM });
+
+  let row = head;
+  if (Number(head.program_ordinal) !== Number(sequence)) {
+    const other = await c.query(
+      `select * from ops.work_request where program_key=$1 and program_ordinal=$2
+         and state <> 'confirmed_closed' for update`, [DEFAULT_PROGRAM, sequence]);
+    const candidate = other.rows[0];
+    if (!candidate || candidate.disposition !== "decline") {
+      throw new ToolError({ error: "out_of_order_project", current_sequence: Number(head.program_ordinal), requested_sequence: Number(sequence),
+        hint: "only a row already dispositioned decline may be settled out of order; build work stays in sequence" });
+    }
+    row = candidate;
+  }
+
   if (Number(row.version) !== Number(baseVersion)) throw new ToolError({ error: "version_conflict", current_version: Number(row.version), base_version: Number(baseVersion), resolution: "re-read capability-program and retry against the current project version; never overwrite blind" });
+  row.__is_program_head = Number(row.program_ordinal) === Number(head.program_ordinal);
   return row;
 }
+
+// Kept so every existing caller keeps its name and its behaviour for build work.
+const requireCurrent = requireProject;
 
 async function loadSession(c, ToolError, sessionId, workRequestId) {
   if (!uuid(sessionId)) throw new ToolError({ error: "capability_agent_session_not_found", session_id: sessionId });
@@ -424,7 +461,11 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         const later = await c.query(`select * from ops.work_request where program_key=$1 and program_ordinal>$2 order by program_ordinal limit 1 for update`, [DEFAULT_PROGRAM, row.program_ordinal]);
         const next = nextProjectState(row.program_ordinal, later.rows.map(r => ({ sequence: Number(r.program_ordinal), state: r.state })));
         const nextRow = later.rows[0] || null;
-        if (nextRow) await writeEvent(c, actor, "complete-capability-project", "ops_work_request", nextRow.id, { field: "program_head", old: { current: false }, new: { current: true, predecessor_ref: row.ref }, idempotency_key: args.idempotency_key });
+        // THE HEAD ONLY MOVES WHEN THE HEAD CLOSED. Settling a decline out of
+        // order must not announce its neighbour as current — the real head has
+        // not moved, and writing that it has would put a false "you are up next"
+        // in the timeline of a row nobody has reached.
+        if (nextRow && row.__is_program_head !== false) await writeEvent(c, actor, "complete-capability-project", "ops_work_request", nextRow.id, { field: "program_head", old: { current: false }, new: { current: true, predecessor_ref: row.ref }, idempotency_key: args.idempotency_key });
         return { ok: true, completed_project: programRow(updated), program_complete: next.completeProgram, next_project: programRow(nextRow), next_session_brief: sessionBrief(nextRow) };
       }),
     },
