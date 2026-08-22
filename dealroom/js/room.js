@@ -106,6 +106,22 @@ export function humanDuration(seconds) {
   return `${Math.round(seconds / 3600)}h`;
 }
 
+/** "33m" is a measurement; "33m ago" is a sentence. Joe's tweak-round ruling
+ *  (2026-08-22): every age on this page says which direction it points. */
+export function relativeAgo(atMs, nowMs) {
+  if (!atMs) return "never";
+  if (Math.round((nowMs - atMs) / 1000) < 5) return "just now";
+  return `${relativeTime(atMs, nowMs)} ago`;
+}
+
+/** The anchor behind a relative age, for tooltips and receipt bodies — a
+ *  clock time a human can cross-reference, in their own locale. */
+export function absoluteTime(atMs) {
+  if (!atMs) return "";
+  return new Date(atMs).toLocaleString(undefined,
+    { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 /** A receipt's parsed body, or null. Receipts are the only turns whose body is
  *  a machine contract; everything else on the wire is prose and stays prose. */
 export function parseReceipt(body) {
@@ -126,6 +142,140 @@ export function receiptKey(body) {
 
 export function isHeartbeat(turn) {
   return turn?.kind === "receipt" && receiptKey(turn.body) === "heartbeat";
+}
+
+/* ----------------------------------------------- the human-legible surface */
+// Joe's first-use verdict on the shipped panel (tweak-round ruling,
+// 2026-08-22): "i don't feel like the data is very straightforward."  The
+// receipts led with raw JSON, the row labels were machine words, and the
+// header's cursor pair meant nothing without knowing the bridge protocol.
+// Everything below turns a machine fact into a sentence BEFORE it reaches the
+// reader; the raw contract stays available, nested one level down, because
+// debugging is real too — it just never goes first.
+
+/** Row labels for the receipt shapes this wire actually carries. Anything not
+ *  listed gets its machine key humanized rather than shown raw. */
+export const RECEIPT_LABELS = {
+  heartbeat: "Bridge check-in",
+  desk: "Desk status",
+  desk_restarted: "Desk restart",
+  worker_spawned: "Worker started",
+  worker_completed: "Build finished",
+  assignment: "Assignment",
+  assignment_rejected: "Assignment refused",
+  control: "Control request",
+  control_refused: "Control refused",
+  session_status: "Session gauge",
+  // Forward hook for the named-agent-profiles build (Joe's direction,
+  // 2026-08-22): persistent agent names with interchangeable models.
+  agent_profile: "Agent profile",
+  receipt: "Receipt",
+};
+
+export function humanizeKey(key) {
+  const words = String(key || "").replace(/[_-]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Receipt";
+}
+
+export function receiptLabel(body) {
+  const key = receiptKey(body);
+  return RECEIPT_LABELS[key] || humanizeKey(key);
+}
+
+/** One machine value, said plainly. Ages inside a receipt are anchored to the
+ *  RECEIPT's own moment, never the viewer's clock, so the text cannot rot. */
+function plainValue(value, receiptAtMs) {
+  if (value === true) return "yes";
+  if (value === false) return "no";
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && /\d{4}-\d{2}-\d{2}T/.test(value)) {
+      return receiptAtMs ? `${absoluteTime(parsed)} (${relativeAgo(parsed, receiptAtMs)})` : absoluteTime(parsed);
+    }
+    return value;
+  }
+  return String(value);
+}
+
+/** A machine object flattened to "Label: value" sentences — no braces, no
+ *  quoted field names, nothing a human has to mentally deserialize. Depth is
+ *  capped (verifier finding: unbounded recursion was a stack-overflow vector
+ *  on a pathologically nested receipt); past the cap the machine-detail view
+ *  still holds the whole thing. */
+export function flattenReceipt(value, receiptAtMs, prefix = "", depth = 0) {
+  if (value === null || value === undefined) return [];
+  if (depth > 6) return [`${prefix ? `${prefix} · ` : ""}(deeper detail in the machine view)`];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => flattenReceipt(entry, receiptAtMs, prefix, depth + 1));
+  }
+  if (typeof value !== "object") {
+    return [prefix ? `${prefix}: ${plainValue(value, receiptAtMs)}` : plainValue(value, receiptAtMs)];
+  }
+  const lines = [];
+  for (const [key, entry] of Object.entries(value)) {
+    const label = humanizeKey(key);
+    if (entry && typeof entry === "object") {
+      lines.push(...flattenReceipt(entry, receiptAtMs, prefix ? `${prefix} · ${label}` : label, depth + 1));
+    } else {
+      lines.push(`${prefix ? `${prefix} · ` : ""}${label}: ${plainValue(entry, receiptAtMs)}`);
+    }
+  }
+  return lines;
+}
+
+/** The whole receipt as sentences. Known shapes get a purpose-built telling;
+ *  unknown shapes still arrive as readable lines rather than JSON. */
+export function describeReceipt(body, receiptAtMs) {
+  const parsed = parseReceipt(body);
+  if (!parsed) return [String(body ?? "")];
+  const key = receiptKey(body);
+  const value = parsed[key];
+
+  if (key === "heartbeat" && value && typeof value === "object") {
+    const lines = [];
+    for (const desk of Array.isArray(value.desks) ? value.desks : []) {
+      if (!desk || typeof desk !== "object") continue;
+      const bits = [`${desk.name || "desk"}${desk.seat ? ` (${desk.seat})` : ""}`];
+      bits.push(desk.live ? "alive" : "not answering");
+      if (desk.auth === true) bits.push("signed in");
+      else if (desk.auth === false) bits.push("SIGNED OUT");
+      const seen = Date.parse(desk.last_seen ?? "");
+      if (Number.isFinite(seen)) bits.push(`seen ${relativeAgo(seen, receiptAtMs)}`);
+      lines.push(bits.join(" · "));
+    }
+    if (Number.isFinite(Number(value.cursor))) {
+      lines.push(`The bridge has delivered the wire through turn ${value.cursor}.`);
+    }
+    return lines.length ? lines : ["A bridge check-in with nothing to report."];
+  }
+
+  if (key === "session_status" && value && typeof value === "object") {
+    const pct = Number(value.context_pct);
+    return [`Session "${value.name || "unnamed"}" is at ${Number.isFinite(pct) ? `${Math.round(pct)}%` : "unknown"} context${value.claimed ? `, working on: ${value.claimed}` : ", with nothing claimed"}.`];
+  }
+
+  const lines = flattenReceipt(value !== undefined ? value : parsed, receiptAtMs);
+  return lines.length ? lines : ["An empty receipt."];
+}
+
+/** The header's bridge figure, as a phrase instead of a delivered/latest
+ *  fraction only the protocol cares about. */
+export function bridgeLagLabel(lag) {
+  const value = Number(lag);
+  if (lag === null || lag === undefined || !Number.isFinite(value)) return "—";
+  const behind = Math.max(0, Math.round(value));
+  if (behind === 0) return "caught up";
+  return behind === 1 ? "1 turn behind" : `${behind} turns behind`;
+}
+
+/** A turn that is actually one model saying something — the conversation the
+ *  panel's default view shows. NOOP and *(silent)* are this wire's literal
+ *  keep-alive conventions, and a receipt is machine traffic by definition. */
+export function isSubstantiveTurn(turn) {
+  if (turn?.kind !== "turn" && turn?.kind !== "system") return false;
+  const body = String(turn.body || "").trim();
+  return Boolean(body) && body !== "NOOP" && body !== "*(silent)*";
 }
 
 /** A bridge receipt that reports something went wrong. Counted for the health
@@ -378,14 +528,22 @@ export function authState(signedIn, known, total) {
   return signedIn === known ? "healthy" : "urgent";
 }
 
-/** Filters compose: a turn survives only if every active filter admits it. */
+/** Filters compose: a turn survives only if every active filter admits it.
+ *  Conversation mode REPLACES the kind filters rather than stacking on them:
+ *  its controls are hidden there, and a hidden control that still filters is
+ *  how the default view ends up saying "no conversation" over a suppressed
+ *  one (the verifier reproduced exactly that). Seats and text still apply. */
 export function turnPasses(turn, filters) {
-  if (turn.kind === "receipt") {
-    if (!filters.receipts) return false;
-    if (isHeartbeat(turn) && !filters.heartbeats) return false;
+  if (filters.conversation) {
+    if (!isSubstantiveTurn(turn)) return false;
+  } else {
+    if (turn.kind === "receipt") {
+      if (!filters.receipts) return false;
+      if (isHeartbeat(turn) && !filters.heartbeats) return false;
+    }
+    if (turn.kind === "turn" && !filters.turns) return false;
+    if (turn.kind === "system" && !filters.system) return false;
   }
-  if (turn.kind === "turn" && !filters.turns) return false;
-  if (turn.kind === "system" && !filters.system) return false;
   if (filters.seats.size && !filters.seats.has(String(turn.seat || "").toLowerCase())) return false;
   if (filters.text) {
     const haystack = `${turn.seat} ${turn.sponsor} ${turn.body}`.toLowerCase();
@@ -418,7 +576,7 @@ function boot() {
     lastErrors: null,
     pollMs: POLL_VISIBLE_MS,
     backoffMs: null,
-    filters: { seats: new Set(), turns: true, system: true, receipts: true, heartbeats: false, text: "" },
+    filters: { seats: new Set(), turns: true, system: true, receipts: true, heartbeats: false, text: "", conversation: true },
     focusSeat: null,
     timer: null,
     counted: new Map(),
@@ -501,6 +659,17 @@ function boot() {
 
   function setState(node, value) {
     if (node) node.dataset.state = value;
+  }
+
+  /** The text-figure version of countTo: a phrase cannot count up, so it
+   *  announces its change with a brief brightening instead. Reduced motion
+   *  turns the flash off in CSS; the text change itself is the information. */
+  function announce(node, text) {
+    if (!node || node.textContent === text) return;
+    node.textContent = text;
+    node.classList.remove("is-changed");
+    void node.offsetWidth;
+    node.classList.add("is-changed");
   }
 
   function seatChip(seat, extra) {
@@ -690,8 +859,11 @@ function boot() {
     if (node.worker) {
       group.appendChild(svg("rect", { class: "stage-node-worker", x: -5, y: -5, width: 10, height: 10, rx: 1 }));
     } else {
-      const glyph = svg("text", { class: "stage-node-glyph", y: 1 });
-      glyph.textContent = String(node.seat || "?").slice(0, 1).toUpperCase();
+      // The full seat name, not an initial: claude and codex were both a "C",
+      // and a picture that needs prior knowledge to disambiguate is not a
+      // picture (Joe's tweak-round ruling, 2026-08-22).
+      const glyph = svg("text", { class: "stage-node-glyph stage-node-name", y: 1 });
+      glyph.textContent = String(node.seat || "?").slice(0, 7).toLowerCase();
       group.appendChild(glyph);
     }
     group.appendChild(svg("circle", { class: "stage-node-badge", cx: 14, cy: -13, r: 4 }));
@@ -730,7 +902,7 @@ function boot() {
     tip.appendChild(el("strong", null, node.label));
     tip.appendChild(el("span", null, `${PARTNER_LABEL[node.partner] || node.partner} · seat ${node.seat}`));
     tip.appendChild(el("span", null, `${node.state} · ${node.sub}`));
-    tip.appendChild(el("span", null, `seen ${relativeTime(node.seenAt, Date.now())} ago`));
+    tip.appendChild(el("span", null, `seen ${relativeAgo(node.seenAt, Date.now())}`));
     if (node.auth === false) tip.appendChild(el("span", null, "signed out — reconnect to restore it"));
     const box = $("roomStage").getBoundingClientRect();
     const scale = box.width / 1200;
@@ -845,7 +1017,7 @@ function boot() {
     else if (!desk.live) bits.push("not live");
     else bits.push("idle");
     if (desk.auth === null && desk.seat) bits.push("sign-in unknown");
-    bits.push(`seen ${relativeTime(desk.seenAt, now)}`);
+    bits.push(`seen ${relativeAgo(desk.seenAt, now)}`);
     return bits.join(" · ");
   }
 
@@ -966,20 +1138,31 @@ function boot() {
           earlier.addEventListener("click", loadEarlier);
           return earlier;
         }
-        if (item.kind === "quiet") return el("p", "wire-quiet", "The wire is quiet.");
+        if (item.kind === "quiet") {
+          return el("p", "wire-quiet", state.filters.conversation
+            ? "No conversation in the loaded wire yet — only machine check-ins. “Everything” shows those too."
+            : "The wire is quiet.");
+        }
         return turnNode(item.turn, item.pending);
       },
       // A turn's TEXT never changes once it is on the wire; only its age does.
       // Touching the time and nothing else is what keeps an expanded receipt
       // expanded and the reader's scroll position where they put it.
       update: (node, item) => {
+        if (item.kind === "quiet") {
+          const text = state.filters.conversation
+            ? "No conversation in the loaded wire yet — only machine check-ins. “Everything” shows those too."
+            : "The wire is quiet.";
+          if (node.textContent !== text) node.textContent = text;
+          return;
+        }
         if (item.kind !== "turn") return;
-        const time = node.querySelector(".turn-time, summary > span:last-child");
+        const time = node.querySelector(".turn-time, :scope > summary > span:last-child");
         if (!time) return;
         const text = item.pending ? "sending…"
           : (node.classList.contains("receipt")
-            ? `${item.turn.seat} · ${relativeTime(timeOf(item.turn), Date.now())}`
-            : relativeTime(timeOf(item.turn), Date.now()));
+            ? `${item.turn.seat} · ${relativeAgo(timeOf(item.turn), Date.now())}`
+            : relativeAgo(timeOf(item.turn), Date.now()));
         if (time.textContent !== text) time.textContent = text;
       },
     });
@@ -1005,11 +1188,22 @@ function boot() {
       details.dataset.seat = seat;
       details.style.setProperty("--seat", seatColor(seat));
       const summary = el("summary");
-      summary.appendChild(el("span", "receipt-key", receiptKey(turn.body)));
-      summary.appendChild(el("span", null, `${seat} · ${relativeTime(timeOf(turn), Date.now())}`));
+      summary.appendChild(el("span", "receipt-key", receiptLabel(turn.body)));
+      summary.appendChild(el("span", null, `${seat} · ${relativeAgo(timeOf(turn), Date.now())}`));
+      summary.title = absoluteTime(timeOf(turn));
       details.appendChild(summary);
+      // Sentences first (anchored to the receipt's own moment, so they never
+      // rot); the raw machine contract stays one honest level down.
+      const human = el("div", "receipt-human");
+      for (const line of describeReceipt(turn.body, timeOf(turn))) {
+        human.appendChild(el("p", "receipt-line", line));
+      }
+      details.appendChild(human);
+      const machine = el("details", "receipt-machine");
+      machine.appendChild(el("summary", null, "machine detail"));
       const parsed = parseReceipt(turn.body);
-      details.appendChild(el("pre", "receipt-json", parsed ? JSON.stringify(parsed, null, 2) : String(turn.body)));
+      machine.appendChild(el("pre", "receipt-json", parsed ? JSON.stringify(parsed, null, 2) : String(turn.body)));
+      details.appendChild(machine);
       return details;
     }
 
@@ -1024,7 +1218,9 @@ function boot() {
       tag.style.setProperty("--halo", partnerHalo(sponsor));
       head.appendChild(tag);
     }
-    head.appendChild(el("span", "turn-time", pending ? "sending…" : relativeTime(timeOf(turn), Date.now())));
+    const time = el("span", "turn-time", pending ? "sending…" : relativeAgo(timeOf(turn), Date.now()));
+    time.title = absoluteTime(timeOf(turn));
+    head.appendChild(time);
     card.appendChild(head);
     card.appendChild(el("p", "turn-body", String(turn.body ?? "")));
     return card;
@@ -1057,7 +1253,7 @@ function boot() {
     const host = $("assignmentList");
     if (!model.assignments.length) {
       host.replaceChildren(el("p", "rail-empty",
-        "No assignments on the wire yet — type @seat assign <ref> <title> below."));
+        "No assignments on the wire yet. When a seat is handed work, it appears here."));
       return;
     }
     reconcile(host, model.assignments.slice(0, 40), {
@@ -1077,7 +1273,7 @@ function boot() {
       // An assignment receipt is immutable once written; only its age moves.
       update: (node, item) => {
         const meta = node.querySelector(".assignment-meta");
-        const text = `by ${item.by || "unknown"} · ${relativeTime(item.at, model.now)} ago`;
+        const text = `by ${item.by || "unknown"} · ${relativeAgo(item.at, model.now)}`;
         if (meta.textContent !== text) meta.textContent = text;
       },
     });
@@ -1120,7 +1316,7 @@ function boot() {
         row.querySelector(".session-fill").style.setProperty(
           "width", `${Math.max(0, Math.min(100, Number(session.contextPct) || 0))}%`);
         row.querySelector(".session-claimed").textContent =
-          `${session.claimed || "nothing claimed"} · ${relativeTime(session.at, model.now)} ago`;
+          `${session.claimed || "nothing claimed"} · ${relativeAgo(session.at, model.now)}`;
       },
     });
   }
@@ -1140,6 +1336,12 @@ function boot() {
     countTo($("healthErrors"), model.errors);
     setState($("healthErrorDot"), errState);
     state.lastErrors = model.errors;
+    // The count is over the turns this page has loaded, and says so — a bare
+    // "8 errors" reads as "8 things wrong right now", which it is not.
+    const oldestAt = state.turns.length ? timeOf(state.turns[0]) : 0;
+    announce($("healthErrorsSub"), oldestAt
+      ? `refusals and failures in the loaded wire, since ${absoluteTime(oldestAt)}`
+      : "refusals and failures in the loaded wire");
 
     countTo($("healthDesks"), model.onlineDesks);
     setState($("healthDeskDot"), model.desks.length
@@ -1152,11 +1354,10 @@ function boot() {
 
     countTo($("figCycle"), model.cycleAgeS === null ? NaN : Math.round(model.cycleAgeS),
       (v) => (Number.isFinite(Number(v)) ? humanDuration(Number(v)) : "—"));
-    // Both halves count rather than cutting: the spec's rule is that no figure
-    // on this page re-renders silently, and the cursor pair is where a partner
-    // reads whether the bridge is keeping up.
-    countTo($("figCursorDelivered"), model.cursor ?? NaN, (v) => (Number.isFinite(Number(v)) ? String(v) : "—"));
-    countTo($("figCursorLatest"), model.latestSeq);
+    // The spec's cursor pair (delivered/latest) said this in protocol terms;
+    // Joe's tweak-round ruling replaces it with the phrase the pair was always
+    // trying to say. announce() keeps the no-silent-re-render rule.
+    announce($("figBridge"), bridgeLagLabel(model.cursorLag));
     countTo($("figDesks"), model.onlineDesks, (v) => `${v} online`);
 
     setState($("presenceDot"), model.presence.state);
@@ -1409,6 +1610,19 @@ function boot() {
       toggle.textContent = collapsed ? "Hide" : "Show";
     });
   }
+
+  /** Conversation is the front door; Everything is the machine room. One
+   *  boolean, two buttons, and the kind chips only matter in Everything. */
+  function setFeedMode(conversation) {
+    state.filters.conversation = conversation;
+    $("viewConversation").setAttribute("aria-pressed", String(conversation));
+    $("viewEverything").setAttribute("aria-pressed", String(!conversation));
+    $("wireFilters").dataset.mode = conversation ? "conversation" : "everything";
+    render();
+  }
+  $("viewConversation").addEventListener("click", () => setFeedMode(true));
+  $("viewEverything").addEventListener("click", () => setFeedMode(false));
+  $("wireFilters").dataset.mode = "conversation";
 
   drawCore();
   bindKindToggle("kindTurns", "turns");

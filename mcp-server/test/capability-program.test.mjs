@@ -268,6 +268,70 @@ test("a proposed decline is never offered as the next build item, and never coun
     "named, not silently dropped — a skipped row nobody can see is how work disappears");
 });
 
+test("the read names what the CLOSE path will demand next, not only what to build", async () => {
+  // THE DIVERGENCE THIS PINS, which the fixture above already contained and
+  // nothing asserted on. `current` skips proposed declines so a session is never
+  // handed one to build — deliberate and right. The close path does not skip: it
+  // takes the first row that is not confirmed_closed in program order and refuses
+  // anything else with out_of_order_project.
+  //
+  // Here the decline sits at ordinal 2 and the buildable row at ordinal 3. So a
+  // session reads WR-AI-001, builds it, calls complete on its sequence, and is
+  // refused by a verb naming a sequence it was never shown. On the live program
+  // that moment is twelve closes away: the first proposed decline is at ordinal
+  // 14 and the queue is at ordinal 2.
+  //
+  // Both answers ship, because they answer different questions.
+  const closed = { id: "a", ref: "WR-AI-006", program_ordinal: 1, version: 1,
+    state: "confirmed_closed", disposition: "extend", title: "RAG pipeline", project_context: {} };
+  const decline = { id: "b", ref: "WR-AI-014", program_ordinal: 2, version: 1,
+    state: "ready", disposition: "decline", title: "Text-to-SQL", project_context: {} };
+  const buildable = { id: "c", ref: "WR-AI-001", program_ordinal: 3, version: 1,
+    state: "ready", disposition: "extend", title: "LLM evaluation harness", project_context: {} };
+
+  const db = { query: async (sql) => {
+    if (sql.includes("from ops.work_request")) return { rows: [closed, decline, buildable] };
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM });
+
+  assert.equal(result.current.ref, "WR-AI-001",
+    "unchanged: the buildable row is still what a session is told to build");
+  assert.equal(result.next_to_close_ref, "WR-AI-014",
+    "the close path takes the decline first, and the read must say so");
+  assert.equal(result.next_to_close_sequence, 2,
+    "and name the sequence the close verb will actually accept");
+  assert.equal(result.close_sequence_blocked_by_proposed_decline, true);
+  assert.match(result.close_sequence_note, /out of order/,
+    "the note must say why completing the buildable row will be refused");
+});
+
+test("no close-sequence warning when the two definitions agree", async () => {
+  // The other half. A warning that fires when nothing is wrong is noise, and
+  // this read is consumed by sessions deciding what to do next.
+  const closed = { id: "a", ref: "WR-AI-006", program_ordinal: 1, version: 1,
+    state: "confirmed_closed", disposition: "extend", title: "RAG pipeline", project_context: {} };
+  const buildable = { id: "c", ref: "WR-AI-001", program_ordinal: 2, version: 1,
+    state: "ready", disposition: "extend", title: "LLM evaluation harness", project_context: {} };
+  const laterDecline = { id: "b", ref: "WR-AI-014", program_ordinal: 3, version: 1,
+    state: "ready", disposition: "decline", title: "Text-to-SQL", project_context: {} };
+
+  const db = { query: async (sql) => {
+    if (sql.includes("from ops.work_request")) return { rows: [closed, buildable, laterDecline] };
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM });
+
+  assert.equal(result.current.ref, "WR-AI-001");
+  assert.equal(result.next_to_close_ref, "WR-AI-001", "same row — both definitions agree");
+  assert.equal(result.close_sequence_blocked_by_proposed_decline, false);
+  assert.equal(result.close_sequence_note, undefined, "no note when there is nothing to warn about");
+});
+
 test("a program with only proposed declines left is NOT complete", async () => {
   // The dangerous half of stepping over them. If the read skipped declines and
   // called the program done, 29 undecided rows would vanish behind a green
@@ -307,6 +371,62 @@ test("a decline that WAS decided stops being a proposed decline", async () => {
   assert.equal(result.proposed_declines_awaiting_a_decision, 0);
   assert.equal(result.buildable_total, 1, "a settled row counts again");
   assert.equal(result.program_complete, true);
+});
+
+test("a settled decline may be closed out of order; build work may not", async () => {
+  // WHY THIS EXISTS. On 2026-08-22 Joe ruled on twelve declines in one sitting
+  // and not one could be recorded: the earliest sat at sequence 24, behind an
+  // unbuilt evaluation harness at sequence 2. Build ordering is about WORK, and
+  // a decline is never built — holding it in the lane is what makes the queue
+  // read fifty deep when twenty-one items are real.
+  const head = { id: "h", ref: "WR-AI-001", program_ordinal: 2, version: 3,
+    state: "ready", disposition: "extend", title: "LLM evaluation harness", project_context: {} };
+  const decline = { id: "d", ref: "WR-AI-024", program_ordinal: 24, version: 5,
+    state: "ready", disposition: "decline", title: "Feature store", project_context: {} };
+  const buildLater = { id: "b", ref: "WR-AI-007", program_ordinal: 7, version: 2,
+    state: "ready", disposition: "extend", title: "Something buildable", project_context: {} };
+
+  const dbFor = rows => ({ query: async (sql, params = []) => {
+    if (/order by w.program_ordinal limit 1/.test(sql)) return { rows: [head] };
+    if (/program_ordinal=\$2/.test(sql)) {
+      const wanted = Number(params[1]);
+      return { rows: rows.filter(r => Number(r.program_ordinal) === wanted) };
+    }
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }});
+
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+
+  // A DECLINE OUT OF ORDER IS REACHABLE. It must fail for a reason that is NOT
+  // out_of_order_project — reaching it is the whole point.
+  let err = null;
+  try {
+    await tools["start-capability-project"].handler(dbFor([decline]), actor,
+      { idempotency_key: "00000000-0000-4000-8000-000000000001", sequence: 24, base_version: 5, executor_actor: "claude", program_key: PROGRAM });
+  } catch (e) { err = e; }
+  assert.notEqual(err?.payload?.error, "out_of_order_project",
+    "a row already dispositioned decline must not be refused for being out of sequence");
+
+  // BUILD WORK OUT OF ORDER IS STILL REFUSED. This is the half that must not
+  // move: the exemption tests the row's disposition, never the caller's wish.
+  err = null;
+  try {
+    await tools["start-capability-project"].handler(dbFor([buildLater]), actor,
+      { idempotency_key: "00000000-0000-4000-8000-000000000002", sequence: 7, base_version: 2, executor_actor: "claude", program_key: PROGRAM });
+  } catch (e) { err = e; }
+  assert.equal(err?.payload?.error, "out_of_order_project",
+    "buildable work stays strictly ordered");
+
+  // A STALE READ IS STILL REFUSED even on the decline path, or the exemption
+  // would also be a way past the version guard.
+  err = null;
+  try {
+    await tools["start-capability-project"].handler(dbFor([decline]), actor,
+      { idempotency_key: "00000000-0000-4000-8000-000000000003", sequence: 24, base_version: 1, executor_actor: "claude", program_key: PROGRAM });
+  } catch (e) { err = e; }
+  assert.equal(err?.payload?.error, "version_conflict",
+    "the decline exemption must not smuggle a stale write past the version check");
 });
 
 class ToolError extends Error {

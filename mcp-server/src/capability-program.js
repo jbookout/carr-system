@@ -133,13 +133,50 @@ async function readCurrentSession(c, workRequest) {
   return session ? { id: session.id, state: session.state } : null;
 }
 
-async function requireCurrent(c, ToolError, sequence, baseVersion) {
-  const row = await readCurrent(c, true);
-  if (!row) throw new ToolError({ error: "capability_program_complete", program_key: DEFAULT_PROGRAM });
-  if (Number(row.program_ordinal) !== Number(sequence)) throw new ToolError({ error: "out_of_order_project", current_sequence: Number(row.program_ordinal), requested_sequence: Number(sequence) });
+// A DECLINE IS NOT SUBJECT TO BUILD ORDERING, because a decline is never built.
+//
+// The program is strictly ordered so a session cannot skip ahead to easy work
+// and leave the hard rows behind. That reasoning is about WORK. It does not
+// reach a row that will never be built: holding a settled decline behind
+// twenty-two build items does not protect the queue, it is what makes the queue
+// read fifty deep when twenty-one items are real — the dysfunction the tune-up
+// council named, and its ruling that the declines become a permanent register is
+// authority for them leaving the build lane.
+//
+// It cost something concrete. On 2026-08-22 Joe ruled on twelve declines in one
+// sitting, five of which needed only his decision, and NOT ONE could be recorded:
+// the earliest sat at sequence 24 behind an unbuilt evaluation harness at
+// sequence 2. His ruling would have waited weeks on work it does not depend on.
+//
+// WHAT IS NOT RELAXED. Buildable work stays strictly ordered — the exemption
+// tests the row's disposition, not the caller's convenience. The version check is
+// unchanged, so a stale read still refuses. The decline still pays the whole
+// completion price: a recorded decision, an independent attestor who is not the
+// implementer, and the same capsule the database enforces.
+async function requireProject(c, ToolError, sequence, baseVersion) {
+  const head = await readCurrent(c, true);
+  if (!head) throw new ToolError({ error: "capability_program_complete", program_key: DEFAULT_PROGRAM });
+
+  let row = head;
+  if (Number(head.program_ordinal) !== Number(sequence)) {
+    const other = await c.query(
+      `select * from ops.work_request where program_key=$1 and program_ordinal=$2
+         and state <> 'confirmed_closed' for update`, [DEFAULT_PROGRAM, sequence]);
+    const candidate = other.rows[0];
+    if (!candidate || candidate.disposition !== "decline") {
+      throw new ToolError({ error: "out_of_order_project", current_sequence: Number(head.program_ordinal), requested_sequence: Number(sequence),
+        hint: "only a row already dispositioned decline may be settled out of order; build work stays in sequence" });
+    }
+    row = candidate;
+  }
+
   if (Number(row.version) !== Number(baseVersion)) throw new ToolError({ error: "version_conflict", current_version: Number(row.version), base_version: Number(baseVersion), resolution: "re-read capability-program and retry against the current project version; never overwrite blind" });
+  row.__is_program_head = Number(row.program_ordinal) === Number(head.program_ordinal);
   return row;
 }
+
+// Kept so every existing caller keeps its name and its behaviour for build work.
+const requireCurrent = requireProject;
 
 async function loadSession(c, ToolError, sessionId, workRequestId) {
   if (!uuid(sessionId)) throw new ToolError({ error: "capability_agent_session_not_found", session_id: sessionId });
@@ -213,10 +250,47 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         const openRows = rows.rows.filter(row => row.state !== "confirmed_closed");
         const proposedDeclines = openRows.filter(isProposedDecline);
         const current = openRows.find(row => !isProposedDecline(row)) || null;
+
+        // TWO DEFINITIONS OF "CURRENT" HAD QUIETLY COME APART, and this names the
+        // gap rather than picking a winner.
+        //
+        // `current` above deliberately SKIPS proposed declines, for the good
+        // reason written just above: a session asking what to build next must not
+        // be handed a row nobody has decided. The CLOSE path does not skip. It
+        // takes the first row that is not confirmed_closed, in program order, and
+        // refuses anything else with out_of_order_project.
+        //
+        // Those agreed while every decline sat behind the buildable work. They
+        // stop agreeing at ordinal 14, which is the first proposed decline, and
+        // the queue is at ordinal 2. So after twelve more closes a session reads
+        // `current` as the row after the decline, builds it, calls complete on
+        // that sequence, and is refused by a verb naming a DIFFERENT sequence it
+        // was never shown. The queue jams and it reads as a broken close verb
+        // rather than as two answers to one question.
+        //
+        // The comment above says the declines "can be neither built nor closed
+        // here". The first half is still true. The second stopped being true when
+        // migration 0281 gave the completion contract a decline branch: a decline
+        // with a recorded owner decision and an independent attestation closes
+        // now. So the close sequence really does run through them.
+        //
+        // Both fields ship, because they answer different questions and a reader
+        // needs both: what should I build, and what must close next for the
+        // program to advance. Naming only one of them is what produced this.
+        const nextToClose = openRows[0] || null;
+        const closeIsBlockedByDecline = Boolean(
+          nextToClose && current && nextToClose.ref !== current.ref);
         const declineCounts = {
           buildable_total: rows.rows.filter(row => !isProposedDecline(row)).length,
           proposed_declines_awaiting_a_decision: proposedDeclines.length,
           proposed_decline_refs: proposedDeclines.map(row => row.ref),
+          next_to_close_ref: nextToClose ? nextToClose.ref : null,
+          next_to_close_sequence: nextToClose ? Number(nextToClose.program_ordinal) : null,
+          close_sequence_blocked_by_proposed_decline: closeIsBlockedByDecline,
+          ...(closeIsBlockedByDecline ? { close_sequence_note:
+            `the close path takes ${nextToClose.ref} next, a proposed decline; `
+            + `${current.ref} is the next BUILDABLE row and completing it will be refused `
+            + "as out of order until the decline ahead of it is decided and closed" } : {}),
         };
         // PAYLOAD BUDGET. The full rows carry desired_outcome prose, acceptance
         // criteria and completion evidence for every project; a queue scan that
@@ -387,7 +461,11 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         const later = await c.query(`select * from ops.work_request where program_key=$1 and program_ordinal>$2 order by program_ordinal limit 1 for update`, [DEFAULT_PROGRAM, row.program_ordinal]);
         const next = nextProjectState(row.program_ordinal, later.rows.map(r => ({ sequence: Number(r.program_ordinal), state: r.state })));
         const nextRow = later.rows[0] || null;
-        if (nextRow) await writeEvent(c, actor, "complete-capability-project", "ops_work_request", nextRow.id, { field: "program_head", old: { current: false }, new: { current: true, predecessor_ref: row.ref }, idempotency_key: args.idempotency_key });
+        // THE HEAD ONLY MOVES WHEN THE HEAD CLOSED. Settling a decline out of
+        // order must not announce its neighbour as current — the real head has
+        // not moved, and writing that it has would put a false "you are up next"
+        // in the timeline of a row nobody has reached.
+        if (nextRow && row.__is_program_head !== false) await writeEvent(c, actor, "complete-capability-project", "ops_work_request", nextRow.id, { field: "program_head", old: { current: false }, new: { current: true, predecessor_ref: row.ref }, idempotency_key: args.idempotency_key });
         return { ok: true, completed_project: programRow(updated), program_complete: next.completeProgram, next_project: programRow(nextRow), next_session_brief: sessionBrief(nextRow) };
       }),
     },
