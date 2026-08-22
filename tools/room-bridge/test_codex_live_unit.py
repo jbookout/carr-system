@@ -12,7 +12,7 @@ starting a fresh thread.
 Codex derived this protocol; see codex_wire.py. The live half is proven in
 test_codex_live_live.py, which needs a real app-server.
 
-Run:  python3 spikes/hermes-dispatch/test_codex_live_unit.py
+Run:  python3 tools/room-bridge/test_codex_live_unit.py
 """
 
 from __future__ import annotations

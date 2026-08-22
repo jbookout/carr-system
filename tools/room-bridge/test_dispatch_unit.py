@@ -18,7 +18,7 @@ be hand-edited between the two. A desk is a session deliberately started with
 `claude --messaging-socket-path /tmp/cc-socks/<name>.sock`, which is a
 statement of intent that a pid is not.
 
-Run:  python3 spikes/hermes-dispatch/test_dispatch_unit.py
+Run:  python3 tools/room-bridge/test_dispatch_unit.py
 Exit 0 = every assertion held.
 """
 

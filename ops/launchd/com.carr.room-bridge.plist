@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    com.carr.room-bridge — the partner room's live wire to local desks.
+
+    One poll cycle per wake: read-room since the stored cursor, route new
+    turns to every registered local desk (echo suppression by msg_id + seat),
+    capture any desk's reply that has landed, run the assignment grammar, and
+    exit. State survives between wakes in ~/.config/carr/room-bridge-state.json
+    (a claude-session desk answers asynchronously, so an in-flight turn is
+    tracked across firings rather than by holding this process open — same
+    house pattern as capture-poll and partner-ping: launchd IS the supervisor).
+
+    --heartbeat-interval throttles a SUCCEEDED row to at most once per 900s
+    (15 min): recording all ~1440 fires/day from a normally-quiet board would
+    be noise, exactly the reasoning ops/config/services.json's capture-poll
+    and partner-ping entries already state. Every non-succeeded outcome is
+    still recorded immediately regardless of the throttle.
+
+    Installed narrowly by bin/install-room-bridge.sh (same shape as
+    bin/install-notes-sweep.sh) — never by the broad config reconciler, which
+    would also touch every other unrelated hook and LaunchAgent.
+  -->
+  <key>Label</key><string>com.carr.room-bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>--heartbeat-interval</string>
+    <string>900</string>
+    <string>room-bridge</string>
+    <string>launchd.run</string>
+    <string>{{REPO}}/.venv/bin/python</string>
+    <string>{{REPO}}/tools/room-bridge/bridge.py</string>
+    <string>run-once</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>{{REPO}}</string>
+
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StandardOutPath</key><string>{{REPO}}/out/room-bridge-launchd.log</string>
+  <key>StandardErrorPath</key><string>{{REPO}}/out/room-bridge-launchd.log</string>
+</dict>
+</plist>
