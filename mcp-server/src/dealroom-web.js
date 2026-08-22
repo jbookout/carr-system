@@ -427,6 +427,29 @@ async function roomTurns(request, env, session, dependencies) {
  * rejected — those fields are simply never consulted, which is the same refusal
  * add-room-turn makes and the reason the panel has no seat selector.
  */
+// The composer promises the reader that a retry cannot double-post. A random
+// id per request does NOT deliver that: the failure this guards is a response
+// the browser never saw, where the turn landed and the reader presses retry.
+//
+// So the id is minted server-side and DETERMINISTICALLY, from the session, the
+// exact body, and a one-minute bucket — the room's own msg_id uniqueness then
+// collapses the retry into a dedup instead of a second turn. Nothing about it
+// comes from the request body's own fields, so this is not a caller-supplied
+// id wearing a different hat.
+//
+// THE DELIBERATE TRADE: the same person posting the same exact text twice
+// inside the same minute lands once. That is the case worth collapsing — it is
+// a double-submit far more often than it is intent — and a minute is short
+// enough that a genuine repeat a moment later still goes through.
+const ROOM_DEDUP_WINDOW_MS = 60_000;
+
+export async function roomMessageId(sessionKey, body, now) {
+  const bucket = Math.floor(now / ROOM_DEDUP_WINDOW_MS);
+  const digest = await sha256(`room-turn\n${sessionKey}\n${bucket}\n${body}`);
+  return [digest.slice(0, 8), digest.slice(8, 12), digest.slice(12, 16),
+    digest.slice(16, 20), digest.slice(20, 32)].join("-");
+}
+
 export function roomControlTurn(control) {
   if (!control || typeof control !== "object") return null;
   const action = typeof control.action === "string" ? control.action : "";
@@ -461,7 +484,7 @@ async function roomTurnPost(request, env, session, dependencies) {
   try {
     posted = await dependencies.roomWriteFn(env, {
       sponsor: scope.sponsor, seat: "human", kind, body,
-      msgId: crypto.randomUUID(),
+      msgId: await roomMessageId(session.key, body, dependencies.now()),
     });
   } catch (error) {
     return json({ error: "wire_unavailable", detail: String(error?.message || error).slice(0, 200) }, 503);

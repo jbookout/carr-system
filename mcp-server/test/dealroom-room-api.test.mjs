@@ -184,6 +184,60 @@ test("posting a turn ignores every caller-supplied attribution and mints its own
   assert.equal(written.room, undefined, "the endpoint never forwards a caller's room");
 });
 
+test("a retry of a post whose response was never seen cannot land a second turn", async () => {
+  // THE FAILURE THIS GUARDS is not a double click — it is a response the
+  // browser never received. The turn landed; the composer showed a failure
+  // toast; the reader pressed retry. A random id per request would post it
+  // twice and there would be no way to tell the two apart afterwards.
+  const { handler, calls } = handlerWith();
+  const environment = env();
+  const cookie = await signedIn(handler, environment);
+  const csrf = (await (await handler.fetch(
+    new Request(`${ORIGIN}/api/room/turns`, { headers: { cookie } }), environment, {})).json()).csrf_token;
+
+  const send = () => handler.fetch(new Request(`${ORIGIN}/api/room/turn`, {
+    method: "POST", headers: postHeaders(cookie, csrf),
+    body: JSON.stringify({ body: "the release gate wants four approval values" }),
+  }), environment, {});
+
+  assert.equal((await send()).status, 200);
+  assert.equal((await send()).status, 200);
+  assert.equal(calls.writes.length, 2, "both requests reach the wire — the room, not the Worker, is what dedups");
+  assert.equal(calls.writes[0].msgId, calls.writes[1].msgId,
+    "and they carry the same message id, so the room's uniqueness collapses the retry");
+
+  // A DIFFERENT body from the same session is a different turn, and the same
+  // body from a different session is too — the id is not a hash of the text.
+  await handler.fetch(new Request(`${ORIGIN}/api/room/turn`, {
+    method: "POST", headers: postHeaders(cookie, csrf),
+    body: JSON.stringify({ body: "the release gate wants four approval values." }),
+  }), environment, {});
+  assert.notEqual(calls.writes[2].msgId, calls.writes[0].msgId);
+
+  const otherEnv = env();
+  const otherCookie = await signedIn(handler, otherEnv);
+  const otherCsrf = (await (await handler.fetch(
+    new Request(`${ORIGIN}/api/room/turns`, { headers: { cookie: otherCookie } }), otherEnv, {})).json()).csrf_token;
+  await handler.fetch(new Request(`${ORIGIN}/api/room/turn`, {
+    method: "POST", headers: postHeaders(otherCookie, otherCsrf),
+    body: JSON.stringify({ body: "the release gate wants four approval values" }),
+  }), otherEnv, {});
+  assert.notEqual(calls.writes[3].msgId, calls.writes[0].msgId,
+    "two sessions saying the same thing are two turns");
+
+  // The window is a minute, not forever: a genuine repeat later still lands.
+  const later = handlerWith({ now: () => 1_800_000_000_000 + 120_000 });
+  const laterEnv = env();
+  const laterCookie = await signedIn(later.handler, laterEnv);
+  const laterCsrf = (await (await later.handler.fetch(
+    new Request(`${ORIGIN}/api/room/turns`, { headers: { cookie: laterCookie } }), laterEnv, {})).json()).csrf_token;
+  await later.handler.fetch(new Request(`${ORIGIN}/api/room/turn`, {
+    method: "POST", headers: postHeaders(laterCookie, laterCsrf),
+    body: JSON.stringify({ body: "the release gate wants four approval values" }),
+  }), laterEnv, {});
+  assert.match(later.calls.writes[0].msgId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+});
+
 test("the composer post carries the whole browser-write guard, not a lighter version of it", async () => {
   const { handler, calls } = handlerWith();
   const environment = env();
