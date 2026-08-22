@@ -546,6 +546,29 @@ drive_projection "cutover readiness (store-first boot predicate)" \
 # nightly alarm nobody can fix.
 step "codex hook smoke (live negative PreToolUse proof)" ./ops/codex-hook-smoke.sh
 
+# ── EVERY LOADED JOB MUST BE REPRODUCIBLE FROM THE REPOSITORY (loop 498) ─────
+# ops/launchd-plist-parity.py was written on 2026-08-13 for a real hole and
+# then called by nothing for nine days. The job that prompted it,
+# com.carr.quill-key-monitor, had been registered by a one-off `launchctl
+# submit`, ran a binary out of /private/tmp, and had respawned about 2000
+# times. A clean plist listing and a clean repo grep both reported all-clear
+# while it ran; it surfaced only because a human ran `launchctl print` during a
+# manual inventory. A detector nobody runs would not have caught it either.
+#
+# IT RUNS HERE AND NOT IN CI for the same reason the environment gates do: it
+# reads THIS Mac's live launchd domain, which a CI runner does not have. On a
+# runner it would find zero CARR jobs and pass vacuously, which is worse than
+# not running it.
+#
+# WHAT DELAYED THE WIRING, recorded because the delay was correct. Until
+# 2026-08-22 the detector failed on com.carr.synthetic-load-failure — a fixture
+# leaked by ops/config-as-code-selftest.py from a temp HOME that no longer
+# exists. Wiring it while that sat there would have failed the chain on
+# somebody else's leftover on night one, which is how a check gets muted rather
+# than fixed. The job was torn down first; the detector then reported 20 loaded
+# jobs, all backed. Read-only — it never loads, unloads or edits anything.
+step "launchd plist parity (every loaded job reproducible)" ./.venv/bin/python ops/launchd-plist-parity.py
+
 # CORPUS FLIP (2026-08-06): the doctrine tier is git-canonical now — corpus/ under this
 # repo, not the Drive, is the source of truth. This step pushes whatever changed in git
 # out to the Drive/vault/home render copies. It refuses to clobber a source-side hand-edit

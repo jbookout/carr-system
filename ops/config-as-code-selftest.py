@@ -261,6 +261,22 @@ def main():
                 launchd_retry_rc = mod.cmd_install(True)
         finally:
             mod.subprocess.run = real_run
+            # THE FIXTURE MUST NOT OUTLIVE THE BLOCK THAT NEEDS IT (loop 503,
+            # item 6). Every assertion about this plist is already made above,
+            # under the stub that keeps `launchctl load` from really running.
+            # Left on disk it is loaded FOR REAL by the next cmd_install in this
+            # file — which runs with the stub reverted — registering
+            # com.carr.synthetic-load-failure in the live gui domain from a temp
+            # HOME that is deleted moments later. That is precisely a job with
+            # no plist behind it: ops/launchd-plist-parity.py found exactly this
+            # one on Joe's Mac on 2026-08-22, nine days after the leak began,
+            # and it was the only thing standing between that detector and being
+            # wired into the nightly chain. A test that leaves a live job behind
+            # is not isolated, however green it reports.
+            (launchd / "com.carr.synthetic-load-failure.plist").unlink(missing_ok=True)
+            mod.subprocess.run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}/com.carr.synthetic-load-failure"],
+                capture_output=True, text=True, check=False)
         mod.IS_PRIMARY = original_primary
         launchd_dir_created = Path(mod.LAUNCHD_SRC).is_dir()
         definition_only_absent = not (
