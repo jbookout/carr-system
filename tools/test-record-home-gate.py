@@ -34,9 +34,16 @@ DENY, ALLOW = "deny", "allow"
 # above it: that the hook actually consults the manifest and applies its verdict
 # end to end, on whatever machine is running.
 sys.path.insert(0, os.path.join(REPO, "hooks"))
-from md_manifest import MIGRATED_PARTNERS, local_actor  # noqa: E402
+from datetime import date
+from md_manifest import CUTOFF, MIGRATED_PARTNERS, local_actor  # noqa: E402
 
-JOB_OUTPUT = DENY if local_actor() in MIGRATED_PARTNERS else ALLOW
+# After CUTOFF every temporary job-output row is dead for every partner.
+# Before that, only a migrated partner (Joe) is closed early.
+JOB_OUTPUT = (
+    DENY
+    if local_actor() in MIGRATED_PARTNERS or date.today() > CUTOFF
+    else ALLOW
+)
 
 CASES = [
     # (label, expected, tool, tool_input)
