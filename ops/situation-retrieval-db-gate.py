@@ -82,8 +82,23 @@ def main() -> int:
                     (revision_id, content_hash, section_id),
                 )
 
+            # SCOPED TO 0135'S OWN SEEDS, not to every pending proposal in the
+            # database. This counted globally until 2026-08-22, which made it
+            # assert something it did not mean: the moment Production carried a
+            # REAL pending proposal, the refreshed schema snapshot carried it too
+            # and this gate failed on every branch that refreshed the snapshot —
+            # with a message blaming the seed count. That is what happened at
+            # 16:32:49 that day, when a golden-miss probe filed a live concept
+            # proposal twenty seconds after a migration landed and thirty-three
+            # seconds before the snapshot was regenerated. The seeds all carry
+            # 0135's reserved idempotency-key block, so scope on that: the gate
+            # then measures its own fixture and is indifferent to real review
+            # traffic. The promotion loop below is scoped by the same query for
+            # the same reason — promoting a real pending proposal would have been
+            # a live approval nobody made.
             proposals = cur.execute(
                 """select id from retrieval_proposal where status='pending'
+                     and idempotency_key::text like '13500000-0000-4000-8000-%'
                      order by case proposal_type when 'concept' then 1
                               when 'phrase' then 2 when 'mapping' then 3 else 4 end,
                               created_at,id"""
