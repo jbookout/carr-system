@@ -147,6 +147,17 @@ def main() -> int:
             if leaked:
                 return fail(f"strict answers must not carry a fallback mark: {leaked}")
 
+            # THE PHANTOM CONCEPT SCORE (defect f4a4405f, 2026-08-22). In
+            # PostgreSQL least(1.0, NULL) ignores the NULL and returns 1.0, so
+            # coalesce(least(1.0, ce.concept_score), 0) handed every section
+            # with NO concept evidence a free 1.0 — real evidence, capped at
+            # 1.0, could never outrank it, and the whole curation lane was
+            # inert while looking wired. With zero approved curation in this
+            # transaction, every strict row must score concept 0.
+            phantom = [row[0] for row in confident if float(row[2]) != 0.0]
+            if phantom:
+                return fail(f"strict rows without curation must score concept 0, got: {phantom}")
+
             # Deterministic replay holds on the fallback lane too.
             if search(cur, ONE_WORD_OFF, allow_fallback=True) != rescued:
                 return fail("fallback results must replay byte-identically")
