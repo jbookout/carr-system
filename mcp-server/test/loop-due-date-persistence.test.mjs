@@ -66,13 +66,6 @@ class LoopFake {
 
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    // Matches on the leading columns only. Replay identity is four things now
-    // (key, actor, tenant, session), so the lookup selects actor_id,
-    // organization_tenant_id and application_session_id as well — a fake keyed
-    // to the old full statement stops matching, falls through this router, and
-    // throws a bare Error, which reads as an untyped 500 rather than the typed
-    // refusal these tests assert. This file arrived from main after that change
-    // and so was never updated with its siblings.
     if (sql.startsWith("select request_hash, response")) {
       const prior = this.calls.get(params[0]);
       return { rows: prior ? [prior] : [] };
@@ -94,9 +87,19 @@ class LoopFake {
       return { rows: [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      this.calls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]),
-        actor_id: params[2], organization_tenant_id: params[7] ?? null,
-        application_session_id: params[12] ?? null });
+      // BY POSITION, from the insert's own parameter order, because that is what
+      // the row coming back out of Postgres would carry. Storing only the hash
+      // and the response made every identity column read as undefined on replay,
+      // so a replay check comparing actor, tenant or session would judge the
+      // call against a row that had forgotten who made it -- and pass, which is
+      // the direction that does not announce itself.
+      this.calls.set(params[0], {
+        request_hash: params[3],
+        response: JSON.parse(params[4]),
+        actor_id: params[2],
+        organization_tenant_id: params[7] ?? null,
+        application_session_id: params[12] ?? null,
+      });
       return { rows: [] };
     }
     throw new Error(`unhandled fake query: ${sql}`);
