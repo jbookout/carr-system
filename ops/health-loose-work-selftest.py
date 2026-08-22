@@ -79,8 +79,9 @@ def main() -> None:
                     {"actionable_tracked": [], "actionable_untracked": ["new.py"],
                      "expected_patched_submodules": [], "managed_artifacts": []}),
                 "unknown untracked source must require health attention")
-        clean = {"actionable_tracked": [], "actionable_untracked": [],
-                 "expected_patched_submodules": [], "managed_artifacts": []}
+        clean: dict[str, list[str]] = {
+            "actionable_tracked": [], "actionable_untracked": [],
+            "expected_patched_submodules": [], "managed_artifacts": []}
         require(not health.loose_work_requires_attention(clean),
                 "a clean loose-work bucket must not require attention")
         require(health.loose_work_requires_attention(

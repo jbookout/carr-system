@@ -154,8 +154,9 @@ def classify_loose_status(repo: str | os.PathLike[str], rows: list[str]) -> dict
     """
     root = os.fspath(repo)
     registered = _registered_worktrees(root)
-    buckets = {"actionable_tracked": [], "actionable_untracked": [],
-               "expected_patched_submodules": [], "managed_artifacts": []}
+    buckets: dict[str, list[str]] = {
+        "actionable_tracked": [], "actionable_untracked": [],
+        "expected_patched_submodules": [], "managed_artifacts": []}
     for row in rows:
         if not row.strip():
             continue
