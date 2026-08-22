@@ -6279,7 +6279,27 @@ export const TOOLS = {
           hint: "already closed — this is what came of it" });
 
       const resolution = args.resolution || "done";
-      const bookkeeping = /\b(renumbered|superseded|merged|split)\b/i.test(outcome);
+      // A BOOKKEEPING CLOSE DECLARES ITSELF; it is not sniffed out of free text.
+      // This used to be /\b(renumbered|superseded|merged|split)\b/i tested
+      // ANYWHERE in the outcome, which conflated two unrelated senses of one
+      // word: a LOOP merged into another loop (bookkeeping) versus a PULL
+      // REQUEST landing on main (completion). Since main is PR-only with
+      // automerge, every honest close of a code loop names a landed pull
+      // request — so the guard fired hardest against the most common true
+      // completion it would ever see. It refused loop #500 on 2026-08-22, whose
+      // work was finished, landed and verified twice (defect 3fe38a2f). "split"
+      // and "superseded" carry the same double meaning: a split file, a
+      // superseded API endpoint.
+      //
+      // The anywhere-match bought no real protection either. It filters WORDING
+      // rather than substance, and is evaded by writing "landed" instead, which
+      // is how that close eventually went through — a guard a caller escapes by
+      // reaching for a synonym is not enforcing anything. What actually signals
+      // continuing work is the outcome OPENING with a bookkeeping declaration
+      // (which the prefix check just below already demands) or a successor loop
+      // being named. Both are deliberate acts; neither is an accident of prose.
+      const bookkeeping = /^\s*(renumbered|superseded|merged|split)\b/i.test(outcome)
+        || Boolean(args.successor_loop);
       let successor = null;
       if (bookkeeping) {
         if (resolution !== "dropped")
