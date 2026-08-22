@@ -100,7 +100,7 @@
       ],
       "failure_mode": "CI class failure — the gates class surfaces an enforcement-layer regression on every proposed change",
       "enforcement_class": "surfacing",
-      "_note_on_implementation_ref": "Production carries this row with implementation_ref 'ops/ci.sh gates class', which is prose naming a class inside a file rather than a path. Declared here as the file itself so the reference resolves and the parity gate can verify it is tracked; the parity gate will report the difference against Production until the row is reconciled, which is a decision rather than a seed and is deliberately left to a person."
+      "_note": "Reconciled 2026-08-22: Production and staging carried implementation_ref 'ops/ci.sh gates class', prose naming a class inside a file rather than a path, so the reference could not resolve or be verified as tracked. Both databases now carry 'ops/ci.sh'; the class is named in test_ref and in the enforcement map already. The control was not locked by any active approved rule."
     }
   }
 }
