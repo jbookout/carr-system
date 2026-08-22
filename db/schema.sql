@@ -24,7 +24,11 @@
 -- change that created the role.
 --
 -- All privilege bundles whose creating migrations are in the snapshot ledger
--- are created here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- are created here. Among them, carr_session_minter joined on 2026-08-20 with
+-- migration 0231: it is the ONLY role permitted to mint an authenticated
+-- application session, which is the whole of that migration's separation
+-- argument, so a rebuilt cluster missing it would have no separation to
+-- enforce. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
@@ -43,9 +47,12 @@ declare
   r text;
   jobs_can_login boolean;
   jobs_placeholder text;
+  issuer_can_login boolean;
+  issuer_placeholder text;
 begin
   foreach r in array array[
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
+    'carr_session_minter',
     'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
     'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver'
   ] loop
@@ -61,8 +68,34 @@ begin
     jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
+  -- carr_session_issuer (migration 0239) is the SECOND login role, and it is
+  -- added the way carr_jobs is added rather than by widening the NOLOGIN array
+  -- above -- which is what the note further up asks for. It is the credential
+  -- the authentication layer holds to mint an application session, so it must
+  -- connect; carr_session_minter stays NOLOGIN because it is the privilege
+  -- bundle the issuer is a member of, never a credential of its own.
+  select rolcanlogin into issuer_can_login from pg_roles where rolname='carr_session_issuer';
+  if not found then
+    issuer_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('create role %I login password %L', 'carr_session_issuer', issuer_placeholder);
+  elsif not issuer_can_login then
+    issuer_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('alter role %I login password %L', 'carr_session_issuer', issuer_placeholder);
+  end if;
+  -- THE ROLE ONLY, NEVER THE MEMBERSHIP, and the reason is about what the
+  -- tests then prove. 0231 no longer objects to a purpose-built issuer holding
+  -- the membership, so this is a choice on the merits rather than a workaround.
+  --
+  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0239
+  -- having run, and the contracts that assert the membership graph would pass
+  -- against the preamble instead of against the migration they exist to test --
+  -- a suite testing its own fixture. Establishing the membership is 0233's
+  -- whole job, so 0233 is where it happens and where a test can see it happen.
+  --
+  -- Creating the role here is still required and is a different question: the
+  -- grant-whitelist gates name it, and has_function_privilege RAISES on a
+  -- missing role rather than returning false.
 end $$;
-
 --
 -- PostgreSQL database dump
 --
