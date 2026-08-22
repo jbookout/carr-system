@@ -143,7 +143,7 @@ def parse_auth_output(text: str) -> bool | None:
 def probe_auth(entry: dict, *, run=subprocess.run, timeout: float = PROBE_TIMEOUT_S) -> bool | None:
     """Ask one desk's vendor CLI whether it is signed in. Never raises: every
     failure mode collapses to None, which the panel renders as unknown."""
-    command = AUTH_STATUS_COMMANDS.get(entry.get("kind"))
+    command = AUTH_STATUS_COMMANDS.get(str(entry.get("kind") or ""))
     if not command:
         return None
     try:
@@ -222,7 +222,7 @@ def launch_login(name: str, entry: dict, *, run=subprocess.Popen) -> dict:
     NOT captured, NOT piped, NOT waited on: the flow opens a browser and the
     human approves there. This function's entire job is to press the vendor's
     button; it has no channel through which a credential could reach it."""
-    command = AUTH_LOGIN_COMMANDS.get(entry.get("kind"))
+    command = AUTH_LOGIN_COMMANDS.get(str(entry.get("kind") or ""))
     if not command:
         return {"launched": False, "reason": f"desk kind {entry.get('kind')!r} has no known sign-in command"}
     try:
