@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: renewals
 """Rollback-only acceptance for the authenticated CARR lease renewal provider."""
 from __future__ import annotations
 
