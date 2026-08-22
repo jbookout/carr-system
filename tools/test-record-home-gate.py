@@ -34,16 +34,28 @@ DENY, ALLOW = "deny", "allow"
 # above it: that the hook actually consults the manifest and applies its verdict
 # end to end, on whatever machine is running.
 sys.path.insert(0, os.path.join(REPO, "hooks"))
-from datetime import date
-from md_manifest import CUTOFF, MIGRATED_PARTNERS, local_actor  # noqa: E402
+from md_manifest import md_write_verdict  # noqa: E402
 
-# After CUTOFF every temporary job-output row is dead for every partner.
-# Before that, only a migrated partner (Joe) is closed early.
-JOB_OUTPUT = (
-    DENY
-    if local_actor() in MIGRATED_PARTNERS or date.today() > CUTOFF
-    else ALLOW
-)
+
+def job_output(rel):
+    """The manifest's own verdict for a vault-relative job-output path.
+
+    ASK THE MANIFEST, DO NOT RESTATE ITS RULE. The previous version computed
+    `DENY if local_actor() in MIGRATED_PARTNERS else ALLOW`, which is only half
+    the rule: an unmigrated machine is allowed until the row's retirement date,
+    not forever. Once Dell's 2026-08-21 cutoff passed, that unmigrated branch
+    began claiming ALLOW where the manifest denies. Joe's Mac kept passing,
+    because the migrated branch of the expression is right.
+
+    That is the same shape as the bug the expression was introduced to fix: an
+    answer that happened to be true on one machine. Deriving it removes the
+    duplicated rule outright, and these subprocess cases still prove what they
+    were written to prove — that the hook consults the manifest and applies its
+    verdict end to end, on whatever machine runs. The per-partner LOGIC stays
+    pinned by the unit cases below, which inject both actor and date and so
+    cannot drift with either.
+    """
+    return DENY if md_write_verdict(rel) else ALLOW
 
 CASES = [
     # (label, expected, tool, tool_input)
@@ -64,11 +76,14 @@ CASES = [
     # client-intake agent writes on purpose. Guarding the directory blocked those
     # too, and over-blocking a partner's own writing surface is how a gate ends up
     # switched off. The set is the exporter's own DOSSIER_FILES list.
-    ("P0+ · intake file in prospects/ follows this machine's partner", JOB_OUTPUT, "Write",
+    ("P0+ · intake file in prospects/ follows this machine's partner",
+     job_output("DNA/Clients/prospects/Beasley-intake.md"), "Write",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/Beasley-intake.md", "new_string": "x"}),
-    ("P0+ · enterprise file in prospects/ follows this machine's partner", JOB_OUTPUT, "Edit",
+    ("P0+ · enterprise file in prospects/ follows this machine's partner",
+     job_output("DNA/Clients/prospects/AltaPointe-enterprise.md"), "Edit",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/AltaPointe-enterprise.md", "new_string": "x"}),
-    ("P0+ · a name not in DOSSIER_FILES is DENIED too (closed 2026-08-14)", JOB_OUTPUT, "Write",
+    ("P0+ · a name not in DOSSIER_FILES is DENIED too (closed 2026-08-14)",
+     job_output("DNA/Clients/prospects/BrandNewClient.md"), "Write",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/BrandNewClient.md", "content": "x"}),
     ("A · hunt-ledger (was unguarded)", DENY, "Edit",
      {"file_path": f"{VAULT}/DNA/Network/hunt-ledger.md", "new_string": "x"}),
@@ -109,7 +124,8 @@ CASES = [
      {"file_path": f"{VAULT}/CLAUDE.md", "new_string": "rev 11: weekends are off"}),
     ("allow · AGENTS.md edit (manifest exact)", ALLOW, "Edit",
      {"file_path": f"{VAULT}/AGENTS.md", "new_string": "x"}),
-    ("P0+ · weekly brief output follows this machine's partner", JOB_OUTPUT, "Write",
+    ("P0+ · weekly brief output follows this machine's partner",
+     job_output("DNA/Network/briefs/2026-08-10-network-brief.md"), "Write",
      {"file_path": f"{VAULT}/DNA/Network/briefs/2026-08-10-network-brief.md", "content": "x"}),
     ("allow · repo file, outside the vault", ALLOW, "Write",
      {"file_path": os.path.join(REPO, "specs", "some-spec.md"), "content": "spec"}),
