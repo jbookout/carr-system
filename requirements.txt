@@ -18,6 +18,20 @@ lxml>=6.0          # fill-engine/fill_document.py scrub_docx's XML pass; importe
 numpy>=2.0         # tools/doc-voice/render-doc.py terminal-slope scoring, on the ROOT venv
 pytest>=9.0        # tools/test-doctrine-mirror.py; a test dependency is still a dependency
 
+# UNDECLARED WHEN IT ARRIVED, and found by importing it rather than by any gate.
+# pipelines/check-brand.py reads a finished PDF back and checks every page
+# against the brand rules before a packet is delivered. It imports fitz, which
+# is this package, and nothing declared it — so the check standing between a
+# client and a mis-rendered tour packet died on ImportError the first time
+# anyone ran it. That is the failure the four lines above already record from
+# 2026-08-13: installed by hand on one Mac, written down nowhere, and a clean
+# install looks correct until first use.
+#
+# ci-dep-check.py cannot catch this class of gap. It proves declared packages
+# are pinned and that the lock matches this file; it never reads the source for
+# imports, so an undeclared one stays invisible to it.
+pymupdf>=1.28      # pipelines/check-brand.py, which imports it as fitz (legacy name)
+
 # SYSTEM (non-pip) dependencies, documented here because nowhere else was:
 #   libreoffice  — shared/fill-engine/fill_deal_template.py renders via `libreoffice --headless`
 #   node         — workflows/*.workflow.js syntax checks (tools/smoke.sh); the Workflow
