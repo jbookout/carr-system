@@ -80,3 +80,26 @@ tools/CARR Calendar Access.app/Contents/MacOS/carr-calendar-access
 
 # npm installs are per machine; mcp-server/package-lock.json is the review surface.
 node_modules/
+
+# Codex worktrees — the same class as .claude/worktrees/ above: each entry is a
+# live CHECKOUT of this repo, not content of it. Two are in use (Graph-System
+# and a phase4 continuity branch), so these are ignored, never removed.
+.codex-worktrees/
+
+# CI and selftest scratch trees. Named by convention (.tmp-*, and mktemp-suffixed
+# selftest dirs), created per run, and never source. Added 2026-08-22: twelve of
+# these had accumulated since 08-15 and made the health check's `loose-work` row
+# amber every single night, which is how a row stops being read. Ignoring them
+# leaves that row meaning what it says — the one loose path it still reports is
+# a real one.
+.tmp-*/
+release-manifest-selftest-*/
+
+# Per-machine tool caches, regenerated on demand and never source.
+node-compile-cache/
+xcrun_db
+
+# doc-convo render daemon runtime files — a log and a pid, both rewritten on
+# every run. Same lane as the whisper-server.log entry above.
+tools/doc-convo/assets/render-daemon.log
+tools/doc-convo/assets/.render-daemon.pid
