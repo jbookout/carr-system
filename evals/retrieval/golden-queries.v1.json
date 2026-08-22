@@ -1,171 +1,424 @@
 {
-  "schema_version": "carr-retrieval-golden-v1",
-  "suite_id": "carr-retrieval-golden-v1",
-  "data_class": "D2_internal_metadata",
-  "scope_ref": "carr-internal",
-  "cases": [
-    {
-      "id": "RET-001",
-      "query": "write acceptance tests first",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:carr-mature-software-end-state-bduf"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["carr-mature-software-end-state-bduf#s39-fresh-session-prompt"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
+ "schema_version": "carr-retrieval-golden-v1",
+ "suite_id": "carr-retrieval-golden-v1",
+ "data_class": "D2_internal_metadata",
+ "scope_ref": "carr-internal",
+ "cases": [
+  {
+   "id": "RET-001",
+   "query": "write acceptance tests first",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:carr-mature-software-end-state-bduf"
+     ],
+     "top_k": 3
     },
-    {
-      "id": "RET-002",
-      "query": "record layer outage diagnosis runbook",
-      "baseline_expectation": "measured_miss",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:runbook"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-003",
-      "query": "playbook self improvement review cycle",
-      "baseline_expectation": "measured_miss",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:playbook-review"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["playbook-review#preamble"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-004",
-      "query": "document factory",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:document-factory-routing"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["document-factory-routing#preamble"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-005",
-      "query": "weekly new provider detection",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:npi-sweep-sop"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["npi-sweep-sop#preamble"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-006",
-      "query": "social publishing review approval",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:social-media-workflow"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["social-media-workflow#placement-the-entire-social-run-is-local-now-joe-july-18-2026"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-007",
-      "query": "space search multi source",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:space-search-sop"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["space-search-sop#preamble"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-008",
-      "query": "lead system",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:lead-system-handoff"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["lead-system-handoff#preamble"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-009",
-      "query": "restore backup rehearsal",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:carr-control-room-bduf"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["carr-control-room-bduf#s30-test-and-verification-strategy"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-010",
-      "query": "single source of truth",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:deal-enrichment-sop"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["deal-enrichment-sop#rules"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-ARCH-001",
-      "query": "agent systems validation",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:2026-07-30-agent-systems-explainer-takeaways"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["2026-07-30-agent-systems-explainer-takeaways#preamble"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "store-duplicates"]
-    },
-    {
-      "id": "RET-TITLE-001",
-      "query": "diagnosis checklist",
-      "failure_class": "title_index_gap",
-      "engines": {
-        "section_index_lexical": {"required_targets": ["doctrine:runbook"], "top_k": 3},
-        "doctrine_postgres_fts": {"required_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-PHRASE-001",
-      "query": "database service unavailable troubleshooting steps",
-      "failure_class": "situation_language_positive",
-      "engines": {
-        "doctrine_postgres_fts": {"required_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-PHRASE-002",
-      "query": "how the operating playbook learns from mistakes",
-      "failure_class": "situation_language_positive",
-      "engines": {
-        "doctrine_postgres_fts": {"required_targets": ["playbook-review#preamble"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-NEG-001",
-      "query": "outage communication template",
-      "failure_class": "near_miss_negative",
-      "engines": {
-        "doctrine_postgres_fts": {"expect_no_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3}
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
-    },
-    {
-      "id": "RET-LIFE-001",
-      "query": "retired retrieval lifecycle fixture",
-      "failure_class": "lifecycle_negative",
-      "engines": {
-        "doctrine_postgres_fts": {"expect_no_hits": true, "top_k": 3}
-      },
-      "forbidden_target_patterns": ["retired", "superseded", "archive", "old-revision"]
-    },
-    {
-      "id": "RET-AMB-001",
-      "query": "review cycle after a record layer outage",
-      "failure_class": "ambiguous_dual",
-      "engines": {
-        "doctrine_postgres_fts": {
-          "required_targets": [
-            "runbook#diagnosis-checklist-in-order-2-minutes",
-            "playbook-review#preamble"
-          ],
-          "require_all_targets": true,
-          "top_k": 3
-        }
-      },
-      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "carr-mature-software-end-state-bduf#s39-fresh-session-prompt"
+     ],
+     "top_k": 3
     }
-  ]
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-002",
+   "query": "record layer outage diagnosis runbook",
+   "baseline_expectation": "measured_miss",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:runbook"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "runbook#diagnosis-checklist-in-order-2-minutes"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-003",
+   "query": "playbook self improvement review cycle",
+   "baseline_expectation": "measured_miss",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:playbook-review"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "playbook-review#preamble"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-004",
+   "query": "document factory",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:document-factory-routing"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "document-factory-routing#preamble"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-005",
+   "query": "weekly new provider detection",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:npi-sweep-sop"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "npi-sweep-sop#preamble"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-006",
+   "query": "social publishing review approval",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:social-media-workflow"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "social-media-workflow#placement-the-entire-social-run-is-local-now-joe-july-18-2026"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-007",
+   "query": "space search multi source",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:space-search-sop"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "space-search-sop#preamble"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-008",
+   "query": "lead system",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:lead-system-handoff"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "lead-system-handoff#preamble"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-009",
+   "query": "restore backup rehearsal",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:carr-control-room-bduf"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "carr-control-room-bduf#s30-test-and-verification-strategy"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-010",
+   "query": "single source of truth",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:deal-enrichment-sop"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "deal-enrichment-sop#rules"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-ARCH-001",
+   "query": "agent systems validation",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:2026-07-30-agent-systems-explainer-takeaways"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "2026-07-30-agent-systems-explainer-takeaways#preamble"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "store-duplicates"
+   ]
+  },
+  {
+   "id": "RET-TITLE-001",
+   "query": "diagnosis checklist",
+   "failure_class": "title_index_gap",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:runbook"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "runbook#diagnosis-checklist-in-order-2-minutes"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-PHRASE-001",
+   "query": "database service unavailable troubleshooting steps",
+   "failure_class": "situation_language_positive",
+   "engines": {
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "runbook#diagnosis-checklist-in-order-2-minutes"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-PHRASE-002",
+   "query": "how the operating playbook learns from mistakes",
+   "failure_class": "situation_language_positive",
+   "engines": {
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "playbook-review#preamble"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-NEG-001",
+   "query": "outage communication template",
+   "failure_class": "near_miss_negative",
+   "engines": {
+    "doctrine_postgres_fts": {
+     "expect_no_targets": [
+      "runbook#diagnosis-checklist-in-order-2-minutes"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-LIFE-001",
+   "query": "retired retrieval lifecycle fixture",
+   "failure_class": "lifecycle_negative",
+   "engines": {
+    "doctrine_postgres_fts": {
+     "expect_no_hits": true,
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "retired",
+    "superseded",
+    "archive",
+    "old-revision"
+   ]
+  },
+  {
+   "id": "RET-AMB-001",
+   "query": "review cycle after a record layer outage",
+   "failure_class": "ambiguous_dual",
+   "engines": {
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "runbook#diagnosis-checklist-in-order-2-minutes",
+      "playbook-review#preamble"
+     ],
+     "require_all_targets": true,
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-012",
+   "query": "close a loop superseded by another loop",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:finalization-window-relay-briefing"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "finalization-window-relay-briefing#relay-contract-and-mission"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  },
+  {
+   "id": "RET-013",
+   "query": "restore rehearsal encrypted backups",
+   "engines": {
+    "section_index_lexical": {
+     "required_targets": [
+      "doctrine:runbook"
+     ],
+     "top_k": 3
+    },
+    "doctrine_postgres_fts": {
+     "required_targets": [
+      "runbook#recovery-levers-biggest-hammer-last"
+     ],
+     "top_k": 3
+    }
+   },
+   "forbidden_target_patterns": [
+    "_to_delete/",
+    "\\.generations/",
+    "archive"
+   ]
+  }
+ ]
 }
