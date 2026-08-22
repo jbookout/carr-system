@@ -206,6 +206,28 @@ check("a turn with no eligible desks queues onto nothing (never an error)",
       desks_with_no_room_seat_are_simply_not_offered_a_turn)
 
 
+def system_and_receipt_turns_are_never_routed_to_a_desk():
+    # Found live 2026-08-22: a kind=receipt turn posted under seat="hermes"
+    # (nobody's room_seat) used to route to every desk exactly like an
+    # ordinary turn — including the desk the receipt was reporting a failure
+    # ABOUT, which then burned a real dispatch "answering" a report of its
+    # own prior failure.
+    s = state_mod.default_state()
+    seats = {"joe-desk": "claude", "codex-desk": "codex"}
+    receipt = turn(1, "hermes", body="{\"desk\":\"codex-desk\",\"status\":\"failed\"}",
+                   msg_id="r1")
+    receipt["kind"] = "receipt"
+    system_row = turn(2, "hermes", body="board operational", msg_id="s1")
+    system_row["kind"] = "system"
+    assert state_mod.route_turn(s, receipt, seats) == []
+    assert state_mod.route_turn(s, system_row, seats) == []
+    assert s["desks"] == {}, s["desks"]
+
+
+check("kind=receipt and kind=system turns are never queued onto a desk",
+      system_and_receipt_turns_are_never_routed_to_a_desk)
+
+
 # ---------------------------------------------------------------------------
 # pending (in-flight reply) tracking
 # ---------------------------------------------------------------------------

@@ -112,12 +112,27 @@ def route_turn(state: dict, turn: dict, desk_seats: dict[str, str]) -> list[str]
     """Queue one new room turn onto every desk it is eligible for.
 
     desk_seats maps desk name -> the room seat that desk speaks for. A turn is
-    queued onto a desk when: the turn is not that desk's own echo (is_echo),
-    and this bridge has not already delivered/queued this exact msg_id to that
-    desk before (already_delivered) — the two-part guard the brief calls for:
-    "echo suppression by msg_id + seat". Returns the names of desks the turn
-    was queued onto, for logging.
+    queued onto a desk when: its kind is "turn" (system/receipt rows are the
+    bridge's own bookkeeping — visible in the room's transcript, but never a
+    task for a desk to answer; see the module docstring below for why this
+    matters more than it looks), the turn is not that desk's own echo
+    (is_echo), and this bridge has not already delivered/queued this exact
+    msg_id to that desk before (already_delivered) — the two-part guard the
+    brief calls for: "echo suppression by msg_id + seat". Returns the names
+    of desks the turn was queued onto, for logging.
+
+    WHY THE KIND FILTER, found live: before it existed, a kind=receipt turn
+    posted under seat="hermes" (e.g. "codex-desk failed: quota_exhausted")
+    routed to EVERY desk exactly like an ordinary turn, since "hermes" is
+    nobody's room_seat — including the desk the receipt was ABOUT, which then
+    burned a real dispatch trying to "answer" a report of its own prior
+    failure. Not an infinite loop (the desk's own reply carries its own seat,
+    which the next cycle's is_echo correctly excludes from re-delivery to
+    itself) but genuine wasted cost and noise for a message nobody was asking
+    a desk to act on.
     """
+    if turn.get("kind") != "turn":
+        return []
     msg_id = str(turn.get("msg_id") or "")
     if not msg_id:
         return []
