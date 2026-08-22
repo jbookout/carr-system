@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import date
 
 # Script-relative, NOT expanduser("~/carr-system") — see the same fix in
 # test-ledger-sweep.py. A checkout outside $HOME made this file crash on import
@@ -34,9 +35,26 @@ DENY, ALLOW = "deny", "allow"
 # above it: that the hook actually consults the manifest and applies its verdict
 # end to end, on whatever machine is running.
 sys.path.insert(0, os.path.join(REPO, "hooks"))
-from md_manifest import MIGRATED_PARTNERS, local_actor  # noqa: E402
+from md_manifest import (  # noqa: E402
+    CLOSED_EARLY, CUTOFF, MIGRATED_PARTNERS, local_actor,
+)
 
-JOB_OUTPUT = DENY if local_actor() in MIGRATED_PARTNERS else ALLOW
+# THE ROW IS DATED, so the expectation has to read the clock as well as the
+# machine. The manifest gives a migrated partner's temporary rows a retirement
+# of CLOSED_EARLY and everyone else's CUTOFF, then allows the write only while
+# today is on or before that date.
+#
+# This line used to ask the partner question alone, which is the same shape of
+# bug the comment above describes, arriving through time instead of through a
+# hostname. On a GitHub runner there is no identity file, so local_actor() is
+# None, the row runs to CUTOFF, and the old expression said ALLOW forever. At
+# 00:00 UTC on 2026-08-22 the hook began denying, this file went on expecting
+# the 21st's answer, and the gates class failed for EVERY branch in the
+# repository — three unrelated pull requests were refused for a change none of
+# them made. A test that encodes a deadline has to compute it, because the day
+# it becomes wrong is the day nobody is looking at it.
+JOB_OUTPUT_RETIRES = CLOSED_EARLY if local_actor() in MIGRATED_PARTNERS else CUTOFF
+JOB_OUTPUT = ALLOW if date.today() <= JOB_OUTPUT_RETIRES else DENY
 
 CASES = [
     # (label, expected, tool, tool_input)
