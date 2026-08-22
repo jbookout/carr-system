@@ -332,7 +332,13 @@ echo "  OK  registry imports cleanly: $SHIPPING verbs about to ship"
 # staging too. Write law 14181e60 settles which copy survives.
 PREVIOUS=""
 LEDGER_RC=0
-PREVIOUS="$("$PY" "$REPO/ops/last-deployed-verb-count.py" carr-mcp "$TARGET_ENV" 2>/dev/null)" \
+# STDERR IS KEPT, and that is the point. This read used to send stderr to
+# /dev/null, so ops/last-deployed-verb-count.py could tell us the baseline was
+# stale and nobody would ever see it — the same "printed into a log nobody
+# opens" shape as the nightly steps that reported skipped for five days
+# (defect 3b21767e). stdout is still the number and nothing else.
+BASELINE_STDERR="$(mktemp)"
+PREVIOUS="$("$PY" "$REPO/ops/last-deployed-verb-count.py" carr-mcp "$TARGET_ENV" 2>"$BASELINE_STDERR")" \
   || LEDGER_RC=$?
 case "$LEDGER_RC" in
   0)
@@ -350,6 +356,10 @@ case "$LEDGER_RC" in
     else
       echo "  OK  no verb loss (last deployed to $TARGET_ENV: $PREVIOUS)"
     fi
+    if grep -q 'STALE BASELINE' "$BASELINE_STDERR" 2>/dev/null; then
+      echo "  !!  the number above is STALE and the guard above is weaker than it looks:" >&2
+      sed 's/^/      /' "$BASELINE_STDERR" >&2
+    fi
     ;;
   3)
     echo "  --  no previous deployment recorded for $TARGET_ENV; this run establishes the baseline"
@@ -366,6 +376,7 @@ case "$LEDGER_RC" in
   If Postgres is down, the Worker you are about to ship cannot serve a verb anyway."
     ;;
 esac
+rm -f "$BASELINE_STDERR"
 fi
 
 # record_deployment <state> <correlation> [identity-readback] — attach what just
@@ -909,6 +920,49 @@ if [ "$TARGET_ENV" = "production" ]; then
   fi
   LIVE_RELEASE_VERIFIED=1
   echo "  OK  serving Production identity matches $HEAD_SHA / $PROVIDER_VERSION_ID"
+
+  # THE PROMOTED BUILD'S VERB COUNT, taken from the identity read-back that just
+  # passed (defect 4077b653). Promote mode skips every source preflight — that is
+  # correct, there is no source tree to trust for an immutable provider version —
+  # but preflight 3 was the ONLY place SHIPPING was ever set, so every Production
+  # promotion recorded verb_count NULL. Since Production source deploys are
+  # disabled outright, promotion is the only way Production ships, and the
+  # verb-loss baseline could therefore never advance again: it sat at 143 from
+  # 2026-08-20 while Production served 146, and a promotion shipping 144 would
+  # have passed the guard while dropping two live verbs. That is loop #276 with
+  # the guard watching a frozen number.
+  #
+  # THE LIVE ENDPOINT IS THE RIGHT SOURCE HERE, not a checkout: it is what is
+  # actually serving, and this exact JSON has just been verified to carry the
+  # expected SHA, provider version, environment and Program 6 posture. Reading a
+  # tree would answer a different question.
+  #
+  # A count that cannot be read does NOT fail the deploy. Production is already
+  # serving by this point; refusing would leave a live deployment unrecorded,
+  # which is worse than a missing number. It says so out loud instead, naming the
+  # consequence rather than passing silently.
+  if [ "$VERSION_MODE" = "promote" ]; then
+    SHIPPING="$(printf '%s' "$LIVE_RELEASE_JSON" | "$PY" -c '
+import json, sys
+try:
+    n = json.load(sys.stdin).get("verb_count")
+except Exception:
+    sys.exit(1)
+if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+    sys.exit(1)
+print(n)
+' 2>/dev/null || true)"
+    case "$SHIPPING" in
+      ''|*[!0-9]*)
+        SHIPPING=""
+        echo "  !!  the promoted build's verb count could not be read from the" >&2
+        echo "      identity read-back, so this deploy records none. The NEXT" >&2
+        echo "      deploy's verb-loss guard will measure against an older row" >&2
+        echo "      (defect 4077b653)." >&2 ;;
+      *)
+        echo "  OK  promoted build serves $SHIPPING verbs — recorded as the next deploy's baseline" ;;
+    esac
+  fi
   # Persist the exact live identity before any later check can claim it measured
   # this promotion. The performance receipt uses this same correlation, and the
   # database refuses a pre-seeded result with no prior read-back journey.

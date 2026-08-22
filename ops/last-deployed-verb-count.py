@@ -91,6 +91,44 @@ def baseline_row(cur, service, environment):
     return cur.fetchone()
 
 
+def countless_rows_newer_than_baseline(cur, service, environment, observed_at):
+    """Shipped rows newer than the baseline that carry NO verb count.
+
+    WHY THIS EXISTS (defect 4077b653, 2026-08-22). `verb_count is not null` in
+    baseline_row above is part of the definition of a baseline, and it has to
+    be — a row with no count cannot be compared against. But skipping such a row
+    SILENTLY means the guard keeps answering with an older number and printing
+    OK, which is a loss guard reporting on a state of the world that has moved.
+
+    That is not hypothetical twice over. baseline_row's own docstring records it
+    holding at 141 while production served 143 on 2026-08-20. It then happened
+    again structurally: `--promote-version` skips the preflight that sets the
+    shipping count, Production source deploys are disabled outright, so every
+    Production release records no count and the baseline froze at 143 while
+    production served 146. The producer half is fixed in bin/deploy-worker.sh;
+    this half makes the freeze VISIBLE rather than trusting that it never
+    recurs, because the first failure was already written down in a docstring
+    and that did not stop the second.
+
+    Reported, never fatal here. The caller decides — see the STALE BASELINE
+    block in bin/deploy-worker.sh for why it warns loudly rather than refusing:
+    refusing would block a legitimate release on a bookkeeping gap in rows that
+    already exist, which is a control lowering the floor it was meant to raise
+    (decision 91020f79).
+    """
+    cur.execute(
+        """select count(*)
+             from ops.deployment d
+             join ops.service s on s.id = d.service_id
+            where s.key = %s
+              and d.environment = %s
+              and d.verb_count is null
+              and d.state = any(%s)
+              and d.observed_at > %s""",
+        (service, environment, list(SHIPPED_STATES), observed_at))
+    return int(cur.fetchone()[0])
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: last-deployed-verb-count.py <service> <environment>",
@@ -123,6 +161,9 @@ def main() -> int:
     try:
         with conn, conn.cursor() as cur:
             row = baseline_row(cur, service, environment)
+            stale_newer = (
+                countless_rows_newer_than_baseline(cur, service, environment, row[4])
+                if row else 0)
     except Exception as exc:
         print(f"last-deployed-verb-count: could not read the ledger: {exc}",
               file=sys.stderr)
@@ -133,6 +174,14 @@ def main() -> int:
               f"{environment} carries a verb count", file=sys.stderr)
         return 3
 
+    # STDERR, never stdout: the caller reads stdout as the number itself.
+    if stale_newer:
+        print(f"last-deployed-verb-count: STALE BASELINE — {stale_newer} newer "
+              f"{environment} deployment(s) of {service} shipped with NO verb count "
+              f"recorded, so this baseline of {int(row[0])} is from "
+              f"{row[4]:%Y-%m-%d} and does not describe what is serving now. "
+              "A loss guard comparing against it can pass while verbs disappear "
+              "(defect 4077b653).", file=sys.stderr)
     print(int(row[0]))
     return 0
 

@@ -91,6 +91,68 @@ def main() -> int:
           "establishes the baseline" in text,
           "the no-prior-deployment path was lost, so a first deploy to a new env would refuse forever")
 
+    # ── THE BASELINE MUST BE ABLE TO ADVANCE (defect 4077b653) ───────────────
+    # Everything above proves the guard reads the LEDGER instead of a file. None
+    # of it proves the ledger ever gets a number written into it. It did not:
+    # --promote-version skips every source preflight, and preflight 3 is the only
+    # place SHIPPING is assigned, so all eight Production deploy rows since
+    # 2026-08-20 carry verb_count NULL. Production source deploys are disabled
+    # outright, so promotion is the ONLY way Production ships and the baseline
+    # froze at 143 while Production served 146.
+    promote_block = re.search(
+        r'if \[ "\$VERSION_MODE" = "promote" \]; then\s*\n\s*SHIPPING=',
+        text)
+    check("promote mode records the verb count of the build it promoted",
+          promote_block is not None,
+          "promote skips the only assignment of SHIPPING, so every Production "
+          "promotion records verb_count NULL and the loss-guard baseline can never advance")
+
+    # SCOPED TO THE PROMOTE BLOCK ON PURPOSE. Asserting that the file merely
+    # mentions LIVE_RELEASE_JSON would pass on the ordinary deploy path, which
+    # already reads it — the string exists whether or not promote uses it.
+    promote_reads_live = False
+    if promote_block:
+        tail = text[promote_block.start():]
+        end = tail.find("\n  fi\n")
+        promote_reads_live = "LIVE_RELEASE_JSON" in tail[:end if end > 0 else 2000]
+    check("that count comes from the verified live read-back, not a source tree",
+          promote_reads_live,
+          "promote mode has no source checkout to count, so the count must come "
+          "from the /release JSON whose identity was just verified")
+
+    check("an unreadable count says so instead of passing silently",
+          "could not be read from the" in text and "4077b653" in text,
+          "a promotion that cannot read its verb count would leave the next "
+          "deploy's guard measuring a stale row with nothing said")
+
+    # THE WARNING MUST REACH A HUMAN. The reader can detect a frozen baseline,
+    # but the deploy used to send its stderr to /dev/null, so the detection would
+    # have been invisible — the same shape as the nightly steps that printed
+    # skipped for five days (defect 3b21767e).
+    check("the deploy does NOT discard the baseline reader's stderr",
+          not re.search(r"last-deployed-verb-count\.py\" [^\n]*2>/dev/null", text),
+          "the reader's stale-baseline warning is thrown away before anyone sees it")
+    check("a stale baseline is surfaced in the preflight output",
+          "STALE BASELINE" in text,
+          "nothing in the deploy surfaces a frozen baseline to the operator")
+
+    htext_early = HELPER.read_text()
+    # DEFINED **AND CALLED**, matched at a word boundary. A substring test passes
+    # on a function renamed to _unused_countless_rows_newer_than_baseline, and a
+    # detector nothing calls is the same as no detector — which is the entire
+    # defect class this block exists for.
+    check("the reader detects shipped rows newer than the baseline that carry no count",
+          re.search(r"^def countless_rows_newer_than_baseline\(", htext_early, re.M) is not None
+          and re.search(r"^\s+(?!def )[^#\n]*\bcountless_rows_newer_than_baseline\(",
+                        htext_early, re.M) is not None
+          and "verb_count is null" in htext_early
+          and "STALE BASELINE" in htext_early,
+          "the reader silently skips countless newer rows, which is how the "
+          "baseline froze twice without anyone noticing")
+    check("the staleness warning goes to stderr, never stdout",
+          re.search(r"STALE BASELINE[\s\S]{0,600}?file=sys\.stderr", htext_early) is not None,
+          "the caller reads stdout as the number itself; a warning there would corrupt it")
+
     # ── the helper's own contract ────────────────────────────────────────────
     htext = HELPER.read_text()
     for code, meaning in ((" 3", "no prior deployment"), ("78", "no credential")):
