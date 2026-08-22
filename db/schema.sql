@@ -4620,6 +4620,95 @@ end $$;
 
 
 --
+-- Name: record_executed_lease(text, integer, date, date, date, integer, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_executed_lease(p_deal text, p_base_version integer, p_executed_on date, p_commencement_on date, p_expiration_on date, p_term_months integer, p_evidence_kind text, p_evidence_ref text, p_source text) RETURNS TABLE(lease_id uuid, version integer, superseded_lease_id uuid, deal_id uuid, client_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare
+  v_actor_slug text;
+  v_actor_id uuid;
+  v_deal_ids uuid[];
+  v_deal_id uuid;
+  v_client_id uuid;
+  v_owner_id uuid;
+  v_current_id uuid;
+  v_current_version integer;
+  v_new_id uuid;
+  v_new_version integer;
+begin
+  v_actor_slug:=ops.authority_actor_slug();
+  select id into v_actor_id from actor where slug=v_actor_slug and active;
+  if v_actor_id is null then raise exception 'lease authority actor is unavailable'; end if;
+  if nullif(btrim(coalesce(p_deal,'')),'') is null then raise exception 'deal is required'; end if;
+  if p_deal ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    select array_agg(id) into v_deal_ids from deal where id=p_deal::uuid;
+  else
+    select array_agg(id order by id) into v_deal_ids from deal where lower(name)=lower(btrim(p_deal));
+  end if;
+  if coalesce(array_length(v_deal_ids,1),0)=0 then raise exception 'lease deal was not found'; end if;
+  if array_length(v_deal_ids,1)<>1 then raise exception 'lease deal needs exact disambiguation'; end if;
+  v_deal_id:=v_deal_ids[1];
+
+  perform pg_advisory_xact_lock(hashtextextended('executed-lease:'||v_deal_id::text,0));
+  select d.client_id,
+         coalesce((select dp.actor_id from deal_participant dp
+                    where dp.deal_id=d.id and dp.role='lead' and dp.to_at is null limit 1),
+                  c.created_by)
+    into v_client_id,v_owner_id
+    from deal d join client c on c.id=d.client_id
+   where d.id=v_deal_id;
+  if v_owner_id is distinct from v_actor_id then
+    raise exception 'lease authority does not own the current deal';
+  end if;
+  if p_executed_on is null or p_expiration_on is null then
+    raise exception 'executed_on and expiration_on are required';
+  end if;
+  if p_commencement_on is not null and p_expiration_on<=p_commencement_on then
+    raise exception 'lease expiration must follow commencement';
+  end if;
+  if p_term_months is not null and (p_term_months<1 or p_term_months>480) then
+    raise exception 'lease term_months is outside 1..480';
+  end if;
+  if p_evidence_kind not in ('executed_lease','lease_amendment','lease_abstract') then
+    raise exception 'lease evidence kind is not admitted';
+  end if;
+  if nullif(btrim(coalesce(p_evidence_ref,'')),'') is null or length(p_evidence_ref)>1000 then
+    raise exception 'lease evidence reference is required and bounded';
+  end if;
+  if nullif(btrim(coalesce(p_source,'')),'') is null or length(p_source)>500 then
+    raise exception 'lease source is required and bounded';
+  end if;
+
+  select l.id,l.version into v_current_id,v_current_version
+    from lease l where l.deal_id=v_deal_id and l.status='current' for update;
+  if v_current_id is not null and p_base_version is distinct from v_current_version then
+    raise exception 'lease version conflict: expected %',v_current_version;
+  end if;
+  if v_current_id is null and p_base_version is not null then
+    raise exception 'no current lease exists for supplied base version';
+  end if;
+  if v_current_id is not null then
+    update lease as held set status='superseded',superseded_at=now(),updated_by=v_actor_id
+     where held.id=v_current_id and held.version=v_current_version and held.status='current';
+    if not found then raise exception 'lease version conflict during replacement'; end if;
+  end if;
+  insert into lease
+    (deal_id,client_id,owner_id,executed_on,commencement_on,expiration_on,term_months,
+     evidence_kind,evidence_ref,source,created_by,updated_by,status,supersedes_lease_id)
+  values
+    (v_deal_id,v_client_id,v_actor_id,p_executed_on,p_commencement_on,p_expiration_on,p_term_months,
+     p_evidence_kind,btrim(p_evidence_ref),btrim(p_source),v_actor_id,v_actor_id,'current',v_current_id)
+  returning id,lease.version into v_new_id,v_new_version;
+  lease_id:=v_new_id; version:=v_new_version; superseded_lease_id:=v_current_id;
+  deal_id:=v_deal_id; client_id:=v_client_id;
+  return next;
+end $_$;
+
+
+--
 -- Name: record_guidance_decision(uuid, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -13768,9 +13857,17 @@ END) STORED,
     created_by uuid NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_by uuid,
+    owner_id uuid,
+    evidence_kind text,
+    evidence_ref text,
+    status text DEFAULT 'legacy_unverified'::text NOT NULL,
+    superseded_at timestamp with time zone,
+    supersedes_lease_id uuid,
     CONSTRAINT lease_check CHECK (((rate_amount IS NULL) OR (rate_basis IS NOT NULL))),
+    CONSTRAINT lease_evidence_kind_check CHECK (((evidence_kind IS NULL) OR (evidence_kind = ANY (ARRAY['executed_lease'::text, 'lease_amendment'::text, 'lease_abstract'::text])))),
     CONSTRAINT lease_rate_amount_check CHECK ((rate_amount > (0)::numeric)),
     CONSTRAINT lease_rate_basis_check CHECK ((rate_basis = ANY (ARRAY['usd_sf_yr'::text, 'usd_sf_mo'::text, 'usd_mo_gross'::text, 'usd_yr_gross'::text]))),
+    CONSTRAINT lease_status_check CHECK ((status = ANY (ARRAY['legacy_unverified'::text, 'current'::text, 'superseded'::text]))),
     CONSTRAINT lease_term_months_check CHECK (((term_months >= 1) AND (term_months <= 480)))
 );
 
@@ -18771,120 +18868,66 @@ COMMENT ON VIEW public.v_record_flag_subject IS 'Every record_flag with its subj
 
 
 --
--- Name: v_renewal_decision_queue_status; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_renewal_decision_queue_status AS
- WITH current_run AS (
-         SELECT renewal_decision_source_run.id,
-            renewal_decision_source_run.job_id,
-            renewal_decision_source_run.attempt,
-            renewal_decision_source_run.snapshot_at,
-            renewal_decision_source_run.recorded_at,
-            renewal_decision_source_run.member_count,
-            renewal_decision_source_run.source_snapshot_id
-           FROM ops.renewal_decision_source_run
-          WHERE (renewal_decision_source_run.source_snapshot_id IS NOT NULL)
-          ORDER BY renewal_decision_source_run.snapshot_at DESC, renewal_decision_source_run.recorded_at DESC, renewal_decision_source_run.id DESC
-         LIMIT 1
-        ), current_members AS (
-         SELECT r.id AS source_run_id,
-            r.recorded_at,
-            r.member_count,
-            m.candidate_id,
-            ((cp.id IS NOT NULL) AND (cp.source = 'renewal-radar'::text) AND (cp.status = 'pool'::text) AND (m.row_digest = ops.renewal_decision_candidate_digest(cp.*))) AS is_current,
-            (upper(COALESCE((cp.source_row ->> 'tier'::text), ''::text)) ~~ 'T1%'::text) AS is_t1
-           FROM ((current_run r
-             LEFT JOIN ops.renewal_decision_source_run_member m ON ((m.source_run_id = r.id)))
-             LEFT JOIN public.candidate_pool cp ON ((cp.id = m.candidate_id)))
-        ), aggregate AS (
-         SELECT max(current_members.recorded_at) AS source_observed_at,
-            COALESCE(max(current_members.member_count), 0) AS sealed_member_count,
-            (count(*) FILTER (WHERE ((current_members.candidate_id IS NOT NULL) AND current_members.is_current)))::integer AS current_member_count,
-            (count(*) FILTER (WHERE ((current_members.candidate_id IS NOT NULL) AND current_members.is_current AND current_members.is_t1)))::integer AS t1_candidate_count
-           FROM current_members
-        )
- SELECT t1_candidate_count,
-    source_observed_at,
-        CASE
-            WHEN ((source_observed_at IS NULL) OR (source_observed_at < (now() - '36:00:00'::interval)) OR (sealed_member_count <> current_member_count)) THEN 'unavailable'::text
-            WHEN (t1_candidate_count = 0) THEN 'empty'::text
-            ELSE 'ready'::text
-        END AS freshness_state
-   FROM aggregate;
-
-
---
--- Name: VIEW v_renewal_decision_queue_status; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON VIEW public.v_renewal_decision_queue_status IS 'One-row renewal source-run state. ready is a current sealed nonempty T1 queue; empty is a current sealed true zero; unavailable is missing, stale, or altered source membership.';
-
-
---
 -- Name: v_renewal_decision_queue; Type: VIEW; Schema: public; Owner: -
 --
 
 CREATE VIEW public.v_renewal_decision_queue AS
- WITH current_run AS (
-         SELECT renewal_decision_source_run.id,
-            renewal_decision_source_run.job_id,
-            renewal_decision_source_run.attempt,
-            renewal_decision_source_run.snapshot_at,
-            renewal_decision_source_run.recorded_at,
-            renewal_decision_source_run.member_count,
-            renewal_decision_source_run.source_snapshot_id
-           FROM ops.renewal_decision_source_run
-          WHERE (renewal_decision_source_run.source_snapshot_id IS NOT NULL)
-          ORDER BY renewal_decision_source_run.snapshot_at DESC, renewal_decision_source_run.recorded_at DESC, renewal_decision_source_run.id DESC
-         LIMIT 1
-        ), current_rows AS (
-         SELECT cp.name AS display_name,
-            cp.org_name,
-            cp.vertical,
-            cp.city,
-            cp.county,
-            cp.state,
-            cp.est_lease_event,
-                CASE
-                    WHEN (upper(COALESCE((cp.source_row ->> 'tier'::text), ''::text)) ~~ 'T1%'::text) THEN 't1'::text
-                    ELSE 'not_t1'::text
-                END AS tier_status,
-                CASE
-                    WHEN (lower(COALESCE((cp.source_row ->> 'flag'::text), ''::text)) ~~ 'already%'::text) THEN 'already_known'::text
-                    WHEN (lower(COALESCE((cp.source_row ->> 'flag'::text), ''::text)) ~~ '%not yet tenant-identified%'::text) THEN 'building_signal'::text
-                    WHEN (NULLIF(btrim(COALESCE((cp.source_row ->> 'flag'::text), ''::text)), ''::text) IS NULL) THEN 'clear'::text
-                    ELSE 'review_required'::text
-                END AS flag_status,
-            (((cp.email IS NOT NULL) AND (cp.email <> ''::text)) OR ((cp.phone IS NOT NULL) AND (cp.phone <> ''::text))) AS has_channel,
-            r.recorded_at AS source_observed_at
-           FROM ((current_run r
-             JOIN ops.renewal_decision_source_run_member m ON ((m.source_run_id = r.id)))
-             JOIN public.candidate_pool cp ON (((cp.id = m.candidate_id) AND (cp.source = 'renewal-radar'::text) AND (cp.status = 'pool'::text) AND (m.row_digest = ops.renewal_decision_candidate_digest(cp.*)))))
-        )
- SELECT display_name,
-    org_name,
-    vertical,
-    city,
-    county,
-    state,
-    est_lease_event,
-    tier_status,
-    flag_status,
-    has_channel,
-    (count(*) OVER ())::integer AS decision_count,
-    source_observed_at,
-    'ready'::text AS freshness_state
-   FROM current_rows
-  WHERE ((tier_status = 't1'::text) AND (( SELECT v_renewal_decision_queue_status.freshness_state
-           FROM public.v_renewal_decision_queue_status) = 'ready'::text));
+ SELECT p.name AS display_name,
+    org.name AS org_name,
+    c.vertical,
+    p.city,
+    NULL::text AS county,
+    p.state,
+    l.expiration_on AS est_lease_event,
+    't1'::text AS tier_status,
+    'clear'::text AS flag_status,
+    (((p.email IS NOT NULL) AND (p.email <> ''::text)) OR ((p.phone IS NOT NULL) AND (p.phone <> ''::text))) AS has_channel,
+    (count(*) OVER (PARTITION BY owner.slug))::integer AS decision_count,
+    GREATEST(l.created_at, l.updated_at) AS source_observed_at,
+    'ready'::text AS freshness_state,
+    owner.slug AS owner_slug
+   FROM (((((public.lease l
+     JOIN public.deal d ON (((d.id = l.deal_id) AND (d.client_id = l.client_id))))
+     JOIN public.client c ON ((c.id = l.client_id)))
+     JOIN public.party p ON (((p.id = c.party_id) AND (p.merged_into IS NULL) AND (p.deleted_at IS NULL))))
+     LEFT JOIN public.party org ON (((org.id = p.org_id) AND (org.merged_into IS NULL) AND (org.deleted_at IS NULL))))
+     JOIN public.actor owner ON (((owner.id = COALESCE(( SELECT dp.actor_id
+           FROM public.deal_participant dp
+          WHERE ((dp.deal_id = d.id) AND (dp.role = 'lead'::text) AND (dp.to_at IS NULL))
+         LIMIT 1), c.created_by)) AND (owner.slug = ANY (ARRAY['joe'::text, 'dell'::text])))))
+  WHERE ((l.status = 'current'::text) AND ((l.expiration_on >= (CURRENT_DATE - 90)) AND (l.expiration_on <= (CURRENT_DATE + 548))) AND (l.evidence_kind = ANY (ARRAY['executed_lease'::text, 'lease_amendment'::text, 'lease_abstract'::text])) AND (NULLIF(btrim(l.evidence_ref), ''::text) IS NOT NULL) AND (NULLIF(btrim(l.source), ''::text) IS NOT NULL));
 
 
 --
 -- Name: VIEW v_renewal_decision_queue; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.v_renewal_decision_queue IS 'Safe T1 renewal queue. Rows are visible only when an immutable DB-owned source run is current; never add candidate IDs, source fields, email, phone, or address.';
+COMMENT ON VIEW public.v_renewal_decision_queue IS 'Safe, sponsor-scoped T1 renewals from current CARR-held executed lease/abstract facts only. Never add IDs, evidence refs, source text, contacts, addresses, or raw document data.';
+
+
+--
+-- Name: v_renewal_decision_queue_status; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_renewal_decision_queue_status AS
+ SELECT a.slug AS owner_slug,
+    (count(q.display_name))::integer AS t1_candidate_count,
+    max(q.source_observed_at) AS source_observed_at,
+        CASE
+            WHEN (count(q.display_name) = 0) THEN 'empty'::text
+            ELSE 'ready'::text
+        END AS freshness_state
+   FROM (public.actor a
+     LEFT JOIN public.v_renewal_decision_queue q ON ((q.owner_slug = a.slug)))
+  WHERE (a.slug = ANY (ARRAY['joe'::text, 'dell'::text]))
+  GROUP BY a.slug;
+
+
+--
+-- Name: VIEW v_renewal_decision_queue_status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_renewal_decision_queue_status IS 'Per-partner readiness for the authenticated CARR lease ledger. Empty is an explicit true zero; a missing view/query is unavailable at the MCP boundary.';
 
 
 --
@@ -21842,6 +21885,14 @@ ALTER TABLE ONLY public.lead_stage
 
 
 --
+-- Name: lease lease_current_provider_contract_check; Type: CHECK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE public.lease
+    ADD CONSTRAINT lease_current_provider_contract_check CHECK (((status <> 'current'::text) OR ((deal_id IS NOT NULL) AND (client_id IS NOT NULL) AND (owner_id IS NOT NULL) AND (executed_on IS NOT NULL) AND (expiration_on IS NOT NULL) AND (evidence_kind IS NOT NULL) AND (NULLIF(btrim(evidence_ref), ''::text) IS NOT NULL) AND (NULLIF(btrim(source), ''::text) IS NOT NULL) AND ((commencement_on IS NULL) OR (expiration_on > commencement_on))))) NOT VALID;
+
+
+--
 -- Name: lease lease_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -23022,6 +23073,20 @@ CREATE INDEX investigation_evidence_branch_idx ON public.investigation_evidence 
 --
 
 CREATE UNIQUE INDEX investigation_one_open_per_signal ON public.investigation_run USING btree (signal_id) WHERE (status = 'open'::text);
+
+
+--
+-- Name: lease_one_current_per_deal; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX lease_one_current_per_deal ON public.lease USING btree (deal_id) WHERE (status = 'current'::text);
+
+
+--
+-- Name: lease_renewal_owner_expiration_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX lease_renewal_owner_expiration_idx ON public.lease USING btree (owner_id, expiration_on) WHERE (status = 'current'::text);
 
 
 --
@@ -26931,11 +26996,27 @@ ALTER TABLE ONLY public.lease
 
 
 --
+-- Name: lease lease_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.lease
+    ADD CONSTRAINT lease_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES public.actor(id);
+
+
+--
 -- Name: lease lease_premises_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.lease
     ADD CONSTRAINT lease_premises_id_fkey FOREIGN KEY (premises_id) REFERENCES public.premises(id);
+
+
+--
+-- Name: lease lease_supersedes_lease_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.lease
+    ADD CONSTRAINT lease_supersedes_lease_id_fkey FOREIGN KEY (supersedes_lease_id) REFERENCES public.lease(id);
 
 
 --
@@ -27755,6 +27836,7 @@ revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease
 revoke all on function ops.record_calendar_prebrief_verified_envelope(p_job_id uuid, p_lease uuid, p_challenge_id uuid, p_scheduled_for timestamp with time zone, p_window_starts_at timestamp with time zone, p_window_ends_at timestamp with time zone, p_allowlist_revision_id uuid, p_allowlist_digest text, p_calendar_keys text[], p_observed_calendar_keys text[], p_events jsonb, p_destination text, p_collector_key_fingerprint text, p_signature_sha256 text, p_collector_version text) from public;
 revoke all on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
 revoke all on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) from public;
+revoke all on function ops.record_executed_lease(p_deal text, p_base_version integer, p_executed_on date, p_commencement_on date, p_expiration_on date, p_term_months integer, p_evidence_kind text, p_evidence_ref text, p_source text) from public;
 revoke all on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) from public;
 revoke all on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) from public;
@@ -28166,7 +28248,7 @@ grant insert, select, update on table public.investigation_run to carr_writer;
 grant insert, select, update on table public.lead to carr_writer;
 grant insert, select, update on table public.lead_lane to carr_writer;
 grant insert, select, update on table public.lead_stage to carr_writer;
-grant insert, select, update on table public.lease to carr_writer;
+grant select on table public.lease to carr_writer;
 grant select on table public.loop_block to carr_exporter;
 grant select on table public.loop_block to carr_reader;
 grant insert, select, update on table public.loop_block to carr_writer;
@@ -28439,8 +28521,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
@@ -28491,13 +28573,14 @@ grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_le
 grant execute on function ops.record_calendar_prebrief_verified_envelope(p_job_id uuid, p_lease uuid, p_challenge_id uuid, p_scheduled_for timestamp with time zone, p_window_starts_at timestamp with time zone, p_window_ends_at timestamp with time zone, p_allowlist_revision_id uuid, p_allowlist_digest text, p_calendar_keys text[], p_observed_calendar_keys text[], p_events jsonb, p_destination text, p_collector_key_fingerprint text, p_signature_sha256 text, p_collector_version text) to carr_calendar_prebrief_attestors;
 grant execute on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) to carr_device_evidence;
+grant execute on function ops.record_executed_lease(p_deal text, p_base_version integer, p_executed_on date, p_commencement_on date, p_expiration_on date, p_term_months integer, p_evidence_kind text, p_evidence_ref text, p_source text) to carr_authority;
 grant execute on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
@@ -28785,6 +28868,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0276_work_in_progress_limit.sql	9bb6ac9c103feeac137a0e44745801f099beb217ce8177edb4822f29c8735196	2026-08-22 13:37:08.780492+00
 0277_wip_limit_survives_reassignment.sql	89da4d228a1021c6c24178ed73ffde5fe49d7f9b896005d67dde71b9f769657f	2026-08-22 13:37:09.117865+00
 0278_completion_needs_a_capsule_and_a_second_pair_of_eyes.sql	1eb6de438dea6e8bf61bdee40f8aa9cc9d6424217cc93a73c6896ab86f5ac088	2026-08-22 13:37:09.424356+00
+0279_carr_lease_renewal_provider.sql	0fbdb9c026aabb34b9c5ca17644ad4b1c2e32b2357008356f1487a23f1013585	2026-08-22 15:16:52.168053+00
 \.
 
 
