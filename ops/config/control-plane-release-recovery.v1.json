@@ -15,7 +15,9 @@
       "0227_nightly_availability_canary_record_layer",
       "0228_atomic_rule_lifecycle_forward_upgrade",
       "0229_calendar_prebrief_projection",
-      "0230_renewal_decision_delivery"
+      "0230_renewal_decision_delivery",
+      "0248_renewal_signed_source_ingress",
+      "0249_calendar_prebrief_joe_runtime"
     ]
   },
   "database_down_migration": "does_not_exist",
