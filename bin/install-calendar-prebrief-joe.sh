@@ -25,7 +25,7 @@ trap recover EXIT HUP INT TERM
 [ "${1:-}" = "--install" ] || { print -u2 'usage: install-calendar-prebrief-joe.sh --install'; exit 64; }
 [ -f "$PROFILE" ] || { print -u2 'calendar prebrief: missing Joe-only 0600 profile'; exit 78; }
 [ "$(stat -f '%Lp' "$PROFILE" 2>/dev/null || stat -c '%a' "$PROFILE")" = 600 ] || { print -u2 'calendar prebrief: profile must be 0600'; exit 78; }
-"$REPO/bin/build-calendar-access.sh" || exit $?
+CARR_REPO="$REPO" "$REPO/bin/build-calendar-access.sh" || exit $?
 mkdir -p "$HOME/Applications"
 STAGED_ROOT="$(mktemp -d "$HOME/Applications/.carr-calendar-access.XXXXXX")"
 STAGED="$STAGED_ROOT/CARR Calendar Access.app"
