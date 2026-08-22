@@ -5,7 +5,7 @@ This is an explicit local installation utility. It never provisions roles,
 enables a scheduler, or prints a DSN, calendar identifier, or attendee address.
 """
 from __future__ import annotations
-import argparse, hashlib, importlib.util, json, os, stat, re, secrets, subprocess
+import argparse, hashlib, importlib.util, json, os, stat, re, secrets, subprocess, uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -126,8 +126,11 @@ def activate_joe_live(evidence_digest:str,env:Mapping[str,str],connect:Callable[
   cur.execute("select session_user,current_user");
   if tuple(cur.fetchone() or ())!=("carr_authority_joe","carr_authority_joe"): raise Refusal("authority session identity mismatch")
   cur.execute("select ops.activate_calendar_prebrief_joe_live(%s)",(evidence_digest,)); row=cur.fetchone()
-  if not row or not isinstance(row[0],str): raise Refusal("activation did not return a typed receipt id")
-  cur.execute("select row_to_json(r) from ops.read_calendar_prebrief_joe_activation(%s) r",(row[0],)); readback=cur.fetchone()
+  receipt_id=row[0] if row else None
+  try: receipt_id=receipt_id if isinstance(receipt_id,uuid.UUID) else uuid.UUID(receipt_id) if isinstance(receipt_id,str) else None
+  except ValueError: receipt_id=None
+  if receipt_id is None: raise Refusal("activation did not return a typed receipt id")
+  cur.execute("select row_to_json(r) from ops.read_calendar_prebrief_joe_activation(%s) r",(receipt_id,)); readback=cur.fetchone()
   if not readback: raise Refusal("activation receipt readback was empty")
   receipt=readback[0]; conn.commit()
  if not isinstance(receipt,dict) or receipt.get("sponsor")!="joe" or receipt.get("app_evidence_digest")!=evidence_digest: raise Refusal("activation receipt readback mismatch")
