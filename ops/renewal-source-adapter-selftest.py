@@ -6,6 +6,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -44,7 +45,7 @@ def signed(rows: list[dict[str, object]], *, key: str, fingerprint: str) -> dict
     return unsigned
 
 
-ROW = {
+ROW: dict[str, object] = {
     "source_key": "fixture-practice|100-main-st",
     "name": "Fixture Practice",
     "org_name": "Fixture Practice",
@@ -79,7 +80,7 @@ def main() -> int:
         subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(public)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         fingerprint = hashlib.sha256(public.read_bytes()).hexdigest()
-        profile = adapter.SourceProfile("fixture-provider", fingerprint, public, "postgresql://carr_jobs:fixture@db.example/carr")
+        profile = adapter.SourceProfile("fixture-provider", fingerprint, public, "postgresql://carr_renewal_source_attestor:fixture@db.example/carr")  # ci-secret-scan: allow -- inert fixture
         good = signed([ROW], key=str(private), fingerprint=fingerprint)
         checked = adapter.validate_snapshot(good, profile)
         assert checked.provider == "fixture-provider"
@@ -93,6 +94,23 @@ def main() -> int:
         assert refuses(signed([ROW, dict(ROW)], key=str(private), fingerprint=fingerprint), profile)
         assert refuses(signed([{**ROW, "source_key": "", "name": ""}], key=str(private), fingerprint=fingerprint), profile)
         assert refuses(signed([{**ROW, "est_lease_event": "not-a-date"}], key=str(private), fingerprint=fingerprint), profile)
+        profile_path = tmp / "profile.env"
+        profile_path.write_text(
+            "CARR_RENEWAL_SOURCE_PROVIDER=fixture-provider\n"
+            f"CARR_RENEWAL_SOURCE_KEY_FINGERPRINT={fingerprint}\n"
+            f"CARR_RENEWAL_SOURCE_PUBLIC_KEY={public}\n"
+            "CARR_DB_RENEWAL_SOURCE_ATTESTOR_URL=postgresql://carr_renewal_source_attestor:fixture@db.example/carr\n",  # ci-secret-scan: allow -- inert fixture
+            encoding="utf-8",
+        )
+        profile_path.chmod(0o600)
+        assert adapter._read_profile(profile_path).attestor_dsn.startswith("postgresql://carr_renewal_source_attestor:")
+        profile_path.write_text(profile_path.read_text(encoding="utf-8").replace("carr_renewal_source_attestor", "carr_jobs"), encoding="utf-8")
+        try:
+            adapter._read_profile(profile_path)
+        except adapter.SourceContractError:
+            pass
+        else:
+            raise AssertionError("jobs identity was accepted for a renewal source profile")
 
     # The adapter is stdin-only by construction.  No normal path may retain a
     # hidden Drive/vault source while this credential has not been provisioned.
@@ -104,6 +122,17 @@ def main() -> int:
     assert "source_snapshot_id" in migration and "v_snapshot.row_count" in migration
     assert "sealed_member_count<>(select count(*) from candidate_pool" not in migration
     assert "octet_length(p_rows::text)>8388608" in migration
+    assert "carr_renewal_source_attestors nologin" in migration
+    assert "session_user<>'carr_renewal_source_attestor'" in migration
+    assert "to carr_jobs;" not in migration
+
+    disabled = subprocess.run(
+        [str(ROOT / "tools" / "renewal-source-adapter.py"), "--disabled-contract"],
+        capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "")},
+    )
+    assert disabled.returncode == 78
+    assert "provider and dedicated claim runner are not installed" in disabled.stderr
+    assert not disabled.stdout
 
     receipt = {
         "contract": "renewal-source-ingress.v1", "schema_version": 1,

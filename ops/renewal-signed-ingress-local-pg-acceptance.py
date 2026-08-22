@@ -54,6 +54,12 @@ source_row = {
 
 with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     job, lease, snapshot = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    cur.execute("""do $$ begin
+      if not exists (select 1 from pg_roles where rolname='carr_renewal_source_attestor') then
+        create role carr_renewal_source_attestor login;
+      end if;
+    end $$""")
+    cur.execute("grant carr_renewal_source_attestors to carr_renewal_source_attestor")
     cur.execute("select id from actor where slug='system'")
     system_id = row(cur, "system actor")[0]
     # A historical cache extra must not become a member of this current signed run.
@@ -68,6 +74,10 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     observed_at = row(cur, "DB observed timestamp")[0]
     args = (job, lease, snapshot, "fixture-provider", "a" * 64, observed_at, "b" * 64, "c" * 64, json.dumps([source_row]))
     cur.execute("set session authorization carr_jobs")
+    refused(cur, "select * from ops.ingest_renewal_signed_snapshot(%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+            args, "42501", "permission denied for function")
+    cur.execute("reset session authorization")
+    cur.execute("set session authorization carr_renewal_source_attestor")
     cur.execute("""select source_run_id,row_count from ops.ingest_renewal_signed_snapshot
                    (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)""", args)
     source_run_id, count = row(cur, "first signed ingress")
@@ -95,6 +105,10 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("select count(*) from ops.renewal_decision_source_run_member where source_run_id=%s", (source_run_id,))
     if row(cur, "sealed member count") != (1,):
         raise RuntimeError("signed source run has an unexpected member count")
+    cur.execute("insert into ops.renewal_decision_source_run(job_id,attempt,snapshot_at,member_count,source_snapshot_id) values(%s,2,now(),0,null)", (job,))
+    cur.execute("select freshness_state from v_renewal_decision_queue_status")
+    if row(cur, "legacy unsigned run is unavailable")[0] != "ready":
+        raise RuntimeError("signed queue status was displaced by a legacy unsigned run")
     conn.rollback()
 
 print("renewal signed ingress local acceptance passed")

@@ -18,6 +18,8 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -234,13 +236,59 @@ def _call(dsn: str, identity: str, query: str, args: tuple[Any, ...]) -> Any:
 
 
 def _capture(contract: Mapping[str, Any]) -> dict[str, Any]:
-    collector = Path(__file__).with_name("calendar-prebrief-collector.py")
-    safe = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "PYTHONPATH", "CARR_CALENDAR_PREBRIEF_ALLOWLIST", "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY", "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION") if os.environ.get(key)}
-    result = subprocess.run([sys.executable, str(collector)], input=_canonical(contract), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=safe, timeout=60, check=False)
-    if result.returncode or len(result.stdout) > MAX_PIPE:
+    # EventKit permission is attached to the responsible signed application,
+    # not to a bare Python interpreter.  The runtime installs and validates the
+    # bundle before this child is reached; do not silently fall back to direct
+    # PyObjC, which would make a permission denial look like a usable runner.
+    app = Path(os.environ.get("CARR_CALENDAR_PREBRIEF_EVENTKIT_APP", ""))
+    launcher = app / "Contents/MacOS/carr-calendar-access"
+    try:
+        info = launcher.lstat()
+    except OSError as exc:
+        raise Refusal("responsible EventKit application is unavailable") from exc
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or not os.access(launcher, os.X_OK):
+        raise Refusal("responsible EventKit application is unsafe")
+    allowlist = Path(os.environ.get("CARR_CALENDAR_PREBRIEF_ALLOWLIST", ""))
+    private_key = Path(os.environ.get("CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY", ""))
+    version = os.environ.get("CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION", "")
+    if not version:
+        raise Refusal("collector version is unavailable")
+    # LaunchServices, rather than direct exec, makes this signed bundle the
+    # responsible EventKit process. The request is contract-only; the bounded
+    # raw envelope stays in a 0600 FIFO, never a filesystem payload.
+    with tempfile.TemporaryDirectory(prefix="carr-prebrief-") as raw:
+        root = Path(raw); request, response = root / "contract.fifo", root / "envelope.fifo"
+        os.mkfifo(request, 0o600); os.mkfifo(response, 0o600)
+        payload_box: list[bytes] = []; errors: list[Exception] = []
+        def write_contract() -> None:
+            try:
+                with request.open("wb", buffering=0) as out: out.write(_canonical(contract))
+            except Exception as exc: errors.append(exc)
+        def read_envelope() -> None:
+            try:
+                with response.open("rb", buffering=0) as incoming:
+                    value = incoming.read(MAX_PIPE + 1)
+                payload_box.append(value)
+            except Exception as exc: errors.append(exc)
+        writer, reader = threading.Thread(target=write_contract), threading.Thread(target=read_envelope)
+        writer.start(); reader.start()
+        test_open = os.environ.get("CARR_CALENDAR_PREBRIEF_TEST_OPEN_BIN", "")
+        if test_open and os.environ.get("CARR_CALENDAR_PREBRIEF_TEST_MODE") != "1":
+            raise Refusal("production EventKit launcher cannot be overridden")
+        opener = test_open if test_open else "/usr/bin/open"
+        open_env={"PATH": os.environ.get("PATH", "")}
+        if test_open:
+            open_env["PYTHONPATH"]=os.environ.get("PYTHONPATH", "")
+        result = subprocess.run([opener, "-n", str(app), "--args", "collector", str(request), str(response), str(allowlist), str(private_key), version], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=open_env, timeout=75, check=False)
+        writer.join(5); reader.join(5)
+        if writer.is_alive() or reader.is_alive() or errors or len(payload_box) != 1:
+            raise Refusal("responsible EventKit application IPC did not finish")
+        payload = payload_box[0]
+    result_stdout = payload
+    if result.returncode or len(result_stdout) > MAX_PIPE:
         raise Refusal("bound EventKit collector failed")
     try:
-        value = json.loads(result.stdout)
+        value = json.loads(result_stdout)
     except json.JSONDecodeError as exc:
         raise Refusal("bound EventKit collector returned malformed envelope") from exc
     if not isinstance(value, dict):
@@ -289,7 +337,7 @@ def child_execute(*, sponsor: str, mode: str, claim: Mapping[str, Any], profile:
     return {"sponsor": sponsor, "mode": mode, "attestation_id": str(attestation), "receipt_id": str(receipt)}
 
 
-def parent_execute(*, sponsor: str, mode: str, claim_command: str, child_profile: Path, public_key: Path, environ: Mapping[str, str]) -> dict[str, Any]:
+def parent_execute(*, sponsor: str, mode: str, claim_command: str, child_profile: Path, public_key: Path, environ: Mapping[str, str], include_claim: bool = False) -> dict[str, Any]:
     if sponsor not in SPONSORS or mode not in {"live", "canary"} or any(environ.get(key) for key in environ if (key.startswith("CARR_DB_") and key != "CARR_DB_JOBS_URL") or key in {"DATABASE_URL", "CARR_DB_WRITER_URL", "CARR_DB_OWNER_URL"}):
         raise Refusal("jobs parent requires only its scoped jobs credential")
     jobs_dsn = environ.get("CARR_DB_JOBS_URL", "")
@@ -305,10 +353,19 @@ def parent_execute(*, sponsor: str, mode: str, claim_command: str, child_profile
     if claim_run.returncode or len(claim_run.stdout) > 8192:
         raise Refusal("jobs claim connector failed")
     try:
-        claim = _claim(json.loads(claim_run.stdout))
+        claimed_value = json.loads(claim_run.stdout)
     except (json.JSONDecodeError, TypeError, Refusal) as exc:
         raise Refusal("jobs claim connector returned malformed claim") from exc
-    child_env = {key: environ[key] for key in ("PATH", "PYTHONPATH", "CARR_CALENDAR_PREBRIEF_ALLOWLIST", "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY", "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION") if environ.get(key)}
+    # An idle queue is a successful, typed result.  In particular, do not
+    # treat a silent/empty connector stdout as idle: that would conceal a
+    # broken lease boundary as a harmless no-op.
+    if claimed_value == {"status": "empty"}:
+        return {"status": "empty"}
+    try:
+        claim = _claim(claimed_value)
+    except Refusal as exc:
+        raise Refusal("jobs claim connector returned malformed claim") from exc
+    child_env = {key: environ[key] for key in ("PATH", "PYTHONPATH", "CARR_CALENDAR_PREBRIEF_EVENTKIT_APP", "CARR_CALENDAR_PREBRIEF_ALLOWLIST", "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY", "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION", "CARR_CALENDAR_PREBRIEF_TEST_MODE", "CARR_CALENDAR_PREBRIEF_TEST_OPEN_BIN") if environ.get(key)}
     child_env.update({"CARR_CALENDAR_PREBRIEF_CHILD_PROFILE": str(child_profile), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY": str(public_key)})
     child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--child", "--sponsor", sponsor, "--mode", mode], input=_canonical(claim), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child_env, timeout=90, check=False)
     if child.returncode or len(child.stdout) > 8192:
@@ -319,7 +376,7 @@ def parent_execute(*, sponsor: str, mode: str, claim_command: str, child_profile
         raise Refusal("sponsor child returned malformed result") from exc
     if not isinstance(result, dict) or set(result) != {"sponsor", "mode", "attestation_id", "receipt_id"}:
         raise Refusal("sponsor child returned malformed result")
-    return result
+    return {"claim": claim, "result": result} if include_claim else result
 
 
 def main() -> int:

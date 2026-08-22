@@ -29,15 +29,26 @@ for each row execute function ops.refuse_job_evidence_rewrite();
 alter table ops.renewal_decision_source_run add column source_snapshot_id uuid references ops.renewal_source_snapshot(id) on delete restrict;
 alter table ops.renewal_decision_source_run add constraint renewal_source_run_snapshot_unique unique(source_snapshot_id);
 
+-- This is a capability bundle, not an identity. The sole LOGIN principal is
+-- provisioned out of band as carr_renewal_source_attestor and receives this
+-- membership. Exact session identity checks below make a general jobs
+-- credential fail closed even if it acquires unrelated grants later.
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname='carr_renewal_source_attestors') then
+    create role carr_renewal_source_attestors nologin;
+  end if;
+end $$;
+grant usage on schema ops,public to carr_renewal_source_attestors;
+
 -- v1 could seal every historical mutable renewal row.  Only snapshot members
 -- may now form a source run; cache extras are never evidence of completion.
-revoke execute on function ops.seal_renewal_decision_source_run(uuid,uuid) from carr_jobs;
+revoke execute on function ops.seal_renewal_decision_source_run(uuid,uuid) from public,carr_reader,carr_writer,carr_jobs,carr_exporter;
 
 create or replace function ops.seal_renewal_decision_source_run(p_job_id uuid,p_lease uuid,p_snapshot_id uuid)
 returns ops.renewal_decision_source_run language plpgsql security definer set search_path=ops,public,pg_temp as $$
 declare v_job ops.job%rowtype; v_snapshot ops.renewal_source_snapshot%rowtype; v_run ops.renewal_decision_source_run%rowtype; v_count integer;
 begin
- if not pg_has_role(session_user,'carr_jobs','member') then raise exception using errcode='42501',message='renewal source-run sealing requires the jobs capability'; end if;
+ if session_user<>'carr_renewal_source_attestor' or not pg_has_role(session_user,'carr_renewal_source_attestors','member') then raise exception using errcode='42501',message='renewal source-run sealing requires the exact renewal source attestor capability'; end if;
  select * into v_job from ops.job where id=p_job_id for update;
  if not found or v_job.definition_key<>'renewal-radar-source-daily' or v_job.definition_version<>1 or v_job.mode<>'live' or v_job.state<>'running' or v_job.lease_token is distinct from p_lease or v_job.leased_until is null or v_job.leased_until<now() then raise exception using errcode='55000',message='renewal source-run sealing requires its current static job lease'; end if;
  if v_job.scheduled_for < now()-interval '36 hours' or v_job.scheduled_for > now()+interval '5 minutes' then raise exception using errcode='22023',message='renewal source-run sealing refuses a job outside its DB-clock window'; end if;
@@ -76,12 +87,12 @@ create function ops.ingest_renewal_signed_snapshot(
 language plpgsql security definer set search_path=ops,public,pg_temp as $$
 declare v_job ops.job%rowtype; v_snapshot ops.renewal_source_snapshot%rowtype; v_row jsonb; v_candidate_id uuid; v_run ops.renewal_decision_source_run%rowtype; v_count integer; v_seq integer:=0; v_key text;
 begin
- if not pg_has_role(session_user,'carr_jobs','member') then raise exception using errcode='42501',message='renewal signed ingress requires the jobs capability'; end if;
+ if session_user<>'carr_renewal_source_attestor' or not pg_has_role(session_user,'carr_renewal_source_attestors','member') then raise exception using errcode='42501',message='renewal signed ingress requires the exact renewal source attestor capability'; end if;
  if p_provider is null or btrim(p_provider)='' or octet_length(p_provider)>256 or p_key_fingerprint !~ '^[0-9a-f]{64}$' or p_payload_sha256 !~ '^[0-9a-f]{64}$' or p_signature_sha256 !~ '^[0-9a-f]{64}$' then raise exception using errcode='22023',message='renewal signed ingress provenance is malformed'; end if;
  if jsonb_typeof(p_rows)<>'array' or jsonb_array_length(p_rows)>10000 or octet_length(p_rows::text)>8388608 then raise exception using errcode='22023',message='renewal signed ingress source rows are not bounded'; end if;
  if exists(select 1 from jsonb_array_elements(p_rows) x(value) where jsonb_typeof(value)<>'object'
            or (select array_agg(key order by key) from jsonb_object_keys(value) key) is distinct from array['address','city','county','email','est_basis','est_lease_event','name','org_name','phone','segment','source_key','source_row','state','vertical']
-           or nullif(btrim(value->>'source_key'),'') is null or nullif(btrim(value->>'name'),'') is null or octet_length(value->>'source_key')>512 or octet_length(value->>'name')>512 or octet_length(value->'source_row'::text)>65536 or octet_length(value::text)>131072 or jsonb_typeof(value->'source_row')<>'object') then
+           or nullif(btrim(value->>'source_key'),'') is null or nullif(btrim(value->>'name'),'') is null or octet_length(value->>'source_key')>512 or octet_length(value->>'name')>512 or octet_length((value->'source_row')::text)>65536 or octet_length(value::text)>131072 or jsonb_typeof(value->'source_row')<>'object') then
    raise exception using errcode='22023',message='renewal signed ingress source row shape is malformed'; end if;
  if exists(select 1 from jsonb_array_elements(p_rows) x(value) group by value->>'source_key' having count(*)<>1) then raise exception using errcode='23505',message='renewal signed ingress source key is duplicated'; end if;
  select * into v_job from ops.job where id=p_job_id for update;
@@ -113,12 +124,41 @@ end $$;
 -- A sealed source run invalidates only when one of its own signed members no
 -- longer reconciles.  Historical cache extras are intentionally irrelevant.
 create or replace view v_renewal_decision_queue_status as
-with current_run as (select * from ops.renewal_decision_source_run order by snapshot_at desc,recorded_at desc,id desc limit 1),
+with current_run as (select * from ops.renewal_decision_source_run where source_snapshot_id is not null order by snapshot_at desc,recorded_at desc,id desc limit 1),
 current_members as (select r.id as source_run_id,r.recorded_at,r.member_count,m.candidate_id,cp.id is not null and cp.source='renewal-radar' and cp.status='pool' and m.row_digest=ops.renewal_decision_candidate_digest(cp) as is_current,upper(coalesce(cp.source_row->>'tier','')) like 'T1%' as is_t1 from current_run r left join ops.renewal_decision_source_run_member m on m.source_run_id=r.id left join candidate_pool cp on cp.id=m.candidate_id),
 aggregate as (select max(recorded_at) as source_observed_at,coalesce(max(member_count),0) as sealed_member_count,count(*) filter(where candidate_id is not null and is_current)::integer as current_member_count,count(*) filter(where candidate_id is not null and is_current and is_t1)::integer as t1_candidate_count from current_members)
 select t1_candidate_count,source_observed_at,case when source_observed_at is null or source_observed_at < now()-interval '36 hours' or sealed_member_count<>current_member_count then 'unavailable' when t1_candidate_count=0 then 'empty' else 'ready' end as freshness_state from aggregate;
 
+-- The delivery surface must read the same signed-only run as its status
+-- companion. Otherwise a later legacy unsigned run could be rendered while
+-- the status view happens to describe an older signed run.
+create or replace view v_renewal_decision_queue as
+with current_run as (
+  select * from ops.renewal_decision_source_run
+   where source_snapshot_id is not null
+   order by snapshot_at desc,recorded_at desc,id desc limit 1
+), current_rows as (
+  select cp.name as display_name,cp.org_name,cp.vertical,cp.city,cp.county,cp.state,cp.est_lease_event,
+         case when upper(coalesce(cp.source_row->>'tier','')) like 'T1%' then 't1' else 'not_t1' end as tier_status,
+         case when lower(coalesce(cp.source_row->>'flag','')) like 'already%' then 'already_known'
+              when lower(coalesce(cp.source_row->>'flag','')) like '%not yet tenant-identified%' then 'building_signal'
+              when nullif(btrim(coalesce(cp.source_row->>'flag','')),'') is null then 'clear'
+              else 'review_required' end as flag_status,
+         ((cp.email is not null and cp.email<>'') or (cp.phone is not null and cp.phone<>'')) as has_channel,
+         r.recorded_at as source_observed_at
+    from current_run r
+    join ops.renewal_decision_source_run_member m on m.source_run_id=r.id
+    join candidate_pool cp on cp.id=m.candidate_id and cp.source='renewal-radar' and cp.status='pool'
+       and m.row_digest=ops.renewal_decision_candidate_digest(cp)
+)
+select display_name,org_name,vertical,city,county,state,est_lease_event,tier_status,flag_status,has_channel,
+       count(*) over ()::integer as decision_count,source_observed_at,'ready'::text as freshness_state
+  from current_rows
+ where tier_status='t1'
+   and (select freshness_state from v_renewal_decision_queue_status)='ready';
+
 revoke all on ops.renewal_source_snapshot,ops.renewal_source_snapshot_member from public,carr_reader,carr_writer,carr_jobs,carr_exporter;
-revoke all on function ops.seal_renewal_decision_source_run(uuid,uuid,uuid),ops.ingest_renewal_signed_snapshot(uuid,uuid,uuid,text,text,timestamptz,text,text,jsonb) from public,carr_reader,carr_writer,carr_exporter;
-grant execute on function ops.ingest_renewal_signed_snapshot(uuid,uuid,uuid,text,text,timestamptz,text,text,jsonb) to carr_jobs;
+revoke all on function ops.seal_renewal_decision_source_run(uuid,uuid,uuid),ops.ingest_renewal_signed_snapshot(uuid,uuid,uuid,text,text,timestamptz,text,text,jsonb) from public,carr_reader,carr_writer,carr_jobs,carr_exporter;
+grant execute on function ops.ingest_renewal_signed_snapshot(uuid,uuid,uuid,text,text,timestamptz,text,text,jsonb) to carr_renewal_source_attestors;
+grant execute on function ops.seal_renewal_decision_source_run(uuid,uuid,uuid) to carr_renewal_source_attestors;
 commit;

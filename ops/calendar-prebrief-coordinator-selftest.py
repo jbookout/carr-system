@@ -179,6 +179,16 @@ with tempfile.TemporaryDirectory() as raw:
     allowlist = root / "e2e-allowlist.json"
     allowlist.write_text('{"version":1,"calendars":[{"identifier":"calendar-joe","sponsor":"joe"}]}', encoding="utf-8")
     allowlist.chmod(0o600)
+    # The coordinator must reach EventKit through the responsible application
+    # executable. This hermetic bundle-shaped shim preserves the app-routing
+    # contract while the fake EventKit module keeps the test UI-free.
+    app_launcher = root / "CARR Calendar Access.app" / "Contents" / "MacOS" / "carr-calendar-access"
+    app_launcher.parent.mkdir(parents=True)
+    app_launcher.write_text("#!/bin/sh\nexport CARR_CALENDAR_PREBRIEF_ALLOWLIST=\"$3\" CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY=\"$4\" CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION=\"$5\"\nexec " + repr(sys.executable) + " " + repr(str(ROOT / 'tools/calendar-prebrief-collector.py')) + " < \"$1\" > \"$2\"\n", encoding="utf-8")
+    app_launcher.chmod(0o700)
+    fake_open = root / "fake-open.py"
+    fake_open.write_text("#!/usr/bin/env python3\nimport os,subprocess,sys\na=sys.argv[1:]\nassert a[0]=='-n' and a[2]=='--args' and a[3]=='collector' and len(a)==9\nraise SystemExit(subprocess.run([a[1]+'/Contents/MacOS/carr-calendar-access',*a[4:]],env=os.environ.copy()).returncode)\n", encoding="utf-8")
+    fake_open.chmod(0o700)
     profile = root / "e2e-profile.env"
     claim = root / "claim.py"
 
@@ -197,7 +207,7 @@ with tempfile.TemporaryDirectory() as raw:
         profile.chmod(0o600)
         claim.write_text("import json,os\n" + f"open({str(e2e_log)!r},'a',encoding='utf-8').write(json.dumps({{'kind':'parent_claim_env','user':'','db_env':sorted(k for k in os.environ if k.startswith('CARR_DB_') or k.startswith('PG'))}})+'\\n')\n" + f"print(json.dumps({{'job_id':{job_id!r},'lease':{e2e_contracts[job_id]['lease_token']!r},'scheduled_for':'2026-08-20T06:30:00Z'}}))\n", encoding="utf-8")
         claim.chmod(0o700)
-        environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(fake), "CARR_DB_JOBS_URL": dsn("carr_jobs"), "CARR_CALENDAR_PREBRIEF_CLAIM_COMMAND": f"{sys.executable} {claim}", "CARR_CALENDAR_PREBRIEF_CHILD_PROFILE": str(profile), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY": str(public), "CARR_CALENDAR_PREBRIEF_ALLOWLIST": str(allowlist), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY": str(private), "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION": "fixture-1"}
+        environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(fake), "CARR_REPO": str(ROOT), "CARR_DB_JOBS_URL": dsn("carr_jobs"), "CARR_CALENDAR_PREBRIEF_CLAIM_COMMAND": f"{sys.executable} {claim}", "CARR_CALENDAR_PREBRIEF_CHILD_PROFILE": str(profile), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY": str(public), "CARR_CALENDAR_PREBRIEF_EVENTKIT_APP": str(app_launcher.parents[2]), "CARR_CALENDAR_PREBRIEF_ALLOWLIST": str(allowlist), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY": str(private), "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION": "fixture-1", "CARR_CALENDAR_PREBRIEF_TEST_MODE":"1", "CARR_CALENDAR_PREBRIEF_TEST_OPEN_BIN":str(fake_open)}
         return subprocess.run([sys.executable, str(SCRIPT), "--sponsor", "joe", "--mode", mode], text=True, capture_output=True, env=environment, timeout=15, check=False)
 
     e2e_live, e2e_canary = run_e2e("live"), run_e2e("canary")
@@ -210,6 +220,12 @@ with tempfile.TemporaryDirectory() as raw:
     check("collector receives no database credential", all(row["db_env"] == [] for row in e2e_rows if row["kind"] == "collector_env"))
     seen = [(row["kind"], row["user"]) for row in e2e_rows if row["kind"] in {"contract", "attestor", "live_ingest", "canary_ingest"}]
     check("E2E uses resolver, attestor, and distinct live/canary ingest identities", seen == [("contract", "carr_calendar_prebrief_resolver_joe"), ("attestor", "carr_calendar_prebrief_attestor_joe"), ("live_ingest", "carr_calendar_prebrief_joe"), ("contract", "carr_calendar_prebrief_resolver_joe"), ("attestor", "carr_calendar_prebrief_attestor_joe"), ("canary_ingest", "carr_calendar_prebrief_canary_joe")])
+    # Empty is a deliberate protocol value, not missing connector output. It
+    # must short-circuit before any EventKit or child credential process.
+    claim.write_text("import json\nprint(json.dumps({'status':'empty'}))\n", encoding="utf-8")
+    idle_env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(fake), "CARR_DB_JOBS_URL": dsn("carr_jobs"), "CARR_CALENDAR_PREBRIEF_CLAIM_COMMAND": f"{sys.executable} {claim}", "CARR_CALENDAR_PREBRIEF_CHILD_PROFILE": str(profile), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY": str(public)}
+    idle = subprocess.run([sys.executable, str(SCRIPT), "--sponsor", "joe", "--mode", "live"], text=True, capture_output=True, env=idle_env, timeout=15, check=False)
+    check("typed empty claim is an idle success while malformed silence is not", idle.returncode == 0 and json.loads(idle.stdout) == {"status": "empty"} and refuses(lambda: coordinator.parent_execute(sponsor="joe", mode="live", claim_command="/usr/bin/true", child_profile=profile, public_key=public, environ={"PATH": os.environ.get("PATH", ""), "CARR_DB_JOBS_URL": dsn("carr_jobs")})))
 
 print("OK" if not bad else "FAIL " + ", ".join(bad))
 raise SystemExit(bool(bad))

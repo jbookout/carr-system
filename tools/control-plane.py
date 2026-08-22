@@ -249,6 +249,29 @@ def sync_registry(manifest: dict[str, Any]) -> dict[str, int]:
                  job["provider_routes"],job.get("cache_ttl_seconds",0)))
         for workflow in manifest["workflows"]:
             execution = workflow["execution"]
+            # This one workflow has a deliberately authority-managed runtime
+            # bit.  The checked-in manifest remains disabled by default so a
+            # fresh environment cannot be enabled by configuration sync.  Once
+            # the migration has recorded a *latest* Joe activation receipt for
+            # the current allowlist, a routine generic sync must preserve that
+            # narrow live state instead of silently turning it back off.
+            enabled = workflow["enabled"]
+            if (workflow["key"], workflow["version"]) == ("calendar-prebrief-projection-joe-daily", 1):
+                cur.execute("select to_regclass('ops.calendar_prebrief_runtime_activation_receipt')")
+                if cur.fetchone()[0] is not None:
+                    cur.execute("""select exists(
+                    select 1 from ops.calendar_prebrief_allowed_calendar a
+                    join lateral (
+                      select r.allowlist_revision_id
+                        from ops.calendar_prebrief_runtime_activation_receipt r
+                       where r.sponsor='joe'
+                       order by r.activated_at desc,r.id desc limit 1
+                    ) latest on latest.allowlist_revision_id=a.active_revision_id
+                    join ops.calendar_prebrief_allowlist_receipt l
+                      on l.id=a.active_revision_id and l.sponsor='joe'
+                     and l.configuration_digest=a.configuration_digest
+                   where a.sponsor='joe')""")
+                    enabled = bool(cur.fetchone()[0])
             # The partial unique index permits one enabled version per key.
             # Lock superseded definitions before checking for running work.
             # Claim functions lock the same row, so either a claim wins and
@@ -298,7 +321,7 @@ def sync_registry(manifest: dict[str, Any]) -> dict[str, int]:
                      retry_policy=excluded.retry_policy,deduplication=excluded.deduplication,
                      completion_contract=excluded.completion_contract,
                      legacy_schedule=excluded.legacy_schedule,updated_at=now()""",
-                (workflow["key"],workflow["version"],workflow["enabled"],workflow["risk"],
+                (workflow["key"],workflow["version"],enabled,workflow["risk"],
                  workflow.get("inventory",{}).get("owner","system"),execution["kind"],
                  json.dumps({k:v for k,v in execution.items() if k != "kind"}),
                  json.dumps(workflow.get("inventory",{})),json.dumps(workflow["recurrence"]),

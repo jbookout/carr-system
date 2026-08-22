@@ -38,7 +38,7 @@ ROW_KEYS = frozenset({
 DATA_KEYS = ("schema_version", "provider", "key_fingerprint", "snapshot_id", "observed_at", "rows")
 SNAPSHOT_KEYS = frozenset((*DATA_KEYS, "payload_sha256", "signature"))
 PROFILE_KEYS = frozenset({"CARR_RENEWAL_SOURCE_PROVIDER", "CARR_RENEWAL_SOURCE_KEY_FINGERPRINT",
-                          "CARR_RENEWAL_SOURCE_PUBLIC_KEY", "CARR_DB_JOBS_URL"})
+                          "CARR_RENEWAL_SOURCE_PUBLIC_KEY", "CARR_DB_RENEWAL_SOURCE_ATTESTOR_URL"})
 HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -47,7 +47,7 @@ class SourceProfile:
     provider: str
     key_fingerprint: str
     public_key: Path
-    jobs_dsn: str
+    attestor_dsn: str
 
 
 @dataclass(frozen=True)
@@ -110,7 +110,9 @@ def _verify_ed25519(payload: bytes, signature_text: object, public_key: Path) ->
     read_fd, write_fd = os.pipe()
     payload_fd = signature_fd = -1
     try:
-        input_path, input_data, signature_path = "/dev/stdin", payload, f"/dev/fd/{read_fd}"
+        input_path = "/dev/stdin"
+        input_data: bytes | None = payload
+        signature_path = f"/dev/fd/{read_fd}"
         if hasattr(os, "memfd_create"):
             payload_fd, signature_fd = os.memfd_create("carr-renewal-source"), os.memfd_create("carr-renewal-signature")
             os.write(payload_fd, payload)
@@ -160,14 +162,14 @@ def _read_profile(path: Path) -> SourceProfile:
     if set(values) != PROFILE_KEYS or not values["CARR_RENEWAL_SOURCE_PROVIDER"].strip() \
             or not HEX.fullmatch(values["CARR_RENEWAL_SOURCE_KEY_FINGERPRINT"]):
         raise SourceContractError("renewal source profile is incomplete")
-    parsed = urlsplit(values["CARR_DB_JOBS_URL"])
-    if parsed.scheme not in {"postgresql", "postgres"} or parsed.username != "carr_jobs" or not parsed.hostname:
-        raise SourceContractError("renewal source profile does not hold the jobs-only database identity")
+    parsed = urlsplit(values["CARR_DB_RENEWAL_SOURCE_ATTESTOR_URL"])
+    if parsed.scheme not in {"postgresql", "postgres"} or parsed.username != "carr_renewal_source_attestor" or not parsed.hostname:
+        raise SourceContractError("renewal source profile does not hold the exact attestor database identity")
     public_key = Path(values["CARR_RENEWAL_SOURCE_PUBLIC_KEY"])
     if hashlib.sha256(_secure_public_key(public_key)).hexdigest() != values["CARR_RENEWAL_SOURCE_KEY_FINGERPRINT"]:
         raise SourceContractError("renewal source profile key fingerprint does not match its public key")
     return SourceProfile(values["CARR_RENEWAL_SOURCE_PROVIDER"], values["CARR_RENEWAL_SOURCE_KEY_FINGERPRINT"],
-                         public_key, values["CARR_DB_JOBS_URL"])
+                         public_key, values["CARR_DB_RENEWAL_SOURCE_ATTESTOR_URL"])
 
 
 def validate_snapshot(value: object, profile: SourceProfile) -> RenewalSnapshot:
@@ -184,6 +186,7 @@ def validate_snapshot(value: object, profile: SourceProfile) -> RenewalSnapshot:
     except (ValueError, TypeError, AttributeError) as exc:
         raise SourceContractError("snapshot_id must be a UUID") from exc
     observed_raw = _text(value.get("observed_at"), "observed_at", required=True)
+    assert observed_raw is not None
     try:
         observed_at = datetime.fromisoformat(observed_raw.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -200,6 +203,7 @@ def validate_snapshot(value: object, profile: SourceProfile) -> RenewalSnapshot:
             raise SourceContractError(f"rows[{index}] has an unregistered shape")
         source_key = _text(row.get("source_key"), f"rows[{index}].source_key", required=True)
         name = _text(row.get("name"), f"rows[{index}].name", required=True)
+        assert source_key is not None and name is not None
         if source_key in seen:
             raise SourceContractError("source_key is duplicated in one source snapshot")
         seen.add(source_key)
@@ -208,7 +212,9 @@ def validate_snapshot(value: object, profile: SourceProfile) -> RenewalSnapshot:
         lease_event = row.get("est_lease_event")
         if lease_event is not None:
             try:
-                datetime.strptime(_text(lease_event, f"rows[{index}].est_lease_event", required=True), "%Y-%m-%d")
+                lease_event_text = _text(lease_event, f"rows[{index}].est_lease_event", required=True)
+                assert lease_event_text is not None
+                datetime.strptime(lease_event_text, "%Y-%m-%d")
             except ValueError as exc:
                 raise SourceContractError("est_lease_event must be YYYY-MM-DD or null") from exc
         clean = dict(row)
@@ -249,9 +255,15 @@ def import_and_seal(conn: Any, snapshot: RenewalSnapshot, *, job_id: str, lease:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--job-id", required=True)
-    parser.add_argument("--lease", required=True)
+    parser.add_argument("--disabled-contract", action="store_true")
+    parser.add_argument("--job-id")
+    parser.add_argument("--lease")
     args = parser.parse_args()
+    if args.disabled_contract:
+        print("renewal-source: refused: provider and dedicated claim runner are not installed", file=sys.stderr)
+        return 78
+    if not args.job_id or not args.lease:
+        parser.error("--job-id and --lease are required outside the disabled contract")
     profile_path = os.environ.get("CARR_RENEWAL_SOURCE_PROFILE")
     if not profile_path:
         raise SystemExit("renewal-source: credentialed verification profile is required")
@@ -262,7 +274,7 @@ def main() -> int:
         profile = _read_profile(Path(profile_path))
         snapshot = validate_snapshot(json.loads(raw), profile)
         import psycopg
-        with psycopg.connect(profile.jobs_dsn) as conn:
+        with psycopg.connect(profile.attestor_dsn) as conn:
             result = import_and_seal(conn, snapshot, job_id=args.job_id, lease=args.lease)
     except (json.JSONDecodeError, SourceContractError) as exc:
         print(f"renewal-source: refused: {exc}", file=sys.stderr)

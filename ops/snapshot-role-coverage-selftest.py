@@ -55,8 +55,12 @@ EXCLUDED = {
 }
 
 # role -> why it must be known but absent from the current active preamble.
-# Empty after the snapshot ledger absorbed 0229 and its four NOLOGIN bundles.
-PENDING: dict[str, str] = {}
+# 0248 is pending in the production-derived snapshot. Its NOLOGIN bundle must
+# remain absent until that migration is actually applied and the snapshot is
+# regenerated from production.
+PENDING: dict[str, str] = {
+    "carr_renewal_source_attestors": "owned by pending 0248; do not leak it into the pre-0248 snapshot",
+}
 
 CREATE_ROLE = re.compile(r"\bcreate\s+role\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
 
