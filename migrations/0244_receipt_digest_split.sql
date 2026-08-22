@@ -1,4 +1,4 @@
--- 0220 — the receipt digest was two different facts wearing one name
+-- 0244 — the receipt digest was two different facts wearing one name
 --
 -- WHAT WAS WRONG, in one sentence: ops.write_receipt.claimed_digest served BOTH
 -- as proof-of-attachment (a function of the CALL, recomputed by the database in
@@ -10,13 +10,13 @@
 -- THREE FAILURES FELL OUT OF THAT ONE CONFLATION, each reproduced by execution
 -- against a disposable cluster before this file was written:
 --
---   1. A REVERSAL RECEIPT COULD NEVER PROVE. 0211 defines exact reversal as
+--   1. A REVERSAL RECEIPT COULD NEVER PROVE. 0241 defines exact reversal as
 --      claimed_digest = target.prior_digest, but claimed_digest must ALSO equal
 --      the readback, which is always the digest of the frozen call. The two
 --      requirements are mutually exclusive, so closing a conflict guaranteed a
 --      permanently unproven receipt.
 --
---   2. ONE UNPROVEN RECEIPT BRICKED ACCEPTANCE FOR THE WHOLE DATABASE. 0213
+--   2. ONE UNPROVEN RECEIPT BRICKED ACCEPTANCE FOR THE WHOLE DATABASE. 0242
 --      bars acceptance on unproven_receipts = 0, counted globally with no
 --      scoping, and a receipt can be neither deleted, re-proven, nor repaired.
 --      Combined with (1), the only mechanism that closes a conflict guaranteed
@@ -27,7 +27,7 @@
 --      touched the receipt's own verb, subject_type or subject_id — the fields
 --      the reducer, the conflict detector and Drive retirement all key on. A
 --      receipt claiming verb 'retire-the-entire-drive' over a log-activity row
---      proved cleanly, and 0214's two-receipt gate separated its two receipts
+--      proved cleanly, and 0243's two-receipt gate separated its two receipts
 --      by nothing but their row ids.
 --
 -- WHAT THIS MIGRATION DOES, and nothing else:
@@ -51,7 +51,7 @@
 --      an exact reversal. Unproven retractions clear nothing, so the escape
 --      hatch cannot be opened from inside.
 --
---   D. MAKES 0214'S TWO-RECEIPT GATE MEAN SOMETHING. Each receipt must NAME the
+--   D. MAKES 0243'S TWO-RECEIPT GATE MEAN SOMETHING. Each receipt must NAME the
 --      dependency being retired, the two must rest on DIFFERENT calls and make
 --      DIFFERENT material claims, and the recovery must build on the state the
 --      repoint produced.
@@ -66,10 +66,10 @@
 -- cluster, where a half-applied database is thrown away rather than kept.
 --
 -- APPLYING THIS IS NOT A ROLLING DEPLOY, and an operator needs to know before
--- they start. 0220 drops the five-argument ops.write_receipt_digest and renames
+-- they start. 0244 drops the five-argument ops.write_receipt_digest and renames
 -- a column the producer writes, so there is no ordering in which a Worker built
--- against the other side of this migration keeps working: old code against 0220
--- fails on the dropped signature, and new code against 0214 fails on the missing
+-- against the other side of this migration keeps working: old code against 0244
+-- fails on the dropped signature, and new code against 0243 fails on the missing
 -- seven-argument one. Both failures land inside the receipt producer, which runs
 -- after the tool_call insert, so the whole verb rolls back and every qualified
 -- write returns an error.
@@ -86,7 +86,7 @@
 -- verified against any existing receipt. Enforcing it would make the reducer's
 -- 'broken' state unreachable, and 'broken' is a finding the system is supposed
 -- to be able to report. Causal continuity therefore remains an honest-caller
--- integrity check, exactly as 0211 left it. It is recorded here as a known
+-- integrity check, exactly as 0241 left it. It is recorded here as a known
 -- limitation rather than fixed by a change that would blind the reducer.
 
 -- ============================================================ (A) the split
@@ -107,7 +107,7 @@ alter table ops.write_receipt add column material_digest text;
 -- BACKFILL, and the reason the immutability trigger has to stand down for it.
 -- ops.refuse_receipt_rewrite permits exactly one update — recording a readback —
 -- so it would refuse this backfill. It is disabled for the statement and
--- restored to ENABLE ALWAYS, which is the state 0211 left it in; restoring it
+-- restored to ENABLE ALWAYS, which is the state 0241 left it in; restoring it
 -- with a plain ENABLE would quietly downgrade it to origin-only.
 alter table ops.write_receipt disable trigger write_receipt_immutable;
 update ops.write_receipt set material_digest = call_digest where material_digest is null;
@@ -124,7 +124,7 @@ comment on column ops.write_receipt.material_digest is
 
 -- --------------------------------------------------- a deterministic order
 -- THE FOLD ORDER WAS DECIDED BY A RANDOM NUMBER, in the one case that matters.
--- 0213 folds a subject's receipts by (recorded_at, id) and its comment defends
+-- 0242 folds a subject's receipts by (recorded_at, id) and its comment defends
 -- the tiebreak, but recorded_at is clock_timestamp() and id is gen_random_uuid()
 -- -- so two receipts written inside one clock tick fold in whichever order two
 -- random uuids happen to sort. Measured on this machine the gaps are tens of
@@ -145,7 +145,7 @@ create index write_receipt_subject_seq_idx
   on ops.write_receipt (subject_type, subject_id, seq);
 
 -- ------------------------------------------------------------- retraction
--- The acceptance bar in 0213 counts unproven receipts globally and a receipt
+-- The acceptance bar in 0242 counts unproven receipts globally and a receipt
 -- can never be deleted, re-proven or repaired. Without a way to disavow one,
 -- a single bad receipt is permanent and the bar is a wall rather than a bar.
 alter table ops.write_receipt
@@ -247,7 +247,7 @@ begin
 end $$;
 
 -- ------------------------------------------------ exact reversal, corrected
--- THE BUG THIS FIXES. 0211 compared claimed_digest to target.prior_digest, and
+-- THE BUG THIS FIXES. 0241 compared claimed_digest to target.prior_digest, and
 -- claimed_digest was simultaneously required to equal the readback. No receipt
 -- could satisfy both, so every reversal was born unprovable. The comparison
 -- belongs to the MATERIAL claim, which is the only one of the two that is about
@@ -372,10 +372,10 @@ begin
   -- mark on the acceptance bar and a mislabelled one is the caller's error.
   --
   -- HONESTY ABOUT THE OTHER TWO: the actor and tenant clauses are UNREACHABLE
-  -- while 0208 stands, because 0208 already refuses a tool_call whose actor or
+  -- while 0231 stands, because 0231 already refuses a tool_call whose actor or
   -- tenant differs from its session's, and this receipt is already required to
   -- match that same session. No probe below exercises them and none can. They
-  -- are kept as depth against a future weakening of 0208, and they are named
+  -- are kept as depth against a future weakening of 0231, and they are named
   -- here as untested rather than counted as proven.
   if tc.verb is distinct from r.verb then
     raise exception 'receipt % claims verb % but its evidence records verb %',
@@ -446,7 +446,7 @@ as $$
      and a.id < b.id
    -- ONLY A PROVEN REVERSAL CLOSES ANYTHING. The earlier version accepted ANY
    -- row that named a side, with no test of proof and no test of whether that
-   -- row had itself been disavowed. Under 0213 that was self-punishing: an
+   -- row had itself been disavowed. Under 0242 that was self-punishing: an
    -- unproven reversal was a permanent wall on the acceptance bar, so nobody
    -- could profit from one. Section (C) removed the punishment by making
    -- unproven receipts retractable, and removing the punishment without
@@ -583,7 +583,7 @@ begin
   select count(*) into n_reads  from public.tool_read_call where application_session_id is not null;
 
   -- THE ONE CHANGE. An unproven receipt that a PROVEN receipt has retracted no
-  -- longer counts against the bar. Everything else about this count is as 0213
+  -- longer counts against the bar. Everything else about this count is as 0242
   -- left it: computed here, never supplied, and global rather than scoped.
   select count(*) filter (where w.is_proven),
          count(*) filter (where not w.is_proven and not exists (
@@ -673,7 +673,7 @@ begin
     raise exception 'the recovery receipt % is not proven', new.recovery_receipt_id;
   end if;
 
-  -- EACH RECEIPT MUST NAME THE DEPENDENCY BEING RETIRED. Without this, 0214
+  -- EACH RECEIPT MUST NAME THE DEPENDENCY BEING RETIRED. Without this, 0243
   -- accepted any two proven receipts about anything at all — the reviewer
   -- retired a dependency with receipts that had never heard of it.
   if repoint.subject_type is distinct from 'drive_dependency'
@@ -692,7 +692,7 @@ begin
   -- from it are two pieces of work, and two rows describing one piece of work
   -- are one piece of evidence counted twice.
   --
-  -- THIS SHADOWS 0214's drive_retirement_distinct_receipts CHECK, and the next
+  -- THIS SHADOWS 0243's drive_retirement_distinct_receipts CHECK, and the next
   -- reader should know that rather than discover it. A receipt trivially shares
   -- its own call with itself, so passing one receipt for both roles now trips
   -- the same-call clause below, and a BEFORE trigger runs ahead of any check
@@ -884,9 +884,9 @@ grant execute on function ops.write_receipt_material_digest(text,uuid,text,uuid)
 
 -- ===== (G) A WRONG RETIREMENT MUST BE CORRECTABLE
 
--- THE DEFECT THIS CLOSES IS THE MIRROR OF THE ONE 0220 EXISTS FOR. The original
+-- THE DEFECT THIS CLOSES IS THE MIRROR OF THE ONE 0244 EXISTS FOR. The original
 -- bug was a permanent REFUSAL: one unproven receipt barred acceptance forever
--- with no way back. 0214 shipped the opposite and nobody noticed, because it
+-- with no way back. 0243 shipped the opposite and nobody noticed, because it
 -- only bites once something is wrong: ops.drive_retirement rows cannot be
 -- updated, cannot be deleted, and one row per dependency was unique, so a
 -- dependency retired in error stayed retired forever and readiness went on
@@ -2020,7 +2020,7 @@ begin
 
   -- ============================ (10) the immutability tuple covers the new fields
   -- The file's own rule is that a field left out of this tuple is a field a
-  -- receipt can be rewritten through. 0220 added two fields to the row and both
+  -- receipt can be rewritten through. 0244 added two fields to the row and both
   -- went untested. Rolled back, because the fixture must be an UNPROVEN receipt
   -- with no readback yet and leaving one behind would sit on the bar.
   begin
@@ -2170,7 +2170,7 @@ begin
   if base_unproven = 0 and base_conflict = 0 then
     begin
       perform ops.accept_phase4(gen_random_uuid(), sid,
-        '0220 probe: acceptance must refuse a caller that authored its own evidence');
+        '0244 probe: acceptance must refuse a caller that authored its own evidence');
       raise exception '0244 FAILED: acceptance ran in a transaction that had already '
         'written, so it counted evidence it authored itself';
     exception
@@ -2181,7 +2181,7 @@ begin
         end if;
     end;
   else
-    raise notice '0220: acceptance-success probe SKIPPED -- this database already '
+    raise notice '0244: acceptance-success probe SKIPPED -- this database already '
                  'carries % unretracted unproven receipt(s) and % open conflict(s) '
                  'that predate the migration. The refusal half still ran.',
                  base_unproven, base_conflict;
@@ -2526,10 +2526,10 @@ begin
     end if;
   end;
 
-  raise notice '0220 apply-time proof passed';
-  raise exception 'ROLLBACK_0220_PROBE';
+  raise notice '0244 apply-time proof passed';
+  raise exception 'ROLLBACK_0244_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0220_PROBE' then
+  if sqlerrm = 'ROLLBACK_0244_PROBE' then
     return;
   end if;
   raise;

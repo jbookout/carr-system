@@ -1,4 +1,4 @@
--- 0213 — the continuity reducer, and Phase 4 acceptance
+-- 0242 — the continuity reducer, and Phase 4 acceptance
 --
 -- WHY THIS COMES LAST, AND WHY NOTHING BEFORE IT WAS ALLOWED TO TOUCH THIS.
 -- Every earlier slice ran under a contract asserting that no reducer, no
@@ -6,7 +6,7 @@
 -- not bureaucracy: a system that can declare itself finished before it can
 -- prove anything will do exactly that, and the declaration is the artifact
 -- everyone downstream trusts. The surface is introduced HERE, deliberately, and
--- only after receipts can prove themselves (0211).
+-- only after receipts can prove themselves (0241).
 --
 -- TWO THINGS, AND THE SECOND DEPENDS ENTIRELY ON THE FIRST.
 --
@@ -20,7 +20,7 @@
 --
 --   1. THE COUNTS ARE COMPUTED, NEVER SUPPLIED. There is no parameter through
 --      which a caller can pass "qualifying rows: many". The function counts
---      them itself, the same lesson 0211's readback encodes.
+--      them itself, the same lesson 0241's readback encodes.
 --   2. IT IS REFUSED WHEN THE EVIDENCE DOES NOT SUPPORT IT. Zero qualifying
 --      evidence, any unproven receipt, or any open conflict, and the insert
 --      fails on a table constraint rather than on anyone's judgement.
@@ -108,7 +108,7 @@ end $$;
 
 -- ------------------------------------------- reconciled conflicts close
 -- FOUND BY MUTATION TESTING, and it is a design fix rather than a test fix.
--- 0211 defined a conflict as two receipts on the same subject that built on the
+-- 0241 defined a conflict as two receipts on the same subject that built on the
 -- same prior state and produced different results. That definition is right,
 -- and receipts are immutable, so under it a conflict could NEVER close — which
 -- made the acceptance bar below unreachable forever in any database that had
@@ -116,7 +116,7 @@ end $$;
 --
 -- A conflict is therefore OPEN until one of its two sides is explicitly
 -- reversed. Reversal is already the one operation whose exactness the database
--- checks (0211), so "resolved" means the same thing here as it does there:
+-- checks (0241), so "resolved" means the same thing here as it does there:
 -- somebody put the subject back where the losing branch started, on the record.
 create or replace function ops.receipt_conflicts(p_subject_type text, p_subject_id uuid)
 returns table (left_receipt uuid, right_receipt uuid, shared_prior text)
@@ -379,10 +379,10 @@ begin
   -- unproven receipts and conflicts, and a broken chain with both receipts
   -- proven is a real history someone must reconcile, not a proof failure. What
   -- MUST refuse is a conflict, which is checked next.
-  raise notice '0213 apply-time proof passed';
-  raise exception 'ROLLBACK_0213_PROBE';
+  raise notice '0242 apply-time proof passed';
+  raise exception 'ROLLBACK_0242_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0213_PROBE' then
+  if sqlerrm = 'ROLLBACK_0242_PROBE' then
     return;
   end if;
   raise;

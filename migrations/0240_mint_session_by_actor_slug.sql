@@ -1,4 +1,4 @@
--- 0210 — mint a session from an actor SLUG, so the door needs no actor id
+-- 0240 — mint a session from an actor SLUG, so the door needs no actor id
 --
 -- THE DEFECT THIS FIXES, FOUND BY REVIEW BEFORE ANY OF IT SHIPPED. The first
 -- attempt to wire the OAuth door called ops.mint_application_session, which
@@ -11,7 +11,7 @@
 -- THE REPAIR THAT LOOKS OBVIOUS IS THE WRONG ONE. Granting carr_session_issuer
 -- SELECT on public.actor would let the door resolve the id itself, and it would
 -- work. It also widens the one credential whose entire purpose is to hold
--- nothing but the mint. 0209 argues that the issuer must be unable to do
+-- nothing but the mint. 0239 argues that the issuer must be unable to do
 -- anything except mint; handing it a table read to fix an ergonomics problem
 -- spends that argument for convenience.
 --
@@ -22,7 +22,7 @@
 --
 -- AN UNKNOWN SLUG RAISES rather than minting a session with a null actor. A
 -- session whose actor is unknown would satisfy "a row exists" while failing the
--- only thing the row is for: 0208's guard matches the evidence row's actor
+-- only thing the row is for: 0231's guard matches the evidence row's actor
 -- against the session's, and null matches nothing, so such a session would
 -- silently make every write it vouched for non-qualifying.
 
@@ -55,7 +55,7 @@ begin
     raise exception 'no actor row for slug %; the session cannot name a principal',
       p_actor_slug;
   end if;
-  -- Delegates rather than duplicating: every invariant 0208 enforces on the
+  -- Delegates rather than duplicating: every invariant 0231 enforces on the
   -- insert (the 30-day ceiling, the server-clock authentication instant, the
   -- immutability triggers) stays in exactly one place. A copy of that INSERT
   -- here would be a second definition of the same rules, free to drift.
@@ -73,7 +73,7 @@ do $$
 declare
   offenders text;
 begin
-  -- Same sweep 0208 runs over its own functions, for the same reason: a grant
+  -- Same sweep 0231 runs over its own functions, for the same reason: a grant
   -- to anything the runtime can reach turns the separation back off.
   select string_agg(a.grantee::regrole::text, ', ') into offenders
     from pg_proc p
@@ -90,14 +90,14 @@ begin
       offenders;
   end if;
 
-  -- The delegation must actually reach 0208's function, or this migration has
-  -- created a mint that enforces none of 0208's invariants.
+  -- The delegation must actually reach 0231's function, or this migration has
+  -- created a mint that enforces none of 0231's invariants.
   if not exists (
     select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
      where n.nspname='ops' and p.proname='mint_application_session_for_slug'
        and p.prosrc like '%ops.mint_application_session(%')
   then
     raise exception '0240 FAILED: the slug wrapper does not delegate to '
-                    'ops.mint_application_session, so 0208''s invariants are bypassed';
+                    'ops.mint_application_session, so 0231''s invariants are bypassed';
   end if;
 end $$;
