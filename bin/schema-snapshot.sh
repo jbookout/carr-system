@@ -609,34 +609,89 @@ if [ "$DECLARED_COUNT" -lt 2 ]; then
   exit 1
 fi
 
-if ! sed -e "s/__DECLARED_KEYS__/$DECLARED_KEYS/g" -e "s/__DECLARED_COUNT__/$DECLARED_COUNT/g" <<'CONTROL_CATALOG_VERIFY' | "$PSQL" -X -q -v ON_ERROR_STOP=1 "$URL"
-do $$
-declare present int;
+# THE SAME DECLARATIONS AGAIN, THIS TIME WHOLE ROWS RATHER THAN KEYS.
+#
+# WHY THIS EXISTS (loop #506 finding 2 — the open-loop record of the first
+# independent review of a Production release, raised by one seat as a major
+# finding and by the other as a minor one). The check below used to compile the
+# declared KEY list from the repository and then verify only that those keys
+# were present, pinning full identity for exactly two legacy controls. Every
+# other declared control had its implementation_ref, test_ref, enforcement_class
+# and installed flag copied straight out of the source database and rendered
+# into db/schema.sql as though it matched the declaration. A declared control
+# whose Production row had drifted rode into a tracked file unreviewed.
+#
+# It was not a hole into Production — ops/control-catalog-parity-gate.py catches
+# it downstream — but it was a hole in the claim this generator exists to make:
+# that an unreviewed row cannot reach a tracked file. Now every declared control
+# is compared field by field before anything is rendered, so the two legacy pins
+# are no longer a special case; both are inside the compiled set and are checked
+# by the same comparison as everything else.
+if ! DECLARED_ROWS="$("$CATALOG_PY" - "$REPO" <<'DECLARED_CONTROL_ROWS'
+import importlib.util, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("scc", repo / "ops" / "sync_control_catalog.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+
+def q(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+rows = sorted(mod.compile_catalog(), key=lambda r: r["control_key"])
+if not rows:
+    raise SystemExit("no declared controls")
+print(",\n      ".join(
+    "("
+    + ", ".join(q(r[c]) for c in
+                ("control_key", "implementation_ref", "test_ref", "enforcement_class"))
+    + ", " + q(bool(r["installed"])) + ")"
+    for r in rows))
+DECLARED_CONTROL_ROWS
+)"; then
+  echo "schema-snapshot: could not compile the declared controls — nothing written" >&2
+  exit 1
+fi
+
+# Composed into a FILE rather than substituted with sed, because the declared
+# values are repository paths and sed's own delimiter lives in every one of them.
+CONTROL_VERIFY_SQL="$(mktemp)"
+{
+  cat <<'VERIFY_HEAD'
+do $carr_control_catalog$
+declare drifted text;
 begin
-  select count(*) into present from ops.enforcement_control_catalog
-   where control_key in (__DECLARED_KEYS__);
-  if present <> __DECLARED_COUNT__ then
-    raise exception 'schema snapshot refused: exact reviewed control catalog is missing or drifted';
+  select string_agg(d.control_key, ', ' order by d.control_key) into drifted
+    from (values
+VERIFY_HEAD
+  printf '      %s\n' "$DECLARED_ROWS"
+  cat <<'VERIFY_TAIL'
+    ) as d(control_key, implementation_ref, test_ref, enforcement_class, installed)
+    left join ops.enforcement_control_catalog c
+      on  c.control_key        = d.control_key::text
+      and c.implementation_ref = d.implementation_ref::text
+      and c.test_ref           = d.test_ref::text
+      and c.enforcement_class  = d.enforcement_class::text
+      and c.installed          = d.installed
+      and (not d.installed or c.verified_at is not null)
+   where c.control_key is null;
+  if drifted is not null then
+    raise exception 'schema snapshot refused: exact reviewed control catalog is missing or drifted: %', drifted;
   end if;
-  -- The two controls that predate the declaration files are still pinned by
-  -- their full identity, because they are the ones no repository file generated
-  -- and so the ones a drift would be silent about.
-  if (select count(*) from ops.enforcement_control_catalog where
-        (control_key='human_authority_runtime'
-         and implementation_ref='migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js'
-         and test_ref='mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py'
-         and enforcement_class='transactional_schema'
-         and installed and verified_at is not null)
-     or (control_key='platform_metering_pre_dispatch'
-         and implementation_ref='lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py'
-         and test_ref='ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py'
-         and enforcement_class='deny_gate'
-         and installed and verified_at is not null)) <> 2 then
-    raise exception 'schema snapshot refused: exact reviewed control catalog is missing or drifted';
-  end if;
-end $$;
-CONTROL_CATALOG_VERIFY
+end
+$carr_control_catalog$;
+VERIFY_TAIL
+} > "$CONTROL_VERIFY_SQL"
+
+# A DO block writes nothing to stdout, so a refusal appends no rows. It runs
+# BEFORE the render below for that reason: render first and a drifted catalog
+# would append half a file before anything raised.
+if ! "$PSQL" -X -q -v ON_ERROR_STOP=1 "$URL" -f "$CONTROL_VERIFY_SQL"
 then
+  rm -f "$CONTROL_VERIFY_SQL"
   echo "schema-snapshot: exact reviewed control catalog is missing or drifted — nothing written" >&2
   exit 1
 fi
