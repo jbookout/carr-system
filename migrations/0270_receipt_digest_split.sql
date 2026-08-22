@@ -345,6 +345,18 @@ $$;
 -- computes a digest that is not bound to a subject, which is the exact defect
 -- this migration exists to remove; leaving it callable would leave the defect
 -- callable.
+--
+-- REVOKED BEFORE IT IS DROPPED, which is this series' established shape for
+-- removing a granted function (0180 and 0184 both do it, naming the roles).
+-- DROP removes the ACL either way, so this changes nothing about the database
+-- -- it changes what the AUTHORITY PLAN can see. tools/schema_snapshot_grants.py
+-- composes each role's privileges by replaying grant and revoke statements from
+-- pending migrations, and it does not read DROP. Without the revoke, the plan
+-- goes on believing carr_writer and carr_reader hold execute on a function that
+-- no longer exists, and the full-rebuild parity gate fails with the plan and the
+-- database disagreeing -- which is exactly what it caught here.
+revoke all on function ops.write_receipt_digest(text,uuid,text,uuid,text)
+  from public, carr_writer, carr_reader;
 drop function ops.write_receipt_digest(text,uuid,text,uuid,text);
 
 create or replace function ops.prove_write_receipt(p_receipt_id uuid)

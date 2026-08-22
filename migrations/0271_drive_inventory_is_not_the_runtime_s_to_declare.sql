@@ -161,6 +161,13 @@ alter table ops.drive_inventory_manifest
 
 -- ==================================== (C) readiness reads the binding as well
 
+-- Revoked before dropped, per this series' shape for removing a granted
+-- function. This one is re-created under the SAME identity and re-granted
+-- below, so the plan lands in the same place either way -- but relying on that
+-- means relying on the signature never changing, and the next person to change
+-- it would not know they were.
+revoke all on function ops.drive_retirement_readiness()
+  from public, carr_writer, carr_reader, carr_authority;
 drop function ops.drive_retirement_readiness();
 
 create function ops.drive_retirement_readiness()
