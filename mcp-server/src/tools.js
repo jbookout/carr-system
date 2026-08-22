@@ -6209,7 +6209,7 @@ export const TOOLS = {
       base_version: { type: "integer" },
       outcome: { type: "string", description: "REQUIRED: what came of it, in your words" },
       resolution: { type: "string", enum: ["done", "dropped"] },
-      successor_loop: { type: "string", description: "Required when the row is renumbered, superseded, merged, or split: the open row that carries the work forward." } },
+      successor_loop: { type: "string", description: "Required when the row is renumbered, superseded, merged, or split: the open row that carries the work forward. Say it the way you would out loud — the number, with or without the leading hash ('#213' or '213') — or pass its loop_id if you have one." } },
       required: ["idempotency_key", "outcome"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "close-loop", args, async () => {
       // The refusal is first and unconditional. A whitespace-only outcome is no
@@ -6238,7 +6238,20 @@ export const TOOLS = {
           throw new ToolError({ error: "bookkeeping_outcome_prefix", hint: "open a bookkeeping close with RENNUMBERED or SUPERSEDED, not an abandonment claim" });
         if (!args.successor_loop)
           throw new ToolError({ error: "successor_loop_required", hint: "name the open loop that now carries this work; a bookkeeping close cannot read as abandonment" });
-        successor = await resolveLoop(c, { loop_id: args.successor_loop });
+        // Accept the form a partner actually says. This field is described as
+        // "the open row that carries the work forward" and its own missing-field
+        // hint says "name the open loop", but it used to be handed straight to
+        // resolveLoop as loop_id — the uuid-only branch. Passing "#213", which is
+        // exactly what the hint asks for, sent a non-uuid string into a where
+        // clause on a uuid column: Postgres raised invalid input syntax and the
+        // caller got a bare `internal error` naming nothing. Four loop closes
+        // failed that way during the 2026-08-21 markdown-endgame consolidation
+        // before the uuid was substituted by hand (defect 3eb1ad6d, rule
+        // 3a9dbafd — never make a partner decode an id).
+        const successorRef = String(args.successor_loop).trim();
+        successor = UUID_RE.test(successorRef)
+          ? await resolveLoop(c, { loop_id: successorRef })
+          : await resolveLoop(c, { number: successorRef.replace(/^#/, "") });
         if (successor.id === cur.id || successor.status !== "open")
           throw new ToolError({ error: "successor_loop_not_open", successor_loop: args.successor_loop,
             hint: "the successor must be a different open loop" });
