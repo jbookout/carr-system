@@ -99,6 +99,23 @@ try:
     code, out, err = invoke(["record", "outage"])
     check("normal retrieval fails closed when store is unavailable", code == retrieve.EX_UNAVAILABLE)
     check("normal refusal names the forbidden implicit fallback", "refuses Drive fallback" in err)
+    # WHY, NOT MERELY WHICH CLASS. This refusal used to print only
+    # type(exc).__name__, so a caller read "(RuntimeError)" — the machinery
+    # named, the fault hidden — while query_store had already raised with the
+    # verb subprocess's own stderr. The class stays for the empty-message case;
+    # the message is what makes the refusal actionable.
+    check("normal refusal names the underlying cause", "offline" in err)
+    check("normal refusal still names the exception class", "ConnectionError" in err)
+
+    def unavailable_silently(*_args, **_kwargs):
+        raise ConnectionError()
+
+    retrieve.query_store = unavailable_silently
+    code, _out, err = invoke(["record", "outage"])
+    check("a message-less failure still identifies itself", "ConnectionError" in err)
+    check("a message-less failure still fails closed", code == retrieve.EX_UNAVAILABLE)
+
+    retrieve.query_store = unavailable
 
     code, _out, err = invoke(["--vault", "/tmp/vault", "record", "outage"])
     check("a vault argument without explicit recovery is rejected", code == 2)
