@@ -1877,7 +1877,20 @@ export const VERB_ALIASES = {
   // sets a deal's lead AGENT; read as though it created a lead, and collided
   // with new-lead in any list a human was scanning. The strongest case of the
   // seven.
-  "set-lead": "assign-lead-agent",
+  //
+  // set-lead-agent, NOT assign-lead-agent, and the reason is worth keeping.
+  // assign-lead-agent was the audit's suggestion and was tried first. It broke
+  // the completion-evidence gate's write classifier, which decides whether an
+  // action is a write from its FIRST WORD against a prefix list — `set` is on
+  // that list, `assign` is not, so the verb silently stopped counting as a
+  // write and the coverage check failed at 102 of 103. Fixing that by widening
+  // the prefix list means editing a file under hooks/, which needs Joe's
+  // in-session approval by his 2026-08-09 ruling and is not something a rename
+  // should drag a human into. Keeping the `set` stem costs nothing and buys
+  // consistency with set-next-action and set-next-step, which are the same
+  // shape of verb. The name still does the whole job: it says AGENT, so it no
+  // longer reads as creating a lead, and it no longer collides with new-lead.
+  "set-lead": "set-lead-agent",
   // means counteroffer; read as a counting device.
   "record-counter": "record-counteroffer",
   // means: log that we contacted someone.
@@ -3307,7 +3320,7 @@ export const TOOLS = {
     }),
   },
 
-  "assign-lead-agent": {
+  "set-lead-agent": {
     write: true, humanOnly: true,
     description: "THE human ownership handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Ownership is a matter between the two humans, never a machine's call. Requires base_version from a fresh read; the locked deal version makes simultaneous handoffs conflict instead of silently replacing one another. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
     inputSchema: { type: "object", properties: {
@@ -3315,7 +3328,7 @@ export const TOOLS = {
       new_lead: { type: "string", enum: ["joe","dell"] },
       base_version: { type: "integer" } },
       required: ["idempotency_key","deal","new_lead","base_version"] },
-    handler: async (c, actor, args) => withEnvelope(c, actor, "assign-lead-agent", args, async () => {
+    handler: async (c, actor, args) => withEnvelope(c, actor, "set-lead-agent", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       await versionGuard(c, "deal", s.id, args.base_version);
@@ -3327,7 +3340,7 @@ export const TOOLS = {
         "insert into deal_participant (deal_id, actor_id, role, set_by) values ($1,$2,'lead',$3)",
         [s.id, na.rows[0].id, actor.id]);
       await c.query("update deal set owner=$1, updated_by=$2 where id=$3", [args.new_lead, actor.id, s.id]);
-      await writeEvent(c, actor, "assign-lead-agent", "deal", s.id,
+      await writeEvent(c, actor, "set-lead-agent", "deal", s.id,
         { old: { lead: prev.rows[0]?.actor_id || null }, new: { lead: args.new_lead }, idempotency_key: args.idempotency_key });
       return { ok: true, new_lead: args.new_lead };
     }),

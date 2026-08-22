@@ -163,7 +163,7 @@ test("HERMES-CASE-006 — the consequential write verbs still refuse", () => {
   // out, and they are the substance of the boundary: destroy, re-point
   // ownership, create a party, advance a deal, touch a rule, draft for a client.
   for (const verb of ["update-deal", "new-client", "new-lead", "new-vendor", "add-party",
-                      "confirm-merge", "reassign-deal", "assign-lead-agent", "log-decision",
+                      "confirm-merge", "reassign-deal", "set-lead-agent", "log-decision",
                       "activate-rule", "retire-rule", "prepare-document", "close-loop"]) {
     assert.equal(allowedIn("hermes", verb, WRITE), false, `${verb} must refuse under hermes`);
   }

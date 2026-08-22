@@ -27,7 +27,7 @@ import assert from "node:assert/strict";
 import { TOOLS, VERB_ALIASES, resolveVerb } from "../src/tools.js";
 
 const RENAMES = {
-  "set-lead": "assign-lead-agent",
+  "set-lead": "set-lead-agent",
   "record-counter": "record-counteroffer",
   "stamp-touch": "log-touch",
   "integrity-digest": "data-health-check",

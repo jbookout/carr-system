@@ -188,7 +188,7 @@ test("freeform nested business data may use reserved-like names without widening
 });
 
 test("set-lead is a human-only optimistic-concurrency mutation", async () => {
-  const tool = TOOLS["assign-lead-agent"];
+  const tool = TOOLS["set-lead-agent"];
   assert.equal(tool.humanOnly, true);
   assert.ok(tool.inputSchema.required.includes("base_version"));
   assert.ok(Object.hasOwn(tool.inputSchema.properties, "base_version"));
