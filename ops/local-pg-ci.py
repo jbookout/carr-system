@@ -154,7 +154,17 @@ def run_local_ci(
     if ci_class not in {"migration", "strict"}:
         raise LocalPGRefusal("ci_class must be migration or strict")
     if not port_is_available(port):
-        raise LocalPGRefusal(f"127.0.0.1:{port} is already in use")
+        # NAME THE ESCAPE. This machine runs several sessions at once, so the
+        # default port being taken is the ORDINARY case, not an error state —
+        # it is almost always another session's disposable cluster. Until
+        # 2026-08-22 the refusal stopped at "already in use", and a session that
+        # did not already know about --port read it as "this lane is unavailable"
+        # and hand-built its own cluster instead. One session did that seven
+        # times in a night, initdb and all, while this flag sat one word away.
+        raise LocalPGRefusal(
+            f"127.0.0.1:{port} is already in use — almost always another session's "
+            f"disposable cluster on this machine, not a problem with yours. "
+            f"Re-run on a free port: ./run.sh local-db-ci --class {ci_class} --port {port + 8}")
     binaries = find_postgres_binaries()
     command_runner = runner or SubprocessRunner()
     root = Path(tempfile.mkdtemp(prefix="carr-local-pg-ci."))
