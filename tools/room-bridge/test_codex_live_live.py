@@ -18,7 +18,7 @@ parent must be a real directory — passing /tmp fails, because /tmp is a
 symlink and the server refuses it as "not a directory".
 
 Costs a small amount of Codex credit. Run:
-    python3 spikes/hermes-dispatch/test_codex_live_live.py
+    python3 tools/room-bridge/test_codex_live_live.py
 """
 
 from __future__ import annotations
