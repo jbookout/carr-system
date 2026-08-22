@@ -95,6 +95,38 @@ test("the other double-meaning words are safe mid-sentence too", async () => {
 });
 
 // ── what the guard is actually for, still enforced ──────────────────────
+test("a loop named as the destination is caught mid-sentence", async () => {
+  // The precision this test file gained from a parallel session's branch
+  // (claude/close-loop-bookkeeping-precision, 2026-08-21): a bookkeeping close
+  // does not have to OPEN with its declaration to be one. What makes it
+  // bookkeeping is that it names the loop the work moved to.
+  for (const outcome of [
+    "Done for now — merged into loop 501, which carries the rest.",
+    "Merged with #501 after the two turned out to be one job.",
+    "Split into 502 and 503 so each has its own completion test.",
+    "Renumbered to #504; the old number still appears in two renders.",
+    "Superseded by loop 505, carried forward verbatim.",
+  ]) {
+    const { error } = await close(outcome);
+    assert.equal(error?.error, "bookkeeping_close_is_dropped",
+      `naming the destination loop is a bookkeeping close: ${outcome}`);
+  }
+});
+
+test("the same verbs with no loop named are left alone", async () => {
+  // The deliberate narrowing. These name no loop and pass no successor, so they
+  // could never have completed a bookkeeping close anyway — the prefix and
+  // successor checks below would have refused them later and less clearly.
+  for (const outcome of [
+    "Done. Now on main as cdaa2be5.",
+    "Done — merged to main once the stale base was updated.",
+    "Done. The effort was merged with another team's, and theirs shipped.",
+  ]) {
+    const { error } = await close(outcome);
+    assert.equal(error, null, `no loop named, so not a bookkeeping close: ${outcome}`);
+  }
+});
+
 test("an outcome OPENING with a bookkeeping declaration is still caught", async () => {
   const { error } = await close("Superseded by #213, carried forward verbatim.");
   assert.equal(error?.error, "bookkeeping_close_is_dropped",
