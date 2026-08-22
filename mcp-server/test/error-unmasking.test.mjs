@@ -98,7 +98,7 @@ test("an unrelated error is still left alone for the caller above to handle", ()
 test("connection strings are redacted out of anything surfaced", () => {
   const translated = pgConstraintError(pgError({
     code: "42501",
-    message: "permission denied; connecting as postgresql://carr_writer:hunter2@db.example/carr",
+    message: "permission denied; connecting as postgresql://carr_writer:hunter2@db.example/carr", // ci-secret-scan: allow — invented fixture; the whole point of this case is that it must NOT survive into the payload
   }));
   assert.doesNotMatch(translated.payload.message, /hunter2/,
     "a credential must never ride out on an error, however useful the rest of the string is");
