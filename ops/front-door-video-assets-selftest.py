@@ -260,7 +260,22 @@ assert 'echo "OK:' not in wrapper[:commit_boundary]
 
 inventory = json.loads((REPO / "ops/config/drive-dependencies.v1.json").read_text())
 rows = {row["id"]: row for row in inventory["entries"]}
-assert rows["normal-front-door-launch-links"]["replacement"]["status"] == "normal_path_repointed_to_record_native_launcher"
-assert rows["normal-video-assets"]["replacement"]["status"] == "normal_path_uses_versioned_brand_assets_and_refuses_missing_media_seam"
+
+
+def _normal_path(entry):
+    """What the registry says a Drive dependency's NORMAL path now does.
+
+    Accepting an entry for retirement sets replacement.status to "accepted"
+    and moves the descriptive value to replacement.normal_path, because one
+    field cannot carry both "what the normal path does" and "has Joe accepted
+    this for retirement". Reading both keys keeps these assertions true either
+    side of an acceptance, rather than passing only while the entry is
+    un-accepted and raising KeyError the day it is.
+    """
+    replacement = entry["replacement"]
+    return replacement.get("normal_path", replacement.get("status"))
+
+assert _normal_path(rows["normal-front-door-launch-links"]) == "normal_path_repointed_to_record_native_launcher"
+assert _normal_path(rows["normal-video-assets"]) == "normal_path_uses_versioned_brand_assets_and_refuses_missing_media_seam"
 
 print("front-door/video asset selftest passed")
