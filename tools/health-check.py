@@ -20,6 +20,7 @@ brand-new task is never mistaken for a broken one. See the scheduler section bel
 import json, os, sys, glob, time, re, subprocess, calendar
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+import health_submodule as _health_sub
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
 # (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
@@ -747,11 +748,17 @@ def _canonical_health():
             _canonical_finding("repo_status", "git status unreadable")
             rc = 1
         else:
-            loose = [line for line in p.stdout.splitlines() if line.strip()]
-            print(f"  {'OK' if not loose else '⚠︎'} loose-work            "
-                  f"{len(loose)} path(s) outside committed canonical history")
-            if loose:
-                _canonical_finding("repo_loose_work", f"{len(loose)} path(s)")
+            _loose = _health_sub.classify_loose_status(REPO_ROOT, p.stdout.splitlines())
+            _actionable = _loose["actionable_tracked"] + _loose["actionable_untracked"]
+            _needs_attention = _health_sub.loose_work_requires_attention(_loose)
+            print(f"  {'OK' if not _needs_attention else '⚠︎'} loose-work            "
+                  f"{len(_actionable)} actionable path(s) "
+                  f"({len(_loose['actionable_tracked'])} tracked, "
+                  f"{len(_loose['actionable_untracked'])} untracked)"
+                  f" · {len(_loose['expected_patched_submodules'])} expected patched submodule(s)"
+                  f" · {len(_loose['managed_artifacts'])} managed artifact(s)")
+            if _needs_attention:
+                _canonical_finding("repo_loose_work", f"{len(_actionable)} actionable path(s)")
                 rc = 1
     print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
     return rc
@@ -1263,20 +1270,14 @@ except OSError as _exc:
 # isolation, already accepted in loop #195; this row is the cheap half that makes
 # loose work visible in the meantime.
 #
-# THE CLOCK RUNS ON TRACKED-MODIFIED FILES ONLY, and that is the whole design.
-# Untracked files here are mostly generated assets from the voice lane; putting
-# them on the clock would leave this row permanently amber, and a chronically
-# amber row detects nothing — the precise failure that let the mypy tripwire stay
-# red for three days and hid a five-gate wipe behind an already-red config row.
-# Untracked is reported as a plain figure with no glyph, so it informs without
-# crying wolf.
+# THE CLOCK RUNS ON TRACKED-MODIFIED FILES ONLY. Managed generated artifacts
+# and verified worktrees stay informational, while an UNKNOWN untracked path is
+# actionable immediately: it could be source awaiting a named disposition and
+# must not hide behind a tracked-edit grace period.
 #
 # 12 HOURS, because it crosses a night. A session running four or six hours is
 # ordinary here and must not nag; work still loose the next morning is the thing
 # actually worth seeing.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import health_submodule as _health_sub  # noqa: E402
-
 _STALE_H = 12
 # Hours since the NEWEST loose file changed, past which nothing here can be
 # called in-flight. Two, not one: a session can legitimately think, research or
@@ -1288,50 +1289,29 @@ try:
     if _gs.returncode != 0:
         print(f"  -- {'uncommitted work':<22} git status failed — cannot tell what is loose")
     else:
+        _loose = _health_sub.classify_loose_status(REPO_ROOT, _gs.stdout.splitlines())
         _tracked: list[tuple[float, str]] = []
-        _untracked = 0
-        # A VENDORED SUBMODULE THAT CARRIES OUR PATCHES IS PERMANENTLY MODIFIED,
-        # and counting that as loose work is a tripwire nobody can act on.
-        # tools/dictation-rig/vendor/quill sits at a detached HEAD on a third-party
-        # upstream and bin/build-quill.sh applies tracked patches onto it at build
-        # time, so it reads dirty after every build — it had been reported for 283
-        # hours by 2026-08-19 and could never have been committed, because doing so
-        # would make a dangling commit in someone else's repository.
-        #
-        # This is NOT a path allowlist. The dirt is compared against the tracked
-        # patches that are supposed to explain it, so a hand-edit inside the same
-        # submodule still lands on the clock. Proven both ways by
-        # ops/submodule-patch-dirt-selftest.py.
-        _expected_sub: list[str] = []
-        for _row in _gs.stdout.splitlines():
-            if not _row.strip():
-                continue
-            _gpath = _row[3:].strip().strip('"')
-            if _row.startswith("??"):
-                _untracked += 1
-                continue
-            _full = os.path.join(REPO_ROOT, _gpath.split(" -> ")[-1])
-            if os.path.isdir(_full) and os.path.exists(os.path.join(_full, ".git")):
-                try:
-                    _sub_diff = subprocess.run(
-                        ["git", "diff"], cwd=_full, capture_output=True,
-                        text=True, timeout=20).stdout
-                    if _health_sub.submodule_dirt_is_tracked_patch(
-                            _sub_diff, _health_sub.patches_dir_for(_full)):
-                        _expected_sub.append(_gpath)
-                        continue
-                except (OSError, subprocess.SubprocessError):
-                    pass          # cannot vouch for it -> leave it on the clock
+        for _gpath in _loose["actionable_tracked"]:
+            _full = os.path.join(REPO_ROOT, _gpath)
             try:
                 _tracked.append((os.path.getmtime(_full), _gpath))
             except OSError:
                 continue                  # deleted or renamed away; not loose work
-        _extra = f" · {_untracked} untracked" if _untracked else ""
-        if _expected_sub:
-            _extra += (f" · {len(_expected_sub)} vendored submodule(s) dirty from their own "
-                       f"tracked patches, which is expected: {', '.join(_expected_sub)}")
+        _extra = (f" · {len(_loose['actionable_untracked'])} actionable untracked"
+                  if _loose["actionable_untracked"] else "")
+        if _loose["expected_patched_submodules"]:
+            _extra += (f" · {len(_loose['expected_patched_submodules'])} vendored submodule(s) "
+                       f"dirty from their own tracked patches, which is expected")
+        if _loose["managed_artifacts"]:
+            _extra += f" · {len(_loose['managed_artifacts'])} managed artifact(s)"
         if not _tracked:
-            print(f"  OK {'uncommitted work':<22} nothing tracked is loose{_extra}")
+            _needs_attention = _health_sub.loose_work_requires_attention(_loose, False)
+            if _needs_attention:
+                print(f"  ⚠︎ {'uncommitted work':<22} 0 tracked file(s) loose{_extra}"
+                      " · actionable untracked source needs a named disposition")
+                rc = 1
+            else:
+                print(f"  OK {'uncommitted work':<22} nothing tracked is loose{_extra}")
         else:
             _tracked.sort()
             _oldest_h = (time.time() - _tracked[0][0]) / 3600.0
@@ -1346,10 +1326,15 @@ try:
             _newest_h = (time.time() - _tracked[-1][0]) / 3600.0
             _names = ", ".join(p for _, p in _tracked[:3])
             _more = f" (+{len(_tracked) - 3} more)" if len(_tracked) > 3 else ""
-            _why = ("past a night outside git" if _oldest_h >= _STALE_H
+            _tracked_attention = _oldest_h >= _STALE_H or _newest_h >= _IDLE_H
+            _needs_attention = _health_sub.loose_work_requires_attention(
+                _loose, _tracked_attention)
+            _why = ("actionable untracked source needs a named disposition"
+                    if _loose["actionable_untracked"]
+                    else "past a night outside git" if _oldest_h >= _STALE_H
                     else f"nothing here has been touched in {_newest_h:.1f}h, so none of it "
                          f"is mid-edit")
-            if _oldest_h >= _STALE_H or _newest_h >= _IDLE_H:
+            if _needs_attention:
                 print(f"  ⚠︎ {'uncommitted work':<22} {len(_tracked)} tracked file(s) loose, "
                       f"oldest {_oldest_h:.0f}h / newest {_newest_h:.1f}h — {_names}{_more}"
                       f"{_extra}  · {_why}. Commit by NAMING PATHS (never a sweep, which takes "

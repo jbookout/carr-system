@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en"__PRINT_MODE__>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -308,7 +308,11 @@
   .foot .who{ font-family:"CARR Display","Oswald",sans-serif; font-size:20px; font-weight:600;
               letter-spacing:.03em; text-transform:uppercase; color:var(--ink); margin-bottom:5px; }
   .foot a{ color:var(--accent-ink); }
-  .stamp{ font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:10.5px; color:var(--muted); line-height:1.75; }
+  /* Body face, not tabular figures. The stamp reads as a colophon, dates, source
+     names, an area, and only the numbers in it are numbers. A source list set in
+     Menlo is prose wearing a spreadsheet's clothes, and CARR's body face is
+     Montserrat. Caught by check-brand.py on the first River Bank packet. */
+  .stamp{ font-size:11px; color:var(--muted); line-height:1.8; letter-spacing:.01em; }
 
   @media (max-width:600px){
     body{ padding:0 15px 132px; font-size:15px; }
@@ -357,8 +361,61 @@
   .np{ color:var(--muted); font-style:italic; font-family:"CARR Text",sans-serif; font-size:13px; }
   .pending{ font-size:14px; color:var(--muted); margin:18px 0 0; max-width:64ch; }
 
+  /* ---------- listing agent (NAME AND FIRM ONLY) ----------
+     Joe's 2026-07-22 rule bars listing-agent and brokerage CONTACT information from
+     anything a client sees, and it still does. A name is who to expect at the door,
+     which is what a packet carried on a tour needs. The generator refuses any value
+     carrying a phone number, an email address, or a URL, so no contact detail can
+     reach this line even if a whole source record is pasted into the field. */
+  .agent{ font-size:12.5px; color:var(--muted); margin:15px 0 0; letter-spacing:.02em; }
+  .agent b{ color:var(--body); font-weight:600; }
+
+  /* The occupancy note: prose, so body face and body colour. It used to be rendered
+     into a spec cell, which is tabular figures and, with `em`, orange. Brand
+     doctrine: orange is an accent, never body text. */
+  .onote{ font-size:13.5px; color:var(--muted); margin:11px 0 0; max-width:68ch; }
+
+  /* The physical address, labelled, on every card. The heading is a display title and
+     on a land listing the broker's title carries no street number, so the address gets
+     its own line and its own label rather than being inferred from the heading.
+     Dell, 2026-08-20: "never ever never leave out the address." */
+  .addr{ margin:10px 0 0; font-size:14px; color:var(--ink); }
+  .addrlab{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:9.5px; font-weight:400;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--muted);
+    display:inline-block; margin-right:9px;
+  }
+
+  /* ---------- notes box ----------
+     Ours, not the client's: somewhere to write while standing in the building.
+     On screen a quiet ruled panel; on paper it is the reason a packet gets
+     carried rather than read off a phone. */
+  .notes{ margin-top:18px; padding-top:15px; border-top:1px solid var(--rule-soft); }
+  .notes h4{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:9.5px; font-weight:400;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--muted); margin:0 0 8px;
+  }
+  .nlines{
+    border:1px solid var(--rule-soft); background-color:var(--tint); height:98px;
+    background-image:repeating-linear-gradient(to bottom,transparent 0,transparent 23px,
+                     var(--rule-soft) 23px,var(--rule-soft) 24px);
+    background-position:0 10px; background-repeat:repeat;
+  }
+  :root[data-ink="save"] .nlines{ background-color:#fff; }
+
+  /* ---------- plans sheet ----------
+     A second sheet for an option where we hold drawings. Each plan is its own
+     figure so the caption can say what the drawing is and where it came from. */
+  .plans .phead{ margin-bottom:15px; }
+  .plansheet{ display:flex; flex-direction:column; gap:20px; }
+  .plan figure{ margin:0; }
+  .plan img{ display:block; width:100%; height:auto; border:1px solid var(--rule); background:#fff; }
+  .plan figcaption{ font-size:11.5px; color:var(--muted); margin-top:5px; line-height:1.35; }
+  .plan figcaption b{ color:var(--body); font-weight:600; }
+  .plansrc{ font-size:12px; color:var(--muted); margin:18px 0 0; letter-spacing:.03em; }
+
   @media print{
-    /* On paper the TOUR candidates print in full — those are the ones being walked.
+    /* On paper the TOUR candidates print in full, those are the ones being walked.
        Lower tiers stay collapsed: printing every panel pushed the packet to 12 pages
        with spec grids orphaned at the top of pages. Screen keeps all of them openable. */
     .more summary{ display:none; }
@@ -520,6 +577,86 @@
     .mini{ break-inside:avoid; page-break-inside:avoid; max-width:3.1in; }
     .mini figcaption{ font-size:7.5pt; }
     .minipin{ print-color-adjust:exact; -webkit-print-color-adjust:exact; }
+    /* The notes box is the point of a printed packet: keep the rules black enough
+       to write between, and never let the box split across two sheets. */
+    .agent{ font-size:8pt; margin-top:9pt; }
+    .onote{ font-size:8.5pt; margin-top:7pt; max-width:none; }
+    /* The address never shrinks below readable and never breaks away from its card:
+       it is the one line on the sheet somebody types into a phone at the kerb. */
+    .addr{ font-size:10pt; margin-top:6pt; break-inside:avoid; page-break-inside:avoid; }
+    .addrlab{ font-size:6.5pt; margin-right:7pt; }
+    .notes{ margin-top:10pt; padding-top:8pt; break-inside:avoid; page-break-inside:avoid; }
+    .notes h4{ font-size:6.5pt; margin-bottom:5pt; }
+    .nlines{
+      height:1.05in; border-color:#8A8A8A;
+      background-image:repeating-linear-gradient(to bottom,transparent 0,transparent 21pt,
+                       #8A8A8A 21pt,#8A8A8A 21.6pt);
+      background-position:0 7pt; print-color-adjust:exact; -webkit-print-color-adjust:exact;
+    }
+    /* Plans get their own sheet behind the property they belong to. The height cap is
+       what keeps a site plan and a floor plan on ONE sheet together: at full column
+       width these drawings are ~4.8in tall each and the pair overruns the page, which
+       separates a site plan from the floor plan it explains. */
+    .tier1 .prop.plans{ break-before:page; page-break-before:always; }
+    .plansheet{ gap:11pt; }
+    .plan{ break-inside:avoid; page-break-inside:avoid; }
+    .plan img{ border-color:#8A8A8A; max-height:3.75in; width:auto; max-width:100%; }
+    .plan figcaption{ font-size:7.5pt; max-width:none; }
+    .plansrc{ font-size:7.5pt; margin-top:8pt; }
+
+    /* ---- PACKET MODE: one listing to a sheet ----------------------------------
+       A report gets READ, so it prints every detail panel expanded. A packet gets
+       CARRIED, and a property whose page turns mid-spec is useless standing in the
+       car park. In packet mode the reference grid, building class, storeys, floor,
+       divisibility, operating expenses, all of it already on screen and most of it
+       already in the headline specs, drops out, and what stays is what someone
+       actually uses on site: the photo, the reasoning, the headline numbers, the
+       things to check, who to expect, and room to write.
+       Report mode is untouched and remains the default. */
+    :root[data-print="packet"] .more summary,
+    :root[data-print="packet"] .dspecs,
+    :root[data-print="packet"] .src,
+    :root[data-print="packet"] .act{ display:none !important; }
+    :root[data-print="packet"] .mbody{ padding-top:0; }
+    :root[data-print="packet"] .sub{ margin-top:9pt; }
+    :root[data-print="packet"] .sub h4{ margin-bottom:4pt; }
+    :root[data-print="packet"] .sub li{ font-size:8pt; margin-bottom:2pt; line-height:1.34; }
+    :root[data-print="packet"] .vnote{ display:none; }
+    :root[data-print="packet"] .why{ font-size:9.5pt; margin-top:5pt; }
+    :root[data-print="packet"] .tier1 .prop{ padding:9pt 11pt; margin-bottom:0; }
+    /* "About the building" is background: true, useful sitting at a desk, and the
+       first thing to go when the constraint is one sheet. What replaces it is the
+       page itself, you are standing in the building. The open questions stay,
+       because those are the reason anyone brought paper. */
+    :root[data-print="packet"] .sub.about{ display:none; }
+    /* Width comes from the photo's own pixels (the generator sets it inline). Height is
+       capped only so a 4:3 shot at full width cannot eat the sheet and push the card
+       onto a second page, the crop is centred, and a photo whose natural height is
+       already under the cap is never touched, which is every small source here. */
+    :root[data-print="packet"] .shot{ margin-top:7pt; max-height:2.75in; }
+    :root[data-print="packet"] .shot img{ max-height:2.75in; object-fit:cover; }
+    :root[data-print="packet"] .specs{ margin-top:7pt; padding-top:6pt; gap:6pt 12pt; }
+    :root[data-print="packet"] .agent{ margin-top:7pt; }
+    :root[data-print="packet"] .notes{ margin-top:8pt; padding-top:7pt; }
+    :root[data-print="packet"] .nlines{ height:.95in; }
+    /* Every tour sheet is one page, and the sheet after it starts the next property. */
+    :root[data-print="packet"] .tier1 .prop{ break-inside:avoid; page-break-inside:avoid; }
+
+    /* A packet is a stack of sheets someone carries round a car park. Screen furniture
+       does not survive the trip: the tour-list picker is a control with nothing to
+       control on paper, and a section heading announcing "Worth touring" is telling the
+       reader what the whole document already is. Sections with no rows are hidden by
+       the data-look/data-out attributes the generator sets, so an empty tier prints
+       nothing rather than an authored apology for being empty. */
+    :root[data-print="packet"] .tourlist,
+    :root[data-print="packet"] .cartbar,
+    :root[data-print="packet"] .s-tour > .sechead,
+    :root[data-print="packet"] .s-tour > .sechead + p,
+    :root[data-print="packet"][data-look="0"] .s-look,
+    :root[data-print="packet"][data-out="0"] .s-out{ display:none !important; }
+    /* Without the tour list, the closing section is the commentary, and that is what
+       carries the footer onto its own sheet. */
+    :root[data-print="packet"] .s-tour{ padding-top:0; }
     ol.tl li{ padding:7pt 0; }
     ol.tl button{ display:none; }
     .empty{ padding:14pt 12pt; margin-top:12pt; }
@@ -619,7 +756,10 @@
     <div class="toprow">
       <img class="logo blu" src="data:image/png;base64,__LOGO_BLUE__" alt="CARR">
       <img class="logo wht" src="data:image/png;base64,__LOGO_WHITE__" alt="CARR">
-      <p class="kicker">Healthcare Real Estate</p>
+      <!-- The masthead kicker is the third hardcoded "healthcare" on this page and the
+           most visible: it sits beside the logo on sheet one. It comes from
+           properties.json now, defaulting to the value that was hardcoded here. -->
+      <p class="kicker">__KICKER__</p>
       <p class="when">__PREPARED__</p>
     </div>
 
@@ -645,19 +785,19 @@
 
   __MAP__
 
-  <section>
+  <section class="s-tour">
     <div class="sechead"><h2>Worth touring</h2><span class="ct">__N_TOUR__ of __N_TOTAL__</span></div>
     <p>These fit the size, the use, and the timing. Each carries a different trade-off, and seeing them in one afternoon will teach you more about your options than any amount of reading. Open the full detail on any of them for the complete picture.</p>
     <div class="list tier1">__TOUR_CARDS__</div>
   </section>
 
-  <section>
+  <section class="s-look">
     <div class="sechead"><h2>Worth a look</h2><span class="ct">__N_LOOK__ of __N_TOTAL__</span></div>
     <p>Each of these could work if one condition changes: a landlord agrees to divide the space, a rate gets disclosed, or you decide to take more square footage than planned.</p>
     <div class="list">__LOOK_CARDS__</div>
   </section>
 
-  <section>
+  <section class="s-out">
     <div class="sechead"><h2>Reviewed and ruled out</h2><span class="ct">__N_OUT__ of __N_TOTAL__</span></div>
     <p>Listed so you can see the whole field rather than a curated few. Every one of these was checked against your requirements before it was set aside.</p>
     <div style="margin-top:20px">__OUT_ROWS__</div>
@@ -678,6 +818,15 @@
     <div class="callout">
       <h3>What we need to confirm on your side</h3>
       <ul>__CONFIRMATIONS__</ul>
+    </div>
+
+    <!-- declined_and_why was a gate with no page behind it: build-space-search has
+         refused a search without the block since the control landed, and then rendered
+         nothing, so the rule it enforces never actually reached the client. It renders
+         here now. Naming what we would not do, and why, is the point of the rule. -->
+    <div class="callout">
+      <h3>What we would not do, and why</h3>
+      <ul>__DECLINED__</ul>
     </div>
     __PENDING__
   </section>
@@ -711,10 +860,15 @@
 
   <footer class="foot">
     <div>
-      <p class="who">Joe Bookout</p>
-      <p>Healthcare Real Estate Advisor, CARR</p>
-      <p><a href="mailto:joe.bookout@carr.us">joe.bookout@carr.us</a></p>
-      <p style="margin-top:13px">CARR represents healthcare tenants and buyers only. We never represent landlords or sellers, so there is no question about whose interests are being protected in your negotiation.</p>
+      <!-- Which advisor signs a search, and the sentence describing who CARR acts for,
+           are per-search facts and come from properties.json. They were hardcoded here
+           to Joe and to "healthcare tenants and buyers", which put the wrong name and a
+           false claim on the first packet either partner built for a non-healthcare
+           client. Absent client.advisor the previous values render unchanged. -->
+      <p class="who">__ADVISOR__</p>
+      <p>__ADVISOR_TITLE__</p>
+      <p><a href="mailto:__ADVISOR_EMAIL__">__ADVISOR_EMAIL__</a></p>
+      <p style="margin-top:13px">__ADVISOR_PROMISE__</p>
     </div>
     <div class="stamp">
       Prepared __PREPARED__<br>
@@ -812,7 +966,7 @@
         elList.appendChild(li);
       });
 
-      elSend.href = 'mailto:joe.bookout@carr.us' +
+      elSend.href = 'mailto:__ADVISOR_EMAIL__' +
         '?subject=' + encodeURIComponent('__TITLE__: the ones I want to see') +
         '&body=' + encodeURIComponent(messageBody());
 
