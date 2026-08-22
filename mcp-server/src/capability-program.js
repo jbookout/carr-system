@@ -213,10 +213,47 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         const openRows = rows.rows.filter(row => row.state !== "confirmed_closed");
         const proposedDeclines = openRows.filter(isProposedDecline);
         const current = openRows.find(row => !isProposedDecline(row)) || null;
+
+        // TWO DEFINITIONS OF "CURRENT" HAD QUIETLY COME APART, and this names the
+        // gap rather than picking a winner.
+        //
+        // `current` above deliberately SKIPS proposed declines, for the good
+        // reason written just above: a session asking what to build next must not
+        // be handed a row nobody has decided. The CLOSE path does not skip. It
+        // takes the first row that is not confirmed_closed, in program order, and
+        // refuses anything else with out_of_order_project.
+        //
+        // Those agreed while every decline sat behind the buildable work. They
+        // stop agreeing at ordinal 14, which is the first proposed decline, and
+        // the queue is at ordinal 2. So after twelve more closes a session reads
+        // `current` as the row after the decline, builds it, calls complete on
+        // that sequence, and is refused by a verb naming a DIFFERENT sequence it
+        // was never shown. The queue jams and it reads as a broken close verb
+        // rather than as two answers to one question.
+        //
+        // The comment above says the declines "can be neither built nor closed
+        // here". The first half is still true. The second stopped being true when
+        // migration 0281 gave the completion contract a decline branch: a decline
+        // with a recorded owner decision and an independent attestation closes
+        // now. So the close sequence really does run through them.
+        //
+        // Both fields ship, because they answer different questions and a reader
+        // needs both: what should I build, and what must close next for the
+        // program to advance. Naming only one of them is what produced this.
+        const nextToClose = openRows[0] || null;
+        const closeIsBlockedByDecline = Boolean(
+          nextToClose && current && nextToClose.ref !== current.ref);
         const declineCounts = {
           buildable_total: rows.rows.filter(row => !isProposedDecline(row)).length,
           proposed_declines_awaiting_a_decision: proposedDeclines.length,
           proposed_decline_refs: proposedDeclines.map(row => row.ref),
+          next_to_close_ref: nextToClose ? nextToClose.ref : null,
+          next_to_close_sequence: nextToClose ? Number(nextToClose.program_ordinal) : null,
+          close_sequence_blocked_by_proposed_decline: closeIsBlockedByDecline,
+          ...(closeIsBlockedByDecline ? { close_sequence_note:
+            `the close path takes ${nextToClose.ref} next, a proposed decline; `
+            + `${current.ref} is the next BUILDABLE row and completing it will be refused `
+            + "as out of order until the decline ahead of it is decided and closed" } : {}),
         };
         // PAYLOAD BUDGET. The full rows carry desired_outcome prose, acceptance
         // criteria and completion evidence for every project; a queue scan that
