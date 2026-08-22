@@ -132,7 +132,7 @@ def main() -> int:
     assert "--snapshot" not in source and "CARR_VAULT" not in source and "HMAC" not in source
     assert "CARR_RENEWAL_SOURCE_PROFILE" in source and "sys.stdin.buffer.read" in source
     assert "ops.ingest_renewal_signed_snapshot" in source
-    migration = (ROOT / "migrations" / "0248_renewal_signed_source_ingress.sql").read_text(encoding="utf-8")
+    migration = (ROOT / "migrations" / "0250_renewal_signed_source_ingress.sql").read_text(encoding="utf-8")
     assert "source_snapshot_id" in migration and "v_snapshot.row_count" in migration
     assert "sealed_member_count<>(select count(*) from candidate_pool" not in migration
     assert "octet_length(p_rows::text)>8388608" in migration

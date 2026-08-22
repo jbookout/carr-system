@@ -1,4 +1,4 @@
--- 0248_renewal_signed_source_ingress.sql — immutable signed source provenance.
+-- 0250_renewal_signed_source_ingress.sql — immutable signed source provenance.
 begin;
 
 create table ops.renewal_source_snapshot (
