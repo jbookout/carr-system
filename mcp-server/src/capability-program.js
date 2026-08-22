@@ -218,6 +218,18 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
           proposed_declines_awaiting_a_decision: proposedDeclines.length,
           proposed_decline_refs: proposedDeclines.map(row => row.ref),
         };
+        // RESOLVE THE SEQUENCE BEFORE EITHER MODE RETURNS. This sat below the
+        // summary early-return until now, so `sequence` naming a project that
+        // does not exist threw capability_project_not_found on the full path and
+        // returned requested:null under summary — two answers to one bad input,
+        // from a flag whose whole promise is that it is the same read on a
+        // budget. The null was the worse half: summary sets `requested` to the
+        // current item when no sequence is passed, and `current` is null once
+        // the program completes, so a caller could not tell "no such project"
+        // from "program finished". A payload budget may drop fields; it may not
+        // change what the verb means.
+        const requested = args.sequence === undefined ? current : rows.rows.find(row => Number(row.program_ordinal) === Number(args.sequence));
+        if (args.sequence !== undefined && !requested) throw new ToolError({ error: "capability_project_not_found", program_key: DEFAULT_PROGRAM, sequence: args.sequence });
         // PAYLOAD BUDGET. The full rows carry desired_outcome prose, acceptance
         // criteria and completion evidence for every project; a queue scan that
         // only needs where the program stands should not pay for 51 of them.
@@ -234,13 +246,11 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
             ...declineCounts,
             program_complete: !current && !proposedDeclines.length,
             current: programRow(current),
-            requested: brief(args.sequence === undefined ? current : rows.rows.find(row => Number(row.program_ordinal) === Number(args.sequence)) || null),
+            requested: brief(requested || null),
             projects: rows.rows.map(brief),
             hint: "summary mode: per-project rows are {ref, sequence, title, state, disposition, executor_actor}; re-read without summary (or with sequence) for any item in full.",
           };
         }
-        const requested = args.sequence === undefined ? current : rows.rows.find(row => Number(row.program_ordinal) === Number(args.sequence));
-        if (args.sequence !== undefined && !requested) throw new ToolError({ error: "capability_project_not_found", program_key: DEFAULT_PROGRAM, sequence: args.sequence });
         const capability_session = await readCurrentSession(c, current);
         // The completed count is confirmed_closed attestations only — it is NOT
         // a count of code on disk. A Work Request can have artifacts already
