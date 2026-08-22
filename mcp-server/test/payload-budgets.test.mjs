@@ -37,6 +37,12 @@ const boardRows = [
     since_text: "2026-08-04", due_on: null, version: 4 },
 ];
 
+// THE DECLARED SHAPE, copied from the summary flag's own description in
+// tools.js. This list is the contract; the test below asserts the returned row
+// matches it EXACTLY, in both directions. Adding a field here without adding it
+// to the description (or the reverse) is the defect this guards.
+const DECLARED_LOOP_KEYS = ["number", "kind", "label", "blocker_class", "owner", "since_text", "version"];
+
 function boardHandler() {
   // The two modes run DIFFERENT SQL over the same table; hand back rows shaped
   // like each query's own select list so the test proves the summary SQL really
@@ -48,7 +54,7 @@ function boardHandler() {
       return { rows: boardRows.map(r => ({
         number: r.number, kind: r.kind, status: r.status, owner: r.owner,
         label: r.label.slice(0, 80), blocker_class: r.blocker_class,
-        since_text: r.since_text, due_on: null, version: r.version,
+        since_text: r.since_text, version: r.version,
       })) };
     }
     return { rows: boardRows };
@@ -68,11 +74,19 @@ test("loop-board summary returns counts and slim rows only", async () => {
   for (const loop of result.loops) {
     for (const forbidden of ["body", "blocker_detail", "domain", "marker", "joint_owner"])
       assert.equal(forbidden in loop, false, `summary rows must not carry ${forbidden}`);
-    for (const required of ["number", "kind", "label", "blocker_class", "owner", "since_text", "version"])
+    for (const required of DECLARED_LOOP_KEYS)
       assert.ok(required in loop, `summary rows must carry ${required}`);
+    // EXACT KEYS, not merely the declared ones plus whatever else. The
+    // inclusion-only version of this block shipped in 4b816d85 and let an
+    // undeclared due_on through: an EXTRA key satisfied both loops above, so
+    // nothing failed. The flag's own description is the contract a caller
+    // writes code against, and a payload that carries more than it declares
+    // has broken it just as surely as one that carries less.
+    assert.deepEqual([...Object.keys(loop)].sort(), [...DECLARED_LOOP_KEYS].sort(),
+      `summary rows must match the declared shape EXACTLY; got ${Object.keys(loop).sort().join(", ")}`);
   }
   assert.match(queries[queries.length - 1], /left\(/i, "labels are truncated in SQL");
-  assert.doesNotMatch(queries[queries.length - 1], /blocker_detail|coalesce\(body/i,
+  assert.doesNotMatch(queries[queries.length - 1], /blocker_detail|coalesce\(body|due_on/i,
     "the summary SQL must not even select the heavy columns");
 });
 

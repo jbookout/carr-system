@@ -2946,8 +2946,7 @@ export const TOOLS = {
                     nullif(title, ''),
                     nullif(regexp_replace(split_part(body, E'\\n', 1), '\\*\\*', '', 'g'), '')
                   ), 80) as label,
-                  blocker_class, since_text,
-                  to_jsonb(due_on)#>>'{}' as due_on, version
+                  blocker_class, since_text, version
              from loop_item
             where ${where.join(" and ")}
             order by domain nulls last,
