@@ -372,8 +372,18 @@ PYEOF
   # only, no machine state, no network, no database. Each carries its own
   # escape hatch for a genuinely mid-flight tree and names its own remedy in
   # its own output, so none is repeated here.
+  #
+  # mechanism-doctrine-gate is in this list rather than a class of its own
+  # because it is the same kind of check: repository content only, no machine
+  # state and no database. It is the compiled half of "knowledge ships with the
+  # mechanism" (open loop 504) — a newly ADDED gate, hook, launchd job or
+  # scheduled task must name the doctrine section explaining it. It reads the
+  # change against origin/main, so it is a no-op on a branch that adds none of
+  # those, which is nearly every branch. Editing an existing mechanism is
+  # deliberately out of scope.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             drive-dependency-inventory drive-retirement-readiness-gate; do
+             drive-dependency-inventory drive-retirement-readiness-gate \
+             mechanism-doctrine-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
