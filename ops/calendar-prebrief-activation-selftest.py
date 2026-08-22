@@ -107,4 +107,7 @@ with tempfile.TemporaryDirectory() as raw:
  def activation_connect(value): return ActivationConn(value.split("://",1)[1].split(":",1)[0])
  sealed=mod.seal_activate_joe_live("e"*64,joe, runtime, plist, activation_connect, launch, 501, root)
  check("sealed activation flips 0600 runtime only after typed receipt and launchd readback",sealed["sponsor"]=="joe" and "CARR_CALENDAR_PREBRIEF_ENABLED=true" in runtime.read_text() and [call[1] for call in launch_calls]==["bootout","bootstrap","kickstart","print"])
+ installer=(ROOT/"bin/install-calendar-prebrief-joe.sh").read_text()
+ check("installer builds and copies the app from the same checked-out repository",
+       'CARR_REPO="$REPO" "$REPO/bin/build-calendar-access.sh"' in installer)
 print("OK" if not bad else "FAIL "+", ".join(bad)); raise SystemExit(bool(bad))
