@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   actionForCard,
   lifecycleForCard,
+  renderCurrentWorkRequests,
   renderSystemWorkCard,
   validateHumanRef,
 } from "../../dealroom/js/system-work-view.js";
@@ -43,6 +44,14 @@ test("captured, triaged, and ready cards expose exactly one safe next action", (
     { kind: "accept-outcome", label: "Accept this outcome record" });
 });
 
+test("a card that becomes stale after opening is read-only with an honest explanation", () => {
+  const stale = { ...card, source: { ...card.source, freshness: "stale" } };
+  assert.equal(actionForCard(stale), null);
+  const html = renderSystemWorkCard(stale);
+  assert.match(html, /read-only until its source is current again/i);
+  assert.doesNotMatch(html, /class="system-work-primary"/);
+});
+
 test("lifecycle is text and shape based, with no execution or close stage", () => {
   const life = lifecycleForCard({ ...card, state: "ready", outcome_feedback: { feedback_ref: "FEEDBACK-1" } });
   assert.deepEqual(life.map((step) => step.label), [
@@ -72,4 +81,16 @@ test("rendered card is truthful, durable, and contains one primary action", () =
   assert.doesNotMatch(html, />complete</i);
   assert.equal((html.match(/class="system-work-primary"/g) || []).length, 1);
   assert.doesNotMatch(html, /550e8400|SELECT |shell command|generic executor/i);
+});
+
+test("first use renders genuine current requests and a safe no-demo empty state", () => {
+  const current = renderCurrentWorkRequests([{ human_ref: "WR-000123", title: "Current source review", state: "captured", source: { freshness: "current" }, next_human_action: "Review and triage" }]);
+  assert.match(current, /WR-000123/);
+  assert.match(current, /current source/);
+  assert.match(current, /data-open-work-request="WR-000123"/);
+  const empty = renderCurrentWorkRequests([]);
+  assert.match(empty, /No eligible Work Requests right now/i);
+  assert.match(empty, /safe empty state/i);
+  assert.match(empty, /not an idea, routine question, or a demo/i);
+  assert.doesNotMatch(empty, /WR-\d+/);
 });

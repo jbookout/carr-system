@@ -13,7 +13,7 @@ export function validateHumanRef(value) {
 }
 
 export function actionForCard(card) {
-  if (!card || !["captured", "triaged", "ready"].includes(card.state)) return null;
+  if (!card || card.source?.freshness !== "current" || !["captured", "triaged", "ready"].includes(card.state)) return null;
   if (card.state === "captured") return { kind: "triage", label: "Confirm classification" };
   if (card.state === "triaged" && !card.plan) return { kind: "prepare-plan", label: "Prepare bounded plan" };
   if (card.state === "triaged") return { kind: "accept-plan", label: "Accept this plan" };
@@ -75,6 +75,14 @@ export function renderSystemWorkCard(card) {
     ${card.pending_outcome_feedback ? `<section class="system-work-evidence pending"><p class="eyebrow">Pending human acceptance</p><h2>${esc(humanize(card.pending_outcome_feedback.proposed_outcome))}</h2><p>${esc(card.pending_outcome_feedback.result_summary)}</p></section>` : ""}
     ${renderOutcome(card.outcome_feedback)}
     <footer><p>${Number(card.accepted_feedback_count || 0)} accepted observation${Number(card.accepted_feedback_count || 0) === 1 ? "" : "s"}</p>
+      ${card.source?.freshness !== "current" ? `<p class="truth-note">This Work Request is read-only until its source is current again.</p>` : ""}
       ${action ? `<button type="button" class="system-work-primary" data-system-action="${esc(action.kind)}">${esc(action.label)}</button>` : ""}</footer>
   </article>`;
+}
+
+export function renderCurrentWorkRequests(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return `<section class="system-work-empty"><p class="eyebrow">No current system work</p><h2>No eligible Work Requests right now.</h2><p>This is a safe empty state, not a failure. Report a concern only when you observed a system behavior that blocks, degrades, or makes a governed outcome unsafe or unverifiable.</p><p>A report is not an idea, routine question, or a demo. It is sourced from current shared doctrine and still requires human review.</p></section>`;
+  }
+  return `<section class="system-work-current"><p class="eyebrow">Current system work</p><h2>Eligible Work Requests</h2><p>These are real, current sourced requests that can take the next bounded human step. Opening one does not execute work.</p><ul>${items.map((item) => `<li><button type="button" data-open-work-request="${esc(item.human_ref)}"><strong>${esc(item.human_ref)} · ${esc(item.title)}</strong><span>${esc(humanize(item.state))} · ${esc(item.source?.freshness || "unknown")} source</span><small>${esc(item.next_human_action || "Review current record")}</small></button></li>`).join("")}</ul></section>`;
 }

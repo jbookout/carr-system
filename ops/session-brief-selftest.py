@@ -14,10 +14,23 @@ says a line that prints every session is a line nobody reads; a line that names
 four already-fixed failures is worse, because the one real failure hides among
 them, and the session pays to rediscover which.
 
+SECOND INCIDENT, 2026-08-21, same disease in loose_work(). The brief opened a
+session with "1 tracked file(s) in ~/carr-system have sat uncommitted for 324h".
+The only dirty tracked path was the git submodule tools/dictation-rig/vendor/quill,
+whose actual edit was 29 hours old. getmtime() had been called straight on the
+path git status printed, and for a gitlink that path is a DIRECTORY: a directory's
+mtime does not move when a file nested inside it is edited, so the number was
+frozen at the submodule's checkout date and could only ever climb. Worse, the
+submodule was dirty by DESIGN — its diff is byte-identical to the committed patch
+tools/dictation-rig/patches/0001-menubar-visible-recording.patch, which the build
+applies — so the line was announcing a permanent steady state as if it were
+someone's stranded work, which is precisely the "line nobody reads" failure.
+
 Run: python3 ops/session-brief-selftest.py
 """
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -103,6 +116,172 @@ def _(assert_):
 def _(assert_):
     out = sb.nightly_verdict(log="/nonexistent/nightly.log")
     assert_(out == "", f"a missing log should produce no line, got {out!r}")
+
+
+# ── loose_work(): a tracked path can be a DIRECTORY (2026-08-21) ─────────────
+
+def _git(cwd, *args):
+    return subprocess.run(("git",) + args, cwd=cwd, capture_output=True,
+                          text=True, timeout=30)
+
+
+def _must(res, what):
+    """Raise with git's own stderr when a setup step fails.
+
+    These cases used to swallow setup failures and quietly pass. That hid a
+    real one: a bare CI runner has no global git identity, so the commit INSIDE
+    the submodule failed, the gitlink never moved, and the assertion failed on
+    the runner while passing on a laptop that had a global user.email. A setup
+    step that cannot run must say which one and why, not skip.
+    """
+    if res.returncode != 0:
+        raise AssertionError(
+            f"setup step failed ({what}): rc={res.returncode} "
+            f"stderr={res.stderr.strip()!r} stdout={res.stdout.strip()!r}")
+    return res
+
+
+def _ident(path):
+    """Give a repo its own identity — never inherited from the machine.
+
+    Applied to the submodule work tree too, not just the outer repos: a commit
+    made inside vendor/dep runs in ITS repo, with ITS config, and a CI runner
+    has no global fallback to borrow.
+    """
+    _git(path, "config", "user.email", "selftest@carr.local")
+    _git(path, "config", "user.name", "selftest")
+    _git(path, "config", "commit.gpgsign", "false")
+    _git(path, "config", "protocol.file.allow", "always")
+    return path
+
+
+def _repo(path):
+    """A throwaway git repo with an identity, so commits work on any machine."""
+    os.makedirs(path, exist_ok=True)
+    _must(_git(path, "init", "-q", "-b", "main"), f"git init {path}")
+    return _ident(path)
+
+
+def _seed_parent_with_submodule(base):
+    """upstream repo + parent repo with it vendored at vendor/dep.
+
+    Returns (parent, submodule_path), or (None, None) when this git cannot add
+    a file-path submodule at all — the one environment difference worth
+    tolerating, and it is reported rather than silently passed.
+    """
+    up = _repo(os.path.join(base, "upstream"))
+    with open(os.path.join(up, "vendored.txt"), "w") as fh:
+        fh.write("original\n")
+    _must(_git(up, "add", "-A"), "stage upstream")
+    _must(_git(up, "commit", "-qm", "seed"), "commit upstream")
+
+    parent = _repo(os.path.join(base, "parent"))
+    with open(os.path.join(parent, "README"), "w") as fh:
+        fh.write("parent\n")
+    _must(_git(parent, "add", "-A"), "stage parent")
+    _must(_git(parent, "commit", "-qm", "seed"), "commit parent")
+
+    add = _git(parent, "-c", "protocol.file.allow=always", "submodule", "add",
+               "-q", up, "vendor/dep")
+    if add.returncode != 0:
+        return None, None
+    _must(_git(parent, "commit", "-qm", "vendor dep"), "commit gitlink")
+    sub = os.path.join(parent, "vendor", "dep")
+    _ident(sub)                      # the submodule commits with its OWN config
+    return parent, sub
+
+
+@case("newest mtime of a DIRECTORY comes from the files inside, not the directory itself")
+def _(assert_):
+    root = tempfile.mkdtemp()
+    inner = os.path.join(root, "sub")
+    os.makedirs(inner)
+    deep = os.path.join(inner, "nested")
+    os.makedirs(deep)
+    f = os.path.join(deep, "edited.txt")
+    with open(f, "w") as fh:
+        fh.write("x")
+    # The 324h shape: the directory looks ancient, the file inside is recent.
+    old = 1_000_000.0
+    new = 2_000_000.0
+    os.utime(f, (new, new))
+    os.utime(deep, (old, old))
+    os.utime(inner, (old, old))
+    got = sb._newest_mtime(inner)
+    assert_(got == new,
+            f"a directory's age must come from its newest file ({new}), got {got}")
+    assert_(got != os.path.getmtime(inner),
+            "the directory's own mtime must not be what is reported")
+
+
+@case("newest mtime of a plain FILE is still just that file's mtime")
+def _(assert_):
+    fd, f = tempfile.mkstemp()
+    os.close(fd)
+    os.utime(f, (1_500_000.0, 1_500_000.0))
+    got = sb._newest_mtime(f)
+    assert_(got == 1_500_000.0, f"expected the file's own mtime, got {got}")
+
+
+@case("a submodule that is only DIRTY INSIDE is not reported as stranded work")
+def _(assert_):
+    parent, sub = _seed_parent_with_submodule(tempfile.mkdtemp())
+    if parent is None:
+        print("      (skipped: this git cannot add a file-path submodule)")
+        return
+
+    # Dirty the submodule's WORK TREE only — the recorded commit does not move.
+    # This is the applied-patch steady state the dictation rig lives in.
+    with open(os.path.join(sub, "vendored.txt"), "w") as fh:
+        fh.write("patched by the build\n")
+    ancient = 1_000_000.0             # make the gitlink DIRECTORY look 300h+ old
+    os.utime(sub, (ancient, ancient))
+
+    porcelain = _git(parent, "status", "--porcelain").stdout
+    assert_(porcelain.strip() != "",
+            "precondition: plain git status should see the dirty submodule, "
+            f"got {porcelain!r} — the case would prove nothing")
+
+    out = sb.loose_work(repo=parent)
+    assert_(out == "",
+            f"a submodule dirty only in its work tree is the designed state and "
+            f"must produce no line, got {out!r}")
+
+
+@case("a submodule whose RECORDED COMMIT moved is still reported")
+def _(assert_):
+    parent, sub = _seed_parent_with_submodule(tempfile.mkdtemp())
+    if parent is None:
+        print("      (skipped: this git cannot add a file-path submodule)")
+        return
+
+    # A real second commit inside the submodule, then leave the parent's
+    # gitlink pointing at the old one — a MOVED POINTER, not work-tree dirt.
+    with open(os.path.join(sub, "vendored.txt"), "w") as fh:
+        fh.write("v2\n")
+    _must(_git(sub, "add", "-A"), "stage inside submodule")
+    _must(_git(sub, "commit", "-qm", "v2"), "commit inside submodule")
+
+    stale = 1_000_000.0               # the 12h clock must still see this as old
+    for root, dirs, files in os.walk(sub):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in files:
+            try:
+                os.utime(os.path.join(root, name), (stale, stale))
+            except OSError:
+                pass
+    os.utime(sub, (stale, stale))
+
+    ignored = _git(parent, "status", "--porcelain",
+                   "--ignore-submodules=dirty").stdout
+    assert_(ignored.strip() != "",
+            "precondition: a MOVED gitlink must survive --ignore-submodules=dirty, "
+            f"got {ignored!r} — if this is empty the pointer never moved")
+
+    out = sb.loose_work(repo=parent)
+    assert_("uncommitted" in out,
+            f"a moved submodule pointer IS uncommitted work and must be "
+            f"reported, got {out!r}")
 
 
 def main():

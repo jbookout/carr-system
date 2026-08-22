@@ -466,7 +466,23 @@ export async function callTool(env, actor, name, args, profile = "full") {
       hint: "a narrow profile may log the activity but not assert relationships — drop links[] from this call and file the introduction facts with add-loop for an interactive partner session to link-parties" });
   if (!tool.write) {
     const sql = neon(env.DATABASE_URL_READER);
-    const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
+    // sideWrite is the ONLY way a read verb may write, and it is deliberately
+    // awkward: a separate credential, never awaited, failure isolated. A read
+    // that writes on the read connection is what took doctrine search down —
+    // search_doctrine_situations carried an insert inside its own statement, so
+    // a refused write killed the answer (migration 0223). Anything using this
+    // must treat the write as optional: losing it costs a record, never a reply.
+    const client = {
+      query: async (text, params = []) => ({ rows: await sql.query(text, params) }),
+      sideWrite: env?.DATABASE_URL_WRITER
+        ? (text, params = []) => {
+            const run = neon(env.DATABASE_URL_WRITER).query(text, params)
+              .catch(() => {});           // a lost log row must never surface as a failed read
+            env.ctx?.waitUntil?.(run);
+            return run;
+          }
+        : null,
+    };
     // Record AFTER the response is ready, via ctx.waitUntil, so recording never
     // adds latency to the read the caller is waiting on. ok/errorKind are
     // metadata only — never the result itself, never args.

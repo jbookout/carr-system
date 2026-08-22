@@ -94,6 +94,43 @@ test("approve-rule delegates one atomic transaction and only returns enforced ac
     "activation belongs inside the authority function");
 });
 
+test("amend-rule cannot change an active rule under its old approval", async () => {
+  const c = fakeClient((sql) => {
+    if (/select status, statement, human_quote, scope, version from rule/i.test(sql))
+      return { rows: [{ status: "active", statement: "approved statement",
+        human_quote: "Joe said it", scope: {}, version: 2 }] };
+    if (/select version from rule where id=\$1 for update/i.test(sql))
+      return { rows: [{ version: 2 }] };
+    return { rows: [] };
+  });
+  await assert.rejects(
+    () => executeRegisteredTool(c, ACTOR, "amend-rule", {
+      idempotency_key: "amend-active-1", rule_id: RULE, base_version: 2,
+      statement: "different substance", reason: "try to reuse the approval",
+    }),
+    e => e instanceof ToolError && e.payload.error === "active_rule_approval_frozen",
+  );
+  assert.equal(c.calls.some(x => /update rule set statement=/i.test(x.sql)), false);
+});
+
+test("retire-rule is Joe-authority receipt-backed, never a direct status update", async () => {
+  assert.equal(TOOLS["retire-rule"].authorityOnly, true);
+  const c = fakeClient((sql) => {
+    if (/select status, statement, personal_to from rule/i.test(sql))
+      return { rows: [{ status: "active", statement: "approved statement", personal_to: null }] };
+    if (/select ops\.retire_rule/i.test(sql))
+      return { rows: [{ result: { ok: true, status: "retired",
+        retirement_receipt_id: "44444444-4444-4444-8444-444444444444" } }] };
+    return { rows: [] };
+  });
+  const out = await executeRegisteredTool(c, ACTOR, "retire-rule", {
+    idempotency_key: "retire-1", rule_id: RULE, reason: "Joe withdrew it",
+  });
+  assert.equal(out.status, "retired");
+  assert.equal(c.calls.some(x => /select ops\.retire_rule/i.test(x.sql)), true);
+  assert.equal(c.calls.some(x => /update rule set status='retired'/i.test(x.sql)), false);
+});
+
 test("applicable-rules delegates finite applicability selection to the policy compiler", async () => {
   const c = fakeClient((sql) => /from ops\.applicable_rules/i.test(sql)
     ? { rows: [{ rule_id: RULE, statement: "fixture", enforcement_class: "machine_enforceable" }] }

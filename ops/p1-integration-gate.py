@@ -64,6 +64,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -105,8 +106,43 @@ def neon(env: dict, *args: str) -> subprocess.CompletedProcess:
                           timeout=300, env=env)
 
 
+def wait_for_branch_connection_string(
+    env: dict[str, str],
+    branch_id: str,
+    project_id: str,
+    *,
+    attempts: int = 12,
+    delay_seconds: float = 5.0,
+    runner: Callable[..., subprocess.CompletedProcess] = neon,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> str:
+    """Bound the readiness race after Neon creates a branch and its compute."""
+    if attempts < 1:
+        return ""
+    for attempt in range(attempts):
+        result = runner(
+            env,
+            "connection-string", branch_id,
+            "--project-id", project_id,
+            "--role-name", "neondb_owner",
+            "--database-name", "neondb",
+            "--endpoint-type", "read_write",
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        if attempt + 1 < attempts:
+            sleeper(delay_seconds)
+    return ""
+
+
 def psql(conn_string: str, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["psql", conn_string, "-v", "ON_ERROR_STOP=1", *args],
+    # db_tap.psql_bin() rather than the bare name: it searches the Homebrew AND
+    # user-local prefixes and, when there is no client at all, refuses with a
+    # sentence naming the missing dependency. The bare name failed as
+    # FileNotFoundError from inside subprocess, which named neither. This is the
+    # lookup ops/p1-rebuild-gate.py already uses; the production-safety guards
+    # above stay a deliberate copy of that gate's, per this file's header.
+    return subprocess.run([db_tap.psql_bin(), conn_string, "-v", "ON_ERROR_STOP=1", *args],
                           capture_output=True, text=True, timeout=1800)
 
 
@@ -191,11 +227,10 @@ def main() -> int:
         say(f"  guard 1: created {branch_name} ({branch_id}), which is not the default branch")
 
         # ── GUARD 2: a different host from production AND staging ────────────
-        out = neon(env, "connection-string", branch_id, "--project-id", project_id,
-                   "--role-name", "neondb_owner")
-        if out.returncode != 0 or not out.stdout.strip():
-            sys.exit("p1-integration-gate: could not obtain the branch connection string")
-        branch_dsn = out.stdout.strip()
+        branch_dsn = wait_for_branch_connection_string(env, branch_id, project_id)
+        if not branch_dsn:
+            sys.exit("p1-integration-gate: could not obtain the branch connection string "
+                     "after the bounded readiness window")
         branch_host = host_of(branch_dsn)
         if branch_host in (prod_host, stg_host):
             sys.exit("p1-integration-gate: the branch resolves to the same host as an "

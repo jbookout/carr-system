@@ -31,6 +31,7 @@ while hosted CI executes them against its already-running local service.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -44,6 +45,15 @@ import psycopg
 from psycopg import sql
 
 REPO = Path(__file__).resolve().parent.parent
+
+# The postgres CLIENT lookup, shared with ops/p1-rebuild-gate.py. Loading by path
+# is how every ops gate reaches tools/db-tap.py, whose hyphenated filename cannot
+# be imported normally.
+_spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
+if _spec is None or _spec.loader is None:
+    sys.exit("release-abandon-selftest: could not load tools/db-tap.py")
+db_tap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(db_tap)
 ABANDON_DB = "abandon_check"
 PROVIDER = "cloudflare-workers"
 PROVIDER_VERSION = "11111111-2222-4333-8444-555555555555"
@@ -63,7 +73,9 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 def psql(dsn, *args):
-    return subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", *args],
+    # Not the bare name: with no client installed that failed as FileNotFoundError
+    # from inside subprocess, naming neither the missing dependency nor the fix.
+    return subprocess.run([db_tap.psql_bin(), dsn, "-v", "ON_ERROR_STOP=1", *args],
                           capture_output=True, text=True, timeout=1800)
 
 
@@ -115,12 +127,9 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
 
 def _cases(dsn: str) -> None:
     record(dsn, "sync-registry")
-    # A FULL manifest. 0131 exempts only draft/candidate/abandoned from
-    # needing rebuild evidence, so a row that must legitimately reach
-    # `complete` (case 4) needs the digest and the lock present from the
-    # start. The first run of these fixtures used a thin manifest, the
-    # setup UPDATE silently failed the constraint, and case 4 then tested
-    # nothing — it passed abandon on a row still sitting at `candidate`.
+    # A full manifest supplies the CHECK-constrained artifact fields required
+    # by case 4's synthetic completed-history fixture. A thin manifest once
+    # left that row at `candidate`, letting abandon pass for the wrong reason.
     manifest = {"service": "carr-mcp", "environment": "staging",
                 "git_sha": "a" * 40, "plan_hash": "plan:selftest",
                 "artifact_digest": "d" * 64,
@@ -162,9 +171,6 @@ def _cases(dsn: str) -> None:
     if bound.returncode != 0:
         return
     production_mpath.write_text(bound.stdout)
-    production_manifest = json.loads(bound.stdout)
-    production_sha = production_manifest["git_sha"]
-    production_plan = production_manifest["plan_hash"]
     candidate = record(dsn, "release", "candidate", "--key", "rel-shipped",
                        "--manifest", str(production_mpath), "--service", "carr-mcp",
                        "--environment", "production", "--maker", "selftest",
@@ -195,27 +201,6 @@ def _cases(dsn: str) -> None:
         "where release_key='rel-shipped'")
     check("0b. promoted fixtures carry verifier and rollback evidence",
           ready.returncode == 0, (ready.stderr or ready.stdout).strip()[:160])
-    # This test owns an explicit throwaway database. Do not call the routine
-    # writer here: it intentionally authenticates only through CARR_DB_JOBS_URL,
-    # which may point at a real environment on a developer machine. The exact
-    # writer contract is covered separately; this fixture needs only the
-    # release-linked receipt required to exercise abandon semantics.
-    recovery = psql(
-        dsn, "-c",
-        "insert into ops.run "
-        "(correlation_id,kind,service_id,release_id,environment,run_key,state,"
-        " started_at,ended_at,recovery_strategy,recovery_plan_ref,source_kind,"
-        " source_ref,evidence_ref) "
-        "select gen_random_uuid(),'check',service_id,id,'staging',"
-        " 'recovery.rehearsal.worker','succeeded',now(),"
-        " now()+interval '1 millisecond',recovery_strategy,rollback_plan_ref,"
-        " 'wrapper','ops/release-abandon-selftest.py',"
-        " 'evidence:release-abandon-recovery' "
-        "from ops.release where release_key='rel-shipped'")
-    check("0c. Production fixture carries a linked recovery rehearsal",
-          recovery.returncode == 0,
-          (recovery.stderr or recovery.stdout).strip()[:160])
-
     # ── 1. a candidate can be abandoned, with a reason ──────────────────
     r = record(dsn, "release", "abandon", "--key", "rel-abandon-a",
                "--reason", "superseded before approval by a later candidate")
@@ -233,50 +218,48 @@ def _cases(dsn: str) -> None:
           "a terminal state with no recorded reason is the thing this exists to prevent")
 
     # ── 3. an APPROVED release can still be abandoned before it ships ──
-    # The window between a signature and a deploy is real, and a plan can be
-    # withdrawn inside it. `approved` is therefore in the allowed set.
-    record(dsn, "release", "approve", "--key", "rel-abandon-b",
-           "--plan-hash", "plan:selftest", "--actor", "selftest")
+    # Typed approval and recovery are exercised by staging-release-readback-gate.
+    # This fixture owns only abandon's allowed-state boundary, so construct the
+    # already-approved pre-deploy state directly rather than trying to recreate
+    # Joe authority and a three-observation recovery bundle in this test.
+    approved = psql(dsn, "-c",
+                    "set session_replication_role=replica; "
+                    "update ops.release set state='approved',approved_by_actor='joe',"
+                    "approved_at=now(),approval_expires_at=now()+interval '1 hour' "
+                    "where release_key='rel-abandon-b'; "
+                    "set session_replication_role=origin")
+    approved_state = psql(dsn, "-At", "-c",
+                          "select state from ops.release where release_key='rel-abandon-b'")
+    check("3a. approved pre-deploy fixture is constructed",
+          approved.returncode == 0 and approved_state.stdout.strip() == "approved",
+          (approved.stderr or approved.stdout or approved_state.stderr or
+           f"state={approved_state.stdout.strip()!r}").strip()[:160])
+    if approved.returncode != 0 or approved_state.stdout.strip() != "approved":
+        return
     r = record(dsn, "release", "abandon", "--key", "rel-abandon-b",
                "--reason", "withdrawn after signing, before any deploy ran")
     check("3. an approved release can be abandoned before it ships",
           r.returncode == 0, (r.stderr or r.stdout).strip()[:160])
 
     # ── 4. history is not erasable ──────────────────────────────────────
-    # WALK THE REAL LIFECYCLE rather than forcing the state. 0131's trigger
-    # refuses `complete` unless a deployment attached to the release recorded
-    # a read-back — "shipped is not the same as serving" — so the fixture has
-    # to approve, deploy and read back exactly as a real release does. The
-    # earlier version set state directly, the constraint refused it silently,
-    # and case 4 then proved nothing on a row still sitting at `candidate`.
-    record(dsn, "release", "approve", "--key", "rel-shipped",
-           "--plan-hash", production_plan, "--actor", "selftest")
-    journey_corr = "77777777-7777-4777-8777-777777777777"
-    record(dsn, "deployment", "--service", "carr-mcp", "--environment", "production",
-           "--state", "complete", "--git-sha", production_sha, "--verb-count", "1",
-           "--provider", PROVIDER, "--provider-version-id", PROVIDER_VERSION,
-           "--correlation", journey_corr,
-           "--release-key", "rel-shipped", "--source-kind", "wrapper",
-           "--source-ref", "ops/release-abandon-selftest.py",
-           "--read-back-at", "now", "--verification-evidence-ref", "selftest read-back")
-    performance = psql(
-        dsn, "-c",
-        "insert into ops.run "
-        "(correlation_id,kind,service_id,release_id,environment,run_key,state,"
-        " started_at,ended_at,budget_ms,source_kind,source_ref,evidence_ref) "
-        f"select '{journey_corr}'::uuid,'check',service_id,id,'production',"
-        " 'performance.release','succeeded',now()-interval '1 second',now(),"
-        " performance_budget_ms,'wrapper','ops/release-abandon-selftest.py',"
-        " 'evidence:release-abandon-performance' "
-        "from ops.release where release_key='rel-shipped'")
-    check("4aa. shipped fixture carries a measured performance receipt",
-          performance.returncode == 0,
-          (performance.stderr or performance.stdout).strip()[:160])
-    done = record(dsn, "release", "complete", "--key", "rel-shipped")
-    check("4a. the shipped fixture really reached `complete`",
-          done.returncode == 0,
-          f"setup did not land, so case 4 would test nothing: "
-          f"{(done.stderr or done.stdout).strip()[:140]}")
+    # The typed promotion/recovery path is a separate database gate. Here a
+    # completed row is only the immutable historical fixture that abandon must
+    # refuse; replica mode keeps this test focused on that state transition.
+    completed = psql(dsn, "-c",
+                     "set session_replication_role=replica; "
+                     "update ops.release set state='complete',ended_at=now(),"
+                     "approved_by_actor='joe',approved_at=now(),"
+                     "approval_expires_at=now()+interval '1 hour' "
+                     "where release_key='rel-shipped'; "
+                     "set session_replication_role=origin")
+    completed_state = psql(dsn, "-At", "-c",
+                           "select state from ops.release where release_key='rel-shipped'")
+    check("4a. completed historical fixture is constructed",
+          completed.returncode == 0 and completed_state.stdout.strip() == "complete",
+          (completed.stderr or completed.stdout or completed_state.stderr or
+           f"state={completed_state.stdout.strip()!r}").strip()[:160])
+    if completed.returncode != 0 or completed_state.stdout.strip() != "complete":
+        return
     r = record(dsn, "release", "abandon", "--key", "rel-shipped",
                "--reason", "trying to erase a release that already shipped")
     check("4. a release that already shipped CANNOT be abandoned",
@@ -309,6 +292,90 @@ def run_cases(dsn: str) -> None:
     _cases(dsn)
 
 
+def legacy_approval_receipt_refusal(dsn: str) -> None:
+    """Exercise 0205 against a populated 0202-shaped receipt table.
+
+    A regenerated snapshot may already contain 0205.  This disposable sibling
+    explicitly restores only 0205's receipt-table additions before applying the
+    migration file directly; its schema_migrations ledger is intentionally not
+    consulted, because raw file application is the behavior under test.
+    """
+    if psql(dsn, "-f", str(REPO / "db" / "schema.sql")).returncode != 0:
+        check("0205 legacy-receipt fixture schema loads", False)
+        return
+    receipt_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    receipt_columns = psql(dsn, "-At", "-c",
+                           "select count(*) from information_schema.columns "
+                           "where table_schema='ops' and table_name='release_approval_receipt' "
+                           "and column_name in ('verifier_actor','verifier_evidence_ref')")
+    has_0205_receipt_columns = receipt_columns.stdout.strip() == "2"
+    verifier_columns = (",verifier_actor,verifier_evidence_ref"
+                        if has_0205_receipt_columns else "")
+    verifier_values = (",'legacy-verifier','legacy:proof'"
+                       if has_0205_receipt_columns else "")
+    seed = psql(
+        dsn, "-c",
+        "set session_replication_role=replica; "
+        "insert into ops.release_approval_receipt "
+        "(id,idempotency_key,release_id,recovery_run_id,recovery_bundle_id,plan_hash,"
+        " approved_by_actor,approved_at,approval_expires_at" + verifier_columns +
+        ",approval_sha256,evidence_ref) "
+        f"values ('{receipt_id}'::uuid,'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'::uuid,"
+        " 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'::uuid,"
+        " 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'::uuid,"
+        " 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'::uuid,'legacy-plan','joe',now(),"
+        " now()+interval '1 hour'" + verifier_values + ",'sha256:" + "1" * 64 + "',"
+        " 'ops.program5-release-approval:sha256:" + "2" * 64 + "'); "
+        "set session_replication_role=origin",
+    )
+    check("0205 legacy-receipt fixture seeds one preexisting append-only receipt",
+          seed.returncode == 0, (seed.stderr or seed.stdout).strip()[:160])
+    if seed.returncode != 0:
+        return
+    if has_0205_receipt_columns:
+        # These are the only 0205 objects that depend on receipt verifier
+        # columns. The generic append-only trigger/function remains installed.
+        restore = psql(
+            dsn, "-c",
+            "drop trigger if exists program5_release_verifier_is_immutable on ops.release; "
+            "drop function if exists ops.program5_release_verifier_is_immutable(); "
+            "drop function if exists ops.approve_program5_release(text,text,uuid,integer); "
+            "drop function if exists ops.approve_program5_release(text,text,uuid,integer,text,text); "
+            "alter table ops.release_approval_receipt "
+            "drop constraint if exists release_approval_receipt_verifier_actor_nonblank, "
+            "drop constraint if exists release_approval_receipt_verifier_evidence_nonblank, "
+            "drop constraint if exists release_approval_receipt_verifier_actor_canonical, "
+            "drop constraint if exists release_approval_receipt_verifier_evidence_canonical; "
+            "alter table ops.release_approval_receipt "
+            "drop column verifier_actor, drop column verifier_evidence_ref",
+        )
+        check("legacy fixture restores only 0205 receipt-table additions",
+              restore.returncode == 0, (restore.stderr or restore.stdout).strip()[:160])
+        if restore.returncode != 0:
+            return
+    before = psql(dsn, "-At", "-c",
+                  "select count(*),min(id::text) from ops.release_approval_receipt")
+    applied = psql(dsn, "-f", str(REPO / "migrations" /
+                                   "0205_program5_approval_verifier.sql"))
+    detail = (applied.stderr + applied.stdout).strip()
+    check("0205 refuses a populated legacy approval-receipt table in words",
+          applied.returncode != 0
+          and "populated 0202 evidence requires a separate audited versioned conversion" in detail,
+          detail[-240:])
+    after = psql(dsn, "-At", "-c",
+                 "select count(*),min(id::text) from ops.release_approval_receipt")
+    check("0205 refusal leaves the legacy append-only receipt unchanged",
+          before.stdout.strip() == f"1|{receipt_id}"
+          and after.stdout.strip() == before.stdout.strip(),
+          f"before={before.stdout.strip()!r} after={after.stdout.strip()!r}")
+    columns = psql(dsn, "-At", "-c",
+                   "select count(*) from information_schema.columns "
+                   "where table_schema='ops' and table_name='release_approval_receipt' "
+                   "and column_name in ('verifier_actor','verifier_evidence_ref')")
+    check("0205 refusal rolls its schema transaction back", columns.stdout.strip() == "0",
+          f"new receipt columns after refusal: {columns.stdout.strip()!r}")
+
+
 def main() -> int:
     # CI's throwaway Postgres first: it is cheaper, faster, and means these
     # fixtures actually run on the surface that gates the merge.
@@ -316,6 +383,8 @@ def main() -> int:
     if ci_dsn:
         print("release-abandon-selftest: using an isolated database on CI Postgres")
         try:
+            with isolated_ci_database(ci_dsn) as legacy_dsn:
+                legacy_approval_receipt_refusal(legacy_dsn)
             with isolated_ci_database(ci_dsn) as isolated_dsn:
                 run_cases(isolated_dsn)
         except Exception:

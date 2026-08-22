@@ -14,7 +14,7 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 
 AUTHORITY_ENVIRONMENTS = {
@@ -113,13 +113,24 @@ def is_direct_authority_uri(value: str, expected_user: str) -> bool:
         port = parsed.port
     except (TypeError, ValueError):
         return False
+    try:
+        query_items = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return False
+    query = dict(query_items)
+    canonical_neon_tls = (
+        len(query_items) == len(query)
+        and query.get("sslmode") == "require"
+        and set(query) in ({"sslmode"}, {"sslmode", "channel_binding"})
+        and ("channel_binding" not in query or query["channel_binding"] == "require")
+    )
     return bool(
         parsed.scheme.lower() in {"postgres", "postgresql"}
         and unquote(parsed.username or "") == expected_user
         and parsed.password not in (None, "")
         and parsed.hostname
         and parsed.path not in ("", "/")
-        and parsed.query == ""
+        and canonical_neon_tls
         and parsed.fragment == ""
         and (port is None or 1 <= port <= 65535)
     )

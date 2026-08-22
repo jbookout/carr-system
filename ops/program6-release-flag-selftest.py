@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep Program 6's browser-action flag release-bound and fail-closed."""
+"""Keep Program 6's reviewed browser activation release-bound and exact."""
 from __future__ import annotations
 
 import tomllib
@@ -19,8 +19,8 @@ def main() -> int:
 
     for name, table in (("production", config.get("vars", {})),
                         ("staging", config.get("env", {}).get("staging", {}).get("vars", {}))):
-        if table.get("DEALROOM_PROGRAM6_ACTIONS_ENABLED") != "false":
-            failures.append(f"{name} must declare DEALROOM_PROGRAM6_ACTIONS_ENABLED=false")
+        if table.get("DEALROOM_PROGRAM6_ACTIONS_ENABLED") != "true":
+            failures.append(f"{name} must declare DEALROOM_PROGRAM6_ACTIONS_ENABLED=true")
 
     release = RELEASE.read_text(encoding="utf-8")
     dealroom = DEALROOM.read_text(encoding="utf-8")
@@ -40,7 +40,7 @@ def main() -> int:
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    print("program6-release-flag-selftest: default-false flag is config-bound and release-readable")
+    print("program6-release-flag-selftest: reviewed activation is config-bound and release-readable")
     return 0
 
 

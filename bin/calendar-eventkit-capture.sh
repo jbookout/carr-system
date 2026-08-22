@@ -55,6 +55,8 @@ PY="$REPO/.venv/bin/python"
 DAYS=7
 DRY=0
 RECEIPT_SAFE=0
+CANARY=0
+CANARY_SNAPSHOT=""
 WAIT_SECONDS="${CARR_CALENDAR_CAPTURE_WAIT_SECONDS:-60}"
 case "$WAIT_SECONDS" in
   ''|*[!0-9]*) echo "calendar-capture: invalid wait bound" >&2; exit 64 ;;
@@ -64,6 +66,7 @@ while [ "$#" -gt 0 ]; do
     --days) DAYS="${2:-7}"; shift ;;
     --dry-run) DRY=1 ;;
     --receipt-safe) RECEIPT_SAFE=1 ;;
+    --canary) CANARY=1 ;;
     -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
     *) echo "calendar-capture: unknown argument: $1" >&2; exit 64 ;;
   esac
@@ -71,6 +74,11 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$RECEIPT_SAFE" -eq 1 ] && [ "$DRY" -ne 1 ]; then
   echo "calendar-capture: --receipt-safe requires --dry-run" >&2
+  exit 64
+fi
+if [ "$CANARY" -eq 1 ]; then CANARY_SNAPSHOT="$(cat)"; [ -n "$CANARY_SNAPSHOT" ] || { echo "calendar-capture: missing protected contact snapshot" >&2; exit 78; }; fi
+if [ "$CANARY" -eq 1 ] && { [ "$DRY" -eq 1 ] || [ "$RECEIPT_SAFE" -eq 1 ] || [ "${CARR_CONTROL_PLANE_MODE:-}" != "canary" ]; }; then
+  echo "calendar-capture: --canary requires explicit control-plane canary mode and no dry-run flags" >&2
   exit 64
 fi
 
@@ -164,8 +172,14 @@ if [ ! -s "$DUMP" ]; then
   echo "calendar-capture: FAIL the bundle read OK but wrote no dump at $DUMP" >&2
   exit 1
 fi
-if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json --from-dump "$DUMP" \
-        > "$MATCH_JSON" 2> "$MATCH_ERR"; then
+if [ "$CANARY" -eq 1 ]; then
+  printf '%s' "$CANARY_SNAPSHOT" | "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json --from-dump "$DUMP" --contact-snapshot-stdin > "$MATCH_JSON" 2> "$MATCH_ERR"
+  MATCH_STATUS=$?
+else
+  "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json --from-dump "$DUMP" > "$MATCH_JSON" 2> "$MATCH_ERR"
+  MATCH_STATUS=$?
+fi
+if [ "$MATCH_STATUS" -ne 0 ]; then
   echo "calendar-capture: FAIL the matcher did not complete" >&2
   sed 's/^/    /' "$MATCH_ERR" >&2
   # The matcher reads the local Calendar database directly, which is a SEPARATE
@@ -180,6 +194,13 @@ if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json --from-dump "$
     exit 4
   fi
   exit 1
+fi
+
+# The canary receipt target is deliberately before all normal-record intake.
+# It proves deterministic EventKit output without creating activity, intake, or
+# research writes against the live record layer.
+if [ "$CANARY" -eq 1 ]; then
+  exec "$PY" "$REPO/tools/calendar-canary-result.py" --proposals "$MATCH_JSON"
 fi
 
 # An address that does not resolve in the record is not a successful capture.

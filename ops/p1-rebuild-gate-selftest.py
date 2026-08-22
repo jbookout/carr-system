@@ -29,6 +29,12 @@ class Result:
         return self.row
 
 
+class ProviderResult:
+    def __init__(self, returncode: int, stdout: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
 class Connection:
     def __init__(self, row: tuple[str, str] | None = None) -> None:
         self.row = row
@@ -105,7 +111,42 @@ def main() -> int:
                                              connect=mismatch_connect,
                                              password_factory=lambda _n: "fixture",
                                              sql_module=FakeSql))
-    print(f"p1-rebuild-gate-selftest: {4 - len(FAILED)}/4 passed")
+
+    provider_calls: list[tuple[object, ...]] = []
+    sleeps: list[float] = []
+    provider_results = iter([
+        ProviderResult(1),
+        ProviderResult(0, ""),
+        ProviderResult(0, "postgresql://fixture@branch.example/neondb?sslmode=require\n"),  # ci-secret-scan: allow — hermetic non-routable fixture
+    ])
+
+    def provider(_env: dict[str, str], *args: str) -> ProviderResult:
+        provider_calls.append(args)
+        return next(provider_results)
+
+    dsn = gate.wait_for_branch_connection_string(
+        {}, "branch-id", "staging-project", attempts=3, delay_seconds=0.25,
+        runner=provider, sleeper=sleeps.append,
+    )
+    check("new branch connection lookup retries bounded provider-not-ready results",
+          dsn.endswith("sslmode=require") and sleeps == [0.25, 0.25]
+          and len(provider_calls) == 3)
+    check("connection lookup pins branch, project, owner, database, and read-write endpoint",
+          all(call == (
+              "connection-string", "branch-id", "--project-id", "staging-project",
+              "--role-name", "neondb_owner", "--database-name", "neondb",
+              "--endpoint-type", "read_write",
+          ) for call in provider_calls))
+
+    exhausted_sleeps: list[float] = []
+    exhausted = gate.wait_for_branch_connection_string(
+        {}, "branch-id", "staging-project", attempts=2, delay_seconds=0.5,
+        runner=lambda _env, *_args: ProviderResult(1), sleeper=exhausted_sleeps.append,
+    )
+    check("connection lookup fails closed after its bounded retry window",
+          exhausted == "" and exhausted_sleeps == [0.5])
+
+    print(f"p1-rebuild-gate-selftest: {7 - len(FAILED)}/7 passed")
     return 1 if FAILED else 0
 
 

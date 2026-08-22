@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -17,6 +18,48 @@ from lib.platform_metering import MeteringRefusal, authorize_metered_execution  
 
 POLICY = json.loads((REPO / "ops/config/platform-metering.v1.json").read_text(encoding="utf-8"))
 FAILED: list[str] = []
+
+
+def _repository_scripts() -> set[str]:
+    """Every .py and .sh file the REPOSITORY tracks — not every file on disk.
+
+    This used to walk REPO.rglob("*"), which descends into git worktrees and
+    scratch directories that live under the repo root. Worktree-per-session is
+    the default working style here, so on 2026-08-21 the check discovered 268
+    branch-create implementations against an inventory of 4. All 264 extras
+    were copies inside .claude/worktrees/, .codex-worktrees/, .worktrees/ and
+    .tmp-* dirs; not one was real. The gate passed on a clean CI runner and
+    failed on the developer machine at the identical commit, so its only
+    reachable remedy was CARR_SKIP_CI=1 — which is how an always-red local gate
+    quietly turns the override into the routine and removes the protection from
+    every other class it guards.
+
+    `git ls-files` is the honest source: an untracked copy of a tracked file is
+    not a second implementation, and a real new one has to be tracked before it
+    can ship. Falls back to a filtered walk when git is unavailable, so the
+    check still runs rather than vanishing.
+    """
+    try:
+        out = subprocess.run(["git", "ls-files", "-z", "--", "*.py", "*.sh"],
+                             cwd=REPO, capture_output=True, text=True,
+                             timeout=30, check=True).stdout
+        tracked = {name for name in out.split("\0") if name}
+        if tracked:
+            return {name for name in tracked
+                    if Path(name).name != Path(__file__).name
+                    and (REPO / name).is_file()}
+    except (OSError, subprocess.SubprocessError):
+        pass
+    skip = (".git", ".claude", ".codex-worktrees", ".worktrees", "node_modules")
+    found = set()
+    for path in REPO.rglob("*"):
+        if path.suffix not in {".py", ".sh"} or path.name == Path(__file__).name:
+            continue
+        parts = path.relative_to(REPO).parts
+        if any(part in skip or part.startswith(".tmp-") for part in parts[:-1]):
+            continue
+        found.add(str(path.relative_to(REPO)))
+    return found
 
 
 def check(label: str, condition: bool) -> None:
@@ -98,12 +141,11 @@ def main() -> int:
         re.compile(r'\$NEONCTL[^\n]*\bbranches\s+create\b'),
     )
     discovered_branch_sources = {
-        str(path.relative_to(REPO))
-        for path in REPO.rglob("*")
-        if path.suffix in {".py", ".sh"}
-        and path.name != Path(__file__).name
-        and any(pattern.search(path.read_text(encoding="utf-8", errors="ignore"))
-                for pattern in branch_patterns)
+        relative
+        for relative in _repository_scripts()
+        if any(pattern.search((REPO / relative).read_text(encoding="utf-8",
+                                                          errors="ignore"))
+               for pattern in branch_patterns)
     }
     check("every Neon branch-create implementation is inventoried",
           discovered_branch_sources == branch_sources)

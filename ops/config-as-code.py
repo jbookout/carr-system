@@ -199,8 +199,9 @@ TOKENS = [(tok, real) for tok, real in
 #                         100 CU-h/month at ~5 min per wake, so a second Mac
 #                         waking it hourly doubles the burn and can SUSPEND the
 #                         database for the rest of the month.
-#   local-briefs        — writes today.md into Joe's vault path; on another
-#                         machine it correctly SKIPs, so it is pure noise.
+#   local-briefs        — maintains Joe's local review queue. Legacy brief files
+#                         are explicit recovery only; a second scheduler would
+#                         duplicate the same owner-specific maintenance.
 #   partner-ping        — writes the shared record. One pinger is the point.
 #
 # What the second machine still needs from the nightly is the record-derived
@@ -270,6 +271,51 @@ DEFINITION_ONLY = {
 # to the TOP level is a CARR-managed primary task and must be registered as a
 # control-plane workflow.
 SECONDARY_SCHEDULED_TASKS: set[str] = set()
+
+
+# EPHEMERAL SCAFFOLDING IS NOT CONFIGURATION, and treating it as such made this
+# check chronically red — the exact failure the comment in cmd_check() warns
+# about, arriving from a direction nobody anticipated.
+#
+# Sessions legitimately create throwaway scheduled tasks: handoff continuations,
+# one-time catch-up runs, drills. On 2026-08-21 two of them blocked unrelated
+# pushes within one hour. The second was created BY a session whose own
+# description read "clear the config drift blocking the push" — it was stuck
+# behind this gate and its attempt to hand the problem on became the next
+# instance of the problem. No session could resolve either one correctly:
+# capturing a throwaway into the repository pollutes it permanently and then
+# inverts into MISSING drift the moment the task is removed, while moving or
+# deleting it takes another live session's work.
+#
+# tracked_scheduled_task_paths() already states the governing rule in its own
+# docstring: a task in Claude's user-owned directory that CARR does not own is
+# personal, and must not "make CARR health falsely red for it". This is that
+# rule applied to the drift comparison, which had never honoured it.
+#
+# A MARKER, NOT A HEURISTIC. Guessing from the name would be silently wrong in
+# both directions. The task itself declares what it is, so a genuine CARR task
+# that someone forgot to commit still shows up as drift — which is the part of
+# this check worth keeping.
+EPHEMERAL_MARKER = "ephemeral:true"
+
+
+def is_ephemeral_scheduled_task(text):
+    """True when a task's own frontmatter declares it session scaffolding.
+
+    Only the frontmatter block is read, so the phrase appearing in prose lower
+    down the file cannot exempt a real task by accident.
+    """
+    if not text:
+        return False
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return False
+        if line.strip().lower().replace(" ", "") == EPHEMERAL_MARKER:
+            return True
+    return False
 
 
 def scheduled_task_allowed(name):
@@ -627,6 +673,24 @@ def codex_configuration_state():
     return "absent"
 
 
+# A DEFINITION-ONLY TASK IS NOT A MISSING JOB. Four calendar-prebrief contracts
+# live in the repository and say, in their own bodies, "This definition is
+# disabled. Do not create, enable, or invoke any scheduler." Their activation
+# needs Joe's allowlist approval, EventKit permission and device evidence that
+# do not exist yet. The repository holds them as CONTRACTS, deliberately ahead
+# of the machine — config-as-code-selftest even asserts a definition-only tick
+# is not installed before cutover.
+#
+# Reporting them as MISSING FROM MACHINE told every session to install four
+# jobs whose own text forbids installing them, and blocked the pre-push gate
+# until somebody did. That is the ephemeral-task problem from the other
+# direction: the repository and the machine legitimately differ, and the check
+# could not express it.
+def is_definition_only_task(text):
+    """True when a repo-side task declares itself disabled rather than deployed."""
+    return bool(text) and "This definition is disabled" in text
+
+
 def pairs():
     """(label, live_text, repo_path) for every tracked item. live_text is
     already portable; repo contents are compared verbatim against it."""
@@ -645,6 +709,8 @@ def pairs():
     for name in sorted(os.listdir(TASKS_SRC)) if os.path.isdir(TASKS_SRC) else []:
         skill = os.path.join(TASKS_SRC, name, "SKILL.md")
         if os.path.isfile(skill) and scheduled_task_allowed(name):
+            if is_ephemeral_scheduled_task(read(skill)):
+                continue
             seen.add(f"{name}.SKILL.md")
             out.append((f"scheduled-task {name}", portable(read(skill)),
                         os.path.join(TASKS_REPO, f"{name}.SKILL.md")))
@@ -653,6 +719,8 @@ def pairs():
     for name, source in sorted(tracked_scheduled_task_paths().items()):
         filename = f"{name}.SKILL.md"
         if scheduled_task_allowed(name) and filename not in seen:
+            if is_definition_only_task(read(source)):
+                continue
             out.append((f"scheduled-task {name} (IN REPO, NOT ON MACHINE)",
                         None, source))
 
@@ -873,6 +941,15 @@ def cmd_install(apply):
         for name in task_plan["install"]:
             source = tracked_scheduled_task_paths()[name]
             destination = os.path.join(TASKS_SRC, name, "SKILL.md")
+            # Same rule the launchd loop below already applies to
+            # DEFINITION_ONLY plists, which this loop had never honoured. A task
+            # whose body says "do not create, enable, or invoke any scheduler"
+            # must not be written INTO the scheduler directory by the installer
+            # that claims to be converging the machine to the repository.
+            if is_definition_only_task(read(source)):
+                print(f"  SKIP  scheduled task {name} (definition only: "
+                      f"awaits its own stated activation approval)")
+                continue
             if read(destination) == concrete(read(source)):
                 print(f"  scheduled task already matches: {name}")
             else:
@@ -972,6 +1049,15 @@ def cmd_install(apply):
     # mistaken for proof that a task is enabled.
     if IS_PRIMARY:
         for name, source in sorted(tracked_scheduled_task_paths().items()):
+            # THE SKIP PRINTED ABOVE IS AN ANNOUNCEMENT; THIS IS THE WRITE IT
+            # DESCRIBES. Guarding only the announcing loop left `install
+            # --apply` reporting "SKIP scheduled task X (definition only)" and
+            # then creating X anyway, which is precisely the outcome that loop's
+            # comment says must not happen. The plan loop and the write loop
+            # both walk the same registry, so a rule applied to one and not the
+            # other is not a partial fix — it is a fix that prints.
+            if is_definition_only_task(read(source)):
+                continue
             destination = os.path.join(TASKS_SRC, name, "SKILL.md")
             desired = concrete(read(source))
             if read(destination) != desired:

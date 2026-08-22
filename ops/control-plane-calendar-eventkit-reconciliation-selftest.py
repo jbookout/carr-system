@@ -25,9 +25,10 @@ check("calendar workflow executes the attendee-aware EventKit capture",
       execution["entrypoint"] == "bin/calendar-eventkit-capture.sh")
 check("calendar shadow is the exact read-only EventKit path",
       execution["shadow_args"] == ["--dry-run", "--receipt-safe", "--days", "7"])
-check("calendar canary refuses until an isolated record destination exists",
-      execution["canary"]["enabled"] is False
-      and "isolated" in execution["canary"].get("reason", "").lower())
+check("calendar canary has the registered isolated record destination contract",
+      execution["canary"]["enabled"] is True
+      and execution["canary"].get("isolation_guard") == "calendar-fetch-daily.canary.v1"
+      and execution["canary"].get("args") == ["--canary", "--days", "7"])
 check("calendar legacy owner is the real launchd surface",
       workflow["legacy_schedule"].get("provider") == "launchd")
 check("calendar inventory names EventKit and not a Drive feed",
@@ -55,7 +56,8 @@ runner = (ROOT / "tools/control-plane.py").read_text()
 check("calendar command evidence recognizes EventKit markers",
       "calendar-capture: source=eventkit mode=shadow" in runner
       and "calendar-pull: source=calendar" not in runner
-      and 'env.pop(inherited, None)' in runner)
+      and '_calendar_canary_aggregate' in runner
+      and 'record_calendar_canary_receipt' in runner)
 
 capture = (ROOT / "bin/calendar-eventkit-capture.sh").read_text()
 # Contents/Resources/run.zsh, not Contents/MacOS/. The bundle's zsh logic moved
@@ -69,11 +71,22 @@ check("EventKit capture supports an isolated output root",
       "CARR_CALENDAR_OUTPUT_ROOT" in capture
       and "CARR_CALENDAR_OUTPUT_ROOT" in bundle
       and "CARR_CALENDAR_OUTPUT_ROOT" in dump)
+check("EventKit canary diverts to its isolated receipt target before live writes",
+      "calendar-canary-result.py" in capture and "--canary requires explicit control-plane canary mode" in capture)
 check("EventKit capture emits finite shadow and live evidence markers",
       "source=eventkit mode=" in capture and "writes=" in capture and "failed=" in capture
       and "RECEIPT_SAFE" in capture)
 check("obsolete published-feed reader is not the registered Control Plane command",
       execution["entrypoint"] != "bin/pull-gmail-calendar.py")
 
-print(f"control-plane calendar EventKit reconciliation — {13-len(FAILED)}/13 passed")
+task_doc = (ROOT / "ops/scheduled-tasks/calendar-fetch-daily.SKILL.md").read_text()
+check("calendar task instructions use the registered EventKit path, not the retired Drive feed",
+      "bin/calendar-eventkit-capture.sh" in task_doc
+      and "EventKit" in task_doc
+      and "Google Drive" not in task_doc
+      and "fetch-calendar.sh" not in task_doc
+      and "pull-gmail-calendar.py" not in task_doc
+      and "calendar-latest" not in task_doc)
+
+print(f"control-plane calendar EventKit reconciliation — {15-len(FAILED)}/15 passed")
 raise SystemExit(1 if FAILED else 0)
