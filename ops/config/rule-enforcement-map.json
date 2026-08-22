@@ -318,6 +318,19 @@
       ],
       "failure_mode": "PreToolUse deny"
     },
+    "close_before_open": {
+      "implementation": [
+        "hooks/close-before-open-gate.py",
+        "hooks/session-brief.py",
+        "ops/built_unclosed.py"
+      ],
+      "test": [
+        "ops/close-before-open-gate-selftest.py",
+        "ops/built-unclosed-selftest.py",
+        "ops/session-brief-selftest.py"
+      ],
+      "failure_mode": "PreToolUse deny"
+    },
     "blocker_decider": {
       "implementation": [
         "hooks/blocker-decider-gate.py"
@@ -1818,9 +1831,12 @@
       "why_unenforceable": "Prose-quality judgment across a huge range of content; same lint-pointed-at-chat sketch as 5be2f462 applies but is not built."
     },
     "20d106f1": {
-      "category": "judgment_advisory",
-      "enforcement_class": "judgment_ambient",
-      "why_unenforceable": "Personal-coaching judgment (what counts as his oldest open decision, a significant prediction)."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "before a new design, roadmap, or plan file while built-unclosed or implementation-open work exists",
+      "control": "close_before_open",
+      "exceptions": "edits to existing latch/ops/hooks files; the coaching half (oldest decision, calibration ledger) stays judgment",
+      "note": "Mechanical close-before-open only. The personal-coaching half of this rule remains judgment."
     },
     "19304882": {
       "category": "judgment_advisory",
