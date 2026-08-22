@@ -48,25 +48,6 @@ def commands(doc):
             for group in groups for hook in group.get("hooks", []) if isinstance(hook, dict)]
 
 
-PLIST_DIR = Path(__file__).resolve().parents[1] / "ops" / "launchd"
-
-
-def _plist_parses(path):
-    """True when Python can read the plist, not merely when plutil can.
-
-    launchd uses CoreFoundation's lenient parser and accepts files that
-    plistlib rejects.  Every repo tool that inspects these jobs uses plistlib,
-    so a file only launchd can read is a file the tooling silently skips.
-    """
-    try:
-        with open(path, "rb") as fh:
-            plistlib.load(fh)
-        return True
-    except Exception as exc:
-        print(f"  UNPARSEABLE  {path.name}: {type(exc).__name__} {exc}")
-        return False
-
-
 def main():
     merged = mod.merge_codex_carr_hooks(LIVE, DESIRED)
     names = commands(merged)
@@ -448,17 +429,15 @@ def main():
          and "SKIP  com.carr.control-plane-tick.plist (definition only:" in launchd_out.getvalue()),
         ("fresh install creates the LaunchAgents directory",
          launchd_dir_created),
-        # EVERY REPO PLIST MUST PARSE WITH plistlib, not merely with plutil.
-        # com.carr.partner-ping.plist named a flag literally inside an XML
-        # comment on 2026-08-18, and XML forbids the two-dash sequence there.
-        # plutil and launchd both accepted the file; Python's parser did not.
-        # The cost was silent: _missing_paths in ops/config-as-code.py catches
-        # the parse error and returns [] — "no missing paths" — so the check
-        # that stops a job installing when its program was never built did
-        # nothing at all for that job, and nothing said so. A text-only drift
-        # comparison cannot see this, which is why it needs its own case.
-        ("every repo launchd plist parses with plistlib, not just plutil",
-         all(_plist_parses(f) for f in sorted(PLIST_DIR.glob("*.plist")))),
+        # THE PLIST PARSE CHECK MOVED OUT, to ops/launchd-plist-portable-selftest.py.
+        # It lived here and could not catch the bug it was written for: this
+        # file is declared local_only in ops/config/ci-check-scope.json — for a
+        # true and evidenced reason about the LIVE settings comparison below —
+        # so on every hosted run the parse check was skipped along with it, and
+        # the room-bridge job merged unparseable on 2026-08-22. An exemption is
+        # declared per FILE and earned per ASSERTION, so a portable check must
+        # not sit in a file with a machine-shaped reason. One home, and it is
+        # the one that runs everywhere.
     ]
     for label, passed in cases:
         print(f"{'PASS' if passed else 'FAIL'}  {label}")
