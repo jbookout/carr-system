@@ -1152,7 +1152,11 @@ function boot() {
 
     countTo($("figCycle"), model.cycleAgeS === null ? NaN : Math.round(model.cycleAgeS),
       (v) => (Number.isFinite(Number(v)) ? humanDuration(Number(v)) : "—"));
-    $("figCursor").textContent = `${model.cursor ?? "—"} / ${model.latestSeq}`;
+    // Both halves count rather than cutting: the spec's rule is that no figure
+    // on this page re-renders silently, and the cursor pair is where a partner
+    // reads whether the bridge is keeping up.
+    countTo($("figCursorDelivered"), model.cursor ?? NaN, (v) => (Number.isFinite(Number(v)) ? String(v) : "—"));
+    countTo($("figCursorLatest"), model.latestSeq);
     countTo($("figDesks"), model.onlineDesks, (v) => `${v} online`);
 
     setState($("presenceDot"), model.presence.state);
