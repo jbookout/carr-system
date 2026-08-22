@@ -17,7 +17,8 @@
       "0229_calendar_prebrief_projection",
       "0230_renewal_decision_delivery",
       "0249_renewal_signed_source_ingress",
-      "0250_calendar_prebrief_joe_runtime"
+      "0250_calendar_prebrief_joe_runtime",
+      "0279_carr_lease_renewal_provider"
     ]
   },
   "database_down_migration": "does_not_exist",
