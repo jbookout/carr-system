@@ -158,7 +158,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback")
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease")
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -2670,7 +2670,8 @@ export const TOOLS = {
       });
       const renewals = await section(async () => {
         const status = await c.query(
-          "select t1_candidate_count, source_observed_at, freshness_state from v_renewal_decision_queue_status");
+          "select t1_candidate_count, source_observed_at, freshness_state from v_renewal_decision_queue_status where owner_slug=$1",
+          [scope.sponsor]);
         if (status.rows.length !== 1)
           return { state: "unavailable", reason: "source_unavailable", items: [] };
         if (status.rows[0].freshness_state === "empty")
@@ -2683,8 +2684,9 @@ export const TOOLS = {
                   tier_status, flag_status, has_channel, decision_count, source_observed_at,
                   freshness_state
              from v_renewal_decision_queue
+            where owner_slug=$1
             order by est_lease_event nulls last, display_name
-            limit 20`);
+            limit 20`, [scope.sponsor]);
         return { items: rows.rows, t1_candidate_count: status.rows[0].t1_candidate_count,
           source_observed_at: status.rows[0].source_observed_at,
           freshness_state: status.rows[0].freshness_state };
@@ -3230,6 +3232,75 @@ export const TOOLS = {
       await writeEvent(c, actor, "add-critical-date", "deal", s.id,
         { new: { kind: args.kind, due_on: args.due_on }, idempotency_key: args.idempotency_key });
       return { ok: true, critical_date_id: r.rows[0].id };
+    }),
+  },
+
+  "record-executed-lease": {
+    write: true,
+    humanOnly: true,
+    authorityOnly: true,
+    description: "Record the current executed lease/abstract that CARR actually holds for a deal. This is the authenticated first-party renewal authority: expiration_on must be an exact sourced date, evidence_kind/evidence_ref are mandatory, and a replacement needs the current lease version. It never infers a date from a term, listing, comp, NPPES, or web research. Only the deal's current owning partner may write it.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, deal: { type: "string" },
+      base_version: { type: "integer" },
+      executed_on: { type: "string" }, commencement_on: { type: "string" },
+      expiration_on: { type: "string" }, term_months: { type: "integer" },
+      evidence_kind: { type: "string", enum: ["executed_lease", "lease_amendment", "lease_abstract"] },
+      evidence_ref: { type: "string" }, source: { type: "string" },
+    }, required: ["idempotency_key", "deal", "executed_on", "expiration_on", "evidence_kind", "evidence_ref", "source"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "record-executed-lease", args, async () => {
+      const isoDate = (value, field, required = false) => {
+        if ((value === null || value === undefined || value === "") && !required) return null;
+        const text = String(value || "");
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(`${text}T00:00:00Z`)))
+          throw new ToolError({ error: "invalid_lease_date", field, expected: "YYYY-MM-DD" });
+        return text;
+      };
+      const executedOn = isoDate(args.executed_on, "executed_on", true);
+      const commencementOn = isoDate(args.commencement_on, "commencement_on");
+      const expirationOn = isoDate(args.expiration_on, "expiration_on", true);
+      if (commencementOn && expirationOn <= commencementOn)
+        throw new ToolError({ error: "invalid_lease_dates", hint: "expiration_on must be after commencement_on" });
+      if (args.term_months !== undefined &&
+          (!Number.isInteger(args.term_months) || args.term_months < 1 || args.term_months > 480))
+        throw new ToolError({ error: "invalid_term_months", allowed: "1..480" });
+      const evidenceKinds = new Set(["executed_lease", "lease_amendment", "lease_abstract"]);
+      if (!evidenceKinds.has(args.evidence_kind))
+        throw new ToolError({ error: "invalid_lease_evidence_kind", valid: [...evidenceKinds] });
+      const evidenceRef = String(args.evidence_ref || "").trim();
+      const source = String(args.source || "").trim();
+      if (!evidenceRef || evidenceRef.length > 1000)
+        throw new ToolError({ error: "lease_evidence_ref_required" });
+      if (!source || source.length > 500)
+        throw new ToolError({ error: "lease_source_required" });
+
+      let inserted;
+      try {
+        inserted = (await c.query(
+          `select lease_id,version,superseded_lease_id,deal_id,client_id
+             from ops.record_executed_lease($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [args.deal, args.base_version ?? null, executedOn, commencementOn, expirationOn,
+           args.term_months ?? null, args.evidence_kind, evidenceRef, source])).rows[0];
+      } catch (error) {
+        const message = String(error?.message || "");
+        if (message.includes("does not own the current deal"))
+          throw new ToolError({ error: "not_deal_owner" });
+        if (message.includes("version conflict"))
+          throw new ToolError({ error: "version_conflict" });
+        if (message.includes("deal was not found"))
+          throw new ToolError({ error: "deal_not_found" });
+        if (message.includes("needs exact disambiguation"))
+          throw new ToolError({ error: "needs_disambiguation", ref: args.deal });
+        if (message.includes("no current lease exists"))
+          throw new ToolError({ error: "no_current_lease" });
+        throw error;
+      }
+      if (!inserted) throw new ToolError({ error: "lease_write_no_readback" });
+      await writeEvent(c, actor, "record-executed-lease", "deal", inserted.deal_id,
+        { new: { lease_id: inserted.lease_id, expiration_on: expirationOn, evidence_kind: args.evidence_kind,
+            evidence_ref: evidenceRef, source }, idempotency_key: args.idempotency_key });
+      return { ok: true, lease_id: inserted.lease_id, version: inserted.version,
+        superseded_lease_id: inserted.superseded_lease_id || null };
     }),
   },
 

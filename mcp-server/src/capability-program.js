@@ -186,7 +186,38 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         requireFixedProgram(args, ToolError);
         const rows = await c.query(`select * from ops.work_request where program_key=$1 order by program_ordinal`, [DEFAULT_PROGRAM]);
         if (!rows.rows.length) throw new ToolError({ error: "capability_program_not_found", program_key: DEFAULT_PROGRAM });
-        const current = rows.rows.find(row => row.state !== "confirmed_closed") || null;
+        // A PROPOSED DECLINE IS NOT THE NEXT THING TO BUILD, and it is not done
+        // either. 29 of this program's 51 rows carry disposition 'decline' while
+        // sitting in state 'ready' — a contradiction the schema permits. Nothing
+        // records that any of those declines was ever DECIDED: shape disposition,
+        // decider, decision timestamp, triage classification and triaging actor
+        // are null on all 29. The word decline is the plan's proposal, and each
+        // row's own completion definition writes it as a condition rather than an
+        // outcome: "Declined with owner decision and independent review",
+        // "Declined unless Projects 21 and 22 expose a measured runtime
+        // bottleneck". So they can be neither built nor closed here.
+        //
+        // WHAT THAT COST BEFORE THIS. `current` walked program_ordinal and would
+        // hand a session a proposed decline as its next build item, and the
+        // headline read "1 of 51" while only 22 of those rows were ever
+        // buildable. The queue looked five times deeper than it was, which is
+        // part of why this program has looked stalled.
+        //
+        // NOT SKIPPED SILENTLY. They are counted and named separately, and
+        // program_complete stays FALSE while any remain — a program that
+        // declared itself complete with 29 undecided rows in it would be the
+        // same false-green this system keeps finding.
+        const isProposedDecline = row =>
+          row.disposition === "decline" && row.state !== "confirmed_closed"
+          && row.state !== "declined";
+        const openRows = rows.rows.filter(row => row.state !== "confirmed_closed");
+        const proposedDeclines = openRows.filter(isProposedDecline);
+        const current = openRows.find(row => !isProposedDecline(row)) || null;
+        const declineCounts = {
+          buildable_total: rows.rows.filter(row => !isProposedDecline(row)).length,
+          proposed_declines_awaiting_a_decision: proposedDeclines.length,
+          proposed_decline_refs: proposedDeclines.map(row => row.ref),
+        };
         // PAYLOAD BUDGET. The full rows carry desired_outcome prose, acceptance
         // criteria and completion evidence for every project; a queue scan that
         // only needs where the program stands should not pay for 51 of them.
@@ -200,7 +231,8 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
           return {
             program_key: DEFAULT_PROGRAM, total: rows.rows.length,
             completed: rows.rows.filter(row => row.state === "confirmed_closed").length,
-            program_complete: !current,
+            ...declineCounts,
+            program_complete: !current && !proposedDeclines.length,
             current: programRow(current),
             requested: brief(args.sequence === undefined ? current : rows.rows.find(row => Number(row.program_ordinal) === Number(args.sequence)) || null),
             projects: rows.rows.map(brief),
@@ -221,11 +253,15 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         return {
           program_key: DEFAULT_PROGRAM, total: rows.rows.length,
           completed: rows.rows.filter(row => row.state === "confirmed_closed").length,
-          program_complete: !current, current: programRow(current),
+          ...declineCounts,
+          program_complete: !current && !proposedDeclines.length,
+          current: programRow(current),
           requested: programRow(requested), capability_session,
           session_brief: sessionBrief(requested),
           landed_in_repo: null, built_unclosed: [],
-          hint: "completed counts confirmed_closed only; code on main is not this number. Run ops/built_unclosed.py / read session-brief CLOSE-BEFORE-BUILD.",
+          hint: "completed counts confirmed_closed only; code on main is not this number. Run ops/built_unclosed.py / read session-brief CLOSE-BEFORE-BUILD. "
+              + "total counts every row; buildable_total excludes proposed declines, which are rows whose disposition is decline and whose decline nobody has recorded as decided. "
+              + "They are never offered as current and never counted as done, and program_complete stays false while any remain.",
           projects: args.include_all ? rows.rows.map(programRow) : undefined,
         };
       },
