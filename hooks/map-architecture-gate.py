@@ -232,7 +232,9 @@ def payload_is_carr(payload):
     if not isinstance(cwd, str) or not cwd.strip():
         return True
     normalized = cwd.replace("\\", "/").lower()
-    return any(marker in normalized for marker in CARR_PATH_MARKERS)
+    repo = REPO.replace("\\", "/").lower().rstrip("/")
+    return (normalized == repo or normalized.startswith(repo + "/")
+            or any(marker in normalized for marker in CARR_PATH_MARKERS))
 
 
 def audit(row):

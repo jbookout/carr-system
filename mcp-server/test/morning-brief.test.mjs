@@ -62,6 +62,9 @@ test("morning-brief derives Joe's sponsor from authenticated context and compose
   assert.match(sql, /v_deal_room_board/);
   assert.match(sql, /loop_item/);
   assert.match(sql, /v_renewal_decision_queue/);
+  const renewalQueries = c.queries.filter(({ sql }) => sql.includes("v_renewal_decision_queue"));
+  assert.ok(renewalQueries.length >= 2);
+  assert.ok(renewalQueries.every(({ params }) => params[0] === "joe"));
   assert.doesNotMatch(sql, /candidate_pool|v_export_pool|source_row|\bemail\b|\bphone\b|\baddress\b/i);
 });
 

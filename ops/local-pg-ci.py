@@ -325,6 +325,23 @@ def run_local_ci(
                     else:
                         print("local-db-ci: renewal signed ingress least-privilege acceptance passed")
                 if exit_code == 0:
+                    renewal_lease_script = repo / "ops/renewal-lease-ledger-local-pg-gate.py"
+                    renewal_lease = command_runner.run(
+                        [acceptance_python, renewal_lease_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if renewal_lease.returncode:
+                        print(
+                            f"local-db-ci: renewal lease ledger acceptance failed: "
+                            f"{_failure_detail(renewal_lease)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = renewal_lease.returncode
+                    else:
+                        print("local-db-ci: authenticated renewal lease ledger acceptance passed")
+                if exit_code == 0:
                     print(
                         f"local-db-ci: {ci_class} proof and atomic Joe authority lifecycle "
                         "passed on disposable PostgreSQL"

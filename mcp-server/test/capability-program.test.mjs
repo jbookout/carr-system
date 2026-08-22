@@ -236,6 +236,79 @@ test("capability-program returns no session when the current Work Request has no
   assert.equal(result.capability_session, null);
 });
 
+test("a proposed decline is never offered as the next build item, and never counted as done", async () => {
+  // THE LIVE SHAPE THIS PINS. 29 of the program's 51 rows carry disposition
+  // 'decline' while sitting in state 'ready'. Nothing records that any of those
+  // declines was DECIDED — shape disposition, decider, decision timestamp,
+  // triage classification and triaging actor are null on all 29 — and each row's
+  // own completion definition writes the decline as a condition rather than an
+  // outcome. So they can be neither built nor closed by this read.
+  const closed = { id: "a", ref: "WR-AI-006", program_ordinal: 1, version: 1,
+    state: "confirmed_closed", disposition: "extend", title: "RAG pipeline", project_context: {} };
+  const decline = { id: "b", ref: "WR-AI-014", program_ordinal: 2, version: 1,
+    state: "ready", disposition: "decline", title: "Text-to-SQL", project_context: {} };
+  const buildable = { id: "c", ref: "WR-AI-001", program_ordinal: 3, version: 1,
+    state: "ready", disposition: "extend", title: "LLM evaluation harness", project_context: {} };
+
+  const db = { query: async (sql) => {
+    if (sql.includes("from ops.work_request")) return { rows: [closed, decline, buildable] };
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM });
+
+  assert.equal(result.current.ref, "WR-AI-001",
+    "the decline sits earlier in the sequence and must be stepped over, not handed to a session to build");
+  assert.equal(result.total, 3, "total still counts every row in the program");
+  assert.equal(result.buildable_total, 2,
+    "buildable excludes the proposed decline; counting it is why 1-of-51 read as stalled");
+  assert.equal(result.proposed_declines_awaiting_a_decision, 1);
+  assert.deepEqual(result.proposed_decline_refs, ["WR-AI-014"],
+    "named, not silently dropped — a skipped row nobody can see is how work disappears");
+});
+
+test("a program with only proposed declines left is NOT complete", async () => {
+  // The dangerous half of stepping over them. If the read skipped declines and
+  // called the program done, 29 undecided rows would vanish behind a green
+  // headline — the false-green shape this system keeps finding.
+  const closed = { id: "a", ref: "WR-AI-006", program_ordinal: 1, version: 1,
+    state: "confirmed_closed", disposition: "extend", title: "RAG pipeline", project_context: {} };
+  const decline = { id: "b", ref: "WR-AI-014", program_ordinal: 2, version: 1,
+    state: "ready", disposition: "decline", title: "Text-to-SQL", project_context: {} };
+  const db = { query: async (sql) => {
+    if (sql.includes("from ops.work_request")) return { rows: [closed, decline] };
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM });
+
+  assert.equal(result.current, null, "there is nothing left to build");
+  assert.equal(result.program_complete, false,
+    "but one decline is still undecided, so the program is not done");
+  assert.equal(result.proposed_declines_awaiting_a_decision, 1);
+});
+
+test("a decline that WAS decided stops being a proposed decline", async () => {
+  // The rule is about undecided rows, not about the word decline. A row moved to
+  // a terminal state is settled and must leave the awaiting count, or the number
+  // could never fall to zero and the program could never complete.
+  const settled = { id: "a", ref: "WR-AI-014", program_ordinal: 1, version: 1,
+    state: "confirmed_closed", disposition: "decline", title: "Text-to-SQL", project_context: {} };
+  const db = { query: async (sql) => {
+    if (sql.includes("from ops.work_request")) return { rows: [settled] };
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM });
+
+  assert.equal(result.proposed_declines_awaiting_a_decision, 0);
+  assert.equal(result.buildable_total, 1, "a settled row counts again");
+  assert.equal(result.program_complete, true);
+});
+
 class ToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
 }

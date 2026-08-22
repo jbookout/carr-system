@@ -1954,6 +1954,42 @@ end $$;
 
 
 --
+-- Name: completion_capsule(jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_predicates jsonb, change_ref text, user_facing boolean, user_journey_ref text, attestor text)
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select
+    -- The council's "acceptance predicates". The capability lane states them as
+    -- the acceptance tests it actually ran; an ordinary row states them directly.
+    coalesce(
+      case when jsonb_typeof(evidence #> '{candidate,acceptance_test_refs}') = 'array'
+           then evidence #> '{candidate,acceptance_test_refs}' end,
+      case when jsonb_typeof(evidence -> 'acceptance_predicates') = 'array'
+           then evidence -> 'acceptance_predicates' end),
+    coalesce(evidence #>> '{candidate,candidate_commit_sha}',
+             evidence ->> 'change_ref'),
+    -- Null when absent, and null is refused below. It is NOT coalesced to false:
+    -- "nobody said" and "somebody said no" are different states and only one of
+    -- them is an answer.
+    coalesce((evidence #>> '{candidate,user_facing}')::boolean,
+             (evidence ->> 'user_facing')::boolean),
+    coalesce(evidence #>> '{candidate,user_journey_ref}',
+             evidence ->> 'user_journey_ref'),
+    coalesce(evidence #>> '{attestation,verifier_actor_id}',
+             evidence ->> 'attested_by')
+$$;
+
+
+--
+-- Name: FUNCTION completion_capsule(evidence jsonb); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.completion_capsule(evidence jsonb) IS 'The tune-up council 2026-08-21 completion capsule, read from either the capability lane shape (candidate/attestation) or a plain one. ONE definition so the closing trigger and any reader cannot disagree about what done means.';
+
+
+--
 -- Name: create_calendar_canary_source_snapshot(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -2514,6 +2550,181 @@ begin
      p_sibling_surface_id,p_sibling_locator,p_sibling_pre_observation_ref,p_sibling_post_observation_ref);
   return ref;
 end $$;
+
+
+--
+-- Name: enforce_completion_capsule(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.enforce_completion_capsule() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  cap        record;
+  implementer text;
+  n_predicates int;
+begin
+  if new.state <> 'confirmed_closed' then
+    return new;
+  end if;
+  if tg_op = 'UPDATE' and old.state = 'confirmed_closed' then
+    return new;   -- already closed under whatever contract applied then
+  end if;
+
+  if new.completion_evidence is null
+     or jsonb_typeof(new.completion_evidence) <> 'object' then
+    raise exception
+      'closing %: done needs an evidence capsule, and completion_evidence is not an object. '
+      'The council''s price for leaving the queue is acceptance predicates, a change reference, '
+      'whether it is user-facing, and who checked it.', new.ref
+      using errcode = 'check_violation';
+  end if;
+
+  select * into cap from ops.completion_capsule(new.completion_evidence);
+
+  select count(*) into n_predicates
+    from jsonb_array_elements_text(coalesce(cap.acceptance_predicates,'[]'::jsonb)) p
+   where btrim(p) <> '';
+  if n_predicates = 0 then
+    raise exception
+      'closing %: the evidence capsule states no acceptance predicates. What would have '
+      'made this done had to be sayable before it was done.', new.ref
+      using errcode = 'check_violation';
+  end if;
+
+  if coalesce(btrim(cap.change_ref),'') = '' then
+    raise exception
+      'closing %: the evidence capsule names no change reference, so nothing ties this '
+      'closure to what actually shipped.', new.ref
+      using errcode = 'check_violation';
+  end if;
+
+  if cap.user_facing is null then
+    raise exception
+      'closing %: the evidence capsule does not say whether this is user-facing. Say so '
+      'explicitly — silence here is how a capability gets reported live before a human '
+      'has used it.', new.ref
+      using errcode = 'check_violation';
+  end if;
+
+  if cap.user_facing and coalesce(btrim(cap.user_journey_ref),'') = '' then
+    raise exception
+      'closing %: this is declared user-facing, so the capsule must name an EXERCISED user '
+      'journey. A user-facing thing nobody has used is not done.', new.ref
+      using errcode = 'check_violation';
+  end if;
+
+  if coalesce(btrim(cap.attestor),'') = '' then
+    raise exception
+      'closing %: no attestor. Done requires somebody who did not build it saying it is done.',
+      new.ref using errcode = 'check_violation';
+  end if;
+
+  -- THE ATTESTOR IS NOT THE IMPLEMENTER. Compared against the same
+  -- executor-then-owner fallback the work-in-progress limit uses, so the two
+  -- controls cannot disagree about who is responsible for a row. The attestor may
+  -- be recorded as an actor uuid (the capability lane) or a slug, so both are
+  -- resolved to a slug before comparing — otherwise a uuid would never equal a
+  -- slug and this check would pass for every self-attestation ever made.
+  implementer := coalesce(new.executor_actor, new.owner_actor);
+  if implementer is not null then
+    if lower(btrim(cap.attestor)) = lower(btrim(implementer))
+       or exists (select 1 from actor a
+                   where a.id::text = cap.attestor
+                     and lower(a.slug) = lower(btrim(implementer))) then
+      raise exception
+        'closing %: % attested their own work. The whole point of an independent attestor '
+        'is that it is somebody else.', new.ref, implementer
+        using errcode = 'check_violation';
+    end if;
+  end if;
+
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION enforce_completion_capsule(); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.enforce_completion_capsule() IS 'Tune-up council 2026-08-21: a Work Request cannot reach confirmed_closed on a timestamp alone. Fires on the TRANSITION into confirmed_closed, so the one row closed before this contract existed stands as recorded. The owner batch sign-off and the 48-hour attestor-green auto-close are NOT here: they need a scheduled job, not a constraint, and are tracked in loop 504.';
+
+
+--
+-- Name: enforce_work_in_progress_limit(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.enforce_work_in_progress_limit() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  system_wide     int;
+  per_executor    int;
+  who             text;
+  who_before      text;
+  already_in_flight boolean;
+  limit_system    constant int := 2;
+  limit_each      constant int := 1;
+begin
+  if new.state not in ('claimed','in_progress') then
+    return new;
+  end if;
+
+  already_in_flight := (tg_op = 'UPDATE' and old.state in ('claimed','in_progress'));
+
+  -- SYSTEM-WIDE: entry only. A row already in flight is already counted, and
+  -- re-checking here would make a full queue uneditable.
+  if not already_in_flight then
+    select count(*) into system_wide
+      from ops.work_request
+     where state in ('claimed','in_progress')
+       and id <> new.id;
+
+    if system_wide + 1 > limit_system then
+      raise exception
+        'work-in-progress limit: % already in flight system-wide and the limit is %. '
+        'Move something to blocked, verification or confirmed_closed before claiming %.',
+        system_wide, limit_system, new.ref
+        using errcode = 'check_violation';
+    end if;
+  end if;
+
+  who := coalesce(new.executor_actor, new.owner_actor);
+
+  -- PER-EXECUTOR: on entry, and on any reassignment of a row already in flight.
+  -- Reassignment does not move the system-wide total but it does move this one.
+  if already_in_flight then
+    who_before := coalesce(old.executor_actor, old.owner_actor);
+    if who_before is not distinct from who then
+      return new;
+    end if;
+  end if;
+
+  if who is not null then
+    select count(*) into per_executor
+      from ops.work_request
+     where state in ('claimed','in_progress')
+       and coalesce(executor_actor, owner_actor) = who
+       and id <> new.id;
+
+    if per_executor + 1 > limit_each then
+      raise exception
+        'work-in-progress limit: % already has % in flight and the limit per executor is %. '
+        'One thing at a time is the point; finish or park it before claiming %.',
+        who, per_executor, limit_each, new.ref
+        using errcode = 'check_violation';
+    end if;
+  end if;
+
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION enforce_work_in_progress_limit(); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.enforce_work_in_progress_limit() IS 'Tune-up council 2026-08-21: work-in-progress limit of 2 system-wide and 1 per executor, enforced at the row transition because the claim path has more than one route. Counts claimed and in_progress only; held-but-not-active states are deliberately excluded so a blocked row cannot freeze the queue. The system-wide check runs on entry into flight only; the per-executor check ALSO runs when a row already in flight changes hands, because reassignment moves that count without moving the total (0277).';
 
 
 --
@@ -23376,6 +23587,13 @@ CREATE TRIGGER cognition_cache_observation_append_only BEFORE DELETE OR UPDATE O
 
 
 --
+-- Name: work_request completion_capsule; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER completion_capsule BEFORE INSERT OR UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.enforce_completion_capsule();
+
+
+--
 -- Name: cost_refusal cost_refusal_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -23807,6 +24025,13 @@ CREATE TRIGGER staging_release_readback_append_only BEFORE DELETE OR UPDATE ON o
 --
 
 CREATE TRIGGER validate_recovery_rehearsal_run BEFORE INSERT OR UPDATE OF recovery_rehearsal_bundle_id, release_id, service_id, environment, correlation_id, run_key, state, evidence_ref, recovery_strategy, recovery_plan_ref, started_at, ended_at ON ops.run FOR EACH ROW EXECUTE FUNCTION ops.validate_recovery_rehearsal_run();
+
+
+--
+-- Name: work_request work_in_progress_limit; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER work_in_progress_limit BEFORE INSERT OR UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.enforce_work_in_progress_limit();
 
 
 --
@@ -28557,6 +28782,9 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0273_authority_login_roles_join_the_bundle.sql	e92888e19e3a7fd1417978bbb374531217600e3b489e4f5368321df2707e10c6	2026-08-22 10:55:23.208206+00
 0274_control_catalog_seed_guarded.sql	f700948101ec88ff23fd1812b611da57d740e276882f2a5ba165b1f16e92d4b9	2026-08-22 10:55:23.486843+00
 0275_control_catalog_ci_gates.sql	0a3605929224dc5ac65e0515227399f22c7401c75c1bf0bdbda51ac2e028788b	2026-08-22 11:08:20.388229+00
+0276_work_in_progress_limit.sql	9bb6ac9c103feeac137a0e44745801f099beb217ce8177edb4822f29c8735196	2026-08-22 13:37:08.780492+00
+0277_wip_limit_survives_reassignment.sql	89da4d228a1021c6c24178ed73ffde5fe49d7f9b896005d67dde71b9f769657f	2026-08-22 13:37:09.117865+00
+0278_completion_needs_a_capsule_and_a_second_pair_of_eyes.sql	1eb6de438dea6e8bf61bdee40f8aa9cc9d6424217cc93a73c6896ab86f5ac088	2026-08-22 13:37:09.424356+00
 \.
 
 
