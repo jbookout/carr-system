@@ -298,6 +298,23 @@ def run_local_ci(
                     else:
                         print("local-db-ci: Nightly canary isolation acceptance passed")
                 if exit_code == 0:
+                    renewal_ingress_script = repo / "ops/renewal-signed-ingress-local-pg-acceptance.py"
+                    renewal_ingress = command_runner.run(
+                        [acceptance_python, renewal_ingress_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if renewal_ingress.returncode:
+                        print(
+                            f"local-db-ci: renewal signed ingress acceptance failed: "
+                            f"{_failure_detail(renewal_ingress)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = renewal_ingress.returncode
+                    else:
+                        print("local-db-ci: renewal signed ingress least-privilege acceptance passed")
+                if exit_code == 0:
                     print(
                         f"local-db-ci: {ci_class} proof and atomic Joe authority lifecycle "
                         "passed on disposable PostgreSQL"

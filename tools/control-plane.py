@@ -577,6 +577,7 @@ class RuntimeWorkflowFactCollector:
             ('notes-sweep-hourly', 'shadow'): (r'notes-sweep shadow: scanned=\d+ unposted=\d+ writes=0 posts=0',),
             ('notes-sweep-hourly', 'canary'): (r'notes-sweep: notes-canary-result \{',),
             ('notes-sweep-hourly', 'live'): (r'notes-sweep: source=.+ posted=\d+ duplicate=\d+ failed=0 still_queued=0',),
+            ('renewal-radar-source-daily', 'live'): (r'renewal-source: result \{',),
             ('restore-rehearse-weekly', 'shadow'): (r'PREFLIGHT OK — every check that runs before anything is created has passed\.', r'Nothing was created, decrypted or charged for\.'),
             ('restore-rehearse-weekly', 'canary'): (r'RESTORE REHEARSAL: PASS',),
             ('restore-rehearse-weekly', 'live'): (r'RESTORE REHEARSAL: PASS',),
@@ -587,6 +588,11 @@ class RuntimeWorkflowFactCollector:
         if self.workflow['key'] == 'notes-sweep-hourly' and self.mode == 'canary':
             try:
                 _notes_canary_aggregate(evidence)
+            except RuntimeError:
+                return False
+        if self.workflow['key'] == 'renewal-radar-source-daily' and self.mode == 'live':
+            try:
+                _renewal_source_aggregate(evidence)
             except RuntimeError:
                 return False
         return True
@@ -764,6 +770,11 @@ class RuntimeWorkflowFactCollector:
                     except RuntimeError:
                         return False
                 return True
+            if fact == 'renewal.source_run_sealed' and self.workflow['key'] == 'renewal-radar-source-daily':
+                try:
+                    return _renewal_source_aggregate(receipt) == _renewal_source_aggregate(self.execution or {})
+                except RuntimeError:
+                    return False
             if fact == 'command.execution_evidence_reconciles':
                 execution = self.execution
                 if not isinstance(execution, dict):
@@ -791,6 +802,12 @@ class RuntimeWorkflowFactCollector:
                 return self.execution.get('exit_code') == 0
             if fact == 'command.workflow_marker_valid':
                 return self._command_evidence_valid(self.execution)
+            if fact in {'renewal.source_complete', 'renewal.pool_imported', 'renewal.source_run_sealed'} \
+                    and self.workflow['key'] == 'renewal-radar-source-daily':
+                try:
+                    return _renewal_source_aggregate(self.execution)["row_count"] >= 0
+                except RuntimeError:
+                    return False
             text = self.execution.get('stdout_tail', '')
             if fact == 'calendar.summary_failed_zero': return 'failed=0' in text
             if fact == 'restore.pass_line': return 'REHEARSAL PASS' in text
@@ -974,6 +991,40 @@ def _nightly_canary_aggregate(evidence: dict[str, Any]) -> dict[str, Any]:
             or not all(isinstance(value[key], str) and re.fullmatch(r"[0-9a-f]{64}", value[key])
                        for key in ("snapshot_digest", "output_digest")):
         raise RuntimeError("nightly canary aggregate is not deterministic")
+    return value
+
+
+def _renewal_source_aggregate(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Parse exactly one non-sensitive signed renewal ingress receipt marker."""
+    text = evidence.get("stdout_tail")
+    marker = "renewal-source: result "
+    lines = [line[len(marker):] for line in text.splitlines() if line.startswith(marker)] \
+        if isinstance(text, str) else []
+    if len(lines) != 1:
+        raise RuntimeError("renewal source adapter emitted no single typed receipt")
+    try:
+        value = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("renewal source receipt is not JSON") from exc
+    required = {"contract", "schema_version", "provider", "key_fingerprint", "snapshot_id",
+                "payload_sha256", "source_observed_at", "row_count", "source_run_id"}
+    if not isinstance(value, dict) or json.dumps(value, sort_keys=True, separators=(",", ":")) != lines[0] \
+            or set(value) != required \
+            or value.get("contract") != "renewal-source-ingress.v1" or value.get("schema_version") != 1:
+        raise RuntimeError("renewal source receipt has an unregistered shape")
+    if not isinstance(value["provider"], str) or not value["provider"].strip() \
+            or not all(isinstance(value[key], str) and re.fullmatch(r"[0-9a-f]{64}", value[key])
+                       for key in ("key_fingerprint", "payload_sha256")) \
+            or type(value["row_count"]) is not int or not 0 <= value["row_count"] <= 10000:
+        raise RuntimeError("renewal source receipt is malformed")
+    try:
+        snapshot_id, source_run_id = str(uuid.UUID(value["snapshot_id"])), str(uuid.UUID(value["source_run_id"]))
+        observed_at = datetime.fromisoformat(value["source_observed_at"].replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("renewal source receipt has an invalid identity") from exc
+    if snapshot_id != value["snapshot_id"] or source_run_id != value["source_run_id"] \
+            or observed_at.tzinfo is None or not value["source_observed_at"].endswith("Z"):
+        raise RuntimeError("renewal source receipt identity is not canonical")
     return value
 
 
