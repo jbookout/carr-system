@@ -204,9 +204,20 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         // verb REPORTS it; enforcing it belongs in the claim path, and saying so
         // here keeps the two from being confused for each other.
         const inFlight = items.filter(i => i.state === "claimed" || i.state === "in_progress");
+        // WHO A ROW BELONGS TO IS DECIDED THE SAME WAY THE TRIGGER DECIDES IT —
+        // coalesce(executor_actor, owner_actor), and rows with NOBODY named are
+        // skipped, exactly as ops.enforce_work_in_progress_limit()'s `if who is
+        // not null` skips them. This used to bucket unnamed rows together under a
+        // single "unassigned" pseudo-executor, so two in-flight rows nobody owned
+        // were reported as one executor over their limit — a breach the database
+        // does not refuse and nobody could act on. A limit reported but not
+        // enforced is worse than either alone: it teaches the reader the number
+        // is decorative, which is how a real breach later gets ignored.
         const perExecutor = {};
+        let unattributed = 0;
         for (const i of inFlight) {
-          const who = i.executor || i.owner || "unassigned";
+          const who = i.executor || i.owner;
+          if (!who) { unattributed += 1; continue; }
           perExecutor[who] = (perExecutor[who] || 0) + 1;
         }
         const overCommitted = Object.entries(perExecutor)
@@ -228,7 +239,15 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
             in_flight: inFlight.length,
             over_system_limit: inFlight.length > 2,
             executors_over_limit: overCommitted,
-            note: "reported here, enforced in the claim path",
+            // COUNTED, NOT SILENTLY DROPPED. These rows are in flight and do
+            // consume the system-wide limit, so they are already inside
+            // in_flight above; they are named separately because in-flight work
+            // with nobody's name on it is worth seeing, and because dropping
+            // them without saying so is how a number stops meaning anything.
+            in_flight_unattributed: unattributed,
+            note: "reported here, enforced in the claim path; per-executor counts "
+                + "resolve the responsible party exactly as the trigger does, and "
+                + "skip rows with nobody named rather than pooling them",
           },
           unchanged_over_48h: stale,
           say: items.length
