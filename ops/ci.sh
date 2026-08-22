@@ -691,17 +691,35 @@ check_binding() {
   # that does change them is squarely in this business and must reconcile.
   if [ -f "$HOME/.claude/settings.json" ]; then
     if ! run_quiet "$LOGDIR/binding-config.log" "$PY" ops/config-as-code.py; then
-      local cfg_changed=""
-      cfg_changed="$(git diff --name-only origin/main...HEAD 2>/dev/null \
-        | grep -E '^(ops/launchd/|ops/scheduled-tasks/|ops/config-as-code\.py|ops/config/settings)' || true)"
+      # OWNED, NOT MERELY ADJACENT. This used to ask whether the branch had
+      # touched ANY declaration path and, if so, make every drifting item on the
+      # machine fatal — including items in the other family that nobody on this
+      # branch had seen. On 2026-08-22 a one-word comment repair to a launchd
+      # file (a double hyphen inside an XML comment, which strict parsers refuse
+      # and plutil accepts) made two unrelated scheduled tasks another session
+      # had installed into that branch's problem, and it could not fix them
+      # without committing somebody else's in-flight work. The matching rule
+      # lives in ops/config_drift_ownership.py so this shell and its selftest ask
+      # the same question (rule a8c55a47).
+      local cfg_changed cfg_owned
+      cfg_changed="$(git diff --name-only origin/main...HEAD 2>/dev/null || true)"
       tail -15 "$LOGDIR/binding-config.log" >&2
-      if [ -n "$cfg_changed" ]; then
+      # shellcheck disable=SC2086
+      cfg_owned="$("$PY" ops/config_drift_ownership.py $cfg_changed \
+        < "$LOGDIR/binding-config.log" 2>/dev/null || true)"
+      if [ -n "$cfg_owned" ]; then
         problems="$problems config-as-code"
-        printf '        this branch changes config-as-code declarations, so the drift above is yours:\n%s\n' "$cfg_changed" >&2
+        printf '        this branch touches the drifting declaration(s), so they are yours:\n%s\n' "$cfg_owned" >&2
       else
         machine_drift="yes"
-        printf '        \033[33mnot fatal here\033[0m  config-as-code drift is on the MACHINE, and this branch changes no\n' >&2
-        printf '        declaration under ops/launchd/ or ops/scheduled-tasks/. Reported, not vetoed —\n' >&2
+        # SAY WHAT IS ACTUALLY TRUE. This line used to read "this branch changes
+        # no declaration", which was true only while the test was directory-wide.
+        # A branch CAN now touch a declaration and still own none of the drift,
+        # and printing the old sentence there would be a comment left above a
+        # changed line — the exact shape that let five nightly steps report
+        # "skipped" for days while their explanatory text said they ran.
+        printf '        \033[33mnot fatal here\033[0m  config-as-code drift is on the MACHINE and this branch touches\n' >&2
+        printf '        none of the drifting declarations above. Reported, not vetoed —\n' >&2
         printf '        run `ops/config-as-code.py pull` on a branch that owns the change.\n' >&2
       fi
     fi
