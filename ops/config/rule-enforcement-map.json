@@ -1831,12 +1831,9 @@
       "why_unenforceable": "Prose-quality judgment across a huge range of content; same lint-pointed-at-chat sketch as 5be2f462 applies but is not built."
     },
     "20d106f1": {
-      "category": "hard_pre_action",
-      "enforcement_class": "deny_gate",
-      "binding_moment": "before a new design, roadmap, or plan file while built-unclosed or implementation-open work exists",
-      "control": "close_before_open",
-      "exceptions": "edits to existing latch/ops/hooks files; the coaching half (oldest decision, calibration ledger) stays judgment",
-      "note": "Mechanical close-before-open only. The personal-coaching half of this rule remains judgment."
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "Personal-coaching judgment (what counts as his oldest open decision, a significant prediction). Mechanical close-before-open is control close_before_open."
     },
     "19304882": {
       "category": "judgment_advisory",
