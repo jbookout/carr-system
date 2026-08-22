@@ -20,8 +20,19 @@ const ARGS = (() => { try { return typeof args === 'string' ? JSON.parse(args) :
 //    top-seat writes the invoking session performs after reading this result (model-tiering hard floor).
 // args: { vault: string (CARR AI absolute path), today: 'YYYY-MM-DD' } — timestamps come in via args.
 
-const VAULT = (ARGS && ARGS.vault) ||
-  '/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI'
+// PHASE 4 GATE (2026-08-22). This workflow reads the legacy Drive vault and has
+// no canonical mode. It used to fall back to a hardcoded Drive root when no
+// vault argument arrived, which is the ambient Drive selection Phase 4 removes
+// -- and it meant a caller who forgot the argument got a silent read of Joe's
+// real vault instead of an error. The root is now required and never guessed.
+const VAULT = (ARGS && ARGS.vault)
+if (!VAULT) {
+  throw new Error(
+    'MISSING_CANONICAL_SEAM: record-native system report card. This workflow reads ' +
+    'the legacy Drive vault and has no canonical mode, so it will not guess a root. ' +
+    'Pass args.vault with the absolute vault path to run it as an acknowledged ' +
+    'recovery exercise.')
+}
 const TODAY = (ARGS && ARGS.today) || 'UNDATED-pass-args.today'
 const CARD = `${VAULT}/00_Context/system-report-card-2026-07-07.md`
 

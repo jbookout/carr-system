@@ -73,6 +73,7 @@ Test:
   (never point --root at the real vault from a test)
 """
 import argparse
+import pathlib as _PATHLIB
 import difflib
 import hashlib
 import json
@@ -86,7 +87,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_VAULT = "/Users/booko/My Drive/CARR AI"
+# PHASE 4 GATE (2026-08-22). --root used to DEFAULT to a hardcoded Drive path,
+# so the watch reached for Joe's real vault with no flag, no reason and no
+# refusal -- the ambient Drive selection Phase 4 removes. There is no default
+# now. An explicit --root (what every test passes, and what the tool's own help
+# has always called the test override) runs normally, because naming a root is
+# not ambient. Omitting it means the caller wants the REAL vault, and that is
+# the case which must say so: it requires --recovery --reason WHY, and refuses
+# with the seam named otherwise. bin/refresh-rules.sh, the one sanctioned
+# caller, passes those controls with a fixed reason.
+sys.path.insert(0, str(_PATHLIB.Path(__file__).resolve().parents[1]))
+from lib.drive_recovery import (  # noqa: E402
+    SEAM_MISSING_EXIT, add_recovery_arguments, require_recovery)
+
+DEFAULT_VAULT = None
 DEFAULT_MANIFEST = REPO_ROOT / "out" / "vault-md-manifest.json"
 DEFAULT_BASELINE_DIR = REPO_ROOT / "out" / "vault-drift-baseline"
 DEFAULT_QUARANTINE_DIR = REPO_ROOT / "out" / "vault-drift-quarantine"
@@ -1244,8 +1258,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=DEFAULT_VAULT,
-                     help="Vault root to scan (default: the real CARR AI vault). "
-                          "Override for tests — never point this at the real vault.")
+                     help="Vault root to scan. No default: naming a root runs normally, "
+                          "omitting it means the REAL vault and requires --recovery --reason.")
+    add_recovery_arguments(ap)
     ap.add_argument("--manifest", default=str(DEFAULT_MANIFEST),
                      help="Structural .md check-to-check manifest "
                           "(default: out/vault-md-manifest.json)")
@@ -1282,6 +1297,14 @@ def main(argv=None):
                      help="Override the run id used for the quarantine folder name and "
                           "salvage payloads (default: current UTC timestamp). Tests only.")
     args = ap.parse_args(argv)
+    if not args.root:
+        try:
+            args.root = str(require_recovery(
+                args,
+                "record-native drift detection (this watches the vault's own file tree)"))
+        except ValueError as exc:
+            print(f"MISSING_CANONICAL_SEAM: {exc}", file=sys.stderr)
+            return SEAM_MISSING_EXIT
 
     if (args.only or args.only_target) and args.check:
         print("FATAL: --only/--only-target apply to --rebaseline only; --check always "

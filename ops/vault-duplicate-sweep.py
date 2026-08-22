@@ -32,10 +32,23 @@ import re
 import shutil
 import subprocess
 import sys
+import pathlib as _PATHLIB
 import time
 from datetime import datetime, timezone
 
-VAULT = os.path.expanduser("~/My Drive/CARR AI")
+# PHASE 4 GATE (2026-08-22). This tool's whole job is the legacy Drive vault, so
+# it has no canonical mode: without a Drive root there is nothing for it to look
+# at. It used to reach for a hardcoded root with no flag, no reason and no
+# refusal, which is the ambient Drive selection Phase 4 exists to remove. Normal
+# operation now refuses with the seam named (exit 69, which the nightly chain
+# reads as BLOCKED); an acknowledged recovery exercise passes
+# --recovery --reason WHY [--vault PATH].
+sys.path.insert(0, str(_PATHLIB.Path(__file__).resolve().parents[1]))
+from lib.drive_recovery import require_legacy_vault  # noqa: E402
+
+_RECOVERY = require_legacy_vault("record-native duplicate detection (this sweeps the vault's own file tree)")
+sys.argv = [sys.argv[0], *_RECOVERY.args]
+VAULT = str(_RECOVERY.vault)
 MIRROR = os.path.join(VAULT, "Backups/portability-mirror/md")
 CLAUDE_DIR = os.path.expanduser("~/.claude")
 # Script-relative, NOT expanduser("~/carr-system"). VAULT and CLAUDE_DIR above

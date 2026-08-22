@@ -38,7 +38,19 @@ STAMP = (
 )
 MARKER = "Doctrine ownership: single writer"
 
-DRIVE = Path("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive")
+# PHASE 4 GATE (2026-08-22). This tool's whole job is the legacy Drive vault, so
+# it has no canonical mode. It used to reach for a hardcoded root with no flag,
+# no reason and no refusal. Normal operation now refuses with the seam named
+# (exit 69, which the nightly chain reads as BLOCKED); an acknowledged recovery
+# exercise passes --recovery --reason WHY [--vault PATH].
+import pathlib as _PATHLIB
+sys.path.insert(0, str(_PATHLIB.Path(__file__).resolve().parents[1]))
+from lib.drive_recovery import require_legacy_vault  # noqa: E402
+
+_RECOVERY = require_legacy_vault(
+    "record-native doctrine ownership (the doctrine store replaced the vault's stamped files)")
+sys.argv = [sys.argv[0], *_RECOVERY.args]
+DRIVE = _RECOVERY.vault.parent
 VAULT = DRIVE / "CARR AI"
 HOME_SKILLS = Path.home() / ".claude" / "skills"
 DRIVE_SKILLS = DRIVE / ".claude" / "skills"
