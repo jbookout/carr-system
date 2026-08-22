@@ -199,6 +199,45 @@ def main() -> int:
     assert "frozen numeric collisions on origin/main" in allocation, allocation
     assert "0169: " + ", ".join(FROZEN_0169) in allocation, allocation
 
+    transient_remote = [
+        "0248_register_conduct_stop_control.sql",
+        "0248_renewal_signed_source_ingress.sql",
+        "0249_calendar_prebrief_joe_runtime.sql",
+    ]
+    transient_current = [
+        "0248_register_conduct_stop_control.sql",
+        "0249_renewal_signed_source_ingress.sql",
+        "0250_calendar_prebrief_joe_runtime.sql",
+    ]
+    assert next_migration._repairs_exact_origin_collision(
+        transient_remote,
+        transient_current,
+        "0248_register_conduct_stop_control.sql\tfixture-digest\n",
+        True,
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        transient_remote,
+        transient_current,
+        "0248_register_conduct_stop_control.sql\tfixture-digest\n",
+        False,
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        transient_remote,
+        transient_current[:-1],
+        "0248_register_conduct_stop_control.sql\tfixture-digest\n",
+        True,
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        transient_remote + ["0248_third.sql"],
+        transient_current,
+        "",
+        True,
+    )
+    assert next_migration._is_exact_broken_peer_tree(transient_remote)
+    assert not next_migration._is_exact_broken_peer_tree(
+        transient_remote + ["0248_third.sql"]
+    )
+
     # The allocator must refuse a collision inside any peer worktree, not just
     # report its filenames as in-flight claims.
     with tempfile.TemporaryDirectory(prefix="migration-number-contract-") as tmp:

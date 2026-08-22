@@ -45,6 +45,7 @@ import subprocess
 import sys
 
 from migration_number_contract import (
+    FROZEN_COLLISIONS,
     MigrationNumberError,
     collision_report,
     validate_migration_names,
@@ -90,9 +91,113 @@ def worktree_paths():
     return paths or [REPO]
 
 
+def _head_contains_origin_main() -> bool:
+    """True only when this checkout includes the exact remote base it repairs."""
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+            cwd=REPO,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+TRANSIENT_ORIGIN_REPAIR = {
+    "0248_renewal_signed_source_ingress.sql": "0249_renewal_signed_source_ingress.sql",
+    "0249_calendar_prebrief_joe_runtime.sql": "0250_calendar_prebrief_joe_runtime.sql",
+}
+TRANSIENT_APPLIED_IDENTITY = "0248_register_conduct_stop_control.sql"
+
+
+def _repairs_exact_origin_collision(
+    remote_names: list[str],
+    current_names: list[str],
+    schema_text: str,
+    contents_match: bool,
+) -> bool:
+    """Admit only the exact, self-expiring 0248/0249 repair PR state.
+
+    A repair PR necessarily sees the broken base through ``origin/main`` until
+    it merges.  The exception retains the one production-snapshot identity,
+    removes both old unapplied names, adds their ordered replacements, and
+    requires the old/new SQL bytes to match. Any extra or different collision
+    still refuses. Once merged, origin/main is valid and this path is inactive.
+    """
+    remote, current = set(remote_names), set(current_names)
+    new_collisions = {
+        slot: names for slot, names in collision_report(remote_names).items()
+        if slot not in FROZEN_COLLISIONS
+    }
+    expected_collision = tuple(sorted((
+        TRANSIENT_APPLIED_IDENTITY,
+        "0248_renewal_signed_source_ingress.sql",
+    )))
+    if new_collisions != {"0248": expected_collision} or not contents_match:
+        return False
+    if f"{TRANSIENT_APPLIED_IDENTITY}\t" not in schema_text:
+        return False
+    if any(f"{old}\t" in schema_text for old in TRANSIENT_ORIGIN_REPAIR):
+        return False
+    if TRANSIENT_APPLIED_IDENTITY not in remote or TRANSIENT_APPLIED_IDENTITY not in current:
+        return False
+    return all(old in remote and old not in current and new in current
+               for old, new in TRANSIENT_ORIGIN_REPAIR.items())
+
+
+def _repair_contents_match() -> bool:
+    for old, new in TRANSIENT_ORIGIN_REPAIR.items():
+        try:
+            old_blob = subprocess.run(
+                ["git", "show", f"origin/main:migrations/{old}"],
+                cwd=REPO,
+                capture_output=True,
+                timeout=30,
+                check=True,
+            ).stdout
+            with open(os.path.join(REPO, "migrations", new), "rb") as fh:
+                new_blob = fh.read()
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if old_blob != new_blob:
+            return False
+    return True
+
+
+def _is_exact_broken_peer_tree(names: list[str]) -> bool:
+    """Recognize only a peer checkout carrying the same transient 0248 pair."""
+    expected = tuple(sorted((
+        TRANSIENT_APPLIED_IDENTITY,
+        "0248_renewal_signed_source_ingress.sql",
+    )))
+    unregistered = {
+        slot: claimed for slot, claimed in collision_report(names).items()
+        if slot not in FROZEN_COLLISIONS
+    }
+    if unregistered != {"0248": expected}:
+        return False
+    filtered = [name for name in names if name != "0248_renewal_signed_source_ingress.sql"]
+    try:
+        validate_migration_names(filtered, allow_frozen_subset=True)
+    except MigrationNumberError:
+        return False
+    return True
+
+
 def main():
     quiet = "--quiet" in sys.argv[1:]
     claims = {}
+    transient_repair = False
+
+    try:
+        current_names = os.listdir(os.path.join(REPO, "migrations"))
+        with open(os.path.join(REPO, "db", "schema.sql"), encoding="utf-8") as fh:
+            schema_text = fh.read()
+    except OSError:
+        current_names, schema_text = [], ""
 
     # 1. everything merged on the remote
     remote = run(["git", "ls-tree", "--name-only", "origin/main", "migrations/"])
@@ -105,9 +210,30 @@ def main():
         try:
             validate_migration_names(remote_names, require_frozen=True)
         except MigrationNumberError as exc:
-            print(f"ERROR: origin/main violates the migration-number contract: {exc}",
-                  file=sys.stderr)
-            return 1
+            try:
+                validate_migration_names(current_names, require_frozen=True)
+            except MigrationNumberError:
+                current_tree_valid = False
+            else:
+                current_tree_valid = True
+            transient_repair = (
+                current_tree_valid
+                and _head_contains_origin_main()
+                and _repairs_exact_origin_collision(
+                    remote_names, current_names, schema_text, _repair_contents_match()
+                )
+            )
+            if not transient_repair:
+                print(f"ERROR: origin/main violates the migration-number contract: {exc}",
+                      file=sys.stderr)
+                return 1
+            print(
+                "WARNING: origin/main has an applied-vs-pending migration collision; "
+                "this descendant tree keeps the snapshot-ledger identity and renumbers "
+                "only the unapplied file.",
+                file=sys.stderr,
+            )
+            remote_names = current_names
 
     # 2 & 3. every worktree's migrations/ directory, on disk, committed or not
     here = os.path.realpath(REPO)
@@ -123,6 +249,11 @@ def main():
         try:
             validate_migration_names(tree_names, allow_frozen_subset=True)
         except MigrationNumberError as exc:
+            if transient_repair and _is_exact_broken_peer_tree(tree_names):
+                # A clean peer checkout of the exact broken base is expected
+                # while this repair PR is in flight. No other invalid tree is.
+                merge(claims, numbers_from_names(current_names), label)
+                continue
             print(f"ERROR: {label} violates the migration-number contract: {exc}",
                   file=sys.stderr)
             return 1
