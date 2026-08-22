@@ -61,6 +61,18 @@ SEND_TOOLS = re.compile(
     re.I)
 
 
+# Transcript origin kinds, OBSERVED on this harness rather than assumed — see
+# partner_is_here below for what assuming them cost. A record with no `origin`
+# key at all is the ordinary older shape and is judged on its content instead,
+# which is why None and "" are here.
+HUMAN_ORIGIN_KINDS = frozenset({None, "", "human", "user", "keyboard"})
+
+# Kinds we have seen and know are NOT a partner typing. Listed only so an
+# unknown kind can be told apart from a known-injected one and logged; both are
+# refused either way.
+INJECTED_ORIGIN_KINDS = frozenset({"task-notification"})
+
+
 def dlog(msg):
     try:
         os.makedirs(os.path.dirname(DEBUG), exist_ok=True)
@@ -89,6 +101,24 @@ def partner_is_here(transcript_path):
     signal a session cannot fabricate for itself. Harness-injected turns are
     NOT his words — the same distinction ledger-sweep.py got wrong on
     2026-08-05 when it quoted a task notification as the partner speaking.
+
+    THE ORIGIN ALLOWLIST WAS GUESSED, AND THE GUESS WAS WRONG (defect 16291f00,
+    2026-08-22). It accepted kinds "user" and "keyboard". The harness has never
+    written either: a typed turn carries origin {"kind": "human"}. So every real
+    keystroke was rejected as non-keyboard, the carve-out could not fire once,
+    and the gate refused a notification on a Saturday Joe had personally
+    authorised two turns earlier. The selftest passed throughout because its own
+    fixture wrote {"kind": "user"} — the code's assumption, checked against
+    itself. Measured across sixteen real transcripts, the accepted set matched
+    zero turns out of 3,271 candidate records.
+
+    SO THE VALUES BELOW ARE OBSERVED, NOT ASSUMED, and they stay an allowlist
+    rather than becoming a denylist of injected kinds. A denylist fails OPEN:
+    an origin kind nobody has seen yet would count as the partner speaking, and
+    a session could self-authorise its own weekend send off a notification —
+    exactly the 2026-08-05 mistake. An unknown kind is refused AND LOGGED, so
+    the next drift is visible in out/hook-guard.log rather than silent for a
+    week. That logging is the actual repair; the missing value is just the bug.
     """
     if not transcript_path or not os.path.exists(transcript_path):
         return False
@@ -107,8 +137,14 @@ def partner_is_here(transcript_path):
         if rec.get("isMeta") or rec.get("isCompactSummary"):
             continue
         origin = rec.get("origin") or {}
-        if isinstance(origin, dict) and origin.get("kind") not in (None, "", "user", "keyboard"):
-            continue
+        if isinstance(origin, dict):
+            kind = origin.get("kind")
+            if kind not in HUMAN_ORIGIN_KINDS:
+                if kind not in INJECTED_ORIGIN_KINDS:
+                    dlog(f"unknown transcript origin kind {kind!r} — treated as NOT a "
+                         "partner keystroke; if a partner typed it, add it to "
+                         "HUMAN_ORIGIN_KINDS in hooks/weekend-quiet-gate.py")
+                continue
         msg = rec.get("message") or rec
         content = msg.get("content")
         text = content if isinstance(content, str) else "\n".join(
