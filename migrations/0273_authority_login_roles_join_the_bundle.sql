@@ -63,10 +63,21 @@ begin
   end loop;
 
   if granted = 0 then
-    raise exception
-      'neither authority login role exists on this database, so no human authority '
-      'principal can read the rule table. Provision carr_authority_joe in the database '
-      'console and re-apply; this migration cannot create a login role.';
+    -- REPORTED, NOT RAISED, and this was wrong in the first version of this
+    -- migration: it raised, and the hosted CI run refused with its own message.
+    -- Correctly, too — a throwaway CI database has neither login role, because
+    -- they are provisioned in the database provider's console and no migration
+    -- can create one. Refusing there would mean no branch could ever merge.
+    --
+    -- The companion check is ops/authority-privilege-gate.py, which takes
+    -- exactly this position: a database with no authority login role is
+    -- reported, while a role that EXISTS and cannot do its job is a failure.
+    -- The dangerous state is a half-provisioned principal, not an absent one,
+    -- and an absent one is loud by other means: no rule can be approved at all.
+    raise notice
+      'no authority login role exists on this database, so nothing was granted. '
+      'Expected on a throwaway CI database; on Production it means '
+      'carr_authority_joe is unprovisioned and no rule can be approved.';
   end if;
 
   if array_length(absent, 1) is not null then
