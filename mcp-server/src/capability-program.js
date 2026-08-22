@@ -284,7 +284,27 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         if (!textPresent(supplied.candidate_fingerprint) || supplied.candidate_fingerprint !== session.candidate_fingerprint)
           throw new ToolError({ error: "completion_candidate_fingerprint_mismatch", hint: "re-read the persisted capability session; completion cannot substitute a candidate" });
         if (actor.id === session.executor_actor_id) throw new ToolError({ error: "capability_self_completion_forbidden", capability_agent_session_id: session.id });
-        const pass = (await c.query(`select * from ops.capability_verification where build_session_id=$1 and work_request_id=$2 and outcome='pass' and candidate_fingerprint=$3 and verifier_actor_id <> $4 order by attested_at desc limit 1 for update`, [session.id, row.id, session.candidate_fingerprint, session.executor_actor_id])).rows[0];
+        // NO `for update` HERE, and that omission is the whole reason this queue could
+        // never close. ops.capability_verification is immutable by design: migration
+        // 0127 puts a before-update-or-delete trigger on it, and carr_writer is granted
+        // only `insert, select`. PostgreSQL requires UPDATE privilege to take a row
+        // lock, so `select ... for update` against this table raised permission denied
+        // on EVERY completion attempt and surfaced to the caller as a bare
+        // `internal error`. That is why the AI Engineering Suite read 0 of 51 complete
+        // while six of its projects were demonstrably finished — the close verb had
+        // never once run to the end.
+        //
+        // The lock was never needed. requireCurrent() already takes `for update of w`
+        // on the queue-head work_request and loadSession() takes `for update of s` on
+        // the session, so two concurrent completions of the same project serialize on
+        // rows this role may actually lock. Granting UPDATE here instead would widen
+        // the write surface of a deliberately append-only evidence table to buy a lock
+        // that adds nothing (rule 5409731b).
+        //
+        // Proven by ops/capability-completion-gate.py, which fires as carr_writer
+        // rather than as the owner. Migration 0127's own proof block ran as the
+        // migration role, which is exactly why it never saw this.
+        const pass = (await c.query(`select * from ops.capability_verification where build_session_id=$1 and work_request_id=$2 and outcome='pass' and candidate_fingerprint=$3 and verifier_actor_id <> $4 order by attested_at desc limit 1`, [session.id, row.id, session.candidate_fingerprint, session.executor_actor_id])).rows[0];
         if (!pass) throw new ToolError({ error: "independent_capability_pass_required", capability_agent_session_id: session.id });
         const persistedEvidence = { candidate: session.candidate_evidence, attestation: { id: pass.id, verifier_actor_id: pass.verifier_actor_id, verification_evidence_ref: pass.verification_evidence_ref, source_ref: pass.source_ref, attested_at: pass.attested_at, candidate_fingerprint: pass.candidate_fingerprint } };
         const updated = (await c.query(`update ops.work_request set state='confirmed_closed', completion_kind=$2, completion_evidence=$3::jsonb, verification_accepted_at=now(), verification_evidence_ref=$4, closed_at=now(), updated_at=now(), version=version+1 where id=$1 returning *`, [row.id, args.completion_kind, JSON.stringify(persistedEvidence), pass.id])).rows[0];
