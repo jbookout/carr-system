@@ -56,7 +56,7 @@ class CloseLoopFake {
 
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) {
+    if (sql.startsWith("select request_hash, response")) {
       const prior = this.calls.get(params[0]);
       return { rows: prior ? [prior] : [] };
     }
@@ -81,7 +81,9 @@ class CloseLoopFake {
       return { rows: [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      this.calls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
+      this.calls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]),
+        actor_id: params[2], organization_tenant_id: params[7] ?? null,
+        application_session_id: params[12] ?? null });
       return { rows: [] };
     }
     throw new Error(`unhandled fake query: ${sql}`);

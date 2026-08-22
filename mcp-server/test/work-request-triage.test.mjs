@@ -14,7 +14,7 @@ class TriageFake {
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim(); this.calls.push({ sql, params });
     if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [] };
-    if (sql.startsWith("select request_hash, response from tool_call")) { const row = this.toolCalls.get(params[0]); return { rows: row ? [row] : [] }; }
+    if (sql.startsWith("select request_hash, response")) { const row = this.toolCalls.get(params[0]); return { rows: row ? [row] : [] }; }
     if (sql.includes("triage_sourced_work_request")) {
       if (params.includes(99)) return { rows: [] };
       this.state = "triaged"; this.version += 1;
@@ -22,7 +22,9 @@ class TriageFake {
         triaged_by_actor_slug: "joe", triaged_at: "2026-08-16T00:00:00Z" }] };
     }
     if (sql.startsWith("insert into event")) return { rows: [] };
-    if (sql.startsWith("insert into tool_call")) { this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) }); return { rows: [] }; }
+    if (sql.startsWith("insert into tool_call")) { this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]),
+        actor_id: params[2], organization_tenant_id: params[7] ?? null,
+        application_session_id: params[12] ?? null }); return { rows: [] }; }
     throw new Error(`unexpected query: ${sql}`);
   }
 }

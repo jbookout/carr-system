@@ -51,7 +51,7 @@ class Fake {
       throw e;
     }
 
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.includes("from v_ref_index where subject_type='client' and ref ilike"))
       return { rows: [{ subject_id: ids.client }] };
     if (sql.includes("subject_type='deal' and lower(display_name)")) return { rows: [] };

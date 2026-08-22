@@ -8,7 +8,7 @@ class NationalFake {
   constructor() { this.partyInserts = 0; }
   async query(text) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.startsWith("select id,name from party where kind='org'")) return { rows: [] };
     if (sql.includes("where c.id=$1 and c.client_type='national_account'"))
       return { rows: [{ id: "account-client", party_id: "account-party", name: "Brand" }] };
