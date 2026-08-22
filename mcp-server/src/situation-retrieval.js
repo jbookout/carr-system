@@ -148,10 +148,18 @@ export async function searchDoctrineSituations(c, actor, args) {
   const actorId = await retrievalVisibilityActorId(c, actor);
   const policy = args.policy_id || null;
   if (policy && !POLICIES.has(policy)) throw new Error(`unknown retrieval policy: ${policy}`);
+  // The live verb always allows the zero-hit fallback (loop 518): when the
+  // strict every-word pass finds nothing, the ranker retries with any-word
+  // matching and marks each such row's provenance with fallback:true. The
+  // argument defaults to OFF in the database, so the golden gate and every
+  // other five-argument caller keep exact strict semantics — the deliberate
+  // negative cases (expect-no-hits, near-miss) are gate properties of the
+  // strict lane, not of this best-effort lane.
   const result = await c.query(
-    `select * from search_doctrine_situations($1, $2::uuid, $3::text[], $4, $5)`,
-    [args.q, actorId, args.content_classes || null, args.limit || 20, policy]);
+    `select * from search_doctrine_situations($1, $2::uuid, $3::text[], $4, $5, $6)`,
+    [args.q, actorId, args.content_classes || null, args.limit || 20, policy, true]);
   const policyId = result.rows[0]?.provenance?.policy_id || policy || "default";
+  const fallbackUsed = result.rows.length > 0 && result.rows.every(r => r.provenance?.fallback === true);
 
   // The query log is written HERE, on the write credential, and never awaited.
   // It used to ride inside search_doctrine_situations as a data-modifying CTE,
@@ -167,18 +175,22 @@ export async function searchDoctrineSituations(c, actor, args) {
       else if (score >= 0.25) bands.medium += 1;
       else bands.low += 1;
     }
+    // A query only answered by the fallback pass was still a strict miss, and
+    // the miss index is what curation mines — logging it as a hit would hide
+    // exactly the queries the phrase-proposal loop exists to learn from.
     c.sideWrite(
       "select log_retrieval_query($1, $2, $3::uuid[], $4::jsonb, $5, $6, $7)",
       [args.q, result.rows.length, result.rows.map(r => r.section_id),
        JSON.stringify(bands), policyId,
        result.rows[0]?.provenance?.policy_version ?? null,
-       result.rows.length > 0]);
+       result.rows.length > 0 && !fallbackUsed]);
   }
 
   return {
     ok: true,
     query: args.q,
     policy_id: policyId,
+    fallback: fallbackUsed,
     hits: result.rows,
     total: result.rows.length,
     generated_text: false,

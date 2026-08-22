@@ -29,8 +29,10 @@ test("registered search-doctrine resolves joe-local sponsorship to Joe's human a
   assert.deepEqual(result.hits, [{ section_key: "diagnosis-checklist", final_score: 1 }]);
   const retrievalCall = calls.find(call => /search_doctrine_situations/.test(call.sql));
   assert.ok(retrievalCall, "search-doctrine must call the shared database ranker");
+  // The trailing true is the zero-hit fallback opt-in (loop 518): the live
+  // verb always allows it; strict semantics live behind the OFF default.
   assert.deepEqual(retrievalCall.params,
-    ["record layer outage diagnosis", "joe-human-id", ["runbook"], 3, null]);
+    ["record layer outage diagnosis", "joe-human-id", ["runbook"], 3, null, true]);
   const scopeCall = calls.find(call => /retrieval_visibility_actor_id/.test(call.sql));
   assert.deepEqual(scopeCall.params, ["joe"]);
   // The active-human constraint still binds; migration 0223 moved it INSIDE
@@ -57,7 +59,7 @@ test("registered search-doctrine resolves Dell sponsorship only to Dell's human 
   });
   assert.deepEqual(calls[0].params, ["dell"]);
   assert.deepEqual(calls.find(call => /search_doctrine_situations/.test(call.sql)).params,
-    ["personal operating preference", "dell-human-id", null, 5, null]);
+    ["personal operating preference", "dell-human-id", null, 5, null, true]);
 });
 
 test("unsponsored search is shared-only and invalid required sponsorship is refused", async () => {
@@ -70,7 +72,7 @@ test("unsponsored search is shared-only and invalid required sponsorship is refu
     { slug: "codex", human: false, via: "agent-token", sponsoring_human_slug: null },
     { q: "shared doctrine", limit: 2 });
   assert.equal(sharedCalls.some(call => /retrieval_visibility_actor_id/.test(call.sql)), false);
-  assert.deepEqual(sharedCalls[0].params, ["shared doctrine", null, null, 2, null]);
+  assert.deepEqual(sharedCalls[0].params, ["shared doctrine", null, null, 2, null, true]);
 
   let queried = false;
   const refusedClient = { query: async () => { queried = true; return { rows: [] }; } };
