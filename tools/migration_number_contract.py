@@ -45,6 +45,15 @@ FROZEN_COLLISIONS: dict[str, tuple[str, ...]] = {
         "0169_hermes_pilot_actor.sql",
         "0169_program5_release_binding.sql",
     ),
+    # Pull requests #452 and #453 landed 16 seconds apart, after each branch had
+    # independently allocated the then-free 0248 slot. Both filenames are now
+    # merged migration identities, and register_conduct_stop_control is already
+    # present in the production ledger. Preserve the exact identities here;
+    # renaming either merged file would manufacture a different migration.
+    "0248": (
+        "0248_register_conduct_stop_control.sql",
+        "0248_renewal_signed_source_ingress.sql",
+    ),
 }
 
 # These twelve filenames were applied to isolated Control Plane staging before
