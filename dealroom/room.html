@@ -138,8 +138,11 @@
   <form class="room-composer" id="roomComposer">
     <span class="composer-seat" id="composerSeat">Human</span>
     <label class="sr-only" for="composerInput">Speak into the room</label>
+    <!-- Deliberately no maxlength. The cap is 20,000 characters and the reader
+         is told when they pass it; silently truncating a partner's turn mid-word
+         on paste would be a worse answer than refusing it out loud. -->
     <textarea class="composer-input" id="composerInput" rows="1" placeholder="Speak into the room as Joe…"
-              maxlength="20000" autocomplete="off"></textarea>
+              autocomplete="off"></textarea>
     <div class="composer-side">
       <span class="composer-count" id="composerCount" hidden></span>
       <button type="submit" class="composer-send" id="composerSend">Send</button>
