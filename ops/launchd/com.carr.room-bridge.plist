@@ -14,7 +14,7 @@
     tracked across firings rather than by holding this process open — same
     house pattern as capture-poll and partner-ping: launchd IS the supervisor).
 
-    --heartbeat-interval throttles a SUCCEEDED row to at most once per 900s
+    The heartbeat-interval option throttles a SUCCEEDED row to at most once
     (15 min): recording all ~1440 fires/day from a normally-quiet board would
     be noise, exactly the reasoning ops/config/services.json's capture-poll
     and partner-ping entries already state. Every non-succeeded outcome is
