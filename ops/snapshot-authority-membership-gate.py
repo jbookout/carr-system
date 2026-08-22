@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: snapshot-rebuild-fidelity
 """A database rebuilt from db/schema.sql must carry 0273's role membership.
 
 WHY THIS GATE EXISTS (open loop #506 finding 3, 2026-08-22). The snapshot's
