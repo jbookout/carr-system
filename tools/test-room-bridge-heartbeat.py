@@ -66,9 +66,12 @@ class RecordingRoom:
 
 DESKS = {
     "joe-desk": {"kind": "claude-session", "room_seat": "claude",
-                 "last_seen": "2026-08-22T14:00:00+00:00", "last_live": True},
+                 "last_seen": "2026-08-22T14:00:00+00:00", "last_live": True,
+                 "last_auth": True},
     "codex-desk": {"kind": "codex-session", "room_seat": "codex",
-                   "last_seen": "2026-08-22T13:58:00+00:00", "last_live": False},
+                   "last_seen": "2026-08-22T13:58:00+00:00", "last_live": False,
+                   "last_auth": False},
+    # never probed successfully — the panel must render this as UNKNOWN
     "unwired-desk": {"kind": "claude-session"},
 }
 
@@ -142,12 +145,24 @@ def the_body_carries_every_registered_desk_including_the_unwired_one():
     assert hb["cycle_at"] == "2026-08-22T14:00:00+00:00", hb
     by_name = {d["name"]: d for d in hb["desks"]}
     assert set(by_name) == {"joe-desk", "codex-desk", "unwired-desk"}, by_name
+    # EXACT shape, not inclusion: an extra field slipping into the wire contract
+    # is exactly the class of defect an inclusion-only assertion lets through.
     assert by_name["joe-desk"] == {"name": "joe-desk", "seat": "claude", "live": True,
-                                   "last_seen": "2026-08-22T14:00:00+00:00"}, by_name
+                                   "last_seen": "2026-08-22T14:00:00+00:00",
+                                   "auth": True}, by_name
     assert by_name["codex-desk"]["live"] is False, by_name
+    assert by_name["codex-desk"]["auth"] is False, by_name
     # the dormant case the panel renders as "no wire registered"
     assert by_name["unwired-desk"]["seat"] is None, by_name
     assert by_name["unwired-desk"]["live"] is False, by_name
+    # NULL, NOT FALSE. A desk whose vendor CLI could not be asked has not been
+    # shown to be signed out, and publishing false here would paint the panel
+    # red on any machine missing a CLI.
+    assert by_name["unwired-desk"]["auth"] is None, by_name
+
+    # a non-boolean that somehow reached the registry is normalised to null
+    odd = {"x": {"room_seat": "claude", "last_live": True, "last_auth": "yes"}}
+    assert json.loads(bridge.heartbeat_body(odd, 1, "t"))["heartbeat"]["desks"][0]["auth"] is None
     # compact JSON: the wire carries turns, not pretty-printed documents
     assert ", " not in bridge.heartbeat_body(DESKS, 68, "2026-08-22T14:00:00+00:00")
 

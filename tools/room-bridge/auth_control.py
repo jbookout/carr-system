@@ -67,7 +67,14 @@ CONTROL_ALLOWED_ACTIONS = frozenset({"login"})
 HUMAN_PARTNERS = frozenset({"joe", "dell"})
 AUTHORIZED_CONTROL_SEATS = frozenset({"human"})
 LOGIN_THROTTLE_S = 600.0
-PROBE_TIMEOUT_S = 20.0
+# TIGHT ON PURPOSE, and the number comes from the service's own cadence rather
+# than from taste: com.carr.room-bridge wakes every 60 seconds, and every
+# registered desk is probed each cycle. At eight seconds a machine with four
+# desks spends at most ~32s in probes even when every vendor CLI hangs, which
+# leaves the cycle's real work — routing, delivery and reply capture — inside
+# the wake interval. A probe that needs longer than eight seconds to say whether
+# a token exists locally has already told us it cannot answer.
+PROBE_TIMEOUT_S = 8.0
 
 # The vendor's OWN commands, per desk kind. A kind absent from these maps is
 # refused by name rather than guessed at: launching the wrong binary at a
