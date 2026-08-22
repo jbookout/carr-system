@@ -2912,7 +2912,7 @@ export const TOOLS = {
       owner: { type: "string", description: "'claude' for the autonomous drain queue — rows the system may finish and close on its own evidence. 'joe' or 'dell' for a person's pile. 'joint' for the legacy rows owned by two people at once, which no query can select for and nobody picks up." },
       search: { type: "string", description: "case-insensitive match against the title" },
       limit: { type: "integer", default: 60 },
-      summary: { type: "boolean", description: "Payload budget: counts by status, blocker class and owner, plus per-loop only {number, kind, label (title or first 80 chars of body's first line), blocker_class, owner, since_text, version}. No bodies, no blocker_detail. Absent/false returns today's full rows." },
+      summary: { type: "boolean", description: "Payload budget: counts by status, blocker class and owner, plus per-loop only {number, kind, label (title or first 80 chars of body's first line), blocker_class, owner, since_text, due_on, version}. No bodies, no blocker_detail. Absent/false returns today's full rows." },
     } },
     handler: async (c, _a, args) => {
       const where = ["kind = $1"];
