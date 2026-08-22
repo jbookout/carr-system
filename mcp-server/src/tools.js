@@ -48,14 +48,64 @@ const CONNSTR_RE = /\b\w+:\/\/[^\s'"]+/gi; // defense in depth; pg errors don't 
 function redact(s) {
   return typeof s === "string" ? s.replace(CONNSTR_RE, "[redacted]") : s;
 }
+
+// THE TWO CLASSES THAT COST THE MOST ON 2026-08-21, neither of which is a
+// constraint violation, so neither was translated and both reached the caller
+// as a bare "internal error" naming nothing:
+//
+//   42501 insufficient_privilege — complete-capability-project took a row lock
+//   on an append-only table the serving role holds only insert/select on. Row
+//   locks need UPDATE. Every completion since the verb shipped died here, which
+//   is why the AI Engineering Suite read 0 complete of 51 while six of its
+//   projects were finished. Hours went into it because the error named nothing.
+//
+//   22P02 invalid_text_representation — a short id or a "#213"-style reference
+//   reaching a uuid column. Hit twice in one session, on close-loop's successor
+//   field and on update-decision, both of which document the human-readable
+//   form in their own hints. Two defects filed under one class.
+//
+// A permission or a type mismatch is not less actionable than a CHECK
+// violation, and it is far more likely to be a bug in the verb rather than in
+// the caller's arguments — which is exactly why hiding it is expensive.
+const PG_FAULT_KIND = Object.freeze({
+  "42501": "insufficient_privilege",
+  "22P02": "invalid_text_representation",
+  "42703": "undefined_column",
+  "42P01": "undefined_table",
+  "42883": "undefined_function",
+});
+const PG_FAULT_HINT = Object.freeze({
+  "42501": "the database refused this to the role the server connects as — the grant is missing, " +
+           "or the statement takes a row lock (select ... for update) on a table this role may only " +
+           "read. Read the handler's SQL before assuming a server fault; do not widen the grant " +
+           "without checking whether the lock is needed at all.",
+  "22P02": "a value did not parse as its column's type — most often a short id, a '#123' reference " +
+           "or a name where a uuid is required. Check which form this field actually accepts; the " +
+           "verb's own description may name a friendlier form than the code accepts.",
+  "42703": "the statement names a column that does not exist — a schema change and this code have drifted.",
+  "42P01": "the statement names a table that does not exist — a migration is missing on this database.",
+  "42883": "the statement calls a function that does not exist — a migration is missing on this database.",
+});
+
 export function pgConstraintError(e) {
   const code = e && e.code;
-  if (typeof code !== "string" || !PG_VIOLATION_KIND[code]) return null;
-  return new ToolError({ error: "invalid_field_value", violation: PG_VIOLATION_KIND[code],
-    constraint: e.constraint || null, table: e.table || null, column: e.column || null,
-    detail: redact(e.detail) || null,
-    hint: "a value failed a database constraint — check it against this verb's documented " +
-          "enum or required fields; this is the constraint the value actually violated, not a stack trace" });
+  if (typeof code !== "string") return null;
+  if (PG_VIOLATION_KIND[code]) {
+    return new ToolError({ error: "invalid_field_value", violation: PG_VIOLATION_KIND[code],
+      constraint: e.constraint || null, table: e.table || null, column: e.column || null,
+      detail: redact(e.detail) || null,
+      hint: "a value failed a database constraint — check it against this verb's documented " +
+            "enum or required fields; this is the constraint the value actually violated, not a stack trace" });
+  }
+  if (PG_FAULT_KIND[code]) {
+    return new ToolError({ error: "database_refused_the_statement", fault: PG_FAULT_KIND[code],
+      sqlstate: code,
+      table: e.table || null, column: e.column || null,
+      message: redact(e.message) || null,
+      detail: redact(e.detail) || null,
+      hint: PG_FAULT_HINT[code] });
+  }
+  return null;
 }
 
 // [ORDER 34 review, blocker 1] The old array-replacer form of JSON.stringify

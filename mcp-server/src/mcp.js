@@ -628,7 +628,41 @@ export async function dispatch(request, env, ctx, actor) {
         } catch (e) {
           if (e instanceof ToolError)
             return reply({ isError: true, content: [{ type: "text", text: JSON.stringify(e.payload) }] });
-          throw e;
+          // UNMASK IT. Until 2026-08-21 an untyped throw fell through to the
+          // outer handler, which answers -32603 with the literal message
+          // "internal error" and puts the real cause in the JSON-RPC `data`
+          // field — a field MCP clients routinely drop, so the caller saw a
+          // four-word string naming nothing. The detail was already being
+          // recorded to the incident store and already being returned on the
+          // wire; the only thing missing was putting it where a caller reads.
+          //
+          // What that masking cost in one day: the capability queue's close
+          // verb had never once succeeded (a row lock on a table the serving
+          // role may only read) and read as "0 complete of 51" while six
+          // projects were finished; close-loop and update-decision each died
+          // on a short id reaching a uuid column. Three defects, all diagnosed
+          // by reading handler SQL, because the error itself said nothing.
+          //
+          // Still recorded to the incident store, same as before, and the
+          // string is redacted for connection-string shapes on the way out. A
+          // failure a caller can act on is not a leak; a failure nobody can
+          // read is just a longer outage.
+          const cause = String((e && e.stack) || e).slice(0, 600)
+            .replace(/\b\w+:\/\/[^\s'"]+/gi, "[redacted]");
+          scheduleFailureRecord(env, ctx, {
+            routeKey: `mcp:tools/call:${rpc?.params?.name || "unknown"}`,
+            failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE),
+            detail: cause.slice(0, 300),
+          });
+          return reply({ isError: true, content: [{ type: "text", text: JSON.stringify({
+            error: "unhandled_verb_failure",
+            verb: rpc?.params?.name || null,
+            cause,
+            hint: "this is the server's own exception, not a refusal of your arguments — the verb " +
+                  "reached code that threw. Read it before retrying: an unhandled failure repeated " +
+                  "with the same arguments fails the same way. If it names a database fault, the " +
+                  "handler's SQL is the place to look.",
+          }) }] });
         }
       }
       default:
