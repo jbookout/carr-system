@@ -45,6 +45,18 @@ FROZEN_COLLISIONS: dict[str, tuple[str, ...]] = {
         "0169_hermes_pilot_actor.sql",
         "0169_program5_release_binding.sql",
     ),
+    # BOTH LANDED ON MAIN INSIDE ONE HOUR, from two pull requests that each
+    # allocated 0248 while the other was still open -- #452 (renewal signed
+    # source ingress) and #453 (register the conduct-stop control). Neither is
+    # applied to production, whose ledger stops at 0247, so this is a repository
+    # collision rather than a deployed one. It is frozen rather than renamed
+    # because both files are already merged: migration identity is the full
+    # filename, the two filenames are distinct, and renaming a merged file
+    # changes an identity other work already refers to.
+    "0248": (
+        "0248_register_conduct_stop_control.sql",
+        "0248_renewal_signed_source_ingress.sql",
+    ),
 }
 
 # These twelve filenames were applied to isolated Control Plane staging before
