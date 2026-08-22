@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Read back the canonical ledger registry and compare every tracked contract."""
+# ci: db-gate
+"""Read back the canonical ledger registry and compare every tracked contract.
+
+WIRED 2026-08-21. This gate was written, was correct, and had no caller: no
+marker, no invocation anywhere in the repository. ops/ci.sh has been naming it
+in the clear on every push since the db-gate loop was built — "db-gates without
+the `# ci: db-gate` marker: control-plane-registry-gate.py" — and nobody read
+the line. The control-plane roadmap's Phase 2 exit asks that every scheduled
+run have an auditable owner independent of the AI provider's scheduler; this is
+the check that asserts it, so Phase 2 could not exit while it sat unrun
+(rule ab814a26 — a rule ships with its enforcement, and recitation is not
+enforcement).
+
+It needs nothing but the throwaway database the migration class already stands
+up: verified passing there on 2026-08-21 against the committed schema, 25
+workflows and 8 cognition contracts exact, zero legacy cutovers.
+"""
 from __future__ import annotations
 
 import json
