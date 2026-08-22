@@ -87,7 +87,19 @@ class LoopFake {
       return { rows: [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      this.calls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]), actor_id: params[2], organization_tenant_id: params[7], application_session_id: params[12] ?? null });
+      // BY POSITION, from the insert's own parameter order, because that is what
+      // the row coming back out of Postgres would carry. Storing only the hash
+      // and the response made every identity column read as undefined on replay,
+      // so a replay check comparing actor, tenant or session would judge the
+      // call against a row that had forgotten who made it -- and pass, which is
+      // the direction that does not announce itself.
+      this.calls.set(params[0], {
+        request_hash: params[3],
+        response: JSON.parse(params[4]),
+        actor_id: params[2],
+        organization_tenant_id: params[7] ?? null,
+        application_session_id: params[12] ?? null,
+      });
       return { rows: [] };
     }
     throw new Error(`unhandled fake query: ${sql}`);

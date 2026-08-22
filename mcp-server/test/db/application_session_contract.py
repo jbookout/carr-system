@@ -1369,6 +1369,16 @@ def main(dsn):  # noqa: C901
             # bar it exists to test. The fixture above is uncommitted and
             # must stay visible, so the role is reset in place rather than by
             # exiting the as_writer block, which would roll it back.
+            # ACCEPTANCE MUST NOW BE THE FIRST WRITE IN ITS TRANSACTION, a
+            # settled ruling after a review reached Phase 4 accepted and Drive
+            # retirement READY on a virgin database inside ONE transaction by
+            # writing the evidence and then counting it. This contract used to
+            # build its whole fixture in the open transaction it then accepted
+            # in, so it now trips that guard before ever reaching the bar it
+            # exists to test. The fixture is committed first, which costs the
+            # residue this contract was avoiding -- so it cleans up after
+            # itself below rather than rolling back.
+            conn.commit()
             cur.execute("reset role")
             try:
                 cur.execute("select ops.accept_phase4(%s,%s,%s)",
@@ -1378,7 +1388,13 @@ def main(dsn):  # noqa: C901
             except psycopg.Error as exc:
                 assert "phase4_acceptance_no_unproven_receipts" in str(exc), (
                     f"refused, but by a different bar: {str(exc).strip().splitlines()[0]}")
-            conn.rollback()
+
+        # Both rows this contract committed are unproven and unexcused: `bad`
+        # is excused only by `ret`, which is itself unproven, which is the whole
+        # point of the contract. Each gets a proven retraction so the residue
+        # invariant the second gate pass depends on still holds.
+        cleanup_unproven_receipt(bad, "deal", bad_subject, sess=sid)
+        cleanup_unproven_receipt(ret, "deal", bad_subject, sess=sid)
     check("req 6: an unproven retraction clears nothing",
           unproven_retraction_clears_nothing)
 

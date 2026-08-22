@@ -1,0 +1,149 @@
+/* CARR pre-tour packet stylesheet.
+   Lifted verbatim from the Hughes pre-tour briefing of 2026-08-19, which is the
+   format Dell asked for by name. That deliverable's build2.py was a one-off with
+   its content hardcoded and half its CSS appended inline at build time; both halves
+   are joined here so the design is one file and the next packet is data, not a fork.
+   Serif headings, navy masthead, gold accent, numbered round badges, fact grid. */
+
+  :root{--navy:#002F6C;--navy2:#20508f;--ink:#00224D;--mute:#5b6675;--line:#e6e9ee;--bg:#f4f6f8;--gold:#F57F29;--soft:#eef1f5;--green:#2f7d5b;}
+  *{box-sizing:border-box} html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6}
+  .wrap{max-width:1040px;margin:0 auto;background:#fff;box-shadow:0 1px 40px rgba(20,40,80,.08)}
+  h1,h2,h3,h4,.brand{font-family:Georgia,"Times New Roman",serif}
+  header{background:var(--navy);color:#fff;padding:34px 44px 30px}
+  .htop{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,.18);padding-bottom:16px}
+  .htop img{height:30px} .htop .kick{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#cdd7e6}
+  h1{font-size:31px;line-height:1.15;margin:22px 0 6px;font-weight:600}
+  .sub{color:#cdd7e6;font-size:15px} .prep{margin-top:16px;font-size:14px;color:#e7edf5} .prep b{color:#fff}
+  main{padding:0 44px 10px}
+  .lead{font-size:16px;color:var(--ink);margin:26px 0 20px}
+  .snap{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:0 0 8px}
+  .snap div{background:#fff;padding:12px 14px} .snap .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute)} .snap .v{font-size:15px;font-weight:600;margin-top:2px}
+  .fid{background:var(--soft);border-left:3px solid var(--gold);padding:12px 16px;margin:18px 0 4px;font-size:14px;color:#33404f;border-radius:0 6px 6px 0}
+  h2{font-size:20px;color:var(--navy);margin:38px 0 4px;font-weight:600;break-after:avoid;page-break-after:avoid} .h2sub{color:var(--mute);font-size:13.5px;margin-bottom:14px;break-after:avoid;page-break-after:avoid}
+  .secnum{color:var(--gold);font-weight:700;font-family:Georgia,serif}
+  figure{margin:8px 0 0} .omap{width:100%;border:1px solid var(--line);border-radius:8px;display:block} figcaption{color:var(--mute);font-size:12.5px;margin-top:6px}
+  .tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;margin-top:6px}
+  table{border-collapse:collapse;width:100%;font-size:13px;min-width:820px}
+  thead th{background:var(--navy);color:#fff;text-align:left;padding:9px 10px;font-weight:600;font-family:-apple-system,Segoe UI,sans-serif;font-size:11px;letter-spacing:.04em;text-transform:uppercase;vertical-align:bottom}
+  tbody td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top} tbody tr:nth-child(even) td{background:#fafbfc}
+  .tc-num{color:var(--gold);font-weight:700;font-family:Georgia,serif;font-size:15px} .tc-where{font-weight:600;min-width:190px}
+  .tsub{color:var(--mute);font-weight:400;font-size:11.5px}
+  .ttag{display:inline-block;margin-top:4px;font-size:10.5px;color:var(--navy2);background:#eaf0f8;border-radius:20px;padding:2px 9px;font-weight:600}
+  .tc-all{font-weight:700;color:var(--navy)} .tnote{font-size:12px;color:var(--mute);margin:8px 2px 0}
+  .card{position:relative;border:1px solid var(--line);border-radius:12px;padding:22px 24px 20px;margin:18px 0;background:#fff;page-break-inside:avoid}
+  .cnum{position:absolute;top:-14px;left:22px;background:var(--gold);color:#fff;font-family:Georgia,serif;font-weight:700;font-size:15px;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(245,127,41,.35)}
+  .chead{margin:6px 0 14px} .ptag{color:var(--gold);font-size:12px;letter-spacing:.09em;text-transform:uppercase;font-weight:700}
+  .paddr{font-size:21px;margin:3px 0 1px;font-weight:600} .pctr{color:var(--navy2);font-weight:600;font-size:14px} .pcity{color:var(--mute);font-size:14px}
+  .cmedia{display:grid;grid-template-columns:2fr 1fr;gap:10px;margin-bottom:14px}
+  .hero{width:100%;height:250px;object-fit:cover;border-radius:8px;display:block;background:#eef1f5}
+  .loc{width:100%;height:250px;object-fit:cover;border-radius:8px;display:block;background:#eef1f5;border:1px solid var(--line)}
+  .pcopy{margin:2px 0 16px;font-size:14.5px}
+  .factgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:16px}
+  .f{background:#fff;padding:9px 11px;display:flex;flex-direction:column;gap:1px} .fk{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--mute)} .fv{font-size:13.5px;font-weight:600}
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:14px}
+  .mini h4{font-size:13px;color:var(--navy);margin:0 0 6px;text-transform:uppercase;letter-spacing:.05em} .mini ul{margin:0;padding-left:17px} .mini li{font-size:13.5px;margin-bottom:5px;color:#33404f}
+  .broker{border-top:1px solid var(--line);padding-top:11px;font-size:12.5px;color:#33404f} .broker span{color:var(--mute);text-transform:uppercase;letter-spacing:.05em;font-size:10.5px;margin-right:3px}
+  /* grand boulevard */
+  .gbwrap{border:1px solid var(--line);border-left:4px solid var(--navy);border-radius:10px;padding:18px 22px 20px;margin:16px 0;background:#fff}
+  .gbhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .gbadge{background:var(--green);color:#fff;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:700;padding:3px 10px;border-radius:20px}
+  .gbtitle{font-family:Georgia,serif;font-size:21px;font-weight:600} .gbcity{color:var(--mute);font-size:14px}
+  .gbintro{font-size:14.5px;margin:12px 0 6px}
+  table.gbt{min-width:760px}
+  .gb{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:2px 8px;border-radius:20px}
+  .gb-yes{background:#e4f2ea;color:var(--green)} .gb-no{background:#fbecec;color:#b23b3b}
+  tr.gr-yes td{background:#f6fbf8 !important} .gfit{font-size:12px;color:#3a4553;min-width:220px}
+  .gbnote{background:var(--soft);border-radius:8px;padding:12px 16px;margin-top:12px;font-size:13px;color:#33404f}
+  .lookgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:6px}
+  .lcard{border:1px solid var(--line);border-radius:10px;padding:15px 17px;background:#fff;page-break-inside:avoid}
+  .ltag{color:var(--gold);font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:700} .laddr{font-weight:600;font-size:15.5px;margin-top:3px} .lcity{color:var(--mute);font-size:13px} .lmeta{font-size:13px;margin:7px 0 4px;color:#33404f} .lcard p{font-size:13px;margin:4px 0 0;color:#3a4553}
+  .rwrap{background:var(--soft);border-radius:10px;padding:8px 20px 14px;margin-top:8px} .rgroup{border-bottom:1px solid #dde3ea;padding:12px 0} .rgroup:last-child{border-bottom:none} .rgroup h4{margin:0 0 4px;font-size:14px;color:var(--navy)} .rgroup p{margin:0;font-size:13px;color:#3a4553}
+  .tkgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:6px}
+  .tk,.dq{border-left:3px solid var(--navy);padding:2px 0 2px 14px;page-break-inside:avoid} .tk h4,.dq h4{margin:0 0 3px;font-size:14.5px;color:var(--ink)} .tk p,.dq p{margin:0;font-size:13.5px;color:#3a4553}
+  .dqgrid{display:grid;grid-template-columns:1fr;gap:13px;margin-top:6px} .dq{border-left-color:var(--gold)}
+  footer{background:var(--navy);color:#fff;margin-top:34px;padding:30px 44px 34px}
+  .sig{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:18px} .sig .name{font-family:Georgia,serif;font-size:20px;font-weight:600} .sig .role{color:#cdd7e6;font-size:13.5px;margin-top:2px} .sig .contact{font-size:14px;margin-top:10px;line-height:1.8} .sig .contact a{color:#fff;text-decoration:none;border-bottom:1px solid rgba(255,255,255,.3)}
+  .fidfoot{border-top:1px solid rgba(255,255,255,.18);margin-top:20px;padding-top:16px;font-size:13px;color:#dbe3ee;max-width:640px} .meta{color:#9fb0c8;font-size:12px;margin-top:14px}
+  @media (max-width:760px){header,main,footer{padding-left:20px;padding-right:20px} .snap,.factgrid{grid-template-columns:repeat(2,1fr)} .cmedia,.twocol,.lookgrid,.tkgrid{grid-template-columns:1fr} .hero,.loc{height:200px}}
+  @media print{body{background:#fff;font-size:12px} .wrap{box-shadow:none;max-width:none} .card,.lcard,.tk,.dq,.rgroup,figure,.tblwrap,.gbwrap{page-break-inside:avoid} h2{page-break-after:avoid} .hero,.loc{height:210px}}
+
+/* ---- appended inline by build2.py at build time ---- */
+  .area{font-family:Georgia,serif;font-size:16px;color:#fff;background:var(--navy);border-radius:8px;padding:9px 16px;margin:34px 0 6px;font-weight:600;letter-spacing:.01em}
+  .area .cnt{float:right;font-weight:400;color:#cdd7e6;font-size:13px}
+  .areasub{color:var(--mute);font-size:13px;margin:0 2px 14px}
+  .ctitle{font-family:Georgia,serif;font-size:21px;font-weight:600}
+  .ccity{color:var(--mute);font-size:14px}
+  .agent{border-top:1px solid var(--line);padding-top:11px;font-size:12.5px;color:#33404f;margin-top:2px}
+  .agent span{color:var(--mute);text-transform:uppercase;letter-spacing:.05em;font-size:10.5px;margin-right:3px}
+
+  .routebox{margin:14px 0 2px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .routebtn{display:inline-block;background:var(--gold);color:#fff;text-decoration:none;font-weight:600;padding:11px 20px;border-radius:8px;font-size:14.5px;box-shadow:0 2px 8px rgba(245,127,41,.3)}
+  .routebtn:hover{background:#B4550F}
+  .routemeta{font-size:13px;color:var(--mute)}
+  @media print{ .routebtn{background:#fff;color:var(--navy);border:1.5px solid var(--navy);box-shadow:none} }
+  .notebox{margin:15px 0 2px;page-break-inside:avoid}
+  .notebox h4{font-size:11.5px;color:var(--navy);margin:0 0 9px;text-transform:uppercase;letter-spacing:.07em}
+  .noteline{height:29px;border-bottom:1px solid #c4ccd8}
+  .noteline:first-of-type{border-top:1px solid #edf0f4}
+  .usernote{margin:0 0 11px;font-size:14px;color:#26313f;background:#fbf7ee;border-left:3px solid var(--gold);padding:10px 13px;border-radius:0 6px 6px 0}
+  .hero.fw{width:100%;height:280px}
+  .cmedia1{margin-bottom:14px}
+  @media print{ .noteline{height:26px;border-bottom:1px solid #9aa6b6} .hero.fw{height:230px} }
+
+/* ---- added for the River Bank packet, 2026-08-21 ---- */
+/* The physical address, labelled, on every card. The heading is a display title and a
+   land listing's title carries no street number, so the address gets its own line. */
+.paddrline{font-size:13.5px;color:#26313f;margin:0 0 13px;padding:8px 12px;background:#f7f9fb;
+  border-left:3px solid var(--navy2);border-radius:0 6px 6px 0}
+.paddrline span{color:var(--mute);text-transform:uppercase;letter-spacing:.07em;
+  font-size:10.5px;margin-right:6px}
+/* Drawings for an option where we hold them. */
+.plans{margin:4px 0 14px}
+.plans h4{font-size:13px;color:var(--navy);margin:0 0 8px;text-transform:uppercase;letter-spacing:.05em}
+.plan{margin:0 0 12px;break-inside:avoid;page-break-inside:avoid}
+.plan img{width:100%;height:auto;border:1px solid var(--line);border-radius:8px;display:block;background:#fff}
+.plan figcaption{color:var(--mute);font-size:12px;margin-top:5px}
+.plan figcaption b{color:#33404f}
+.plansrc{font-size:12px;color:var(--mute);margin:6px 0 0}
+.tkgrid,.dqgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}
+.tk,.dq{border:1px solid var(--line);border-top:3px solid var(--gold);border-radius:8px;padding:14px 16px;background:#fff;break-inside:avoid}
+.dq{border-top-color:var(--navy)}
+.tk h4,.dq h4{font-size:14px;color:var(--navy);margin:0 0 6px}
+.tk p,.dq p{margin:0;font-size:13.5px;color:#33404f}
+footer{background:var(--navy);color:#fff;padding:26px 44px 30px;margin-top:34px}
+.sig{display:flex;justify-content:space-between;align-items:flex-start;gap:20px}
+.sig .name{font-family:Georgia,serif;font-size:19px;font-weight:600}
+.sig .role{color:#cdd7e6;font-size:13px;margin-top:2px}
+.sig .contact{margin-top:8px;font-size:13px}
+.sig .contact a{color:#fff;text-decoration:none}
+.fidfoot{margin-top:16px;font-size:12.5px;color:#cdd7e6;border-top:1px solid rgba(255,255,255,.18);padding-top:14px}
+.meta{margin-top:10px;font-size:11.5px;color:#9fb0c6}
+@page{margin:.5in}
+@media print{
+  body{background:#fff}
+  .wrap{box-shadow:none;max-width:none}
+  header,main{padding-left:0;padding-right:0}
+  footer{padding-left:22px;padding-right:22px}
+  .card{break-inside:avoid;page-break-inside:avoid}
+  .hero.fw{height:210px}
+  table{min-width:0;font-size:11px}
+  .tkgrid,.dqgrid{gap:12px}
+}
+
+/* ---- page-break discipline, 2026-08-21 ----
+   A card is allowed to break across two sheets, which is what the Hughes briefing did.
+   Forcing break-inside:avoid on a full-page card is what stranded three headings and
+   two paragraphs on sheets of their own: the card could not fit beside them, so it
+   jumped and left them behind. The sub-blocks are protected instead, so a break never
+   lands inside a photo, a fact grid, a notes box or a drawing. */
+@media print{
+  .card{break-inside:auto;page-break-inside:auto}
+  .chead,.paddrline,.cmedia1,.cmedia,.factgrid,.notebox,.plan,.agent,.twocol .mini{
+    break-inside:avoid;page-break-inside:avoid}
+  .chead,.paddrline,.plans h4,.mini h4,.notebox h4{break-after:avoid;page-break-after:avoid}
+  /* a block and the sentence that introduces it stay together */
+  .snap,.fid,.tnote,.lead{break-inside:avoid;page-break-inside:avoid}
+  .snap{break-after:avoid;page-break-after:avoid}
+  .tk,.dq{break-inside:avoid;page-break-inside:avoid}
+}
