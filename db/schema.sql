@@ -28129,6 +28129,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0230_renewal_decision_delivery.sql	40fdc0ba235fdd62b90946c294b87a5c18a87c602e4a042e5aead1536d8e8665	2026-08-21 23:24:41.516402+00
 0245_program6_current_sourced_work_requests.sql	01754b470ca657b082e484b291181927c8d5c68ecdb111592c333de79a5c9190	2026-08-21 23:24:41.793598+00
 0247_system_rule_scope_binding.sql	0bd1b9832e5d570a769aa93f7394dadb6797e949250c427b37b0046901ec6fad	2026-08-21 23:24:41.997369+00
+0248_register_conduct_stop_control.sql	1854dbc574fc14cb9f0af6546c9060df664c84879b6fdeb418c2f32d3670c7ce	2026-08-22 03:04:18.638152+00
 \.
 
 
