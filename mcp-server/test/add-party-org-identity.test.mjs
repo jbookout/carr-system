@@ -78,7 +78,7 @@ class Fake {
       throw e;
     }
 
-    if (sql.startsWith("select request_hash, response from tool_call")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
 
     // add-party's similarity guard
     if (sql.includes("similarity(name,$2)")) return { rows: this.similar };
