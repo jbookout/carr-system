@@ -433,6 +433,44 @@ function boot() {
     return node;
   }
 
+  /**
+   * KEYED RECONCILIATION, and it is a correctness requirement here rather than a
+   * performance nicety.
+   *
+   * This page re-derives its whole model every five seconds. Rebuilding the DOM
+   * from that model each time looks harmless and is not: a replaced element
+   * restarts its CSS animation, so every pulse on the page would stutter back to
+   * the start of its breath on every poll — the exact thing the pulse scale is
+   * supposed to communicate. It would also collapse any receipt the reader had
+   * expanded, drop the feed's scroll position, and throw away hover state
+   * mid-gesture.
+   *
+   * So: match by key, update in place, create only what is new, remove only what
+   * is gone, and reorder without detaching anything that is already correct.
+   */
+  function reconcile(host, items, { key, create, update }) {
+    const existing = new Map();
+    for (const child of host.children) {
+      if (child.dataset.key !== undefined) existing.set(child.dataset.key, child);
+    }
+    const wanted = items.map((item) => {
+      const id = key(item);
+      let node = existing.get(id);
+      if (node) { existing.delete(id); update?.(node, item); } else {
+        node = create(item);
+        node.dataset.key = id;
+      }
+      return node;
+    });
+    for (const stale of existing.values()) stale.remove();
+    // Place each node at its index only when it is not already there, so an
+    // unchanged list performs zero DOM mutations.
+    wanted.forEach((node, index) => {
+      if (host.children[index] !== node) host.insertBefore(node, host.children[index] || null);
+    });
+    while (host.children.length > wanted.length) host.lastElementChild.remove();
+  }
+
   function svg(tag, attrs = {}) {
     const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
     for (const [name, value] of Object.entries(attrs)) {
@@ -578,14 +616,35 @@ function boot() {
     return nodes;
   }
 
+  let stageLayout = "";
+
   function renderStage(model) {
+    const nodes = stageNodes(model);
+    // THE SKY IS ONLY REDRAWN WHEN ITS SHAPE CHANGES. A node's position, its
+    // drift phase and its halo animation all live in the element; rebuilding
+    // them every five seconds would reset every orbit to the same starting
+    // point and break the comets mid-flight. When only STATE changed — a desk
+    // going urgent, a worker finishing — the existing nodes are updated where
+    // they stand.
+    const layout = nodes.map((n) => `${n.id}|${n.ring}|${n.partner}`).join(",") + `|${isCompact()}`;
+    if (layout === stageLayout) {
+      for (const node of nodes) {
+        const entry = nodeIndex.get(node.id);
+        if (!entry) continue;
+        entry.node = node;
+        const pulse = $("stageNodes").querySelector(`[data-node="${CSS.escape(node.id)}"] .stage-node-pulse`);
+        if (pulse && pulse.dataset.state !== node.state) pulse.dataset.state = node.state;
+      }
+      return;
+    }
+    stageLayout = layout;
+
     const connectors = $("stageConnectors");
     const nodeLayer = $("stageNodes");
     connectors.replaceChildren();
     nodeLayer.replaceChildren();
     nodeIndex.clear();
 
-    const nodes = stageNodes(model);
     const buckets = { "left:inner": [], "left:outer": [], "right:inner": [], "right:outer": [] };
     for (const node of nodes) {
       const hemisphere = String(node.partner).toLowerCase() === "dell" ? "right" : "left";
@@ -779,44 +838,7 @@ function boot() {
 
   /* ---------------------------------------------------------------- desks */
 
-  function renderDesks(model) {
-    const host = $("deskList");
-    host.replaceChildren();
-    if (!model.desks.length) {
-      host.appendChild(el("p", "desk-empty",
-        "No desk roster on the wire yet. The bridge publishes one every five minutes; until then this column stays honest and empty."));
-      return;
-    }
-    for (const partner of HUMAN_PARTNERS) {
-      const mine = model.desks.filter((d) => String(d.partner).toLowerCase() === partner);
-      if (!mine.length) continue;
-      const group = el("div", "desk-group");
-      group.style.setProperty("--halo", partnerHalo(partner));
-      const head = el("div", "desk-group-head", `${PARTNER_LABEL[partner]} · ${mine.length}`);
-      group.appendChild(head);
-      for (const desk of mine) group.appendChild(deskCard(desk, model.now));
-      host.appendChild(group);
-    }
-  }
-
-  function deskCard(desk, now) {
-    const card = el("button", `desk-card${desk.state === "dormant" ? " is-dormant" : ""}`);
-    card.type = "button";
-    card.style.setProperty("--halo", partnerHalo(desk.partner));
-    card.style.setProperty("--seat", seatColor(desk.seat));
-    card.setAttribute("aria-pressed", String(state.filters.seats.has(desk.seat)));
-
-    const dot = el("span", "dot");
-    dot.dataset.state = desk.state;
-    dot.style.setProperty("background", desk.state === "healthy" ? seatColor(desk.seat) : "");
-    card.appendChild(dot);
-
-    const body = el("div");
-    const name = el("div", "desk-name");
-    name.appendChild(el("b", null, desk.seat || "no seat"));
-    name.appendChild(document.createTextNode(` · ${desk.name}`));
-    body.appendChild(name);
-
+  function deskSubLine(desk, now) {
     const bits = [];
     if (!desk.seat) bits.push("no wire registered");
     else if (desk.auth === false) bits.push("signed out");
@@ -824,22 +846,99 @@ function boot() {
     else bits.push("idle");
     if (desk.auth === null && desk.seat) bits.push("sign-in unknown");
     bits.push(`seen ${relativeTime(desk.seenAt, now)}`);
-    body.appendChild(el("div", "desk-sub", bits.join(" · ")));
+    return bits.join(" · ");
+  }
 
-    if (desk.auth === false) {
-      const reconnect = el("span", "assignment-badge", "⛓ signed out — RECONNECT");
-      reconnect.style.setProperty("color", "#F08A2D");
-      reconnect.style.setProperty("border-color", "#F08A2D");
-      body.appendChild(reconnect);
-      card.addEventListener("click", (event) => {
-        if (event.altKey) return;
-        event.preventDefault();
-        requestReconnect(desk.name);
-      }, { capture: true });
+  function renderDesks(model) {
+    const host = $("deskList");
+    if (!model.desks.length) {
+      host.replaceChildren(el("p", "desk-empty",
+        "No desk roster on the wire yet. The bridge publishes one every five minutes; until then this column stays honest and empty."));
+      return;
     }
+    // One flat, keyed list of partner headers and their cards. Flat because the
+    // grouping is a rendering detail and reconciling nested lists would buy
+    // nothing: the key already carries the partner.
+    const items = [];
+    for (const partner of HUMAN_PARTNERS) {
+      const mine = model.desks.filter((d) => String(d.partner).toLowerCase() === partner);
+      if (!mine.length) continue;
+      items.push({ kind: "group", partner, count: mine.length });
+      for (const desk of mine) items.push({ kind: "desk", desk });
+    }
+    reconcile(host, items, {
+      key: (item) => (item.kind === "group" ? `g:${item.partner}` : `d:${item.desk.name}`),
+      create: (item) => (item.kind === "group" ? deskGroupHead(item) : deskCard(item.desk, model.now)),
+      update: (node, item) => {
+        if (item.kind === "group") { node.textContent = `${PARTNER_LABEL[item.partner]} · ${item.count}`; return; }
+        updateDeskCard(node, item.desk, model.now);
+      },
+    });
+  }
+
+  function deskGroupHead(item) {
+    const head = el("div", "desk-group-head", `${PARTNER_LABEL[item.partner]} · ${item.count}`);
+    head.style.setProperty("--halo", partnerHalo(item.partner));
+    return head;
+  }
+
+  function deskCard(desk, now) {
+    const card = el("button", "desk-card");
+    card.type = "button";
+
+    const dot = el("span", "dot");
+    card.appendChild(dot);
+
+    const body = el("div");
+    const name = el("div", "desk-name");
+    name.appendChild(el("b", null, ""));
+    name.appendChild(document.createTextNode(""));
+    body.appendChild(name);
+    body.appendChild(el("div", "desk-sub"));
+    const reconnect = el("span", "assignment-badge", "⛓ signed out — RECONNECT");
+    reconnect.style.setProperty("color", "#F08A2D");
+    reconnect.style.setProperty("border-color", "#F08A2D");
+    reconnect.hidden = true;
+    body.appendChild(reconnect);
     card.appendChild(body);
-    card.addEventListener("click", () => toggleSeatFilter(desk.seat));
+
+    // The card's two actions are bound ONCE, on creation, and read the desk's
+    // current identity from the element rather than from a captured closure —
+    // otherwise every update would have to rebind and the listeners would pile up.
+    card.addEventListener("click", (event) => {
+      if (card.dataset.auth === "false" && event.target.closest(".assignment-badge")) {
+        event.preventDefault();
+        requestReconnect(card.dataset.desk);
+        return;
+      }
+      toggleSeatFilter(card.dataset.seat || null);
+    });
+    updateDeskCard(card, desk, now);
     return card;
+  }
+
+  function updateDeskCard(card, desk, now) {
+    card.dataset.desk = desk.name;
+    card.dataset.seat = desk.seat || "";
+    card.dataset.auth = String(desk.auth);
+    card.classList.toggle("is-dormant", desk.state === "dormant");
+    card.style.setProperty("--halo", partnerHalo(desk.partner));
+    card.style.setProperty("--seat", seatColor(desk.seat));
+    card.setAttribute("aria-pressed", String(state.filters.seats.has(desk.seat)));
+
+    const dot = card.querySelector(".dot");
+    // Assigning the same value would still be a no-op for the animation, but the
+    // guard keeps that guarantee explicit rather than incidental.
+    if (dot.dataset.state !== desk.state) dot.dataset.state = desk.state;
+    dot.style.setProperty("background", desk.state === "healthy" ? seatColor(desk.seat) : "");
+
+    const name = card.querySelector(".desk-name");
+    name.firstChild.textContent = desk.seat || "no seat";
+    name.lastChild.textContent = ` · ${desk.name}`;
+    const sub = card.querySelector(".desk-sub");
+    const line = deskSubLine(desk, now);
+    if (sub.textContent !== line) sub.textContent = line;
+    card.querySelector(".assignment-badge").hidden = desk.auth !== false;
   }
 
   /* ----------------------------------------------------------------- wire */
@@ -848,20 +947,42 @@ function boot() {
     const feed = $("wireFeed");
     const visible = state.turns.filter((turn) => turnPasses(turn, state.filters));
     const capped = visible.slice(-DOM_TURN_CAP);
-    feed.replaceChildren();
 
-    if (state.oldestSeq !== null && state.oldestSeq > 1) {
-      const earlier = el("button", "wire-earlier", "Load earlier turns");
-      earlier.type = "button";
-      earlier.addEventListener("click", loadEarlier);
-      feed.appendChild(earlier);
-    }
-    if (!capped.length && !state.pending.size) {
-      feed.appendChild(el("p", "wire-quiet", "The wire is quiet."));
-      return;
-    }
-    for (const turn of capped) feed.appendChild(turnNode(turn));
-    for (const pending of state.pending.values()) feed.appendChild(turnNode(pending, true));
+    const items = [];
+    if (state.oldestSeq !== null && state.oldestSeq > 1) items.push({ kind: "earlier" });
+    if (!capped.length && !state.pending.size) items.push({ kind: "quiet" });
+    for (const turn of capped) items.push({ kind: "turn", turn, pending: false });
+    for (const pending of state.pending.values()) items.push({ kind: "turn", turn: pending, pending: true });
+
+    reconcile(feed, items, {
+      key: (item) => {
+        if (item.kind !== "turn") return item.kind;
+        return `t:${item.turn.msg_id ?? item.turn.seq}`;
+      },
+      create: (item) => {
+        if (item.kind === "earlier") {
+          const earlier = el("button", "wire-earlier", "Load earlier turns");
+          earlier.type = "button";
+          earlier.addEventListener("click", loadEarlier);
+          return earlier;
+        }
+        if (item.kind === "quiet") return el("p", "wire-quiet", "The wire is quiet.");
+        return turnNode(item.turn, item.pending);
+      },
+      // A turn's TEXT never changes once it is on the wire; only its age does.
+      // Touching the time and nothing else is what keeps an expanded receipt
+      // expanded and the reader's scroll position where they put it.
+      update: (node, item) => {
+        if (item.kind !== "turn") return;
+        const time = node.querySelector(".turn-time, summary > span:last-child");
+        if (!time) return;
+        const text = item.pending ? "sending…"
+          : (node.classList.contains("receipt")
+            ? `${item.turn.seat} · ${relativeTime(timeOf(item.turn), Date.now())}`
+            : relativeTime(timeOf(item.turn), Date.now()));
+        if (time.textContent !== text) time.textContent = text;
+      },
+    });
     if (state.following) scrollToBottom(!freshOnly);
   }
 
@@ -934,59 +1055,74 @@ function boot() {
 
   function renderAssignments(model) {
     const host = $("assignmentList");
-    host.replaceChildren();
     if (!model.assignments.length) {
-      host.appendChild(el("p", "rail-empty",
+      host.replaceChildren(el("p", "rail-empty",
         "No assignments on the wire yet — type @seat assign <ref> <title> below."));
       return;
     }
-    for (const item of model.assignments.slice(0, 40)) {
-      const card = el("div", "assignment");
-      const head = el("div", "assignment-head");
-      head.appendChild(seatChip(`@${item.seat}`));
-      head.querySelector(".seat-chip")?.style.setProperty("--seat", seatColor(item.seat));
-      head.appendChild(el("span", "assignment-ref", item.ref || "—"));
-      card.appendChild(head);
-      card.appendChild(el("p", "assignment-title", item.title || `${item.verb || "claim"} ${item.ref || ""}`));
-      card.appendChild(el("div", "assignment-meta",
-        `by ${item.by || "unknown"} · ${relativeTime(item.at, model.now)} ago`));
-      card.appendChild(el("span", "assignment-badge", "recorded — queue link pending"));
-      host.appendChild(card);
-    }
+    reconcile(host, model.assignments.slice(0, 40), {
+      key: (item) => `a:${item.seq}`,
+      create: (item) => {
+        const card = el("div", "assignment");
+        const head = el("div", "assignment-head");
+        head.appendChild(seatChip(`@${item.seat}`));
+        head.querySelector(".seat-chip")?.style.setProperty("--seat", seatColor(item.seat));
+        head.appendChild(el("span", "assignment-ref", item.ref || "—"));
+        card.appendChild(head);
+        card.appendChild(el("p", "assignment-title", item.title || `${item.verb || "claim"} ${item.ref || ""}`));
+        card.appendChild(el("div", "assignment-meta"));
+        card.appendChild(el("span", "assignment-badge", "recorded — queue link pending"));
+        return card;
+      },
+      // An assignment receipt is immutable once written; only its age moves.
+      update: (node, item) => {
+        const meta = node.querySelector(".assignment-meta");
+        const text = `by ${item.by || "unknown"} · ${relativeTime(item.at, model.now)} ago`;
+        if (meta.textContent !== text) meta.textContent = text;
+      },
+    });
   }
 
   /** The context gauges: one row per relay session that has reported in the
    *  last two hours, so no agent burns tokens Joe cannot see burning. */
   function renderSessions(model) {
     const host = $("sessionList");
-    host.replaceChildren();
     if (!model.sessions.length) {
-      host.appendChild(el("p", "rail-empty",
+      host.replaceChildren(el("p", "rail-empty",
         "No session has reported its context yet. Rows appear here as relay sessions post a status receipt."));
       return;
     }
-    for (const session of model.sessions) {
-      const row = el("div", `session-row${session.stale ? " is-stale" : ""}`);
-      row.style.setProperty("--halo", partnerHalo(session.partner));
-      const head = el("div", "session-head");
-      const dot = el("span", "dot");
-      dot.dataset.state = session.state;
-      head.appendChild(dot);
-      head.appendChild(el("span", "session-name", session.name));
-      head.appendChild(el("span", "session-pct",
-        Number.isFinite(session.contextPct) ? `${Math.round(session.contextPct)}%` : "—"));
-      row.appendChild(head);
-
-      const bar = el("div", "session-bar");
-      const fill = el("span", "session-fill");
-      fill.style.setProperty("width", `${Math.max(0, Math.min(100, Number(session.contextPct) || 0))}%`);
-      bar.appendChild(fill);
-      row.appendChild(bar);
-
-      row.appendChild(el("div", "session-claimed",
-        `${session.claimed || "nothing claimed"} · ${relativeTime(session.at, model.now)} ago`));
-      host.appendChild(row);
-    }
+    reconcile(host, model.sessions, {
+      key: (session) => `s:${session.name}`,
+      create: () => {
+        const row = el("div", "session-row");
+        const head = el("div", "session-head");
+        head.appendChild(el("span", "dot"));
+        head.appendChild(el("span", "session-name"));
+        head.appendChild(el("span", "session-pct"));
+        row.appendChild(head);
+        const bar = el("div", "session-bar");
+        bar.appendChild(el("span", "session-fill"));
+        row.appendChild(bar);
+        row.appendChild(el("div", "session-claimed"));
+        return row;
+      },
+      update: (row, session) => {
+        row.classList.toggle("is-stale", session.stale);
+        row.style.setProperty("--halo", partnerHalo(session.partner));
+        const dot = row.querySelector(".dot");
+        if (dot.dataset.state !== session.state) dot.dataset.state = session.state;
+        row.querySelector(".session-name").textContent = session.name;
+        row.querySelector(".session-pct").textContent =
+          Number.isFinite(session.contextPct) ? `${Math.round(session.contextPct)}%` : "—";
+        // The bar animates its width, which is the count-up equivalent for a
+        // gauge: context that just jumped ten points should be seen jumping.
+        row.querySelector(".session-fill").style.setProperty(
+          "width", `${Math.max(0, Math.min(100, Number(session.contextPct) || 0))}%`);
+        row.querySelector(".session-claimed").textContent =
+          `${session.claimed || "nothing claimed"} · ${relativeTime(session.at, model.now)} ago`;
+      },
+    });
   }
 
   /* --------------------------------------------------------------- health */
@@ -1030,18 +1166,23 @@ function boot() {
 
   function renderSeatChips(model) {
     const host = $("seatChips");
-    host.replaceChildren();
     const seats = new Set();
     for (const desk of model.desks) if (desk.seat) seats.add(desk.seat);
     for (const orbiter of model.orbiters) seats.add(orbiter.seat);
     seats.add("human");
-    for (const seat of [...seats].sort()) {
-      const chip = el("button", "chip", seat);
-      chip.type = "button";
-      chip.style.setProperty("--chip", seatColor(seat));
-      chip.setAttribute("aria-pressed", String(state.filters.seats.has(seat)));
-      chip.addEventListener("click", () => toggleSeatFilter(seat));
-      host.appendChild(chip);
+    reconcile(host, [...seats].sort(), {
+      key: (seat) => `c:${seat}`,
+      create: (seat) => {
+        const chip = el("button", "chip", seat);
+        chip.type = "button";
+        chip.style.setProperty("--chip", seatColor(seat));
+        chip.addEventListener("click", () => toggleSeatFilter(seat));
+        return chip;
+      },
+      update: (chip, seat) => chip.setAttribute("aria-pressed", String(state.filters.seats.has(seat))),
+    });
+    for (const chip of host.children) {
+      chip.setAttribute("aria-pressed", String(state.filters.seats.has(chip.textContent)));
     }
   }
 
@@ -1308,7 +1449,7 @@ function boot() {
     clearTimeout(resizeTimer);
     // Crossing the phone/desktop boundary swaps the stage geometry, so the core
     // and the rings are both redrawn rather than left at the old scale.
-    resizeTimer = setTimeout(() => { drawCore(); render(); }, 180);
+    resizeTimer = setTimeout(() => { stageLayout = ""; drawCore(); render(); }, 180);
   }, { passive: true });
   document.addEventListener("visibilitychange", () => schedule());
   reduced.addEventListener("change", () => render());
