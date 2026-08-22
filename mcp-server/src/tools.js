@@ -6298,8 +6298,22 @@ export const TOOLS = {
       // continuing work is the outcome OPENING with a bookkeeping declaration
       // (which the prefix check just below already demands) or a successor loop
       // being named. Both are deliberate acts; neither is an accident of prose.
-      const bookkeeping = /^\s*(renumbered|superseded|merged|split)\b/i.test(outcome)
-        || Boolean(args.successor_loop);
+      //
+      // A real bookkeeping close is identifiable three ways, and all three are
+      // things this verb already demands of one: the outcome OPENS with the
+      // declaration (the prefix check immediately below requires exactly that),
+      // or it NAMES the loop the work moved to, or it passes successor_loop.
+      // Prose about a branch reaching main does none of those.
+      //
+      // The narrowing is real and worth naming: an outcome saying "merged with
+      // another effort", naming no loop and passing no successor, is no longer
+      // flagged. That phrasing already failed the two checks below, so it could
+      // never have completed a bookkeeping close — it would only have been
+      // refused later and less clearly.
+      const bookkeeping =
+        /^\s*(renumbered|superseded)\b/i.test(outcome) ||
+        /\b(?:superseded\s+by|renumbered\s+(?:to|as)|merged\s+(?:into|with)|split\s+into)\s+(?:open\s+)?(?:loop\s*)?#?\d+/i.test(outcome) ||
+        Boolean(args.successor_loop);
       let successor = null;
       if (bookkeeping) {
         if (resolution !== "dropped")
