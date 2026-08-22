@@ -297,6 +297,111 @@ export async function writeReceiptsFor(client, actor, verb, key, hash) {
   }
 }
 
+// EVIDENCE THAT GETS RESTATED IN PLACE, and the receipts that have to be taken
+// back when it is. This exists because 0238's event freeze made a shipped verb
+// permanently refuse.
+//
+// THE REGRESSION. log-decision with an `about` ref writes a pointer event through
+// writeEvent, which carries the application session, so the loop below files and
+// PROVES a receipt on it. detach-decision then restates that same row -- this
+// repo's designed "nothing is deleted, the pointer is restated" retraction path,
+// and the reason 0232 deliberately left event.UPDATE open. Under the freeze that
+// restatement was refused outright, with a message telling the caller to retract
+// the receipt: something require_sound_retraction refuses for a PROVEN receipt,
+// which every receipt this producer files is. Every about-attached decision was
+// permanently un-detachable, and the remedy named did not exist.
+//
+// WHAT A RESTATEMENT MEANS IN RECEIPT TERMS. The receipt said "this call put this
+// subject in this state". The state is being taken back, so the receipt is too,
+// through the primitive the substrate already has for undoing a PROVEN claim: a
+// reversal, whose material is the state its target built on. Retraction is not
+// that primitive and is refused here for the same reason it is refused there.
+// Nothing is deleted on this side either -- the original receipt, its proof and
+// its reversal all stay on the record.
+//
+// A VERB DECLARES IT. There is no way to notice from here that a handler ran an
+// UPDATE against public.event, so the two handlers that do say so. Forgetting to
+// is not silent: the deferred guard refuses the whole transaction at commit and
+// names the receipt, which is a loud failure rather than a quiet corruption.
+const restatedEvidence = new WeakMap();          // client -> Set("type\u0000id")
+
+export function noteEvidenceRestated(client, subjectType, subjectId) {
+  let marks = restatedEvidence.get(client);
+  if (!marks) { marks = new Set(); restatedEvidence.set(client, marks); }
+  marks.add(`${subjectType}\u0000${subjectId}`);
+}
+
+// AFTER the tool_call insert, and that ordering is forced rather than chosen.
+// ops.require_receipt_says_what_its_call_wrote refuses a receipt whose call has
+// no frozen tool_call row, and this envelope writes that row only once the
+// handler has returned a response. So the reversal cannot be filed at the moment
+// of the edit, which is exactly why the database-side guard defers to commit.
+export async function reverseRestatedReceipts(client, actor, verb, key, hash) {
+  const marks = restatedEvidence.get(client);
+  if (!marks || !marks.size) return;
+  const identity = auditIdentity(actor);
+  const sid = identity.application_session_id;
+  if (!sid) return;                    // legacy evidence backs no receipt
+  for (const mark of [...marks].sort()) {
+    const [subjectType, subjectId] = mark.split("\u0000");
+    // WHICH RECEIPTS DRIFTED IS ASKED OF THE DATABASE, not tracked here. The
+    // recomputation is the same one the guard performs at commit, so the two
+    // cannot disagree about what needs taking back — and a receipt whose fold
+    // still matches is left alone, which is the no-op case for a verb that
+    // rewrote a column the digest does not read.
+    //
+    // NO ADVISORY LOCK, unlike the receipt loop below, and deliberately. The
+    // only thing that can have drifted this evidence is this transaction's own
+    // UPDATE on the event row, and that UPDATE already holds the row lock, so a
+    // second restatement of the same row is serialised behind it. Everything
+    // read below — the target's prior and material — is immutable by
+    // ops.refuse_receipt_rewrite. Taking the subject lock here as well would
+    // give this call two lock-acquisition passes over overlapping subject sets
+    // in different orders, which is the deadlock shape the ORDER BY in
+    // writeReceiptsFor exists to prevent.
+    const drifted = await client.query(
+      `select w.id, w.is_proven, w.prior_digest, w.material_digest
+         from ops.write_receipt w
+        where w.subject_type = $1 and w.subject_id = $2
+          and w.organization_tenant_id = $3
+          and w.reverses_receipt_id is null
+          and w.retracts_receipt_id is null
+          and not ops.receipt_is_disavowed(w.id)
+          and w.material_digest is distinct from ops.write_receipt_material_digest(
+                w.tool_call_idempotency_key, w.application_session_id,
+                w.subject_type, w.subject_id)
+        order by w.seq`,
+      [subjectType, subjectId, identity.organization_tenant_id]);
+    for (const target of drifted.rows) {
+      const rid = crypto.randomUUID();
+      // PROVEN TAKES A REVERSAL, UNPROVEN TAKES A RETRACTION, and the database
+      // enforces which is which: require_sound_retraction refuses to retract a
+      // proven receipt, require_exact_reversal requires a reversal to name the
+      // state its target built on. A reversal's prior is the target's own
+      // material, which is the state being left.
+      const disavowal = target.is_proven
+        ? { column: "reverses_receipt_id",
+            material: target.prior_digest, prior: target.material_digest }
+        : { column: "retracts_receipt_id", material: "restated-in-place", prior: "origin" };
+      await client.query(
+        `insert into ops.write_receipt
+           (id, application_session_id, actor_id, organization_tenant_id, verb,
+            subject_type, subject_id, tool_call_idempotency_key,
+            call_digest, material_digest, prior_digest, ${disavowal.column})
+         values ($1,$2,$3,$4,$5,$6,$7,$8,
+                 ops.write_receipt_digest($5,$3,$4,$2,$9,$6,$7),$10,$11,$12)`,
+        [rid, sid, actor.id, identity.organization_tenant_id, verb,
+         subjectType, subjectId, key, hash,
+         disavowal.material, disavowal.prior, target.id]);
+      // Proved here, in the same transaction, for the reason writeReceiptsFor
+      // proves its own: an unproven disavowal clears nothing — not the freeze,
+      // not the acceptance bar — so filing one and walking away would leave the
+      // restatement refused at commit anyway, with a second receipt to explain.
+      await client.query(`select ops.prove_write_receipt($1)`, [rid]);
+    }
+  }
+}
+
 async function withEnvelope(client, actor, verb, args, fn) {
   const key = args.idempotency_key;
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
@@ -318,10 +423,20 @@ async function withEnvelope(client, actor, verb, args, fn) {
     if (verdict.error) throw new ToolError(verdict);
     return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
   }
+  // A POOLED CLIENT OUTLIVES A CALL, so anything a rolled-back call left behind
+  // would otherwise be drained by the next one on the same connection.
+  restatedEvidence.delete(client);
   const result = await fn();                                        // inside the open transaction
   const { text, params } = toolCallInsertSQL(key, verb, actor, hash, result);
   await client.query(text, params);
-  await writeReceiptsFor(client, actor, verb, key, hash);
+  try {
+    // BEFORE the producer, so a receipt this call files builds on the restored
+    // state rather than on the claim just taken back.
+    await reverseRestatedReceipts(client, actor, verb, key, hash);
+    await writeReceiptsFor(client, actor, verb, key, hash);
+  } finally {
+    restatedEvidence.delete(client);
+  }
   return result;
 }
 
@@ -5835,6 +5950,15 @@ export const TOOLS = {
         `update event set new_value = $1, human_quote = $2, agent_rationale = $3 where id = $4`,
         [JSON.stringify(next), quote || null,
          args.rationale !== undefined ? args.rationale : cur.agent_rationale, cur.id]);
+      // [0238] Declared for the same reason detach-decision declares it. This
+      // verb survives 0238's freeze today only by an accident of one line:
+      // log-decision's hand-rolled insert of the decision row omits
+      // application_session_id, so no receipt ever rests on it and the guard
+      // returns early. That accident is one column away from ending, and a verb
+      // whose correctness rests on a field somebody forgot is a verb waiting to
+      // break. Declaring it costs one query that finds nothing while the accident
+      // holds, and is already correct on the day it stops holding.
+      noteEvidenceRestated(c, "decision", args.decision_id);
 
       // [loop #278] Attach after the fact, through the SAME helper log-decision uses, so
       // a late attachment is indistinguishable from one made at the time. The mirror
@@ -5916,6 +6040,16 @@ export const TOOLS = {
 
       await c.query("update event set new_value = $1 where id = $2",
         [JSON.stringify(next), ptr.id]);
+      // [0238] THE POINTER IS EVIDENCE, and a receipt may rest on it. This row was
+      // written by log-decision's mirror through writeEvent, which carries the
+      // application session, so on a qualified write the producer filed and proved
+      // a receipt whose material folds this very new_value. Restating it in place
+      // — which is what this verb IS, and what 0232 left event.UPDATE open for —
+      // changes that fold, so the receipt has to be taken back on the record
+      // before the transaction can commit. Saying so here is what makes that
+      // happen; without it the database refuses the whole call at commit, which
+      // is how this verb was found permanently broken in review.
+      noteEvidenceRestated(c, s.type, s.id);
 
       await writeEvent(c, actor, "detach-decision", s.type, s.id, {
         field: "decision_retracted",

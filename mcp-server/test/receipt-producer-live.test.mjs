@@ -27,7 +27,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { writeReceiptsFor } from "../src/tools.js";
+import { writeReceiptsFor, reverseRestatedReceipts, noteEvidenceRestated }
+  from "../src/tools.js";
 
 const DSN = process.env.CARR_TEST_DSN;
 const SEP = "|";
@@ -69,19 +70,23 @@ describe("the receipt producer against a real database", { skip: !DSN }, () => {
         ", 'joe', 'probe', 'probe-issuer', 'verified_partner', 'probe'," +
         " clock_timestamp() + interval '1 hour')");
   }
-  function evt(key, subject, value) {
+  // THE VERB IS A PARAMETER, defaulting to the one every earlier test uses.
+  // ops.require_receipt_says_what_its_call_wrote refuses a receipt whose verb
+  // disagrees with its evidence, so a fixture standing in for a correcting
+  // detach-decision call has to record that verb on BOTH rows.
+  function evt(key, subject, value, verb = "log-activity") {
     raw("insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field," +
         " new_value, cause, idempotency_key, organization_tenant_id, application_session_id)" +
-        " values (clock_timestamp(), " + lit(actorId) + ", 'log-activity', 'deal', " +
+        " values (clock_timestamp(), " + lit(actorId) + ", " + lit(verb) + ", 'deal', " +
         lit(subject) + ", 'stage', " + lit(JSON.stringify(value)) + "::jsonb, 'system', " +
         lit(key) + ", " + lit(tenant) + ", " + lit(sessionId) + ")");
   }
-  function call(key, subject, value) {
+  function call(key, subject, value, verb = "log-activity") {
     raw("insert into tool_call (idempotency_key, verb, actor_id, request_hash, response," +
         " organization_tenant_id, application_session_id) values (" + lit(key) +
-        ", 'log-activity', " + lit(actorId) + ", " + lit(key) + ", '{}'::jsonb, " +
+        ", " + lit(verb) + ", " + lit(actorId) + ", " + lit(key) + ", '{}'::jsonb, " +
         lit(tenant) + ", " + lit(sessionId) + ")");
-    evt(key, subject, value);
+    evt(key, subject, value, verb);
   }
   const actor = () => ({ id: actorId, via: "probe",
     organization_tenant_id: tenant, application_session_id: sessionId,
@@ -141,6 +146,74 @@ describe("the receipt producer against a real database", { skip: !DSN }, () => {
         "two subjects share one call digest, so proof is transferable between them");
       assert.notEqual(rows[0][1], rows[1][1], "two subjects share one material claim");
       assert.ok(rows.every(r => r[2] === "true"), "a per-subject receipt did not prove");
+    });
+
+  // ---------------------------------------------------------------------
+  // 0238 SECTION (H), THE RUNTIME HALF. detach-decision restates a decision
+  // pointer in place -- this repo's designed retraction path, and the reason
+  // 0232 left event.UPDATE open. Once the producer files a receipt on that
+  // pointer, restating it changes the material the receipt attests, and the
+  // guard refuses the transaction at commit unless the receipt has been taken
+  // back on the record. reverseRestatedReceipts is what takes it back.
+  //
+  // WHAT THIS FILE CAN AND CANNOT REACH, said plainly rather than implied. The
+  // client here shells out to psql per statement, so every statement is its own
+  // transaction and no transaction can span the edit and its correction -- which
+  // is exactly the shape the deferred guard exists to judge. So the edit is made
+  // with the guard STOOD DOWN, which manufactures on disk the state the runtime
+  // reaches inside one open transaction, and the producer is then asked to do
+  // its job against it. That the two halves compose INSIDE one transaction is
+  // proven where a transaction can be held open: the Python contract suite's
+  // "a receipted event is restatable once its receipt is reversed", driven as
+  // carr_writer. Neither surface covers both halves; together they cover both.
+  test("a restated pointer's receipt is reversed by the producer, and proves",
+    async () => {
+      setup();
+      const subject = randomUUID(), key = randomUUID(), fixKey = randomUUID();
+      call(key, subject, "attached");
+      await writeReceiptsFor(psqlClient(), actor(), "log-activity", key, key);
+      const original = raw("select id from ops.write_receipt where subject_id = " +
+                           lit(subject)).trim();
+      assert.ok(original, "the fixture receipt was never filed");
+
+      raw("alter table public.event disable trigger event_receipted_material_frozen");
+      raw("update event set new_value = '\"retracted\"'::jsonb where idempotency_key = " +
+          lit(key) + " and subject_id = " + lit(subject));
+      raw("alter table public.event enable always trigger event_receipted_material_frozen");
+      assert.equal(
+        raw("select ops.first_drifted_receipt(" + lit(key) + ", " + lit(sessionId) +
+            ", 'deal', " + lit(subject) + ") is not null").trim(), "t",
+        "the fixture did not actually drift the receipt's material, so nothing below tests anything");
+
+      // THE MARKER IS LOAD-BEARING. Without a verb declaring that it restated
+      // evidence, the producer does nothing at all -- which is the whole reason
+      // detach-decision has to say so, and a mutation that deleted the call
+      // would otherwise be invisible here.
+      const silent = psqlClient();
+      call(fixKey, subject, "detached", "detach-decision");
+      await reverseRestatedReceipts(silent, actor(), "detach-decision", fixKey, fixKey);
+      assert.equal(raw("select count(*) from ops.write_receipt where reverses_receipt_id = " +
+                       lit(original)).trim(), "0",
+        "the producer filed a reversal for a call that never declared a restatement");
+
+      const c = psqlClient();
+      noteEvidenceRestated(c, "deal", subject);
+      await reverseRestatedReceipts(c, actor(), "detach-decision", fixKey, fixKey);
+      const rev = raw("select is_proven::text, material_digest, prior_digest from" +
+        " ops.write_receipt where reverses_receipt_id = " + lit(original)).trim().split("\n");
+      assert.equal(rev.length, 1, "expected exactly one reversal of the restated receipt");
+      const [proven, material, prior] = rev[0].split(SEP);
+      assert.equal(proven, "true", "the producer's reversal did not prove");
+      assert.equal(material, "origin",
+        "a reversal must carry the state its target BUILT ON, which for a first receipt is origin");
+      assert.ok(prior && prior !== "origin",
+        "the reversal must build on the state it is undoing");
+      assert.equal(raw("select ops.receipt_is_disavowed(" + lit(original) + ")").trim(), "t",
+        "the original receipt is not disavowed, so the freeze would still refuse the restatement");
+      assert.equal(
+        raw("select ops.first_drifted_receipt(" + lit(key) + ", " + lit(sessionId) +
+            ", 'deal', " + lit(subject) + ") is null").trim(), "t",
+        "the evidence still carries a live receipt whose material has drifted");
     });
 
   test("events another session wrote under the same key are not receipted here",

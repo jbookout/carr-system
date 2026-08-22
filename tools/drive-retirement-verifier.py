@@ -127,6 +127,35 @@ def main():
                              join ops.write_receipt v on v.id = r.recovery_receipt_id
                             where (not p.is_proven or not v.is_proven)""" + live)
             unproven_backing = cur.fetchone()[0]
+            # PROOF IS NOT THE SAME QUESTION AS "STILL STANDS". is_proven is a
+            # stored generated column and never goes false again, so a receipt
+            # whose author has since reversed it on the record still reads
+            # proven. ops.require_proven_retirement_receipts is BEFORE INSERT and
+            # cannot see a reversal filed tomorrow; a reviewer filed a proven
+            # reversal of a retirement's recovery receipt and readiness went on
+            # printing READY. Re-derived here for the same reason every other
+            # clause is: a verifier that re-reads a trigger's verdict is not a
+            # verifier.
+            cur.execute("""select count(*) from ops.drive_retirement r
+                            where (ops.receipt_is_disavowed(r.repoint_receipt_id)
+                                   or ops.receipt_is_disavowed(r.recovery_receipt_id))"""
+                        + live)
+            disavowed_backing = cur.fetchone()[0]
+            # AUTHORITY BELONGS TO THE TENANT THAT DID THE RETIRING. The
+            # acceptance bar ops.accept_phase4 enforces is scoped to the
+            # accepting tenant -- deliberately, so a bar can be cleared from
+            # where the accepting party stands. Counting acceptances globally
+            # silently undid that: a clean, unrelated tenant could accept for
+            # itself and its row then supplied the authority for retirements
+            # belonging to a tenant whose own receipts were unproven. Reproduced
+            # end to end, and this tool printed READY.
+            cur.execute("""select count(distinct r.organization_tenant_id)
+                             from ops.drive_retirement r
+                            where not exists (
+                                    select 1 from ops.phase4_acceptance a
+                                     where a.organization_tenant_id
+                                           = r.organization_tenant_id)""" + live)
+            unaccepted_tenants = cur.fetchone()[0]
             cur.execute("""select count(*) from ops.drive_retirement r
                             where r.repoint_receipt_id = r.recovery_receipt_id""" + live)
             same_receipt = cur.fetchone()[0]
@@ -152,10 +181,12 @@ def main():
             cur.execute("select count(*) from ops.drive_retirement_withdrawal")
             withdrawn = cur.fetchone()[0]
             print(f"retirements on unproven    : {unproven_backing}")
+            print(f"retirements on disavowed   : {disavowed_backing}")
             print(f"retirements reusing one    : {same_receipt}")
             print(f"receipts not naming the dep: {unnamed}")
             print(f"pairs asserting one thing  : {hollow_pairs}")
             print(f"withdrawn retirements      : {withdrawn}")
+            print(f"tenants retiring unaccepted: {unaccepted_tenants}")
 
     problems = []
     if total == 0:
@@ -171,9 +202,18 @@ def main():
     if remaining and remaining > 0:
         problems.append(f"{remaining} operational dependencies are not retired")
     if not has_auth:
-        problems.append("no authority acceptance is on record")
+        problems.append("no authority acceptance is on record for every tenant whose "
+                        "retirements are being counted")
+    if unaccepted_tenants:
+        problems.append(f"{unaccepted_tenants} tenants hold live retirements without "
+                        "having accepted Phase 4 themselves; another tenant's acceptance "
+                        "is not authority over their receipts")
     if unproven_backing:
         problems.append(f"{unproven_backing} retirements cite a receipt that is not proven")
+    if disavowed_backing:
+        problems.append(f"{disavowed_backing} retirements cite a receipt that has since "
+                        "been reversed or retracted on the record, so the claim it "
+                        "evidenced no longer stands")
     if same_receipt:
         problems.append(f"{same_receipt} retirements reuse one receipt for both claims")
 

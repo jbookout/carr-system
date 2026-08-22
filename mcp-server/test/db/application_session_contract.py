@@ -980,6 +980,8 @@ def main(dsn):  # noqa: C901
     # Same shape, over a subject_type of 'drive_dependency' -- needed once 0238
     # binds a retirement receipt's proof to naming the dependency it is about.
     RECEIPT_INSERT_DEP = RECEIPT_INSERT.replace("'deal'", "'drive_dependency'")
+    RECEIPT_INSERT_DEP_TENANT = RECEIPT_INSERT_TENANT.replace(
+        "'deal'", "'drive_dependency'")
 
     # --------------------------------------------- residue cleanup helpers ----
     # THE FILE'S OWN RULE (see the module docstring, rule 3: "CONTRACTS ARE
@@ -2074,6 +2076,132 @@ def main(dsn):  # noqa: C901
         cleanup_unproven_receipt(rid, "deal", subject, sess=sid)
     check("req 6: carr_writer cannot delete a receipt", receipts_are_frozen)
 
+    def a_receipted_event_is_restatable_only_once_its_receipt_is_taken_back():
+        """0238 section (H), both halves, driven as carr_writer.
+
+        THE GUARD. A receipt's material_digest is a fold over the event rows
+        its call wrote about one subject, and carr_writer holds UPDATE on
+        public.event -- so without a guard a receipt could prove and then have
+        its evidence rewritten underneath it, which is rejection reason 2 from
+        0235's own header. The guard compares the fold at COMMIT and refuses
+        any transaction that would leave a live receipt attesting material the
+        database no longer computes.
+
+        AND THE HALF THAT SHIPPED BROKEN. The first version simply refused
+        every edit under a receipt, telling the caller to "retract the receipt
+        and file a new one" -- a remedy require_sound_retraction refuses for a
+        PROVEN receipt, which every receipt the producer files is. That made
+        detach-decision, this repo's designed "nothing is deleted, the pointer
+        is restated" retraction path, permanently refused for every
+        about-attached decision. 0232 left event.UPDATE open FOR that path and
+        says so in its own comment. A guard that turns a designed path into a
+        permanent uncorrectable refusal is the exact shape section (G) exists
+        to remove.
+
+        THE ROUTE IS A REVERSAL, and this contract holds both ends of it: the
+        edit alone is refused at commit, and the same edit accompanied by a
+        proven reversal of the receipt commits and takes effect. Nothing is
+        deleted on either side -- the receipt, its proof and its reversal all
+        stay on the record.
+
+        IT IS ASSERTED AT COMMIT, NOT THROUGH refuses(). The check is
+        DEFERRABLE INITIALLY DEFERRED, because the correcting reversal cannot
+        be filed until the correcting call's tool_call row exists and the
+        runtime writes that row after the handler returns. refuses() expects
+        the statement itself to raise, so it would report this guard absent."""
+        sess, key, digest, subj, material = receipt_fixture()
+        rid = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT,
+                    (rid, sess, joe, subj, key, digest, material, "origin"),
+                    because="setup: a receipt to rest on the evidence")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+            assert cur.fetchone()[0] is True, "the fixture receipt failed to prove"
+            conn.commit()
+
+        restate = """update event set new_value = to_jsonb('restated'::text)
+                      where idempotency_key = %s and subject_id = %s"""
+
+        # HALF ONE: the edit alone does not survive its own commit.
+        refused = ""
+        with conn.cursor() as cur:
+            cur.execute("set role carr_writer")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(restate, (key, subj))
+                assert cur.rowcount == 1, "the fixture event was not there to restate"
+            conn.commit()
+        except psycopg.Error as exc:
+            refused = str(exc)
+        finally:
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute("reset role")
+            conn.commit()
+        assert refused, (
+            "an event a PROVEN receipt rests on was rewritten and the "
+            "transaction committed -- the receipt now attests material the "
+            "database does not compute")
+        assert "no longer folds to the material it recorded" in refused, (
+            f"the restatement was refused by the WRONG guard: {refused}")
+        with conn.cursor() as cur:
+            cur.execute("""select new_value #>> '{}' from event
+                            where idempotency_key = %s and subject_id = %s""",
+                        (key, subj))
+            assert cur.fetchone()[0] != "restated", (
+                "the refused edit left its change behind")
+            conn.rollback()
+
+        # HALF TWO: the same edit, with the receipt taken back on the record.
+        # The correcting call's evidence is written FIRST and in its own
+        # transaction: ops.require_receipt_says_what_its_call_wrote demands a
+        # frozen tool_call row plus an event about this subject, and writing
+        # them after the edit would mean committing mid-restatement.
+        _s2, key2, digest2, _subj2, _m2 = receipt_fixture(sess=sess, subject_id=subj)
+        rev = uuid.uuid4()
+        with conn.cursor() as cur:
+            cur.execute("set role carr_writer")
+        committed = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(restate, (key, subj))
+                assert cur.rowcount == 1
+                cur.execute("""insert into ops.write_receipt
+                                 (id, application_session_id, actor_id,
+                                  organization_tenant_id, verb, subject_type,
+                                  subject_id, tool_call_idempotency_key, call_digest,
+                                  material_digest, prior_digest, reverses_receipt_id)
+                               values (%s,%s,%s,'carr-internal','log-activity','deal',
+                                       %s,%s,%s,'origin',%s,%s)""",
+                            (rev, sess, joe, subj, key2, digest2, material, rid))
+                cur.execute("select ops.prove_write_receipt(%s)", (rev,))
+                assert cur.fetchone()[0] is True, "the correcting reversal failed to prove"
+            conn.commit()
+        except psycopg.Error as exc:
+            committed = False
+            refused_two = str(exc)
+            with contextlib.suppress(Exception):
+                conn.rollback()
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("reset role")
+            conn.commit()
+        assert committed, (
+            "a receipted event could NOT be restated even with its receipt "
+            "reversed on the record, so the only correction route the guard's "
+            "own message names does not exist: " + locals().get("refused_two", ""))
+        with conn.cursor() as cur:
+            cur.execute("""select new_value #>> '{}' from event
+                            where idempotency_key = %s and subject_id = %s""",
+                        (key, subj))
+            assert cur.fetchone()[0] == "restated", (
+                "the correction committed but the restatement did not take")
+            conn.rollback()
+    check("review 4: a receipted event is restatable once its receipt is "
+          "reversed, and not before -- detach-decision's path",
+          a_receipted_event_is_restatable_only_once_its_receipt_is_taken_back)
+
     # ------------------------- 0236: the reducer and Phase 4 acceptance ----
     def reducer_reports_the_worst_thing_it_finds():
         """A fold, not a flag. The state is derived from the causal chain every
@@ -2407,6 +2535,14 @@ def main(dsn):  # noqa: C901
         (id, drive_dependency_id, repoint_receipt_id, recovery_receipt_id,
          application_session_id, retired_by_actor_id, organization_tenant_id, note)
         values (%s,%s,%s,%s,%s,%s,'carr-internal',%s)"""
+
+    # Same shape with the tenant as a parameter. Needed once readiness stops
+    # reading a phase acceptance globally: proving that authority belongs to the
+    # RETIRING tenant requires a retirement filed under a second, real tenant.
+    RETIREMENT_INSERT_TENANT = """insert into ops.drive_retirement
+        (id, drive_dependency_id, repoint_receipt_id, recovery_receipt_id,
+         application_session_id, retired_by_actor_id, organization_tenant_id, note)
+        values (%s,%s,%s,%s,%s,%s,%s,%s)"""
 
 
     # ------------------------------------- 0237: Drive retirement ----------
@@ -3816,6 +3952,229 @@ def main(dsn):  # noqa: C901
     check("rule 8: readiness counts DISTINCT dependencies, not retirement rows "
           "-- two live, un-withdrawn retirements of ONE dependency count once",
           readiness_counts_dependencies_not_rows)
+
+    # ------------------------------------------------------------------------
+    # THE FOURTH REVIEW ROUND. Both contracts below reproduce a finding a
+    # reviewer drove end to end against this substrate, and both are about the
+    # same shape: ops.require_proven_retirement_receipts is BEFORE INSERT, so
+    # every clause it enforces describes the moment a retirement row was
+    # written and nothing since. Readiness re-reads the row and, for two of
+    # those clauses, was taking the trigger's word for it forever.
+    # ------------------------------------------------------------------------
+
+    def retirement_backing_helper(dep, base="origin", tenant=TENANT, sess=None):
+        """File an honest proven repoint/recovery pair and retire `dep` on it.
+
+        Returns (retirement_id, session, repoint_id, recovery_id, m1, m2).
+        Unlike complete_honest_retirement this hands back the RECEIPT IDS and
+        BOTH materials, because the contracts below have to reach into the
+        pair afterwards -- one to disavow a receipt, the other to chain a
+        replacement retirement onto a prior that will not manufacture a
+        conflict with what it replaced."""
+        s = sess or mint(conn, joe, tenant=tenant)
+        marker = str(uuid.uuid4())
+        insert_sql = (RECEIPT_INSERT_DEP if tenant == TENANT
+                      else RECEIPT_INSERT_DEP_TENANT)
+
+        def one(new_value, prior):
+            _s, key, digest, _ss, material = receipt_fixture(
+                sess=s, subject_type="drive_dependency", subject_id=dep,
+                new_value=new_value, tenant=tenant)
+            rid = uuid.uuid4()
+            params = ((rid, s, joe, dep, key, digest, material, prior)
+                      if tenant == TENANT
+                      else (rid, s, joe, tenant, dep, key, digest, material, prior))
+            writer_runs(conn, insert_sql, params,
+                        because=f"setup: {new_value} receipt for {dep}")
+            with as_writer(conn), conn.cursor() as cur:
+                cur.execute("select ops.prove_write_receipt(%s)", (rid,))
+                assert cur.fetchone()[0] is True, f"{new_value} receipt failed to prove"
+                conn.commit()
+            return rid, material
+
+        r1, m1 = one(f"{marker}-repoint", base)
+        r2, m2 = one(f"{marker}-recovery", m1)
+        ret = uuid.uuid4()
+        writer_runs(conn,
+                    RETIREMENT_INSERT if tenant == TENANT else RETIREMENT_INSERT_TENANT,
+                    ((ret, dep, r1, r2, s, joe, f"retirement of {dep}")
+                     if tenant == TENANT
+                     else (ret, dep, r1, r2, s, joe, tenant, f"retirement of {dep}")),
+                    because=f"setup: retire {dep}")
+        return ret, s, r1, r2, m1, m2
+
+    def a_disavowed_recovery_receipt_un_retires_its_dependency():
+        """Rule 8. A retirement rests on two PROVEN receipts, and is_proven is
+        a stored generated column: it never goes false again. So a receipt
+        whose author has since taken it back ON THE RECORD -- by the only
+        primitive that can undo a proven claim, a reversal -- still reads
+        proven forever after.
+
+        THE FINDING. ops.require_proven_retirement_receipts checks proof at
+        INSERT and says nothing about a reversal filed the next day, and
+        ops.drive_retirement_readiness re-derived every other clause of that
+        trigger and not this one. A reviewer filed a proven reversal of a
+        retirement's recovery receipt and readiness went on reporting READY --
+        a permanent false yes, which is worse than a permanent no because
+        nothing downstream ever asks again. Section (G) exists precisely to
+        make a wrong retirement correctable; this was the correction the
+        record could express and readiness could not hear.
+
+        THE CLEANUP CHAINS ON m1, NOT m2, AND THAT IS LOAD-BEARING. The
+        replacement retirement's repoint needs a prior that is real (rule:
+        ops.require_prior_state_existed) and that does not fork the chain into
+        an open conflict this contract would then owe a reconciliation for.
+        Building on m2 would put the new repoint on the SAME prior as the
+        reversal, with different material: an open conflict, and no proven
+        reversal names either side of that pair, so it would stand. Building
+        on m1 forks against the recovery receipt instead -- which the reversal
+        DOES name, so ops.receipt_conflicts excludes the pair and the chain
+        stays clean."""
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+
+        def readiness():
+            with conn.cursor() as cur:
+                cur.execute("""select operational_total, retired_total, remaining,
+                                      has_authority, ready
+                                 from ops.drive_retirement_readiness()""")
+                return cur.fetchone()
+
+        ret, sess, _r1, r2, m1, m2 = retirement_backing_helper(dep)
+        _t0, retired_0, remaining_0, auth_0, ready_0 = readiness()
+        assert remaining_0 == 0 and ready_0 is True, (
+            f"setup bug: the dependency must be retired and readiness READY "
+            f"before the reversal, got remaining={remaining_0} ready={ready_0}")
+
+        # THE REVERSAL. Exempt from the material recompute (0238 F), and
+        # required by require_exact_reversal to carry the state its target
+        # built on -- which is m1, the repoint's material.
+        _s, rkey, rdigest, _ss, _rm = receipt_fixture(
+            sess=sess, subject_type="drive_dependency", subject_id=dep,
+            new_value=f"undo-{uuid.uuid4()}")
+        rev = uuid.uuid4()
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("""insert into ops.write_receipt
+                             (id, application_session_id, actor_id,
+                              organization_tenant_id, verb, subject_type, subject_id,
+                              tool_call_idempotency_key, call_digest, material_digest,
+                              prior_digest, reverses_receipt_id)
+                           values (%s,%s,%s,'carr-internal','log-activity',
+                                   'drive_dependency',%s,%s,%s,%s,%s,%s)""",
+                        (rev, sess, joe, dep, rkey, rdigest, m1, m2, r2))
+            cur.execute("select ops.prove_write_receipt(%s)", (rev,))
+            assert cur.fetchone()[0] is True, "the reversal of the recovery receipt failed to prove"
+            conn.commit()
+
+        _t1, retired_1, remaining_1, auth_1, ready_1 = readiness()
+        assert retired_1 == retired_0 - 1, (
+            f"retired_total stayed at {retired_1} after a PROVEN reversal of a "
+            f"retirement's recovery receipt -- readiness is still counting a "
+            f"retirement whose evidence the record has withdrawn")
+        assert remaining_1 == remaining_0 + 1, (
+            f"remaining stayed at {remaining_1} for the same reason")
+        assert ready_1 is False, (
+            f"READY survived a proven reversal of a retirement's recovery "
+            f"receipt, got ready={ready_1} -- this is the permanent false yes")
+
+        # RESIDUE. The dependency is now operational-but-unretired, which every
+        # later readiness assertion in this file would inherit. Correct it the
+        # way the substrate says to: withdraw the retirement whose evidence is
+        # gone, then retire honestly again.
+        writer_runs(conn, """insert into ops.drive_retirement_withdrawal
+                (id, drive_retirement_id, application_session_id, withdrawn_by_actor_id,
+                 organization_tenant_id, note)
+              values (%s,%s,%s,%s,'carr-internal',%s)""",
+                    (uuid.uuid4(), ret, mint(conn, joe), joe,
+                     "cleanup: its recovery receipt was reversed"),
+                    because="cleanup: withdraw the retirement whose evidence was disavowed")
+        retirement_backing_helper(dep, base=m1)
+        _t2, retired_2, remaining_2, auth_2, ready_2 = readiness()
+        assert remaining_2 == remaining_0 and ready_2 is True, (
+            f"cleanup failed to restore readiness: remaining={remaining_2} "
+            f"ready={ready_2}, expected {remaining_0} and True")
+        assert auth_2 == auth_0, "cleanup changed the authority answer"
+    check("review 4: a PROVEN reversal of a retirement's recovery receipt "
+          "un-retires the dependency, and READY goes false",
+          a_disavowed_recovery_receipt_un_retires_its_dependency)
+
+    def authority_belongs_to_the_tenant_that_did_the_retiring():
+        """Rule 8, and the mirror of the acceptance bar's own tenant scoping.
+
+        ops.accept_phase4 counts unproven receipts and open conflicts within
+        the ACCEPTING tenant only. That was deliberate and is right: a bar you
+        cannot clear from where you stand is a wall, and every mechanism for
+        clearing one -- retraction, reversal -- is same-tenant by construction.
+
+        BUT READINESS READ THE ACCEPTANCE BACK GLOBALLY, which silently undid
+        it. A tenant with a clean ledger accepts for itself, and its row then
+        supplies the authority for retirements belonging to a DIFFERENT tenant
+        whose own receipts are unproven and whose own acceptance could never
+        have been written. Reproduced end to end; the verifier printed READY.
+        Authority over a tenant's work is that tenant's to give.
+
+        THE ASSERTION IS A DELTA. By this point carr-internal has an
+        acceptance on record and readiness is READY. Retiring a dependency
+        under a SECOND tenant that has no acceptance of its own must flip
+        has_authority to false -- under the global read it would not move at
+        all, because carr-internal's row is still sitting there."""
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+
+        def readiness():
+            with conn.cursor() as cur:
+                cur.execute("""select has_authority, ready, remaining
+                                 from ops.drive_retirement_readiness()""")
+                return cur.fetchone()
+
+        auth_0, ready_0, _rem0 = readiness()
+        assert auth_0 is True, (
+            "setup bug: carr-internal must already hold an acceptance here")
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from ops.phase4_acceptance "
+                        "where organization_tenant_id = %s", (OTHER_TENANT,))
+            assert cur.fetchone()[0] == 0, (
+                "setup bug: the second tenant must NOT hold an acceptance, or "
+                "this contract proves nothing")
+
+        ret, _s, _r1, _r2, m1, _m2 = retirement_backing_helper(
+            dep, tenant=OTHER_TENANT)
+        auth_1, ready_1, _rem1 = readiness()
+        assert auth_1 is False, (
+            "has_authority stayed true while a tenant with NO acceptance of "
+            "its own held a live retirement -- another tenant's acceptance is "
+            "being read as authority over this one's receipts")
+        assert ready_1 is False, (
+            "READY survived a retirement by a tenant that never accepted")
+
+        # RESIDUE: withdraw the cross-tenant retirement and re-retire the
+        # dependency inside carr-internal, which does hold authority. m1 is the
+        # prior for the same reason the contract above uses it.
+        writer_runs(conn, """insert into ops.drive_retirement_withdrawal
+                (id, drive_retirement_id, application_session_id, withdrawn_by_actor_id,
+                 organization_tenant_id, note)
+              values (%s,%s,%s,%s,%s,%s)""",
+                    (uuid.uuid4(), ret, mint(conn, joe, tenant=OTHER_TENANT), joe,
+                     OTHER_TENANT, "cleanup: retired under a tenant with no authority"),
+                    because="cleanup: withdraw the cross-tenant retirement")
+        retirement_backing_helper(dep, base="origin")
+        auth_2, ready_2, _rem2 = readiness()
+        assert auth_2 is True and ready_2 is True, (
+            f"cleanup failed to restore authority: has_authority={auth_2} "
+            f"ready={ready_2}")
+    check("review 4: authority is the RETIRING tenant's to give -- another "
+          "tenant's acceptance does not carry it",
+          authority_belongs_to_the_tenant_that_did_the_retiring)
 
     def withdrawal_cannot_cross_tenants_or_be_rewritten():
         """Rule 8, the withdrawal table's own guards."""

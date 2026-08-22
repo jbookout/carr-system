@@ -129,15 +129,40 @@ comment on column ops.write_receipt.call_digest is
   'the comparison. It says nothing about what was written.';
 
 alter table ops.write_receipt add column material_digest text;
+-- seq IS DECLARED HERE, BESIDE material_digest, AND BACKFILLED WITH IT. Both are
+-- `add column <type>` with no default, which Postgres records in the catalogue
+-- without touching the heap, so declaring them together costs nothing. What it
+-- buys is that ONE update pass writes both, instead of two passes each rewriting
+-- every row and each leaving a dead tuple behind. The whole migration already
+-- holds ACCESS EXCLUSIVE on this table from its first ALTER to commit -- that is
+-- a property of running inside one transaction and no reordering changes it --
+-- so what this saves is the second full-table rewrite, not lock time. Say that
+-- rather than claim a lock win that is not there. The reasoning for the ORDER
+-- the backfill numbers rows in is below, under `a deterministic order`.
+alter table ops.write_receipt add column seq bigint;
 
 -- BACKFILL, and the reason the immutability trigger has to stand down for it.
 -- ops.refuse_receipt_rewrite permits exactly one update — recording a readback —
 -- so it would refuse this backfill. It is disabled for the statement and
 -- restored to ENABLE ALWAYS, which is the state 0260 left it in; restoring it
 -- with a plain ENABLE would quietly downgrade it to origin-only.
-alter table ops.write_receipt disable trigger write_receipt_immutable;
-update ops.write_receipt set material_digest = call_digest where material_digest is null;
-alter table ops.write_receipt enable always trigger write_receipt_immutable;
+do $$
+declare next_seq bigint;
+begin
+  alter table ops.write_receipt disable trigger write_receipt_immutable;
+  update ops.write_receipt w
+     set material_digest = coalesce(w.material_digest, w.call_digest),
+         seq             = t.rn
+    from (select id, row_number() over (order by recorded_at, id) as rn
+            from ops.write_receipt) t
+   where t.id = w.id;
+  alter table ops.write_receipt enable always trigger write_receipt_immutable;
+
+  select coalesce(max(seq), 0) + 1 into next_seq from ops.write_receipt;
+  execute format(
+    'alter table ops.write_receipt alter column seq set not null, '
+    'alter column seq add generated always as identity (start with %s)', next_seq);
+end $$;
 
 alter table ops.write_receipt alter column material_digest set not null;
 alter table ops.write_receipt add constraint write_receipt_material_digest_nonempty
@@ -173,28 +198,21 @@ comment on column ops.write_receipt.material_digest is
 --
 -- So the existing rows are numbered explicitly, in the order the reducer used
 -- before this migration -- recorded_at then id -- and the identity takes over
--- from the next row on. The immutability trigger stands down for that write for
--- the same reason it does for the material backfill, and is restored to ENABLE
--- ALWAYS, the state 0260 left it in.
-alter table ops.write_receipt add column seq bigint;
-
-do $$
-declare next_seq bigint;
-begin
-  alter table ops.write_receipt disable trigger write_receipt_immutable;
-  update ops.write_receipt w
-     set seq = t.rn
-    from (select id, row_number() over (order by recorded_at, id) as rn
-            from ops.write_receipt) t
-   where t.id = w.id;
-  alter table ops.write_receipt enable always trigger write_receipt_immutable;
-
-  select coalesce(max(seq), 0) + 1 into next_seq from ops.write_receipt;
-  execute format(
-    'alter table ops.write_receipt alter column seq set not null, '
-    'alter column seq add generated always as identity (start with %s)', next_seq);
-end $$;
-
+-- from the next row on. That numbering is the `row_number() over (order by
+-- recorded_at, id)` in the combined backfill above; the immutability trigger
+-- stands down for that one write and is restored to ENABLE ALWAYS, the state
+-- 0260 left it in.
+--
+-- IT IS NOT PROVABLE FROM INSIDE THIS FILE, and pretending otherwise would be
+-- the same defect as a shape check dressed up as behaviour. The backfill only
+-- concerns rows that existed BEFORE the migration, and the apply-time proof runs
+-- after it against whatever rows the target database happened to hold -- on a
+-- fresh cluster, none. An evidence auditor confirmed the fix is real AND that a
+-- mutant reverting it to heap order passes this file's proof untouched. The
+-- probe therefore lives one level up, in ops/check-application-session.sh, which
+-- can stand up a database at 0262, seed receipts whose heap order is deliberately
+-- the REVERSE of their (recorded_at, id) order, apply this migration, and read
+-- the numbering back. See `the seq backfill` there.
 comment on column ops.write_receipt.seq is
   'Insertion order, assigned by the database. The continuity reducer folds in '
   'this order; recorded_at is a timestamp for humans and ties on it are real.';
@@ -226,6 +244,44 @@ comment on column ops.write_receipt.retracts_receipt_id is
 create index write_receipt_retracts_idx
   on ops.write_receipt (retracts_receipt_id)
   where retracts_receipt_id is not null;
+
+-- 0260 declared reverses_receipt_id with no index, and every question this file
+-- asks about disavowal now looks it up the same way it looks up a retraction.
+create index write_receipt_reverses_idx
+  on ops.write_receipt (reverses_receipt_id)
+  where reverses_receipt_id is not null;
+
+-- ONE DEFINITION OF "DISAVOWED", because four surfaces ask the question and four
+-- hand-written copies of it are four places for the readings to drift apart --
+-- which is precisely how the round-three finding happened: the conflict detector
+-- and the reducer held two different readings of "retracted" and the gap between
+-- them was the hole.
+--
+-- A CLAIM IS DISAVOWED WHEN ITS AUTHOR HAS TAKEN IT BACK ON THE RECORD, by
+-- either of the two primitives this substrate has for that, and only when the
+-- taking-back is itself PROVEN. Which primitive applies is decided by the target
+-- and not by preference: an UNPROVEN receipt is retracted, and a PROVEN one can
+-- only be reversed, because require_sound_retraction refuses to retract
+-- something the database confirmed and a reversal has to say what state it puts
+-- the subject back to. Both are disavowals and both belong here.
+create function ops.receipt_is_disavowed(p_receipt_id uuid)
+returns boolean language sql stable
+set search_path = pg_catalog, ops, public
+as $$
+  select exists (
+    select 1 from ops.write_receipt d
+     where d.is_proven
+       and (d.retracts_receipt_id = p_receipt_id
+            or d.reverses_receipt_id = p_receipt_id));
+$$;
+
+comment on function ops.receipt_is_disavowed(uuid) is
+  'True when a PROVEN receipt has retracted or reversed this one. The single '
+  'reading of "taken back on the record", shared by the event freeze, Drive '
+  'retirement readiness and the retirement gate so they cannot drift apart.';
+
+revoke all on function ops.receipt_is_disavowed(uuid) from public;
+grant execute on function ops.receipt_is_disavowed(uuid) to carr_writer, carr_reader;
 
 create function ops.require_sound_retraction()
 returns trigger language plpgsql
@@ -646,6 +702,14 @@ declare
   n_proven   bigint;
   n_unproven bigint;
   n_conflict bigint;
+  -- READ, NEVER ASSIGNED. pg_current_xact_id() ASSIGNS a transaction id if the
+  -- caller has not written yet, which this guard would then do on every single
+  -- acceptance -- including the read-only ones -- purely to ask a question whose
+  -- answer is already known when no id exists. The _if_assigned form returns
+  -- null in exactly that case, and null is the whole answer: a transaction with
+  -- no id assigned has written nothing at all, so it cannot have written any of
+  -- the evidence below and there is nothing to scan for.
+  self_xid   xid8 := pg_current_xact_id_if_assigned();
 begin
   if p_note is null or length(btrim(p_note)) = 0 then
     raise exception 'accepting a phase requires a note saying what was accepted';
@@ -665,11 +729,24 @@ begin
   -- xmin on a row written by the current transaction equals the current
   -- transaction id, so this asks the cheapest honest question available: has
   -- this transaction already written any of the material I am about to count.
-  if exists (select 1 from public.tool_call t
-              where t.application_session_id is not null
-                and t.xmin = pg_current_xact_id()::xid)
-     or exists (select 1 from ops.write_receipt w
-                 where w.xmin = pg_current_xact_id()::xid)
+  --
+  -- THE 32-BIT COMPARISON IS EXACT HERE, and the reason is worth writing down
+  -- because the cast looks like it is throwing information away. It is: xmin is
+  -- a 32-bit xid and carries no epoch, so nothing recoverable from it could tell
+  -- one epoch from another and no cleverer comparison exists. What makes that
+  -- safe is the freeze horizon rather than the arithmetic. A tuple whose xmin is
+  -- from a PREVIOUS epoch would have to be at least 2^32 transactions old and
+  -- still unfrozen, and anti-wraparound vacuum freezes every visible tuple well
+  -- before that (autovacuum_freeze_max_age caps at 2 billion, under 2^31). A
+  -- frozen tuple reports xmin = 2, which pg_current_xact_id() never returns. So
+  -- no visible row can collide with the current id from another epoch, and the
+  -- refusal this guard raises cannot be a wraparound artifact.
+  if self_xid is not null
+     and (exists (select 1 from public.tool_call t
+                   where t.application_session_id is not null
+                     and t.xmin = self_xid::xid)
+          or exists (select 1 from ops.write_receipt w
+                      where w.xmin = self_xid::xid))
   then
     raise exception
       'acceptance must be the first write in its transaction; this one has '
@@ -842,6 +919,28 @@ begin
       'the recovery receipt does not build on the repointed state: it built on '
       '% but the repoint produced %',
       recovery.prior_digest, repoint.material_digest;
+  end if;
+
+  -- AND NEITHER MAY ALREADY HAVE BEEN TAKEN BACK. is_proven is a stored
+  -- generated column and never goes false again, so proof alone cannot tell you
+  -- whether the claim still stands. A receipt its author has since reversed on
+  -- the record is not evidence of work that happened, and citing one would build
+  -- a retirement on a claim the record already withdraws.
+  --
+  -- ops.drive_retirement_readiness() RE-DERIVES this rather than trusting it,
+  -- because this trigger is BEFORE INSERT and says nothing about the reversal
+  -- that lands tomorrow. Both are needed and neither is redundant: this one
+  -- refuses the wrong row at the door, and readiness stops counting a row that
+  -- went wrong afterwards.
+  if ops.receipt_is_disavowed(new.repoint_receipt_id) then
+    raise exception
+      'the repoint receipt % has been disavowed on the record and cannot '
+      'evidence a retirement', new.repoint_receipt_id;
+  end if;
+  if ops.receipt_is_disavowed(new.recovery_receipt_id) then
+    raise exception
+      'the recovery receipt % has been disavowed on the record and cannot '
+      'evidence a retirement', new.recovery_receipt_id;
   end if;
   return new;
 end $$;
@@ -1189,25 +1288,68 @@ returns table (
 language sql stable
 set search_path = pg_catalog, ops, public
 as $$
-  with op as (select count(*) n from ops.drive_dependency where operational),
-       ret as (select count(distinct r.drive_dependency_id) n
-                 from ops.drive_retirement r
-                 join ops.drive_dependency d on d.id = r.drive_dependency_id
-                where d.operational
-                  and not exists (select 1 from ops.drive_retirement_withdrawal w
-                                   where w.drive_retirement_id = r.id)),
-       auth as (select count(*) n from ops.phase4_acceptance)
-  select op.n, ret.n, op.n - ret.n, auth.n > 0,
-         op.n > 0 and op.n = ret.n and auth.n > 0
+  with live as (
+         -- A RETIREMENT STILL STANDING, RE-DERIVED RATHER THAN ASSUMED.
+         -- ops.require_proven_retirement_receipts is BEFORE INSERT, so every
+         -- clause it enforces is a statement about the moment the row was
+         -- written and about nothing since. Two things can happen afterwards and
+         -- both were being counted as though they had not: the retirement can be
+         -- withdrawn, which this always handled, and either of its two receipts
+         -- can be DISAVOWED -- reversed, since they must be proven to have got
+         -- here at all. A reviewer filed a proven reversal of a retirement's
+         -- recovery receipt and readiness went on reporting READY, which is the
+         -- permanent false yes section (G) exists to make impossible, arriving
+         -- through the one clause the correction path did not re-derive.
+         select r.drive_dependency_id, r.organization_tenant_id
+           from ops.drive_retirement r
+           join ops.drive_dependency d on d.id = r.drive_dependency_id
+           join ops.write_receipt p on p.id = r.repoint_receipt_id
+           join ops.write_receipt v on v.id = r.recovery_receipt_id
+          where d.operational
+            and p.is_proven and v.is_proven
+            and not ops.receipt_is_disavowed(p.id)
+            and not ops.receipt_is_disavowed(v.id)
+            and not exists (select 1 from ops.drive_retirement_withdrawal w
+                             where w.drive_retirement_id = r.id)),
+       op as (select count(*) n from ops.drive_dependency where operational),
+       ret as (select count(distinct drive_dependency_id) n from live),
+       -- AUTHORITY IS TENANT-SCOPED, because the bar that produces it is.
+       -- ops.accept_phase4 counts unproven receipts and open conflicts within
+       -- the ACCEPTING tenant only -- deliberately, so that a bar can be cleared
+       -- from where the accepting party stands. Reading the acceptance back
+       -- globally silently undid that: an unrelated tenant with a clean ledger
+       -- could accept for itself, and its row then supplied the authority for
+       -- retirements belonging to a tenant whose own receipts were unproven and
+       -- whose own acceptance could never have been written. Reproduced end to
+       -- end; the verifier printed READY. Every tenant whose retirements are
+       -- being counted must therefore have accepted for ITSELF.
+       -- SCOPED BY THE RETIREMENT'S OWN TENANT, taken from the live row rather
+       -- than from the dependency. ops.drive_dependency carries no tenant at all
+       -- -- it is the static inventory -- so the only party this can name is the
+       -- one that actually did the retiring, which is also the only party whose
+       -- acceptance would mean anything about it. Keying on the dependency
+       -- instead would drag in a WITHDRAWN retirement's tenant, and demand an
+       -- acceptance from a party whose retirement is not being counted.
+       auth as (
+         select exists (select 1 from ops.phase4_acceptance)
+            and not exists (
+              select 1 from live l
+               where not exists (select 1 from ops.phase4_acceptance a
+                                  where a.organization_tenant_id = l.organization_tenant_id))
+           as ok)
+  select op.n, ret.n, op.n - ret.n, auth.ok,
+         op.n > 0 and op.n = ret.n and auth.ok
     from op, ret, auth;
 $$;
 
 comment on function ops.drive_retirement_readiness() is
   'ready requires: at least one operational dependency on record, every one of '
-  'them retired with two proven receipts and NOT withdrawn, and a phase '
-  'acceptance only the authority identity can create. Counts DISTINCT '
+  'them retired with two proven receipts that are NOT withdrawn and NOT '
+  'disavowed, and a phase acceptance from every tenant whose retirements are '
+  'being counted -- one only the authority identity can create. Counts DISTINCT '
   'dependencies, so repeated rows for one dependency cannot inflate the total. '
-  'An empty inventory is NOT ready.';
+  'Every clause is re-derived here rather than trusted from the insert-time '
+  'trigger that first enforced it. An empty inventory is NOT ready.';
 
 grant select, insert on ops.drive_retirement_withdrawal to carr_writer;
 grant select on ops.drive_retirement_withdrawal to carr_reader;
@@ -1333,14 +1475,59 @@ revoke all on function ops.require_receipt_says_what_its_call_wrote() from publi
 -- "its readback proof relied on MUTABLE rows and proved no readback" --
 -- reintroduced by a check added to close a different hole.
 --
--- NEITHER REQUIREMENT HAS TO LOSE. The freeze applies only once a PROVEN
--- receipt rests on the event, and only to the four columns the digest folds.
--- An unreceipted decision stays as editable as it ever was, which is the case
--- update-decision and detach-decision exist for. A receipted one is frozen,
--- and the way to correct it is the one the substrate already provides: retract
--- the receipt, then file a new one against the corrected state. That is what
--- retraction is for, and it leaves both the mistake and the correction on the
--- record instead of rewriting history in place.
+-- THE FIRST TWO ATTEMPTS AT THIS BROKE detach-decision OUTRIGHT, and the second
+-- one shipped. That is the finding this section now carries, written down before
+-- the mechanism, because the mechanism only makes sense as an answer to it.
+--
+-- A reviewer drove the real handler: log-decision with an `about` ref writes a
+-- pointer event through the shared writeEvent helper, which carries the
+-- application session, so the producer files and PROVES a receipt on it. Then
+-- detach-decision -- this repo's designed "nothing is deleted, the pointer is
+-- restated" retraction path -- restates that same row and was refused, with the
+-- message telling the caller to retract the receipt and file a new one. So every
+-- about-attached decision written through this substrate became permanently
+-- un-detachable. update-decision survived by accident: log-decision's own
+-- hand-rolled insert of the decision row omits application_session_id, so no
+-- receipt ever rests on it.
+--
+-- AND THE REMEDY THE MESSAGE NAMED DID NOT EXIST. require_sound_retraction
+-- refuses to retract a PROVEN receipt -- correctly, since retraction is for a
+-- claim the database never confirmed -- and the producer proves in the same
+-- transaction, so the receipt resting on that pointer is always proven. A
+-- reversal did not clear the freeze either, because the freeze matched on the
+-- original receipt and never looked for one. A permanent, uncorrectable refusal
+-- pointing at a door that is not there: the exact shape section (G) exists to
+-- remove, rebuilt by the guard added to close a different hole. Three rounds
+-- running, each round's fix has been the next round's finding, and this is that
+-- pattern landing on the fix for the pattern.
+--
+-- NEITHER REQUIREMENT HAS TO LOSE, and the resolution is to stop asking the
+-- wrong question. The old check asked DOES A RECEIPT REST HERE, which is not the
+-- invariant; the invariant is that a live receipt's stored material must equal
+-- what the database would compute for its evidence. So the check now RECOMPUTES
+-- and compares. An edit that leaves the fold unchanged is none of this guard's
+-- business, an edit that changes it must be accompanied by the receipt being
+-- taken back on the record, and the route for taking it back is the one the
+-- substrate already has: reverse it if it is proven, retract it if it never was.
+-- ops.receipt_is_disavowed is the single reading of that, shared with readiness
+-- and the retirement gate.
+--
+-- WHICH IS WHY THE CHECK IS DEFERRED TO COMMIT rather than fired at the
+-- statement, and that is not a weakening. The correcting reversal has to name
+-- the correcting CALL, and require_receipt_says_what_its_call_wrote insists that
+-- call's tool_call row exists -- but the runtime writes tool_call AFTER the
+-- handler returns, so at the moment of the edit the row the reversal would need
+-- has not been written yet. There is no ordering inside one verb in which an
+-- immediate check can be satisfied. Deferring moves the question to the only
+-- moment when the whole correction is on the table. Between transactions nothing
+-- changes: no commit can leave drifted material behind.
+--
+-- IT ALSO CLOSES A SHAPE THE OLD CHECK COULD NOT SEE. Under an existence test, a
+-- caller that computed the material, filed the receipt, proved it and THEN edited
+-- the evidence -- all inside one transaction -- passed, because at the moment of
+-- the edit the receipt was its own and the test only asked whether one existed.
+-- Comparing digests at commit refuses that too, and it is the same single rule
+-- doing it rather than a fourth special case.
 -- THE DIGEST IS A FOLD OVER A SET, so the freeze has to guard SET MEMBERSHIP,
 -- not just one row's contents. The first version guarded a single shape and a
 -- reviewer walked past it three ways, all reproduced:
@@ -1361,61 +1548,119 @@ revoke all on function ops.require_receipt_says_what_its_call_wrote() from publi
 -- layer exists for the writer that is buggy rather than careful, and a retry or
 -- a two-phase verb reaches the first one without trying.
 --
--- ANY receipt now freezes the set, not merely a proven one, which closes the
--- window without costing the producer anything: within its own transaction the
--- producer has already written every event before it files the receipt.
-create function ops.refuse_receipted_event_rewrite()
-returns trigger language plpgsql
+-- ANY receipt is compared, not merely a proven one, which closes the window
+-- without costing the producer anything: within its own transaction the producer
+-- has already written every event before it files the receipt, so by commit the
+-- two agree.
+--
+-- REVERSALS AND RETRACTIONS ARE NOT COMPARED, for the reason section (F) gives
+-- for exempting them from its own material check: their material is a
+-- caller-chosen statement about a state their own rows never produced, so a
+-- recomputation over those rows could not express one. Holding them to equality
+-- would refuse the correcting reversal itself, one statement after filing it.
+-- SECURITY DEFINER, unlike the trigger it replaces, and for a mechanical reason
+-- rather than a privilege one. Postgres does not check EXECUTE when a trigger
+-- fires, but it does check it on a function this one CALLS, and the helper below
+-- is revoked from public so that it is not a queryable oracle. Running as the
+-- owner keeps the helper unreachable from carr_writer's own session while the
+-- guard can still use it.
+create function ops.refuse_receipted_material_drift()
+returns trigger language plpgsql security definer
 set search_path = pg_catalog, ops, public
 as $$
 declare
-  key_    text;
-  sess_   uuid;
-  stype_  text;
-  sid_    uuid;
+  stale uuid;
 begin
-  if tg_op = 'INSERT' then
-    key_ := new.idempotency_key; sess_ := new.application_session_id;
-    stype_ := new.subject_type;  sid_ := new.subject_id;
-  else
-    -- On UPDATE the OLD identity is what matters: a row moving OUT of a receipted
-    -- set is exactly as damaging as one being edited inside it.
-    if (new.verb, new.field, new.old_value, new.new_value,
-        new.idempotency_key, new.application_session_id, new.subject_type, new.subject_id)
-       is not distinct from
-       (old.verb, old.field, old.old_value, old.new_value,
-        old.idempotency_key, old.application_session_id, old.subject_type, old.subject_id)
-    then
-      return new;                    -- nothing the digest reads, or keys on, has moved
-    end if;
-    key_ := old.idempotency_key; sess_ := old.application_session_id;
-    stype_ := old.subject_type;  sid_ := old.subject_id;
+  -- BOTH IDENTITIES ON AN UPDATE, and the OLD one is the load-bearing half: a
+  -- row moving OUT of a receipted set -- by changing its subject or its
+  -- idempotency key -- damages that set exactly as much as an edit inside it,
+  -- and touches none of the four columns the digest folds while doing it.
+  stale := ops.first_drifted_receipt(
+             new.idempotency_key, new.application_session_id,
+             new.subject_type, new.subject_id);
+  if stale is null and tg_op = 'UPDATE'
+     and (old.idempotency_key, old.application_session_id,
+          old.subject_type, old.subject_id)
+         is distinct from
+         (new.idempotency_key, new.application_session_id,
+          new.subject_type, new.subject_id)
+  then
+    stale := ops.first_drifted_receipt(
+               old.idempotency_key, old.application_session_id,
+               old.subject_type, old.subject_id);
   end if;
 
-  if sess_ is null then
-    return new;                      -- legacy evidence backs no receipt
-  end if;
-  if exists (
-    select 1 from ops.write_receipt w
-     where w.tool_call_idempotency_key = key_
-       and w.application_session_id    = sess_
-       and w.subject_type              = stype_
-       and w.subject_id                = sid_)
-  then
+  if stale is not null then
     raise exception
-      'a write receipt rests on this call and subject, so the evidence it was '
-      'filed against cannot be added to, moved or rewritten. Retract the receipt '
-      'and file a new one against the corrected state.';
+      'write receipt % rests on this call and subject, and the evidence it '
+      'attests no longer folds to the material it recorded. Take the receipt '
+      'back on the record first -- reverse it if it is proven, retract it if it '
+      'never was -- and file a fresh receipt against the corrected state.', stale;
   end if;
-  return new;
+  return null;                       -- AFTER trigger: the return value is ignored
 end $$;
 
-create trigger event_receipted_content_frozen
-before insert or update on public.event
-for each row execute function ops.refuse_receipted_event_rewrite();
-alter table public.event enable always trigger event_receipted_content_frozen;
+-- The comparison itself, factored out so the two identities above ask it the
+-- same way rather than twice in longhand.
+create function ops.first_drifted_receipt(
+  p_key text, p_session uuid, p_subject_type text, p_subject_id uuid)
+returns uuid language plpgsql stable
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  computed text;
+  hit      uuid;
+begin
+  if p_session is null then
+    return null;                     -- legacy evidence backs no receipt
+  end if;
+  -- CHEAP QUESTION FIRST. The overwhelming majority of event rows have no
+  -- receipt resting on their set at all, and this index lookup is what keeps the
+  -- digest recomputation off that path entirely.
+  if not exists (
+    select 1 from ops.write_receipt w
+     where w.tool_call_idempotency_key = p_key
+       and w.application_session_id    = p_session
+       and w.subject_type              = p_subject_type
+       and w.subject_id                = p_subject_id
+       and w.reverses_receipt_id is null
+       and w.retracts_receipt_id is null)
+  then
+    return null;
+  end if;
+  computed := ops.write_receipt_material_digest(
+                p_key, p_session, p_subject_type, p_subject_id);
+  select w.id into hit
+    from ops.write_receipt w
+   where w.tool_call_idempotency_key = p_key
+     and w.application_session_id    = p_session
+     and w.subject_type              = p_subject_type
+     and w.subject_id                = p_subject_id
+     and w.reverses_receipt_id is null
+     and w.retracts_receipt_id is null
+     and w.material_digest is distinct from computed
+     and not ops.receipt_is_disavowed(w.id)
+   order by w.seq
+   limit 1;
+  return hit;
+end $$;
 
-revoke all on function ops.refuse_receipted_event_rewrite() from public;
+-- DEFERRED TO COMMIT, for the reason in the header: the correcting reversal
+-- cannot exist until the correcting call's tool_call row does, and the runtime
+-- writes that row after the handler returns. A caller may SET CONSTRAINTS
+-- IMMEDIATE, which only makes this stricter, and cannot push it past commit.
+create constraint trigger event_receipted_material_frozen
+after insert or update on public.event
+deferrable initially deferred
+for each row execute function ops.refuse_receipted_material_drift();
+alter table public.event enable always trigger event_receipted_material_frozen;
+
+create index write_receipt_evidence_idx
+  on ops.write_receipt (tool_call_idempotency_key, application_session_id,
+                        subject_type, subject_id);
+
+revoke all on function ops.refuse_receipted_material_drift() from public;
+revoke all on function ops.first_drifted_receipt(text,uuid,text,uuid) from public;
 
 -- --------------------------------------------------------------- apply-time
 -- EXERCISES every guarantee this migration claims, and rolls all of it back.
@@ -2686,12 +2931,54 @@ begin
     perform ops.prove_write_receipt(p4);
 
     -- Receipts that name something OTHER than the dependency.
+    --
+    -- BUILT FRESH RATHER THAN BORROWED, so that the naming clause is the ONLY
+    -- one this fixture can fail. It used to reuse r1/r2 from the top of the
+    -- proof; those are a chain on another subject, but one of them has since
+    -- been reversed by the exact-reversal probes, so once the disavowal clause
+    -- was added a mutant that deleted the naming clause was refused by THAT
+    -- instead and the probe stopped isolating what it names. A pair that is
+    -- honest in every other respect puts the isolation back.
+    declare
+      u_subj uuid := gen_random_uuid();
+      ku1 text := 'pdu1-' || gen_random_uuid()::text;
+      ku2 text := 'pdu2-' || gen_random_uuid()::text;
+      u1 uuid := gen_random_uuid();
+      u2 uuid := gen_random_uuid();
+      mu1 text;
     begin
+      insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+        response, organization_tenant_id, application_session_id)
+      values (ku1,'log-activity',probe_actor,ku1,'{}'::jsonb,'carr-internal',sid),
+             (ku2,'log-activity',probe_actor,ku2,'{}'::jsonb,'carr-internal',sid);
+      insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+        field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+      values (clock_timestamp(),probe_actor,'log-activity','deal',u_subj,'stage','"u1"'::jsonb,'system',ku1,'carr-internal',sid),
+             (clock_timestamp(),probe_actor,'log-activity','deal',u_subj,'stage','"u2"'::jsonb,'system',ku2,'carr-internal',sid);
+      mu1 := ops.write_receipt_material_digest(ku1, sid, 'deal', u_subj);
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (u1,sid,probe_actor,'carr-internal','log-activity','deal',u_subj,ku1,
+              ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,ku1,'deal',u_subj),
+              mu1,'origin');
+      if not ops.prove_write_receipt(u1) then
+        raise exception '0263 FAILED: the unrelated-pair repoint did not prove';
+      end if;
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (u2,sid,probe_actor,'carr-internal','log-activity','deal',u_subj,ku2,
+              ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,ku2,'deal',u_subj),
+              ops.write_receipt_material_digest(ku2, sid, 'deal', u_subj), mu1);
+      if not ops.prove_write_receipt(u2) then
+        raise exception '0263 FAILED: the unrelated-pair recovery did not prove';
+      end if;
       failed := false;
       insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
         recovery_receipt_id, application_session_id, retired_by_actor_id,
         organization_tenant_id, note)
-      values (gen_random_uuid(), dep, r1, r2, sid, probe_actor, 'carr-internal', 'probe');
+      values (gen_random_uuid(), dep, u1, u2, sid, probe_actor, 'carr-internal', 'probe');
     exception when others then
       failed := true;
       if position('does not name dependency' in sqlerrm) = 0 then
@@ -2906,6 +3193,31 @@ begin
     -- them, so without this the readback proved against a surface the writer
     -- could edit afterwards -- the defect 0260's own header lists as the second
     -- reason an earlier version of this layer was rejected.
+    --
+    -- THE GUARD IS DEFERRED TO COMMIT, so these probes force it to speak inside
+    -- the transaction. SET CONSTRAINTS ... IMMEDIATE checks anything already
+    -- pending and fires every later statement at once, which is what makes a
+    -- refusal catchable here; the correction-route probe further down puts it
+    -- back to DEFERRED, because its whole point is that the edit and the reversal
+    -- are judged together rather than one at a time.
+    --
+    -- THE GUARD IS THERE AND IT IS ENABLE ALWAYS, asserted before anything
+    -- leans on it. Without this the mutant that deletes the trigger outright is
+    -- "caught" by SET CONSTRAINTS complaining about an unknown constraint --
+    -- a kill, but by an accident of syntax rather than by a probe, and it says
+    -- nothing about the ENABLE ALWAYS half, which is what keeps the guard alive
+    -- for a replication-role connection.
+    if not exists (
+      select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+                                 join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = 'public' and c.relname = 'event'
+         and t.tgname = 'event_receipted_material_frozen'
+         and t.tgenabled = 'A')
+    then
+      raise exception '0263 FAILED: the receipted-evidence guard is absent or is '
+                      'not ENABLE ALWAYS, so nothing below tests anything';
+    end if;
+    set constraints public.event_receipted_material_frozen immediate;
     declare rr1 uuid := gen_random_uuid();
     begin
       insert into ops.write_receipt (id, application_session_id, actor_id,
@@ -2922,7 +3234,7 @@ begin
         update public.event set new_value = '"TAMPERED"'::jsonb where id = ev_id;
       exception when others then
         failed := true;
-        if position('cannot be added to, moved or rewritten' in sqlerrm) = 0 then
+        if position('no longer folds to the material it recorded' in sqlerrm) = 0 then
           raise exception '0263 FAILED: event rewrite refused by the WRONG guard: %', sqlerrm;
         end if;
       end;
@@ -2947,7 +3259,7 @@ begin
         values (clock_timestamp(),probe_actor,'log-activity','deal',v_subj,'price','"9999"'::jsonb,'system',kq,'carr-internal',sid);
       exception when others then
         failed := true;
-        if position('cannot be added to, moved or rewritten' in sqlerrm) = 0 then
+        if position('no longer folds to the material it recorded' in sqlerrm) = 0 then
           raise exception '0263 FAILED: appending to receipted evidence refused by the WRONG guard: %', sqlerrm;
         end if;
       end;
@@ -2963,7 +3275,7 @@ begin
         update public.event set subject_id = gen_random_uuid() where id = ev_id;
       exception when others then
         failed := true;
-        if position('cannot be added to, moved or rewritten' in sqlerrm) = 0 then
+        if position('no longer folds to the material it recorded' in sqlerrm) = 0 then
           raise exception '0263 FAILED: moving receipted evidence refused by the WRONG guard: %', sqlerrm;
         end if;
       end;
@@ -3000,7 +3312,7 @@ begin
            where id = wev;
         exception when others then
           failed := true;
-          if position('cannot be added to, moved or rewritten' in sqlerrm) = 0 then
+          if position('no longer folds to the material it recorded' in sqlerrm) = 0 then
             raise exception '0263 FAILED: in-window rewrite refused by the WRONG guard: %', sqlerrm;
           end if;
         end;
@@ -3011,6 +3323,152 @@ begin
         if not ops.prove_write_receipt(wrid) then
           raise exception '0263 FAILED: an untouched receipt did not prove';
         end if;
+      end;
+
+      -- AND THE CORRECTION ROUTE EXISTS, WHICH IS THE HALF THAT SHIPPED BROKEN.
+      -- The previous version of this freeze refused every edit under a receipt
+      -- and told the caller to "retract the receipt and file a new one" -- a
+      -- remedy require_sound_retraction refuses outright for a PROVEN receipt,
+      -- which the producer's receipts always are. A reviewer drove the real
+      -- handler and found detach-decision, this repo's designed pointer-retraction
+      -- path, permanently refused for every about-attached decision.
+      --
+      -- THIS IS THAT EXACT SHAPE, in the substrate's own terms: a pointer event
+      -- carrying a session, a proven receipt resting on it, and then the pointer
+      -- restated in place. It must SUCCEED once the receipt has been taken back
+      -- on the record, and the taking-back that applies to a proven receipt is a
+      -- reversal. Deferred rather than immediate for the length of this probe,
+      -- because the reversal names the CORRECTING call and cannot be filed until
+      -- that call's evidence exists -- which is the whole reason the guard waits
+      -- for commit rather than firing per statement.
+      declare
+        kp   text := 'p14p-' || gen_random_uuid()::text;
+        kp2  text := 'p14q-' || gen_random_uuid()::text;
+        psubj uuid := gen_random_uuid();
+        pev  uuid;
+        prid uuid := gen_random_uuid();
+        prev_ uuid := gen_random_uuid();
+        p_material text;
+        p_prior    text;
+      begin
+        insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+          response, organization_tenant_id, application_session_id)
+        values (kp,'log-decision',probe_actor,kp,'{}'::jsonb,'carr-internal',sid);
+        insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+          field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+        values (clock_timestamp(),probe_actor,'log-decision','deal',psubj,'decision',
+                '{"summary":"attached to the wrong record"}'::jsonb,'system',kp,'carr-internal',sid)
+        returning id into pev;
+        p_material := ops.write_receipt_material_digest(kp, sid, 'deal', psubj);
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+        values (prid,sid,probe_actor,'carr-internal','log-decision','deal',psubj,kp,
+                ops.write_receipt_digest('log-decision',probe_actor,'carr-internal',sid,kp,'deal',psubj),
+                p_material,'origin');
+        if not ops.prove_write_receipt(prid) then
+          raise exception '0263 FAILED: the pointer fixture receipt did not prove';
+        end if;
+        select prior_digest into p_prior from ops.write_receipt where id = prid;
+
+        set constraints public.event_receipted_material_frozen deferred;
+
+        -- The restatement detach-decision performs: the pointer row is kept and
+        -- its summary is rewritten to say it was retracted. Nothing is deleted.
+        update public.event
+           set new_value = '{"summary":"RETRACTED — not about this record","retracted":true}'::jsonb
+         where id = pev;
+
+        -- The correcting call, and the reversal that rests on it. Its material is
+        -- the state the pointer receipt BUILT ON, which is what a reversal means
+        -- and what require_exact_reversal compares.
+        insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+          response, organization_tenant_id, application_session_id)
+        values (kp2,'detach-decision',probe_actor,kp2,'{}'::jsonb,'carr-internal',sid);
+        insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+          field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+        values (clock_timestamp(),probe_actor,'detach-decision','deal',psubj,'decision_retracted',
+                '{"summary":"retracted a decision pointer"}'::jsonb,'system',kp2,'carr-internal',sid);
+        insert into ops.write_receipt (id, application_session_id, actor_id,
+          organization_tenant_id, verb, subject_type, subject_id,
+          tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+          reverses_receipt_id)
+        values (prev_,sid,probe_actor,'carr-internal','detach-decision','deal',psubj,kp2,
+                ops.write_receipt_digest('detach-decision',probe_actor,'carr-internal',sid,kp2,'deal',psubj),
+                p_prior, p_material, prid);
+        if not ops.prove_write_receipt(prev_) then
+          raise exception '0263 FAILED: the correcting reversal did not prove, so the '
+                          'route this guard''s own message names is still not reachable';
+        end if;
+
+        -- The moment of truth: force every pending check now. Under the shipped
+        -- version this raised, and detach-decision was dead.
+        begin
+          set constraints public.event_receipted_material_frozen immediate;
+        exception when others then
+          raise exception '0263 FAILED: a pointer restated in place was still refused '
+                          'after its receipt was reversed on the record, so the '
+                          'correction route the error message names does not exist: %',
+                          sqlerrm;
+        end;
+
+        -- AND THE ROUTE IS NOT A BACK DOOR. An UNPROVEN reversal disavows
+        -- nothing, exactly as an unproven retraction clears nothing off the
+        -- acceptance bar -- otherwise any receipt could be edited out from under
+        -- by asserting a reversal nobody confirmed.
+        declare
+          kp3  text := 'p14r-' || gen_random_uuid()::text;
+          qsubj uuid := gen_random_uuid();
+          qev  uuid;
+          qrid uuid := gen_random_uuid();
+          qrev uuid := gen_random_uuid();
+          q_material text;
+        begin
+          insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+            response, organization_tenant_id, application_session_id)
+          values (kp3,'log-decision',probe_actor,kp3,'{}'::jsonb,'carr-internal',sid);
+          insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+            field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+          values (clock_timestamp(),probe_actor,'log-decision','deal',qsubj,'decision',
+                  '{"summary":"a second pointer"}'::jsonb,'system',kp3,'carr-internal',sid)
+          returning id into qev;
+          q_material := ops.write_receipt_material_digest(kp3, sid, 'deal', qsubj);
+          insert into ops.write_receipt (id, application_session_id, actor_id,
+            organization_tenant_id, verb, subject_type, subject_id,
+            tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+          values (qrid,sid,probe_actor,'carr-internal','log-decision','deal',qsubj,kp3,
+                  ops.write_receipt_digest('log-decision',probe_actor,'carr-internal',sid,kp3,'deal',qsubj),
+                  q_material,'origin');
+          if not ops.prove_write_receipt(qrid) then
+            raise exception '0263 FAILED: the second pointer fixture receipt did not prove';
+          end if;
+          -- A reversal resting on the SAME call, which can never prove: the
+          -- readback digests the frozen call and this one claims a verb that call
+          -- does not record. Filed, never confirmed.
+          insert into ops.write_receipt (id, application_session_id, actor_id,
+            organization_tenant_id, verb, subject_type, subject_id,
+            tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+            reverses_receipt_id)
+          values (qrev,sid,probe_actor,'carr-internal','log-decision','deal',qsubj,kp3,
+                  'a-digest-nobody-computed', 'origin', q_material, qrid);
+          if ops.prove_write_receipt(qrev) then
+            raise exception '0263 FAILED: the unproven-reversal fixture proved';
+          end if;
+          failed := false;
+          begin
+            update public.event set new_value = '{"summary":"edited under an unproven reversal"}'::jsonb
+             where id = qev;
+          exception when others then
+            failed := true;
+            if position('no longer folds to the material it recorded' in sqlerrm) = 0 then
+              raise exception '0263 FAILED: edit under an unproven reversal refused by the WRONG guard: %', sqlerrm;
+            end if;
+          end;
+          if not failed then
+            raise exception '0263 FAILED: an UNPROVEN reversal lifted the freeze, so the '
+                            'correction route can be opened from inside';
+          end if;
+        end;
       end;
 
       -- AND A COLUMN THE DIGEST DOES NOT READ STAYS EDITABLE EVEN WHEN THE
@@ -3150,7 +3608,20 @@ begin
       select id into machine_actor from public.actor
         where id <> probe_actor order by slug limit 1;
     end if;
-    if a_retirement is not null and machine_actor is not null then
+    -- IT SAYS SO WHEN IT CANNOT RUN. This probe needs a retirement that nobody
+    -- has withdrawn, and a second actor to play the stranger; on a database where
+    -- every retirement already carries a withdrawal, or which holds a single
+    -- actor, neither exists. The version that shipped wrapped itself in this same
+    -- condition with NO else branch, so on such a database it printed nothing at
+    -- all and the proof still ended with "passed" -- a guard reported as tested
+    -- on a run that never reached it. The acceptance probe below already knows
+    -- how to disclose a skip; so does this one now.
+    if a_retirement is null or machine_actor is null then
+      raise notice '0263: (14e) standing-to-withdraw probe SKIPPED -- %',
+        case when a_retirement is null
+             then 'this database holds no retirement without a withdrawal'
+             else 'this database holds no second actor to play the third party' end;
+    else
       declare msid uuid := gen_random_uuid();
       begin
         insert into ops.application_session (id, actor_id, organization_tenant_id,
@@ -3177,6 +3648,12 @@ begin
     end if;
   end;
 
+  -- BACK TO DEFERRED, which is how the guard actually ships. The probes above
+  -- forced it immediate so a refusal could be caught inside the transaction;
+  -- leaving it that way would mean everything after this ran against a
+  -- configuration no caller uses, and the commit-time path would never execute.
+  set constraints public.event_receipted_material_frozen deferred;
+
   -- ===== (15) the seven guards an auditor could revert with nothing failing
   -- Each was reverted by an evidence auditor against the previous commit and
   -- survived BOTH proof surfaces. Two of them undo fixes this migration takes
@@ -3195,16 +3672,29 @@ begin
     amb uuid := gen_random_uuid();
     src text;
   begin
-    -- (15a) THE MATERIAL FOLD SORTS UNDER C. A behavioural probe cannot see
-    -- this: the disposable cluster's own collation is C, so dropping the
-    -- clause changes nothing here and the auditor's mutant survived. It is
-    -- checked by SHAPE instead, and named as a shape check rather than dressed
-    -- up as behaviour. What it defends is real -- under a non-C collation the
-    -- same events fold to a different digest, so the local harness and Neon
-    -- would disagree about identical writes.
+    -- (15a) THE MATERIAL FOLD SORTS UNDER C. A behavioural probe cannot see this
+    -- from HERE: the disposable cluster's own collation is C, so removing the
+    -- clause changes nothing on this database and the auditor's mutant survived.
+    -- It is checked by SHAPE, and named as a shape check rather than dressed up
+    -- as behaviour.
+    --
+    -- COMMENTS ARE STRIPPED FIRST, and that is not tidiness. pg_get_functiondef
+    -- returns the function's comments along with its code, so a mutant that
+    -- deleted `collate "C"` from all four sort keys and pasted four copies into a
+    -- comment counted exactly the same and walked through -- reproduced by a
+    -- reviewer. A shape check that reads prose is checking prose.
+    --
+    -- AND SHAPE IS THE WEAKER HALF. The behavioural proof this deserves lives in
+    -- ops/check-application-session.sh, which owns the cluster and can therefore
+    -- do what this file cannot: build a second database with a NON-C collation
+    -- and fold the identical fixture in it. See `the collation fold` there. This
+    -- stays as the in-file tripwire for the case where the harness is not the
+    -- thing being run.
     select pg_get_functiondef(p.oid) into src
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'ops' and p.proname = 'write_receipt_material_digest';
+    src := regexp_replace(src, '/\*.*?\*/', '', 'g');   -- block comments
+    src := regexp_replace(src, '--[^' || chr(10) || ']*', '', 'g');   -- line comments
     if (length(src) - length(replace(src, 'collate "C"', ''))) / length('collate "C"') <> 4 then
       raise exception '0263 FAILED: the material fold does not sort all four keys '
                       'under collate "C", so its digest depends on the database''s '
@@ -3272,39 +3762,86 @@ begin
                       'it lands in the fold';
     end if;
 
-    -- (15d) THE SEPARATORS ARE PRESENT. Checked by SHAPE, and the reason is
-    -- worth stating exactly, because the first version of this was a
-    -- behavioural probe that tested nothing. It folded field 'ab' carrying "c"
-    -- against field 'a' carrying "bc" and asserted the two digests differed.
-    -- They do differ -- with the separator or without it -- because new_value
-    -- is jsonb and a jsonb STRING renders WITH its quotes, so the folds are
-    -- ab"c" and a"bc" and never collide. The quotes were doing the separator's
-    -- job, and the probe passed against a fold that had lost it.
+    -- (15d) THE FOLD IS PINNED TO A KNOWN DIGEST. This replaces a counted
+    -- SHAPE check, and the reason is the point of the whole item.
     --
-    -- A COLLIDING FIXTURE IS CONSTRUCTIBLE. An earlier version of this comment
-    -- claimed it was not, on the grounds that every folded row begins with its
-    -- verb. That is wrong: both rows carry the SAME verb, so the prefix cancels
-    -- and protects nothing. jsonb NUMBERS render bare, and field 'a' carrying
-    -- 12 against field 'a1' carrying 2 both fold to a12 -- digests EQUAL once
-    -- the separator is dropped, and DIFFERENT under this file. Measured on a
-    -- disposable cluster in both directions, not reasoned about.
+    -- WHAT THE SHAPE CHECK COULD NOT SEE. It counted chr(31) three times,
+    -- chr(30) twice and chr(29) once in the function source. A reviewer walked
+    -- past it twice over: pg_get_functiondef returns COMMENTS, so a separator
+    -- deleted from the code and mentioned in prose still counted; and SWAPPING
+    -- chr(31) with chr(30) preserves every count exactly while changing the
+    -- bytes the digest folds. A count cannot tell you where a byte is, and where
+    -- it is, is the entire property.
     --
-    -- SHAPE IS STILL THE RIGHT CHECK HERE, for a reason that survives the
-    -- correction: behaviour needs one fixture PER separator. The pair above
-    -- kills a fold that lost the separators around old_value, but a fold that
-    -- lost only the one before new_value needs the difference to straddle THAT
-    -- boundary instead -- old 1 with new 23, against old 12 with new 3. Six
-    -- positions means six fixtures and six ways to write one that quietly
-    -- proves nothing. One counted assertion covers every position at once.
-    -- COUNTED, not merely present. Asking whether chr(31) appears at all passes
-    -- while two of the three are gone, which is how the first version of this
-    -- check let a mutant through.
-    if (length(src) - length(replace(src, 'chr(31)', ''))) / length('chr(31)') <> 3
-       or (length(src) - length(replace(src, 'chr(30)', ''))) / length('chr(30)') <> 2
-       or (length(src) - length(replace(src, 'chr(29)', ''))) / length('chr(29)') <> 1 then
-      raise exception '0263 FAILED: the material fold has lost a separator, so a field '
-                      'boundary inside it is ambiguous';
-    end if;
+    -- WHY A GOLDEN DIGEST RATHER THAN MORE FIXTURES. The old comment argued for
+    -- shape on the grounds that behaviour needs one colliding fixture per
+    -- separator position -- six positions, six fixtures, six chances to write
+    -- one that quietly proves nothing. That argument was sound against
+    -- DIFFERENTIAL fixtures, which is all it considered. It does not apply to an
+    -- ABSOLUTE one: pinning a fixed fixture to a fixed hash covers every
+    -- position at once, because any change to any byte of the folded string --
+    -- a separator removed, two of them swapped, a sort key reordered, a field
+    -- added to or dropped from the recipe -- lands on a different digest.
+    --
+    -- IT IS ALSO THE CROSS-ENVIRONMENT CONTRACT ITSELF. The reason the fold
+    -- sorts under C is so that Neon and this harness compute the SAME digest for
+    -- the same writes. That sentence is a claim about a specific number, and
+    -- this is that number. ops/check-application-session.sh folds this identical
+    -- fixture in a database with a NON-C collation and asserts the same value,
+    -- which is the half no in-file probe can reach.
+    --
+    -- CHANGING THE RECIPE MEANS CHANGING THIS LINE, deliberately and in a
+    -- migration that says so, because every stored material_digest in every
+    -- database was computed under the old one.
+    declare
+      pin_key  text := 'p15d-' || gen_random_uuid()::text;
+      pin_subj uuid := '00000000-0000-4000-8000-000000000263';
+      pin_want text := '5659c63df9186781f263c644941b0dba9054ce75e1d7a1d4a409bd1a5f4f8de2';
+      pin_got  text;
+    begin
+      insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+        response, organization_tenant_id, application_session_id)
+      values (pin_key,'log-activity',probe_actor,pin_key,'{}'::jsonb,'carr-internal',sid);
+      -- THREE ROWS, AND EACH ONE IS DOING A JOB.
+      --
+      -- 'Stage' AND 'amount' PIN THE COLLATION, and the pair is chosen by
+      -- MEASUREMENT rather than by intuition. C sorts by byte, so 'S' (0x53)
+      -- comes before 'a' (0x61); every language collation worth the name sorts
+      -- case-insensitively at the primary level and puts 'amount' first. These
+      -- two share a verb, so the tie falls to the field and the collation
+      -- decides it, and ops/check-application-session.sh re-folds this exact
+      -- pair under a non-C collation.
+      --
+      -- THE FIRST ATTEMPT AT THIS PAIR WAS 'a_b' AND 'ab', on the reasoning that
+      -- collations weigh punctuation below letters. Measured on PostgreSQL 17,
+      -- that is false for both libc en_US.UTF-8 and ICU en-US: underscore sorts
+      -- before 'b' in all three, so the fold was IDENTICAL under every
+      -- collation and the harness check passed against a fold that had lost its
+      -- collate clauses entirely. Found by mutating the fix and watching the
+      -- check stay green -- which is the only way a vacuous probe ever gets
+      -- found.
+      --
+      -- THE THIRD ROW PINS THE ORDER OF THE SORT KEYS THEMSELVES, and it was
+      -- added because without it a mutant that reordered them survived. With two
+      -- rows sharing a verb, verb never breaks a tie, so promoting field or
+      -- new_value ahead of it changed nothing and the pinned digest did not
+      -- move. 'aa-activity' sorts first by VERB and last by FIELD, so any
+      -- reordering of the keys moves it and the digest changes.
+      insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+        field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+      values (clock_timestamp(),probe_actor,'log-activity','deal',pin_subj,'Stage','1'::jsonb,'system',pin_key,'carr-internal',sid),
+             (clock_timestamp(),probe_actor,'log-activity','deal',pin_subj,'amount','2'::jsonb,'system',pin_key,'carr-internal',sid),
+             (clock_timestamp(),probe_actor,'aa-activity','deal',pin_subj,'zz','3'::jsonb,'system',pin_key,'carr-internal',sid);
+      pin_got := ops.write_receipt_material_digest(pin_key, sid, 'deal', pin_subj);
+      if pin_got is distinct from pin_want then
+        raise exception
+          '0263 FAILED: the material fold no longer produces its pinned digest. '
+          'The recipe changed -- a separator moved or was removed, a sort key '
+          'changed, or a field entered or left the fold -- and every '
+          'material_digest already stored was computed under the old one. '
+          'expected % got %', pin_want, pin_got;
+      end if;
+    end;
   end;
 
   -- (15e) THE PRIOR GUARD IS TENANT-SCOPED. Without it, material another tenant
@@ -3367,6 +3904,19 @@ begin
      limit 1;
     select id into other_human from public.actor
      where kind = 'human' and id <> probe_actor order by slug limit 1;
+    -- DISCLOSED, NOT SILENT, for the same reason (14e) is. Both halves below
+    -- guarded themselves on data the target database may not carry and neither
+    -- had an else branch, so on a database where every retirement is already
+    -- withdrawn this whole section printed nothing and the run still reported
+    -- passed. A probe that can decline to run must say when it did.
+    if a_ret is null then
+      raise notice '0263: (15f) withdrawal-binding probes SKIPPED -- this database '
+                   'holds no retirement without a withdrawal to bind one against';
+    end if;
+    if a_ret is not null and other_human is null then
+      raise notice '0263: (15f) actor-binding half SKIPPED -- this database holds no '
+                   'second human actor to name against the probe session';
+    end if;
     if a_ret is not null and other_human is not null then
       failed := false;
       begin
@@ -3514,6 +4064,143 @@ begin
         end if;
       end;
     end;
+  end;
+
+  -- ===== (17) what the FOURTH review round reproduced, on the retirement side
+  -- ONE ROOT, TWO SURFACES. ops.require_proven_retirement_receipts is BEFORE
+  -- INSERT: every clause it enforces is a statement about the moment a
+  -- retirement row was written and about nothing that happens afterwards.
+  -- is_proven is a stored generated column and never goes false again, so a
+  -- receipt whose author has since taken it back on the record still reads
+  -- proven forever. Readiness re-derived every other clause of that trigger and
+  -- took its word for this one.
+  --
+  -- Placed LAST on purpose. It creates an operational dependency and retires it,
+  -- which moves the global readiness numbers, and nothing after it should have
+  -- to reason about that. Everything here rolls back with the rest.
+  declare
+    kd1  text := 'p17a-' || gen_random_uuid()::text;
+    kd2  text := 'p17b-' || gen_random_uuid()::text;
+    kd3  text := 'p17c-' || gen_random_uuid()::text;
+    dep2 uuid;
+    dr1  uuid := gen_random_uuid();
+    dr2  uuid := gen_random_uuid();
+    drev uuid := gen_random_uuid();
+    md1  text;
+    md2  text;
+    rdy2 record;
+    before_retired bigint;
+  begin
+    insert into ops.drive_dependency (source_path, reference, classification, operational)
+    values ('probe/0263-review4-' || gen_random_uuid()::text || '.py:1',
+            '{{VAULT}}', 'vault-path', true)
+    returning id into dep2;
+
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (kd1,'log-activity',probe_actor,kd1,'{}'::jsonb,'carr-internal',sid),
+           (kd2,'log-activity',probe_actor,kd2,'{}'::jsonb,'carr-internal',sid),
+           (kd3,'log-activity',probe_actor,kd3,'{}'::jsonb,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep2,'reader','"repointed"'::jsonb,'system',kd1,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep2,'reader','"recovered"'::jsonb,'system',kd2,'carr-internal',sid),
+           (clock_timestamp(),probe_actor,'log-activity','drive_dependency',dep2,'reader','"undone"'::jsonb,'system',kd3,'carr-internal',sid);
+    md1 := ops.write_receipt_material_digest(kd1, sid, 'drive_dependency', dep2);
+    md2 := ops.write_receipt_material_digest(kd2, sid, 'drive_dependency', dep2);
+
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (dr1,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep2,kd1,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd1,'drive_dependency',dep2),
+            md1,'origin');
+    -- PROVED BEFORE THE RECOVERY IS FILED, not alongside it. The prior-state
+    -- guard accepts only material a PROVEN receipt produced, so a two-row insert
+    -- would offer the recovery a prior that is real but not yet confirmed.
+    if not ops.prove_write_receipt(dr1) then
+      raise exception '0263 FAILED: the section 17 repoint receipt did not prove';
+    end if;
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (dr2,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep2,kd2,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd2,'drive_dependency',dep2),
+            md2,md1);
+    if not ops.prove_write_receipt(dr2) then
+      raise exception '0263 FAILED: the section 17 recovery receipt did not prove';
+    end if;
+
+    insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+      recovery_receipt_id, application_session_id, retired_by_actor_id,
+      organization_tenant_id, note)
+    values (gen_random_uuid(), dep2, dr1, dr2, sid, probe_actor,
+            'carr-internal', 'probe: an honest retirement, about to lose its evidence');
+    select * into rdy2 from ops.drive_retirement_readiness();
+    before_retired := rdy2.retired_total;
+
+    -- THE REVERSAL, filed AFTER the retirement, which is the whole point: no
+    -- insert-time trigger can see it. Its material is the state its target built
+    -- on, which require_exact_reversal compares.
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest,
+      reverses_receipt_id)
+    values (drev,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep2,kd3,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd3,'drive_dependency',dep2),
+            md1, md2, dr2);
+    if not ops.prove_write_receipt(drev) then
+      raise exception '0263 FAILED: the section 17 reversal did not prove';
+    end if;
+
+    -- (17a) READINESS STOPS COUNTING IT. Reproduced by a reviewer as a
+    -- permanent false yes: the reversal landed, the retirement stood, and the
+    -- verifier printed READY.
+    select * into rdy2 from ops.drive_retirement_readiness();
+    if rdy2.retired_total <> before_retired - 1 then
+      raise exception
+        '0263 FAILED: a retirement whose recovery receipt a PROVEN reversal has '
+        'disavowed is still counted retired (retired_total % before, % after) -- '
+        'readiness is taking an insert-time trigger''s word for a fact that '
+        'changed afterwards', before_retired, rdy2.retired_total;
+    end if;
+    if rdy2.ready then
+      raise exception '0263 FAILED: READY survived a proven reversal of a '
+                      'retirement''s recovery receipt';
+    end if;
+
+    -- (17b) AND THE GATE REFUSES ONE AT THE DOOR. Both halves are needed and
+    -- neither is redundant: this one keeps the wrong row out, (17a) stops
+    -- counting a row that went wrong after it was written.
+    --
+    -- THE FIRST RETIREMENT IS WITHDRAWN FIRST, so that ops.require_one_live_retirement
+    -- has nothing to say. Left standing it refuses with "already has a
+    -- retirement that has not been withdrawn" -- true, and never the interesting
+    -- reason -- and a mutant that deleted the disavowal clause would have been
+    -- refused by that instead, which is a probe that stops isolating what it
+    -- names.
+    insert into ops.drive_retirement_withdrawal (id, drive_retirement_id,
+      application_session_id, withdrawn_by_actor_id, organization_tenant_id, note)
+    select gen_random_uuid(), r2.id, sid, probe_actor, 'carr-internal',
+           'probe: clearing the way to re-attempt on disavowed evidence'
+      from ops.drive_retirement r2 where r2.drive_dependency_id = dep2;
+    failed := false;
+    begin
+      insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+        recovery_receipt_id, application_session_id, retired_by_actor_id,
+        organization_tenant_id, note)
+      values (gen_random_uuid(), dep2, dr1, dr2, sid, probe_actor,
+              'carr-internal', 'probe: retiring on evidence already withdrawn');
+    exception when others then
+      failed := true;
+      if position('has been disavowed on the record' in sqlerrm) = 0 then
+        raise exception '0263 FAILED: disavowed-evidence retirement refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0263 FAILED: a retirement was accepted on a receipt the '
+                      'record already disavows';
+    end if;
   end;
 
   raise notice '0263 apply-time proof passed';
