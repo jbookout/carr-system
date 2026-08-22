@@ -55,30 +55,18 @@ def main() -> int:
         REPO / "db/schema.sql", REPO / "migrations", "carr_writer"
     )
     current_facts = set(snapshot.acl_facts(current_grants))
-    # THE LAST CLAUSE IS `>=`, NOT `>`, and that is the whole point of it. It used
-    # to demand that composing the pending migrations produce STRICTLY more ACL
-    # facts than the snapshot carries on its own — which is true only while at
-    # least one unapplied migration happens to grant carr_writer something new.
-    # That is a statement about how far behind db/schema.sql has drifted, not
-    # about whether the provisioner composes correctly, so it failed the moment
-    # the snapshot was refreshed to production's 0184 on 2026-08-19: pending
-    # narrowed to 0188, which grants carr_writer nothing, and 495 == 495 read as
-    # a regression. A test that goes red when the thing it guards is finally
-    # correct trains people to refresh the snapshot less often, which is the
-    # opposite of what the nightly drift check is asking for.
-    #
-    # The property actually worth pinning is that composition never LOSES the
-    # canonical set, which `>=` says. That composition applies pending GRANTs and
-    # REVOKEs in filename order is pinned properly a few lines below, by the
-    # synthetic three-migration fixture — deterministic, and independent of what
-    # the repo's real migration backlog happens to look like today.
+    # Pending security migrations can intentionally revoke snapshot authority,
+    # so cardinality is not a valid composition invariant. Pin representative
+    # current grant and revoke outcomes here; the synthetic fixture below proves
+    # that arbitrary GRANT/REVOKE operations compose in filename order.
     check("the current grant plan composes every post-snapshot migration",
           ("table", "ops.work_request", "insert", False) not in current_facts
           and ("table", "ops.work_request", "update", False) in current_facts
+          and ("table", "public.lease", "insert", False) not in current_facts
+          and ("table", "public.lease", "update", False) not in current_facts
           and ("function",
                "ops.capture_sourced_work_request(text, text, text, jsonb, uuid, uuid, uuid)",
-               "execute", False) in current_facts
-          and len(current_facts) >= len(snapshot.acl_facts(extracted)))
+               "execute", False) in current_facts)
 
     synthetic_applied = "begin; commit;\n"
     synthetic_pending = """begin;
