@@ -7720,7 +7720,12 @@ begin
     ('RET-PHRASE-001','database service unavailable troubleshooting steps',array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false,'{}'::text[],false),
     ('RET-PHRASE-002','how the operating playbook learns from mistakes',array['playbook-review#preamble']::text[],false,'{}'::text[],false),
     ('RET-NEG-001','outage communication template','{}'::text[],false,array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false),
-    ('RET-LIFE-001','retired retrieval lifecycle fixture','{}'::text[],false,'{}'::text[],true),
+    -- The token zzqx can appear in no honest doctrine section, so this stays
+    -- an every-word query that matches nothing — the drifted form ('retired
+    -- retrieval lifecycle fixture') began matching a live end-state section
+    -- and blocked every approval batch. Real retired-content leakage is
+    -- proven fixture-based in ops/situation-retrieval-db-gate.py.
+    ('RET-LIFE-001','retired zzqx retrieval lifecycle fixture','{}'::text[],false,'{}'::text[],true),
     ('RET-AMB-001','review cycle after a record layer outage',array['runbook#diagnosis-checklist-in-order-2-minutes','playbook-review#preamble']::text[],true,'{}'::text[],false)
   ) q(case_id,query,required_targets,require_all,forbidden_targets,expect_no_hits)
   loop
@@ -8196,8 +8201,10 @@ with
       from concept_evidence group by section_id
   ),
   unioned as materialized (
-    select c.*, coalesce(least(1.0, l.raw_score), 0)::double precision as lexical_score,
-           coalesce(least(1.0, ce.concept_score), 0)::double precision as concept_score,
+    -- Coalesce FIRST, cap second: least(1.0, NULL) is 1.0 in PostgreSQL
+    -- (nulls are ignored), which is the whole defect this migration removes.
+    select c.*, least(1.0, coalesce(l.raw_score, 0))::double precision as lexical_score,
+           least(1.0, coalesce(ce.concept_score, 0))::double precision as concept_score,
            l.snippet, coalesce(ce.phrase_ids, '{}') as phrase_ids,
            coalesce(ce.concept_ids, '{}') as concept_ids,
            coalesce(ce.mapping_ids, '{}') as mapping_ids,
@@ -8207,10 +8214,6 @@ with
       left join concept_by_section ce on ce.section_id = c.section_id
      where l.section_id is not null or ce.section_id is not null
   ),
-  -- THE FALLBACK LANE. Same normalized words, OR between them. websearch
-  -- syntax recognizes the OR keyword, so this stays inside the same parser
-  -- that already accepts arbitrary user text without erroring. It computes
-  -- nothing unless the caller allowed it AND the strict lane came up empty.
   fallback_terms as materialized (
     select websearch_to_tsquery('english', regexp_replace(q, ' ', ' OR ', 'g')) as tsq
       from normalized
@@ -8230,7 +8233,7 @@ with
          or c.body_search_vector @@ q.tsq)
   ),
   fallback_unioned as (
-    select c.*, coalesce(least(1.0, f.raw_score), 0)::double precision as lexical_score,
+    select c.*, least(1.0, coalesce(f.raw_score, 0))::double precision as lexical_score,
            0::double precision as concept_score,
            f.snippet, '{}'::uuid[] as phrase_ids,
            '{}'::uuid[] as concept_ids,
@@ -8282,8 +8285,6 @@ select l.section_id, l.section_key, l.section_title, l.doc_slug, l.content_class
          'lexical_score', l.lexical_score, 'concept_score', l.concept_score,
          'final_score', l.final_score, 'phrase_ids', to_jsonb(l.phrase_ids),
          'concept_ids', to_jsonb(l.concept_ids), 'mapping_ids', to_jsonb(l.mapping_ids))
-       -- The mark rides only on fallback rows, so strict answers keep their
-       -- exact prior provenance shape and every downstream byte comparison.
        || case when l.used_fallback then jsonb_build_object('fallback', true)
                else '{}'::jsonb end
   from limited l
@@ -28925,6 +28926,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0280_control_catalog_workflow_manifest.sql	204acaa7bdd419acd749db373dacdcff4de828ce84204f371bd35486d9b50bcf	2026-08-22 15:38:56.495239+00
 0281_a_decline_is_not_built_work.sql	eba7d5356775835fe67c89c96e1bbbc43f4535a200f9a7abe2639364d51cbd8a	2026-08-22 16:32:29.91838+00
 0282_zero_hit_fallback_for_doctrine_search.sql	3bdd8a30afc47b07cf036ae4d36e059e3b593422db576cc0231814b8e04a5469	2026-08-22 17:00:48.544908+00
+0283_concept_scores_stop_being_free.sql	18031ebf9e28201a30c9e2400d2e1fb9229541c8f4d3abcb0e57c9137d5b484d	2026-08-22 17:41:45.996977+00
 \.
 
 
@@ -29233,6 +29235,14 @@ c25b1976-3068-4048-a7ba-dc143b41b7b2	concept	{"label": "National accounts", "def
 8e46f474-4b2a-4c72-af08-dc124ec95d62	phrase	{"phrase": "national account", "source": "golden_miss", "weight": 1, "match_mode": "fts", "source_ref": "ox-alpha lane-3 probe 2026-08-22: 'national account modelling musicologie' -> 0 hits", "concept_key": "national-accounts", "min_similarity": 0.35}	Partners say 'national account' as a noun; doctrine sections describe the mechanism without the phrase.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	6ab69e17-ec21-46b8-851c-8f6103a0107f	1	2026-08-22 16:36:38.209721+00	\N
 ae218a8b-261c-49d0-8b5e-8f0ed35ae102	concept	{"label": "Merge survivorship", "definition": "Which row wins when two party records are confirmed as one person: decided in advance by rule 4c21d86b so no merge is an ad-hoc judgment. Survivors keep their ref; retired rows become navigable tombstones (retired_refs), never merge targets again.", "concept_key": "merge-survivorship", "review_after": null}	Golden-miss probe 2026-08-22: 'survivorship rule for merges' and 'duplicate party merge which row wins' returned only one weak unrelated hit — the rule exists and ~20 merges pend on it, yet its natural question does not reach it.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	01584d4c-3e33-4f37-82ce-85d9632f3399	1	2026-08-22 16:40:00.86531+00	\N
 c632cdda-8ff4-4003-9d06-d8fbfa2df956	phrase	{"phrase": "which row wins", "source": "golden_miss", "weight": 0.9, "match_mode": "trgm", "source_ref": "ox-alpha lane-3 probe 2026-08-22: 'duplicate party merge which row wins' -> only unrelated hit", "concept_key": "merge-survivorship", "min_similarity": 0.35}	The partner question about merges is phrased as which record survives, not as survivorship policy.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0959cd3f-9215-4623-bae7-4f8962f81050	1	2026-08-22 16:40:01.432213+00	\N
+97324c9d-c4f9-4500-a095-98e4087aed1f	mapping	{"role": "governs", "weight": 1, "rationale": "This active engine-playbook section is the one that teaches \\"who gets me to X\\": it names the who-do-we-know verb, the ref forms it takes, and when to walk the intro graph instead of a name lookup — exactly the answer to a partner asking who can introduce them to someone.", "concept_key": "relationship-path-finding", "section_address": "engine#section-6-intro-graph-queries-who-gets-me-to-x-added-july-13-2026-practice-os-ramp-step-1"}	The relationship-path-finding concept from today's golden-miss probe arrived with a phrase but no section mapping, so approving it would activate nothing; this binds it to the section that actually teaches the intro-graph question.	b6c38b27-d006-4fad-9c38-49edf3130a07	pending	\N	{}	ee51bd54-5b9a-4c5e-a9ab-5db802161fd1	1	2026-08-22 17:15:07.874405+00	\N
+a5c64024-d679-41c2-979b-6e707eec657b	mapping	{"role": "governs", "weight": 1, "rationale": "The toolkit preamble is the working entry point for every national-account action — registration, preregistration, pitching, onboarding, Local Agent handoff — and it points on to the doctrine layer in pipeline-craft Part C, so a partner asking about national accounts lands where execution starts.", "concept_key": "national-accounts", "section_address": "national-accounts-toolkit#preamble"}	The national-accounts concept from today's golden-miss probe arrived with a phrase but no section mapping, so approving it would activate nothing; this binds it to the toolkit's entry section.	b6c38b27-d006-4fad-9c38-49edf3130a07	pending	\N	{}	ecea751b-857e-4d35-adac-d66ad8823945	1	2026-08-22 17:15:18.259177+00	\N
+4d7e4d6f-5be4-46cd-8c3e-efe5c6418460	concept	{"label": "Lead system", "definition": "The shared lead pipeline machinery as one system: the lead board, claim-before-touch protocol, drips, weekly refresh duties, and the handoff document that consolidates how leads move from sweep to claimed work.", "concept_key": "lead-system", "review_after": null}	The golden question "lead system" has failed against production since the corpus grew competing sections that tie it lexically out of the top three; the handoff document is the governing answer and needs concept evidence to say so.	b6c38b27-d006-4fad-9c38-49edf3130a07	pending	\N	{}	9ca38048-0f88-4a71-8d26-d14308b3d19d	1	2026-08-22 17:28:55.901014+00	\N
+6801daff-1f32-4ad1-8e6c-91afdfa8d3b0	concept	{"label": "Authoritative record ownership", "definition": "Choosing one canonical home for a record or fact and making every other surface a governed consumer instead of a competing copy — the single-source-of-truth discipline.", "concept_key": "authoritative-record-ownership", "review_after": null}	The golden question "single source of truth" has failed against production since a social-media section began outranking the enrichment rules lexically; the standing rule needs its governing section reachable by its own name.	b6c38b27-d006-4fad-9c38-49edf3130a07	pending	\N	{}	097f6450-9fa4-43cf-a59f-4aa02f21ca0c	1	2026-08-22 17:29:07.47438+00	\N
+fe5c7f51-b71c-41b8-92f8-61f315471d77	phrase	{"phrase": "lead system", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-008, failing on production baseline 2026-08-22", "concept_key": "lead-system", "min_similarity": 0.35}	The exact words a partner and the golden suite use for this system.	b6c38b27-d006-4fad-9c38-49edf3130a07	pending	\N	{}	e4bfffb5-82cc-4e6d-9dce-0eab64bbfc5f	1	2026-08-22 17:29:26.725705+00	\N
+d00bf818-02e6-467b-8739-0e4e48a1eb2e	phrase	{"phrase": "single source of truth", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-010, failing on production baseline 2026-08-22", "concept_key": "authoritative-record-ownership", "min_similarity": 0.35}	The exact words a partner and the golden suite use for this discipline.	b6c38b27-d006-4fad-9c38-49edf3130a07	pending	\N	{}	c8f566a0-0dd5-49b5-9625-437a30457463	1	2026-08-22 17:29:50.397173+00	\N
+926cdffa-2477-452d-baf7-ba2f0700ea25	mapping	{"role": "governs", "weight": 1, "rationale": "The handoff document's opening section is the consolidated statement of how the lead system works end to end; the sibling sections (claim protocol, drips, weekly duties) are parts of it.", "concept_key": "lead-system", "section_address": "lead-system-handoff#preamble"}	Binds the lead-system concept to the section the golden suite names as its governing answer.	b6c38b27-d006-4fad-9c38-49edf3130a07	pending	\N	{}	f968566b-14ec-43a2-baaa-3a41e699ff9e	1	2026-08-22 17:29:59.543131+00	\N
+5f83aa52-8901-4a0b-8cc0-83d51a841401	mapping	{"role": "governs", "weight": 1, "rationale": "The enrichment rules section states the single-source-of-truth discipline as an operating rule for deal data — where the question \\"what is our single source of truth\\" is actually answered.", "concept_key": "authoritative-record-ownership", "section_address": "deal-enrichment-sop#rules"}	Binds the authoritative-record-ownership concept to the section the golden suite names as its governing answer.	b6c38b27-d006-4fad-9c38-49edf3130a07	pending	\N	{}	72f3fdb2-681d-470f-a891-35d8918330b7	1	2026-08-22 17:30:01.93936+00	\N
 \.
 
 
