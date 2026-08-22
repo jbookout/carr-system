@@ -82,15 +82,65 @@ def main() -> int:
                     (revision_id, content_hash, section_id),
                 )
 
-            proposals = cur.execute(
-                """select id from retrieval_proposal where status='pending'
-                     order by case proposal_type when 'concept' then 1
-                              when 'phrase' then 2 when 'mapping' then 3 else 4 end,
-                              created_at,id"""
-            ).fetchall()
-            if len(proposals) != 10:
-                return fail(f"expected 10 pending seed proposals, found {len(proposals)}")
-            for (proposal_id,) in proposals:
+            # SELF-CONTAINED CURATION FIXTURES (2026-08-22). This used to
+            # promote every pending proposal and assert there were exactly 10 —
+            # which broke the moment real curation life started: the snapshot
+            # carries retrieval_proposal as reference data, so live proposals
+            # (and, after the first production approval, rows already marked
+            # approved) ride into every fresh build. The gate now files its own
+            # ten proposals inside this rolled-back transaction, cloned from
+            # 0135's seed payloads and bound by address to the fixture sections
+            # above, so it proves the promote-and-rank path regardless of what
+            # production's proposal table happens to hold.
+            seed_proposals = (
+                ("concept", {"concept_key": "record-layer-outage-diagnosis",
+                             "label": "Record layer outage diagnosis",
+                             "definition": "Diagnosing an unavailable or failing CARR record layer before attempting repair."}),
+                ("concept", {"concept_key": "playbook-self-improvement-review",
+                             "label": "Playbook self-improvement review",
+                             "definition": "Reviewing operating evidence so the playbook learns from mistakes and improves."}),
+                ("phrase", {"concept_key": "record-layer-outage-diagnosis",
+                            "phrase": "record layer outage diagnosis runbook",
+                            "match_mode": "exact", "min_similarity": 0.35, "weight": 1,
+                            "source": "golden_miss", "source_ref": "RET-002"}),
+                ("phrase", {"concept_key": "record-layer-outage-diagnosis",
+                            "phrase": "database service unavailable troubleshooting steps",
+                            "match_mode": "fts", "min_similarity": 0.35, "weight": 0.9,
+                            "source": "golden_miss", "source_ref": "RET-PHRASE-001"}),
+                ("phrase", {"concept_key": "record-layer-outage-diagnosis",
+                            "phrase": "review cycle after a record layer outage diagnosis",
+                            "match_mode": "fts", "min_similarity": 0.35, "weight": 0.8,
+                            "source": "golden_miss", "source_ref": "RET-AMB-001"}),
+                ("phrase", {"concept_key": "playbook-self-improvement-review",
+                            "phrase": "playbook self improvement review cycle",
+                            "match_mode": "exact", "min_similarity": 0.35, "weight": 1,
+                            "source": "golden_miss", "source_ref": "RET-003"}),
+                ("phrase", {"concept_key": "playbook-self-improvement-review",
+                            "phrase": "how the operating playbook learns from mistakes",
+                            "match_mode": "fts", "min_similarity": 0.35, "weight": 0.9,
+                            "source": "golden_miss", "source_ref": "RET-PHRASE-002"}),
+                ("phrase", {"concept_key": "playbook-self-improvement-review",
+                            "phrase": "review cycle after a record layer outage playbook",
+                            "match_mode": "fts", "min_similarity": 0.35, "weight": 0.8,
+                            "source": "golden_miss", "source_ref": "RET-AMB-001"}),
+                ("mapping", {"concept_key": "record-layer-outage-diagnosis",
+                             "section_address": "runbook#diagnosis-checklist-in-order-2-minutes",
+                             "role": "governs", "weight": 1,
+                             "rationale": "This current runbook section is the ordered diagnosis procedure."}),
+                ("mapping", {"concept_key": "playbook-self-improvement-review",
+                             "section_address": "playbook-review#preamble",
+                             "role": "governs", "weight": 1,
+                             "rationale": "The current preamble states the playbook review and improvement cycle."}),
+            )
+            for index, (proposal_type, payload) in enumerate(seed_proposals, start=1):
+                proposal_id = required_value(cur.execute(
+                    """insert into retrieval_proposal
+                         (proposal_type, payload, reason, proposer_id, idempotency_key)
+                       values (%s, %s, %s, %s, %s) returning id""",
+                    (proposal_type, Jsonb(payload),
+                     "gate fixture, rolled back",
+                     actor_id, f"99990000-0000-4000-8000-{index:012d}"),
+                ).fetchone(), "fixture proposal insert")
                 cur.execute("select promote_retrieval_proposal(%s,%s)",
                             (proposal_id, actor_id))
 

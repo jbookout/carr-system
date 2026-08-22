@@ -510,9 +510,23 @@ drive_projection "upstream corroborate (pre-entity-watch + pool mapping)" \
 # missing, which tightens the gate rather than loosening it.
 step "fetch allowlist (client domains -> guard)"     ./.venv/bin/python ops/fetch-allowlist.py
 
-drive_projection "exports (7 targets -> vault)" \
-  "record/document projection destination for seven legacy exports" \
-  ./run.sh export
+# THE EXPORTS HAVE A CANONICAL HOME AGAIN (Joe's ruling, 2026-08-22): CARR's
+# OneDrive, beside the finished deal documents this system already writes there.
+# They were addressed to the Drive vault, which the 2026-08-19 cutoff retired,
+# so they refused here every night for want of a destination rather than for
+# anything being broken — they build in seconds and always did.
+#
+# NO LONGER A DRIVE PROJECTION, so it runs in the normal route rather than only
+# behind the recovery envelope. CARR_EXPORT_LIVE is set on THIS STEP ALONE, with
+# env, so the chain's ambient-Drive unset above still holds for every other
+# child: nothing else inherits a live-write flag.
+#
+# SIX TARGETS, NOT SEVEN. The old label said seven and so did the loop that
+# tracked this; the code declares six non-markdown targets and always has since
+# the cutoff. The seventh was a markdown render, retired with the other 38 and
+# counted as a survivor by mistake. The retired renders stay retired: each still
+# prints RETIRED here rather than being rewritten.
+step "exports (6 targets -> OneDrive)" env CARR_EXPORT_LIVE=1 ./run.sh export
 EXPORTS_RC=$LAST_STEP_RC
 
 # CUTOVER READINESS (Phase 1, 2026-08-13, August 21 cutover). Right after the

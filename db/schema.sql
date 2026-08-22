@@ -1957,12 +1957,10 @@ end $$;
 -- Name: completion_capsule(jsonb); Type: FUNCTION; Schema: ops; Owner: -
 --
 
-CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_predicates jsonb, change_ref text, user_facing boolean, user_journey_ref text, attestor text)
+CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_predicates jsonb, change_ref text, user_facing boolean, user_journey_ref text, attestor text, decision_ref text)
     LANGUAGE sql IMMUTABLE
     AS $$
   select
-    -- The council's "acceptance predicates". The capability lane states them as
-    -- the acceptance tests it actually ran; an ordinary row states them directly.
     coalesce(
       case when jsonb_typeof(evidence #> '{candidate,acceptance_test_refs}') = 'array'
            then evidence #> '{candidate,acceptance_test_refs}' end,
@@ -1970,15 +1968,14 @@ CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_
            then evidence -> 'acceptance_predicates' end),
     coalesce(evidence #>> '{candidate,candidate_commit_sha}',
              evidence ->> 'change_ref'),
-    -- Null when absent, and null is refused below. It is NOT coalesced to false:
-    -- "nobody said" and "somebody said no" are different states and only one of
-    -- them is an answer.
     coalesce((evidence #>> '{candidate,user_facing}')::boolean,
              (evidence ->> 'user_facing')::boolean),
     coalesce(evidence #>> '{candidate,user_journey_ref}',
              evidence ->> 'user_journey_ref'),
     coalesce(evidence #>> '{attestation,verifier_actor_id}',
-             evidence ->> 'attested_by')
+             evidence ->> 'attested_by'),
+    coalesce(evidence #>> '{candidate,decision_ref}',
+             evidence ->> 'decision_ref')
 $$;
 
 
@@ -1986,7 +1983,7 @@ $$;
 -- Name: FUNCTION completion_capsule(evidence jsonb); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.completion_capsule(evidence jsonb) IS 'The tune-up council 2026-08-21 completion capsule, read from either the capability lane shape (candidate/attestation) or a plain one. ONE definition so the closing trigger and any reader cannot disagree about what done means.';
+COMMENT ON FUNCTION ops.completion_capsule(evidence jsonb) IS 'The tune-up council 2026-08-21 completion capsule, read from either the capability lane shape (candidate/attestation) or a plain one. ONE definition so the closing trigger and any reader cannot disagree about what done means. 0281 added decision_ref, which is what a DECLINED closure turns on instead of a change reference.';
 
 
 --
@@ -2560,72 +2557,86 @@ CREATE FUNCTION ops.enforce_completion_capsule() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 declare
-  cap        record;
+  cap         record;
   implementer text;
   n_predicates int;
+  declining   boolean;
 begin
   if new.state <> 'confirmed_closed' then
     return new;
   end if;
   if tg_op = 'UPDATE' and old.state = 'confirmed_closed' then
-    return new;   -- already closed under whatever contract applied then
+    return new;
   end if;
 
   if new.completion_evidence is null
      or jsonb_typeof(new.completion_evidence) <> 'object' then
     raise exception
-      'closing %: done needs an evidence capsule, and completion_evidence is not an object. '
-      'The council''s price for leaving the queue is acceptance predicates, a change reference, '
-      'whether it is user-facing, and who checked it.', new.ref
-      using errcode = 'check_violation';
+      'closing %: done needs an evidence capsule, and completion_evidence is not an object.',
+      new.ref using errcode = 'check_violation';
   end if;
 
   select * into cap from ops.completion_capsule(new.completion_evidence);
 
-  select count(*) into n_predicates
-    from jsonb_array_elements_text(coalesce(cap.acceptance_predicates,'[]'::jsonb)) p
-   where btrim(p) <> '';
-  if n_predicates = 0 then
-    raise exception
-      'closing %: the evidence capsule states no acceptance predicates. What would have '
-      'made this done had to be sayable before it was done.', new.ref
-      using errcode = 'check_violation';
+  -- KEYED ON THE DECLARED KIND, never on the capsule looking thin. If a missing
+  -- change reference were itself the signal, "I have no change reference" would
+  -- become the way to buy the cheaper close.
+  declining := (new.completion_kind = 'declined');
+
+  if declining then
+    -- A DECLINE HAS NO CHANGE, NO ACCEPTANCE TESTS AND NO JOURNEY. What it has
+    -- is a decision, and someone other than the implementer who checked it.
+    if coalesce(btrim(cap.decision_ref),'') = '' then
+      raise exception
+        'closing %: a decline needs the DECISION that made it. Nothing else here is '
+        'evidence — there is no change to point at and no test that passed.',
+        new.ref using errcode = 'check_violation';
+    end if;
+  else
+    select count(*) into n_predicates
+      from jsonb_array_elements_text(coalesce(cap.acceptance_predicates,'[]'::jsonb)) p
+     where btrim(p) <> '';
+    if n_predicates = 0 then
+      raise exception
+        'closing %: the evidence capsule states no acceptance predicates. What would have '
+        'made this done had to be sayable before it was done.', new.ref
+        using errcode = 'check_violation';
+    end if;
+
+    if coalesce(btrim(cap.change_ref),'') = '' then
+      raise exception
+        'closing %: the evidence capsule names no change reference, so nothing ties this '
+        'closure to what actually shipped.', new.ref
+        using errcode = 'check_violation';
+    end if;
+
+    if cap.user_facing is null then
+      raise exception
+        'closing %: the evidence capsule does not say whether this is user-facing. Say so '
+        'explicitly — silence here is how a capability gets reported live before a human '
+        'has used it.', new.ref
+        using errcode = 'check_violation';
+    end if;
+
+    if cap.user_facing and coalesce(btrim(cap.user_journey_ref),'') = '' then
+      raise exception
+        'closing %: this is declared user-facing, so the capsule must name an EXERCISED user '
+        'journey. A user-facing thing nobody has used is not done.', new.ref
+        using errcode = 'check_violation';
+    end if;
   end if;
 
-  if coalesce(btrim(cap.change_ref),'') = '' then
-    raise exception
-      'closing %: the evidence capsule names no change reference, so nothing ties this '
-      'closure to what actually shipped.', new.ref
-      using errcode = 'check_violation';
-  end if;
-
-  if cap.user_facing is null then
-    raise exception
-      'closing %: the evidence capsule does not say whether this is user-facing. Say so '
-      'explicitly — silence here is how a capability gets reported live before a human '
-      'has used it.', new.ref
-      using errcode = 'check_violation';
-  end if;
-
-  if cap.user_facing and coalesce(btrim(cap.user_journey_ref),'') = '' then
-    raise exception
-      'closing %: this is declared user-facing, so the capsule must name an EXERCISED user '
-      'journey. A user-facing thing nobody has used is not done.', new.ref
-      using errcode = 'check_violation';
-  end if;
-
+  -- IDENTICAL FOR BOTH KINDS, and that is the point. A decline waved through on
+  -- the implementer's own say-so is exactly as unaccountable as a self-attested
+  -- build. The uuid-or-slug resolution stays too: every capability-lane
+  -- attestation records a uuid, so a slug-only comparison would pass every
+  -- self-attestation ever made.
   if coalesce(btrim(cap.attestor),'') = '' then
     raise exception
       'closing %: no attestor. Done requires somebody who did not build it saying it is done.',
       new.ref using errcode = 'check_violation';
   end if;
 
-  -- THE ATTESTOR IS NOT THE IMPLEMENTER. Compared against the same
-  -- executor-then-owner fallback the work-in-progress limit uses, so the two
-  -- controls cannot disagree about who is responsible for a row. The attestor may
-  -- be recorded as an actor uuid (the capability lane) or a slug, so both are
-  -- resolved to a slug before comparing — otherwise a uuid would never equal a
-  -- slug and this check would pass for every self-attestation ever made.
   implementer := coalesce(new.executor_actor, new.owner_actor);
   if implementer is not null then
     if lower(btrim(cap.attestor)) = lower(btrim(implementer))
@@ -2647,7 +2658,7 @@ end $$;
 -- Name: FUNCTION enforce_completion_capsule(); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.enforce_completion_capsule() IS 'Tune-up council 2026-08-21: a Work Request cannot reach confirmed_closed on a timestamp alone. Fires on the TRANSITION into confirmed_closed, so the one row closed before this contract existed stands as recorded. The owner batch sign-off and the 48-hour attestor-green auto-close are NOT here: they need a scheduled job, not a constraint, and are tracked in loop 504.';
+COMMENT ON FUNCTION ops.enforce_completion_capsule() IS 'Tune-up council 2026-08-21: a Work Request cannot reach confirmed_closed on a timestamp alone. Fires on the TRANSITION into confirmed_closed. A BUILT closure pays acceptance predicates, a change reference, an explicit user-facing boolean and a journey where that is true; a DECLINED closure pays the decision that made it, because there is no change and no test (0281). The independent-attestor test is identical for both.';
 
 
 --
@@ -7709,7 +7720,12 @@ begin
     ('RET-PHRASE-001','database service unavailable troubleshooting steps',array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false,'{}'::text[],false),
     ('RET-PHRASE-002','how the operating playbook learns from mistakes',array['playbook-review#preamble']::text[],false,'{}'::text[],false),
     ('RET-NEG-001','outage communication template','{}'::text[],false,array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false),
-    ('RET-LIFE-001','retired retrieval lifecycle fixture','{}'::text[],false,'{}'::text[],true),
+    -- The token zzqx can appear in no honest doctrine section, so this stays
+    -- an every-word query that matches nothing — the drifted form ('retired
+    -- retrieval lifecycle fixture') began matching a live end-state section
+    -- and blocked every approval batch. Real retired-content leakage is
+    -- proven fixture-based in ops/situation-retrieval-db-gate.py.
+    ('RET-LIFE-001','retired zzqx retrieval lifecycle fixture','{}'::text[],false,'{}'::text[],true),
     ('RET-AMB-001','review cycle after a record layer outage',array['runbook#diagnosis-checklist-in-order-2-minutes','playbook-review#preamble']::text[],true,'{}'::text[],false)
   ) q(case_id,query,required_targets,require_all,forbidden_targets,expect_no_hits)
   loop
@@ -8115,10 +8131,10 @@ $$;
 
 
 --
--- Name: search_doctrine_situations(text, uuid, text[], integer, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: search_doctrine_situations(text, uuid, text[], integer, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20, p_policy_id text DEFAULT NULL::text) RETURNS TABLE(section_id uuid, section_key text, title text, doc_slug text, content_class text, rank double precision, snippet text, lexical_score double precision, concept_score double precision, final_score double precision, provenance jsonb)
+CREATE FUNCTION public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20, p_policy_id text DEFAULT NULL::text, p_allow_fallback boolean DEFAULT false) RETURNS TABLE(section_id uuid, section_key text, title text, doc_slug text, content_class text, rank double precision, snippet text, lexical_score double precision, concept_score double precision, final_score double precision, provenance jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
@@ -8184,20 +8200,56 @@ with
            array_agg(distinct mapping_id order by mapping_id) as mapping_ids
       from concept_evidence group by section_id
   ),
-  unioned as (
-    select c.*, coalesce(least(1.0, l.raw_score), 0)::double precision as lexical_score,
-           coalesce(least(1.0, ce.concept_score), 0)::double precision as concept_score,
+  unioned as materialized (
+    -- Coalesce FIRST, cap second: least(1.0, NULL) is 1.0 in PostgreSQL
+    -- (nulls are ignored), which is the whole defect this migration removes.
+    select c.*, least(1.0, coalesce(l.raw_score, 0))::double precision as lexical_score,
+           least(1.0, coalesce(ce.concept_score, 0))::double precision as concept_score,
            l.snippet, coalesce(ce.phrase_ids, '{}') as phrase_ids,
            coalesce(ce.concept_ids, '{}') as concept_ids,
-           coalesce(ce.mapping_ids, '{}') as mapping_ids
+           coalesce(ce.mapping_ids, '{}') as mapping_ids,
+           false as used_fallback
       from current_set c
       left join lexical_raw l on l.section_id = c.section_id
       left join concept_by_section ce on ce.section_id = c.section_id
      where l.section_id is not null or ce.section_id is not null
   ),
+  fallback_terms as materialized (
+    select websearch_to_tsquery('english', regexp_replace(q, ' ', ' OR ', 'g')) as tsq
+      from normalized
+  ),
+  fallback_raw as (
+    select c.section_id,
+           ts_rank_cd(
+             setweight(c.section_title_vector, 'A') ||
+             setweight(c.document_title_vector, 'A') ||
+             setweight(c.body_search_vector, 'B'), q.tsq) as raw_score,
+           ts_headline('english', c.plain_text, q.tsq, 'MaxWords=25, MinWords=10') as snippet
+      from current_set c cross join fallback_terms q
+     where p_allow_fallback
+       and not exists (select 1 from unioned)
+       and (c.section_title_vector @@ q.tsq
+         or c.document_title_vector @@ q.tsq
+         or c.body_search_vector @@ q.tsq)
+  ),
+  fallback_unioned as (
+    select c.*, least(1.0, coalesce(f.raw_score, 0))::double precision as lexical_score,
+           0::double precision as concept_score,
+           f.snippet, '{}'::uuid[] as phrase_ids,
+           '{}'::uuid[] as concept_ids,
+           '{}'::uuid[] as mapping_ids,
+           true as used_fallback
+      from current_set c
+      join fallback_raw f on f.section_id = c.section_id
+  ),
+  combined as (
+    select * from unioned
+    union all
+    select * from fallback_unioned
+  ),
   maxima as (
     select greatest(max(lexical_score), 0) as max_lexical,
-           greatest(max(concept_score), 0) as max_concept from unioned
+           greatest(max(concept_score), 0) as max_concept from combined
   ),
   scored as (
     select u.*,
@@ -8216,7 +8268,7 @@ with
                      then (p.config->>'dual_evidence_bonus')::double precision else 0 end)
            end::double precision as final_score,
            p.policy_id, p.version as policy_version
-      from unioned u cross join maxima x cross join policy p
+      from combined u cross join maxima x cross join policy p
   ),
   limited as materialized (
     select * from scored
@@ -8233,6 +8285,8 @@ select l.section_id, l.section_key, l.section_title, l.doc_slug, l.content_class
          'lexical_score', l.lexical_score, 'concept_score', l.concept_score,
          'final_score', l.final_score, 'phrase_ids', to_jsonb(l.phrase_ids),
          'concept_ids', to_jsonb(l.concept_ids), 'mapping_ids', to_jsonb(l.mapping_ids))
+       || case when l.used_fallback then jsonb_build_object('fallback', true)
+               else '{}'::jsonb end
   from limited l
  order by l.final_score desc, l.concept_score desc, l.lexical_score desc, l.section_key asc
 $$;
@@ -27883,7 +27937,7 @@ revoke all on function public.log_retrieval_query(p_query text, p_result_count i
 revoke all on function public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) from public;
 revoke all on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) from public;
 revoke all on function public.retrieval_visibility_actor_id(p_sponsor_slug text) from public;
-revoke all on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) from public;
+revoke all on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text, p_allow_fallback boolean) from public;
 grant usage on schema ops to carr_authority;
 grant usage on schema ops to carr_calendar_prebrief_attestors;
 grant usage on schema ops to carr_calendar_prebrief_canary_jobs;
@@ -28521,8 +28575,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
@@ -28613,8 +28667,8 @@ grant execute on function public.promote_retrieval_proposal(p_proposal_id uuid, 
 grant execute on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) to carr_writer;
 grant execute on function public.retrieval_visibility_actor_id(p_sponsor_slug text) to carr_reader;
 grant execute on function public.retrieval_visibility_actor_id(p_sponsor_slug text) to carr_writer;
-grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_reader;
-grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_writer;
+grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text, p_allow_fallback boolean) to carr_reader;
+grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text, p_allow_fallback boolean) to carr_writer;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_exporter;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_reader;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_writer;
@@ -28870,6 +28924,9 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0278_completion_needs_a_capsule_and_a_second_pair_of_eyes.sql	1eb6de438dea6e8bf61bdee40f8aa9cc9d6424217cc93a73c6896ab86f5ac088	2026-08-22 13:37:09.424356+00
 0279_carr_lease_renewal_provider.sql	0fbdb9c026aabb34b9c5ca17644ad4b1c2e32b2357008356f1487a23f1013585	2026-08-22 15:16:52.168053+00
 0280_control_catalog_workflow_manifest.sql	204acaa7bdd419acd749db373dacdcff4de828ce84204f371bd35486d9b50bcf	2026-08-22 15:38:56.495239+00
+0281_a_decline_is_not_built_work.sql	eba7d5356775835fe67c89c96e1bbbc43f4535a200f9a7abe2639364d51cbd8a	2026-08-22 16:32:29.91838+00
+0282_zero_hit_fallback_for_doctrine_search.sql	3bdd8a30afc47b07cf036ae4d36e059e3b593422db576cc0231814b8e04a5469	2026-08-22 17:00:48.544908+00
+0283_concept_scores_stop_being_free.sql	18031ebf9e28201a30c9e2400d2e1fb9229541c8f4d3abcb0e57c9137d5b484d	2026-08-22 17:41:45.996977+00
 \.
 
 
@@ -29162,16 +29219,30 @@ referred	Referred (business sent)	60
 --
 
 COPY public.retrieval_proposal (id, proposal_type, payload, reason, proposer_id, status, reviewer_id, resulting_row_ids, idempotency_key, version, created_at, reviewed_at) FROM stdin;
-b4188a13-123f-4897-bbe0-c45dfcec2602	concept	{"label": "Record layer outage diagnosis", "definition": "Diagnosing an unavailable or failing CARR record layer before attempting repair.", "concept_key": "record-layer-outage-diagnosis"}	RET-002 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000001	1	2026-08-16 14:49:59.066172+00	\N
-b9d066b1-c5e3-447b-a12e-fa256ef04965	phrase	{"phrase": "record layer outage diagnosis runbook", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-002", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000002	1	2026-08-16 14:49:59.066172+00	\N
-d26c9779-33fa-4ac1-a49a-304926dd48b9	phrase	{"phrase": "database service unavailable troubleshooting steps", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000003	1	2026-08-16 14:49:59.066172+00	\N
-d5f92043-e10b-435d-bbaa-ab3d8c393657	phrase	{"phrase": "review cycle after a record layer outage diagnosis", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-AMB-001 explicit outage-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000009	1	2026-08-16 14:49:59.066172+00	\N
-4546a581-b8a5-4a62-8a50-1716a615f8e4	mapping	{"role": "governs", "weight": 1, "rationale": "This current runbook section is the ordered diagnosis procedure.", "concept_key": "record-layer-outage-diagnosis", "section_address": "runbook#diagnosis-checklist-in-order-2-minutes"}	RET-002 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000004	1	2026-08-16 14:49:59.066172+00	\N
-1bd30896-b82b-4444-9f1d-2c6e7b3ecd39	concept	{"label": "Playbook self-improvement review", "definition": "Reviewing operating evidence so the playbook learns from mistakes and improves.", "concept_key": "playbook-self-improvement-review"}	RET-003 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000005	1	2026-08-16 14:49:59.066172+00	\N
-10814895-c50b-49e7-9687-8e76d50416e1	phrase	{"phrase": "playbook self improvement review cycle", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-003", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000006	1	2026-08-16 14:49:59.066172+00	\N
-7edd92a9-a803-4bff-a543-bda5a6ef2416	phrase	{"phrase": "how the operating playbook learns from mistakes", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-002", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000007	1	2026-08-16 14:49:59.066172+00	\N
-b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a record layer outage playbook", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-AMB-001 explicit review-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000010	1	2026-08-16 14:49:59.066172+00	\N
-6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000008	1	2026-08-16 14:49:59.066172+00	\N
+ae218a8b-261c-49d0-8b5e-8f0ed35ae102	concept	{"label": "Merge survivorship", "definition": "Which row wins when two party records are confirmed as one person: decided in advance by rule 4c21d86b so no merge is an ad-hoc judgment. Survivors keep their ref; retired rows become navigable tombstones (retired_refs), never merge targets again.", "concept_key": "merge-survivorship", "review_after": null}	Golden-miss probe 2026-08-22: 'survivorship rule for merges' and 'duplicate party merge which row wins' returned only one weak unrelated hit — the rule exists and ~20 merges pend on it, yet its natural question does not reach it.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	01584d4c-3e33-4f37-82ce-85d9632f3399	1	2026-08-22 16:40:00.86531+00	\N
+c632cdda-8ff4-4003-9d06-d8fbfa2df956	phrase	{"phrase": "which row wins", "source": "golden_miss", "weight": 0.9, "match_mode": "trgm", "source_ref": "ox-alpha lane-3 probe 2026-08-22: 'duplicate party merge which row wins' -> only unrelated hit", "concept_key": "merge-survivorship", "min_similarity": 0.35}	The partner question about merges is phrased as which record survives, not as survivorship policy.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0959cd3f-9215-4623-bae7-4f8962f81050	1	2026-08-22 16:40:01.432213+00	\N
+97324c9d-c4f9-4500-a095-98e4087aed1f	mapping	{"role": "governs", "weight": 1, "rationale": "This active engine-playbook section is the one that teaches \\"who gets me to X\\": it names the who-do-we-know verb, the ref forms it takes, and when to walk the intro graph instead of a name lookup — exactly the answer to a partner asking who can introduce them to someone.", "concept_key": "relationship-path-finding", "section_address": "engine#section-6-intro-graph-queries-who-gets-me-to-x-added-july-13-2026-practice-os-ramp-step-1"}	The relationship-path-finding concept from today's golden-miss probe arrived with a phrase but no section mapping, so approving it would activate nothing; this binds it to the section that actually teaches the intro-graph question.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{bfb0b2ff-d36d-4e39-adea-114d77b849fe}	ee51bd54-5b9a-4c5e-a9ab-5db802161fd1	2	2026-08-22 17:15:07.874405+00	2026-08-22 17:44:56.197601+00
+a5c64024-d679-41c2-979b-6e707eec657b	mapping	{"role": "governs", "weight": 1, "rationale": "The toolkit preamble is the working entry point for every national-account action — registration, preregistration, pitching, onboarding, Local Agent handoff — and it points on to the doctrine layer in pipeline-craft Part C, so a partner asking about national accounts lands where execution starts.", "concept_key": "national-accounts", "section_address": "national-accounts-toolkit#preamble"}	The national-accounts concept from today's golden-miss probe arrived with a phrase but no section mapping, so approving it would activate nothing; this binds it to the toolkit's entry section.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{8b090395-551e-4c85-b33d-b941cafdb4ad}	ecea751b-857e-4d35-adac-d66ad8823945	2	2026-08-22 17:15:18.259177+00	2026-08-22 17:44:56.197601+00
+1bd30896-b82b-4444-9f1d-2c6e7b3ecd39	concept	{"label": "Playbook self-improvement review", "definition": "Reviewing operating evidence so the playbook learns from mistakes and improves.", "concept_key": "playbook-self-improvement-review"}	RET-003 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{d9019bff-d750-468e-a40f-314cf3c9a320}	13500000-0000-4000-8000-000000000005	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+b4188a13-123f-4897-bbe0-c45dfcec2602	concept	{"label": "Record layer outage diagnosis", "definition": "Diagnosing an unavailable or failing CARR record layer before attempting repair.", "concept_key": "record-layer-outage-diagnosis"}	RET-002 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{425482a0-1109-4434-8343-8ec6485f9212}	13500000-0000-4000-8000-000000000001	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+227897ce-1025-42d6-b96f-f9338fac3197	concept	{"label": "Relationship path finding", "definition": "Finding who can introduce whom: walking the party intro graph to answer 'who do we know that can reach X'. Served by the who-do-we-know verb over v_party_graph edges; distinct from name lookup (find) and from deal context (catch-me-up).", "concept_key": "relationship-path-finding", "review_after": null}	Golden-miss probe 2026-08-22: partner-phrased question 'who can introduce me to a hospital decision maker' returned ZERO hits on search-doctrine despite a live who-do-we-know verb and doctrine covering the intro graph.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{ab4ef440-b834-454d-993b-93cf5883a418}	1743e0b3-0b23-4bf0-947e-017a9853f3c0	2	2026-08-22 16:32:49.703719+00	2026-08-22 17:44:56.197601+00
+fe5c7f51-b71c-41b8-92f8-61f315471d77	phrase	{"phrase": "lead system", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-008, failing on production baseline 2026-08-22", "concept_key": "lead-system", "min_similarity": 0.35}	The exact words a partner and the golden suite use for this system.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b91e6244-df5e-466c-8e9b-8ce5c49ecbcc}	e4bfffb5-82cc-4e6d-9dce-0eab64bbfc5f	2	2026-08-22 17:29:26.725705+00	2026-08-22 17:44:56.197601+00
+c25b1976-3068-4048-a7ba-dc143b41b7b2	concept	{"label": "National accounts", "definition": "The national-account client type: a parent organization spanning many markets, with per-market deals under one account owner. Ruled first-class by Joe on the Musicologie case (2026-08-02); served by create-national-account, set-national-account-owner, set-market-agent and the Lead Board's national-accounts lane.", "concept_key": "national-accounts", "review_after": null}	Golden-miss probe 2026-08-22: 'national account modelling musicologie' returned ZERO hits on search-doctrine although the ruling exists in precedent search and the lane is built — the doctrine side never names the concept the way partners say it.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e0083f58-b3fa-4127-a430-db35ac514c64}	d67ae31e-a5fc-4998-87b5-6e1a487c2a2b	2	2026-08-22 16:36:37.606914+00	2026-08-22 17:44:56.197601+00
+4d7e4d6f-5be4-46cd-8c3e-efe5c6418460	concept	{"label": "Lead system", "definition": "The shared lead pipeline machinery as one system: the lead board, claim-before-touch protocol, drips, weekly refresh duties, and the handoff document that consolidates how leads move from sweep to claimed work.", "concept_key": "lead-system", "review_after": null}	The golden question "lead system" has failed against production since the corpus grew competing sections that tie it lexically out of the top three; the handoff document is the governing answer and needs concept evidence to say so.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{8aa41aa1-ccca-4560-9f96-927ffd37d894}	9ca38048-0f88-4a71-8d26-d14308b3d19d	2	2026-08-22 17:28:55.901014+00	2026-08-22 17:44:56.197601+00
+6801daff-1f32-4ad1-8e6c-91afdfa8d3b0	concept	{"label": "Authoritative record ownership", "definition": "Choosing one canonical home for a record or fact and making every other surface a governed consumer instead of a competing copy — the single-source-of-truth discipline.", "concept_key": "authoritative-record-ownership", "review_after": null}	The golden question "single source of truth" has failed against production since a social-media section began outranking the enrichment rules lexically; the standing rule needs its governing section reachable by its own name.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{3658ad6c-2d93-4107-a4bf-0f380de7a97c}	097f6450-9fa4-43cf-a59f-4aa02f21ca0c	2	2026-08-22 17:29:07.47438+00	2026-08-22 17:44:56.197601+00
+10814895-c50b-49e7-9687-8e76d50416e1	phrase	{"phrase": "playbook self improvement review cycle", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-003", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{dda63053-955e-4868-a2e8-9486ff1f467f}	13500000-0000-4000-8000-000000000006	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+7edd92a9-a803-4bff-a543-bda5a6ef2416	phrase	{"phrase": "how the operating playbook learns from mistakes", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-002", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e98b5d0e-547c-4d6e-9090-a910db667b9b}	13500000-0000-4000-8000-000000000007	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a record layer outage playbook", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-AMB-001 explicit review-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{3067e545-d54e-4b7c-8243-9595c776c10c}	13500000-0000-4000-8000-000000000010	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+b9d066b1-c5e3-447b-a12e-fa256ef04965	phrase	{"phrase": "record layer outage diagnosis runbook", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-002", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{55a561ad-354b-41de-9e93-d0268e826d7d}	13500000-0000-4000-8000-000000000002	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+d26c9779-33fa-4ac1-a49a-304926dd48b9	phrase	{"phrase": "database service unavailable troubleshooting steps", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{55136104-75f7-4c3e-89fb-170ef4f46bd2}	13500000-0000-4000-8000-000000000003	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+d5f92043-e10b-435d-bbaa-ab3d8c393657	phrase	{"phrase": "review cycle after a record layer outage diagnosis", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-AMB-001 explicit outage-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e9529c3b-d026-4a09-8ef0-1b7ba2598ed9}	13500000-0000-4000-8000-000000000009	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+4f8a652c-3a89-46b2-a8af-b0e635416594	phrase	{"phrase": "who can introduce me to", "source": "golden_miss", "weight": 1, "match_mode": "trgm", "source_ref": "ox-alpha lane-3 probe 2026-08-22: 'who can introduce me to a hospital decision maker' -> 0 hits on search-doctrine", "concept_key": "relationship-path-finding", "min_similarity": 0.4}	The partner phrasing for intro-graph questions names PEOPLE and introductions, never the machine nouns (party graph, who-do-we-know); without this phrase the lane is unreachable by its natural question.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{f7a89a1f-db92-420a-b91c-3ab872f9b1b0}	0100e2a1-b5b5-4ea5-b42d-1ba0b3e49a6c	2	2026-08-22 16:35:27.320302+00	2026-08-22 17:44:56.197601+00
+8e46f474-4b2a-4c72-af08-dc124ec95d62	phrase	{"phrase": "national account", "source": "golden_miss", "weight": 1, "match_mode": "fts", "source_ref": "ox-alpha lane-3 probe 2026-08-22: 'national account modelling musicologie' -> 0 hits", "concept_key": "national-accounts", "min_similarity": 0.35}	Partners say 'national account' as a noun; doctrine sections describe the mechanism without the phrase.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{021bebff-db19-4fac-8fc4-36c441aa08ff}	6ab69e17-ec21-46b8-851c-8f6103a0107f	2	2026-08-22 16:36:38.209721+00	2026-08-22 17:44:56.197601+00
+d00bf818-02e6-467b-8739-0e4e48a1eb2e	phrase	{"phrase": "single source of truth", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-010, failing on production baseline 2026-08-22", "concept_key": "authoritative-record-ownership", "min_similarity": 0.35}	The exact words a partner and the golden suite use for this discipline.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{7a534edd-67d4-4c57-bfcf-0a9eb2fb9149}	c8f566a0-0dd5-49b5-9625-437a30457463	2	2026-08-22 17:29:50.397173+00	2026-08-22 17:44:56.197601+00
+4546a581-b8a5-4a62-8a50-1716a615f8e4	mapping	{"role": "governs", "weight": 1, "rationale": "This current runbook section is the ordered diagnosis procedure.", "concept_key": "record-layer-outage-diagnosis", "section_address": "runbook#diagnosis-checklist-in-order-2-minutes"}	RET-002 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{3e489126-0094-453a-a24f-b0e41eed2505}	13500000-0000-4000-8000-000000000004	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{dade0b55-03ac-4d96-8dea-18a67e23f0a4}	13500000-0000-4000-8000-000000000008	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
+926cdffa-2477-452d-baf7-ba2f0700ea25	mapping	{"role": "governs", "weight": 1, "rationale": "The handoff document's opening section is the consolidated statement of how the lead system works end to end; the sibling sections (claim protocol, drips, weekly duties) are parts of it.", "concept_key": "lead-system", "section_address": "lead-system-handoff#preamble"}	Binds the lead-system concept to the section the golden suite names as its governing answer.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{12cb4791-c775-4c06-898b-05e022b28383}	f968566b-14ec-43a2-baaa-3a41e699ff9e	2	2026-08-22 17:29:59.543131+00	2026-08-22 17:44:56.197601+00
+5f83aa52-8901-4a0b-8cc0-83d51a841401	mapping	{"role": "governs", "weight": 1, "rationale": "The enrichment rules section states the single-source-of-truth discipline as an operating rule for deal data — where the question \\"what is our single source of truth\\" is actually answered.", "concept_key": "authoritative-record-ownership", "section_address": "deal-enrichment-sop#rules"}	Binds the authoritative-record-ownership concept to the section the golden suite names as its governing answer.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{68ec37b8-f301-4bd3-b34b-edf7fef8088d}	72f3fdb2-681d-470f-a891-35d8918330b7	2	2026-08-22 17:30:01.93936+00	2026-08-22 17:44:56.197601+00
 \.
 
 

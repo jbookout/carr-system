@@ -626,7 +626,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     },
 
     "search-doctrine": {
-      description: "Deterministic doctrine search: weighted title/body FTS unioned with human-approved situation concepts. Returns current section text plus reconstructible score provenance; never generated prose. The versioned active default policy row controls ranking.",
+      description: "Deterministic doctrine search: weighted title/body FTS unioned with human-approved situation concepts. Returns current section text plus reconstructible score provenance; never generated prose. The versioned active default policy row controls ranking. When no section matches every query word, a second any-word pass answers instead: the result then carries fallback:true (top level and per row) and is best-effort leads, not a confident match — and the query is still logged as a miss so curation can learn a phrase from it. A zero-hit result with fallback machinery live means the store genuinely holds nothing nearby.",
       inputSchema: { type: "object", properties: {
         q: { type: "string" },
         content_classes: { type: "array", items: { type: "string" } },

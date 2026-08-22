@@ -268,6 +268,70 @@ test("a proposed decline is never offered as the next build item, and never coun
     "named, not silently dropped — a skipped row nobody can see is how work disappears");
 });
 
+test("the read names what the CLOSE path will demand next, not only what to build", async () => {
+  // THE DIVERGENCE THIS PINS, which the fixture above already contained and
+  // nothing asserted on. `current` skips proposed declines so a session is never
+  // handed one to build — deliberate and right. The close path does not skip: it
+  // takes the first row that is not confirmed_closed in program order and refuses
+  // anything else with out_of_order_project.
+  //
+  // Here the decline sits at ordinal 2 and the buildable row at ordinal 3. So a
+  // session reads WR-AI-001, builds it, calls complete on its sequence, and is
+  // refused by a verb naming a sequence it was never shown. On the live program
+  // that moment is twelve closes away: the first proposed decline is at ordinal
+  // 14 and the queue is at ordinal 2.
+  //
+  // Both answers ship, because they answer different questions.
+  const closed = { id: "a", ref: "WR-AI-006", program_ordinal: 1, version: 1,
+    state: "confirmed_closed", disposition: "extend", title: "RAG pipeline", project_context: {} };
+  const decline = { id: "b", ref: "WR-AI-014", program_ordinal: 2, version: 1,
+    state: "ready", disposition: "decline", title: "Text-to-SQL", project_context: {} };
+  const buildable = { id: "c", ref: "WR-AI-001", program_ordinal: 3, version: 1,
+    state: "ready", disposition: "extend", title: "LLM evaluation harness", project_context: {} };
+
+  const db = { query: async (sql) => {
+    if (sql.includes("from ops.work_request")) return { rows: [closed, decline, buildable] };
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM });
+
+  assert.equal(result.current.ref, "WR-AI-001",
+    "unchanged: the buildable row is still what a session is told to build");
+  assert.equal(result.next_to_close_ref, "WR-AI-014",
+    "the close path takes the decline first, and the read must say so");
+  assert.equal(result.next_to_close_sequence, 2,
+    "and name the sequence the close verb will actually accept");
+  assert.equal(result.close_sequence_blocked_by_proposed_decline, true);
+  assert.match(result.close_sequence_note, /out of order/,
+    "the note must say why completing the buildable row will be refused");
+});
+
+test("no close-sequence warning when the two definitions agree", async () => {
+  // The other half. A warning that fires when nothing is wrong is noise, and
+  // this read is consumed by sessions deciding what to do next.
+  const closed = { id: "a", ref: "WR-AI-006", program_ordinal: 1, version: 1,
+    state: "confirmed_closed", disposition: "extend", title: "RAG pipeline", project_context: {} };
+  const buildable = { id: "c", ref: "WR-AI-001", program_ordinal: 2, version: 1,
+    state: "ready", disposition: "extend", title: "LLM evaluation harness", project_context: {} };
+  const laterDecline = { id: "b", ref: "WR-AI-014", program_ordinal: 3, version: 1,
+    state: "ready", disposition: "decline", title: "Text-to-SQL", project_context: {} };
+
+  const db = { query: async (sql) => {
+    if (sql.includes("from ops.work_request")) return { rows: [closed, buildable, laterDecline] };
+    if (sql.includes("from ops.capability_agent_session")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM });
+
+  assert.equal(result.current.ref, "WR-AI-001");
+  assert.equal(result.next_to_close_ref, "WR-AI-001", "same row — both definitions agree");
+  assert.equal(result.close_sequence_blocked_by_proposed_decline, false);
+  assert.equal(result.close_sequence_note, undefined, "no note when there is nothing to warn about");
+});
+
 test("a program with only proposed declines left is NOT complete", async () => {
   // The dangerous half of stepping over them. If the read skipped declines and
   // called the program done, 29 undecided rows would vanish behind a green

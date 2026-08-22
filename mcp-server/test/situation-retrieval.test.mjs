@@ -264,6 +264,67 @@ test("a logged query rides the side-write channel, never the read connection", a
   assert.equal(out.total, 1, "the answer is returned regardless of logging");
 });
 
+// THE ZERO-HIT FALLBACK (loop 518, built 2026-08-22). Doctrine search requires
+// every query word, so a natural question naming one word the right section
+// lacks returned nothing at all, with no second try. The verb now asks the
+// ranker for a fallback pass; the ranker only uses it when the strict pass is
+// empty, and marks every fallback row in its provenance. Deliberate-negative
+// golden cases stay on the strict path — the gate calls the ranker without
+// the fallback argument, and the default is off.
+
+test("the verb opts into the ranker's fallback and reports a fallback answer", async () => {
+  const calls = [];
+  const sideWrites = [];
+  const client = {
+    query: async (sql, params) => {
+      calls.push({ sql, params });
+      if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "sponsor-uuid" }] };
+      return { rows: [{ section_id: "sec-1", final_score: 0.4,
+                        provenance: { policy_id: "coequal-normalized-v1", policy_version: 1,
+                                      fallback: true } }] };
+    },
+    sideWrite: (sql, params) => { sideWrites.push({ sql, params }); },
+  };
+  const out = await searchDoctrineSituations(client, { slug: "joe", human: true }, { q: "renewals for dental clients" });
+
+  assert.equal(calls[1].params.length, 6, "the ranker call carries the fallback argument");
+  assert.equal(calls[1].params[5], true, "the live verb always allows the fallback pass");
+  assert.equal(out.fallback, true, "a fallback answer says so at the top level");
+  assert.equal(sideWrites.length, 1);
+  assert.equal(sideWrites[0].params[6], false,
+    "a query only answered by fallback is still logged as a miss for curation");
+});
+
+test("a strict answer reports no fallback and logs a hit", async () => {
+  const sideWrites = [];
+  const client = {
+    query: async (sql) => {
+      if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "sponsor-uuid" }] };
+      return { rows: [{ section_id: "sec-1", final_score: 0.9,
+                        provenance: { policy_id: "coequal-normalized-v1", policy_version: 1 } }] };
+    },
+    sideWrite: (sql, params) => { sideWrites.push({ sql, params }); },
+  };
+  const out = await searchDoctrineSituations(client, { slug: "joe", human: true }, { q: "runbook" });
+  assert.equal(out.fallback, false);
+  assert.equal(sideWrites[0].params[6], true, "a strict answer logs as an explicit hit");
+});
+
+test("an empty answer reports no fallback and logs a miss", async () => {
+  const sideWrites = [];
+  const client = {
+    query: async (sql) => {
+      if (/retrieval_visibility_actor_id/.test(sql)) return { rows: [{ id: "sponsor-uuid" }] };
+      return { rows: [] };
+    },
+    sideWrite: (sql, params) => { sideWrites.push({ sql, params }); },
+  };
+  const out = await searchDoctrineSituations(client, { slug: "joe", human: true }, { q: "no such thing" });
+  assert.equal(out.fallback, false);
+  assert.equal(out.total, 0);
+  assert.equal(sideWrites[0].params[6], false);
+});
+
 test("search still answers when the side-write channel is absent", async () => {
   const client = {
     query: async (sql) => {
