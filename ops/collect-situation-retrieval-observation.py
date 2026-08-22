@@ -36,7 +36,7 @@ SUITE_SCHEMA = "carr-situation-retrieval-suite-v1"
 GOLDEN_SCHEMA = "carr-retrieval-golden-v1"
 OBSERVATION_SCHEMA = "carr-situation-retrieval-observation-v1"
 POLICIES = ("lexical-dominant-v1", "coequal-normalized-v1")
-# Six arguments since 0281: the trailing boolean is the zero-hit fallback,
+# Six arguments since 0282: the trailing boolean is the zero-hit fallback,
 # OFF by default, so every five-argument call in this collector still
 # measures the strict lane the golden suite gates.
 RANKER_SIGNATURE = "search_doctrine_situations(text,uuid,text[],integer,text,boolean)"

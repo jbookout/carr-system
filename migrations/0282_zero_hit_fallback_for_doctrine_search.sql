@@ -1,4 +1,4 @@
--- 0281_zero_hit_fallback_for_doctrine_search.sql
+-- 0282_zero_hit_fallback_for_doctrine_search.sql
 -- A NATURAL QUESTION MUST NEVER RETURN A FALSE "NOTHING EXISTS".
 --
 -- Doctrine search parses queries with websearch_to_tsquery, whose bare terms
@@ -224,17 +224,17 @@ begin
   select count(*) into overloads from pg_proc
    where proname='search_doctrine_situations' and pronamespace='public'::regnamespace;
   if overloads <> 1 then
-    raise exception '0281 FAILED: % overloads of search_doctrine_situations survive (must be exactly 1)', overloads;
+    raise exception '0282 FAILED: % overloads of search_doctrine_situations survive (must be exactly 1)', overloads;
   end if;
   select pg_get_function_arguments('search_doctrine_situations(text,uuid,text[],integer,text,boolean)'::regprocedure)
     into args;
   if args not like '%p_allow_fallback boolean DEFAULT false%' then
-    raise exception '0281 FAILED: the fallback argument must default to OFF, got: %', args;
+    raise exception '0282 FAILED: the fallback argument must default to OFF, got: %', args;
   end if;
   if exists (select 1 from pg_roles where rolname='carr_reader') then
     if not has_function_privilege('carr_reader',
         'search_doctrine_situations(text,uuid,text[],integer,text,boolean)', 'execute') then
-      raise exception '0281 FAILED: carr_reader cannot execute the recreated search function';
+      raise exception '0282 FAILED: carr_reader cannot execute the recreated search function';
     end if;
   end if;
 end $$;
