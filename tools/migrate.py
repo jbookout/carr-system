@@ -35,6 +35,57 @@ from migration_number_contract import (
     validate_migration_names,
 )
 
+# ── MIGRATIONS THAT BIND TO ONE PRODUCTION ROW AND ARE INERT ELSEWHERE ──────
+#
+# WHY THIS EXISTS (2026-08-22, defect 87da6fe5). 0248 registers the conduct-stop
+# control and binds it to the autonomy rule, with an insert requiring that rule
+# to exist as `proposed` and a proof block that raises when the insert matched
+# nothing. That row exists in Production and nowhere else. So 0248 applied
+# cleanly to Production and then failed on the isolated staging project, which
+# stopped at 206 applied while Production reached 209.
+#
+# That is not a cosmetic gap. The typed staging readback compares staging's
+# schema against a release candidate's exact declared migration set, so it could
+# never match; the recovery rehearsal could not complete; and Production approval
+# refuses without a rehearsal bundle. Every Production release was blocked, and
+# the repository could no longer reconstruct a non-production environment, which
+# is Program 1's rebuild clause.
+#
+# Every obvious repair is closed by design. The file cannot be edited —
+# validate_applied_ledger records a sha256 per applied migration and refuses an
+# edited one, correctly. It cannot be re-applied to Production either, since the
+# rule is now `active` rather than `proposed`. A forward repair migration cannot
+# help, because migrations run in filename order and any new number runs after
+# it. The rename-alias table covers historical renames only.
+#
+# SO THE RUNNER LEARNS THE NARROWEST POSSIBLE FACT: this exact file, with this
+# exact probe, has nothing to do on a database where the probe finds no row.
+#
+# THIS IS NOT A SKIP-ON-FAILURE DOOR, and the distinction is the whole design.
+# A general "ignore migrations that error" would let any broken migration through.
+# Each entry here names ONE file and ONE precondition query that must come back
+# empty, checked BEFORE the file runs rather than after it fails — a migration
+# that errors for any other reason still stops the run exactly as before. The
+# entry also has to say why the file is inert without its row, and that reason
+# has to be checkable rather than asserted: for 0248 it is that 0272 registers
+# the conduct-stop control everywhere from the repository's own declarations, so
+# the only thing 0248 adds beyond it is a binding to a rule that is absent.
+#
+# Adding an entry here is a deliberate, reviewed act, same as the alias table
+# below it. If you are reaching for it to make a red migration green, stop: the
+# question to answer first is whether the migration should depend on row data at
+# all (rule a8c55a47 — a manual path and an automated path doing the same job
+# must be the same code, and an environment nobody can rebuild is not the same
+# code).
+DATA_DEPENDENT_MIGRATIONS: dict[str, tuple[str, str]] = {
+    "0248_register_conduct_stop_control.sql": (
+        "select 1 from rule where id = '3fa422b7-7c99-49fc-8e22-1e551a975c6f'",
+        "0272 registers the conduct-stop control from ops/config/rule-enforcement-map.json "
+        "on every database; all 0248 adds here is a binding to the autonomy rule, "
+        "which this database does not carry",
+    ),
+}
+
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # NNNN_name.sql, plus an OPTIONAL single lowercase letter after the number:
 # 0013a_name.sql. Widened 2026-08-13 for a defect that could not be fixed inside
@@ -301,6 +352,23 @@ def main() -> None:
         print(f"lock_timeout: {LOCK_TIMEOUT}   statement_timeout: {STATEMENT_TIMEOUT}")
         for name, sql, digest in pending:
             with conn.cursor() as cur:
+                precondition = DATA_DEPENDENT_MIGRATIONS.get(name)
+                if precondition is not None:
+                    probe, inert_because = precondition
+                    cur.execute(probe)
+                    if cur.fetchone() is None:
+                        # RECORDED AS DISCHARGED, NOT SILENTLY SKIPPED. The row it
+                        # binds does not exist here, so the file has nothing to do
+                        # and its own proof would raise. The reason it is safe is
+                        # stated in the table beside it and is checkable, not
+                        # asserted.
+                        cur.execute(
+                            "insert into schema_migrations (filename, sha256) values (%s, %s)",
+                            (name, digest),
+                        )
+                        conn.commit()
+                        print(f"discharged (precondition absent) — {inert_because}")
+                        continue
                 print(f"applying {name} ...", end=" ", flush=True)
                 # SET LOCAL, not SET: scoped to THIS migration's transaction and
                 # reverted at commit, so one migration can never leak a timeout
