@@ -37,14 +37,18 @@
 #                         bin/review-council-runner.sh for the provisioning runbook.
 #                         PROVISIONED AND ACTIVE as of 2026-08-06 (#214 audit,
 #                         verified live: both reviewer actors exist, active=t).
-#   LOCAL_TOKENS        — JSON map { "joe-local": "<token>" } for the local
-#                         machine door (Phase 1, 2026-08-13, decision 97e76a2f).
+#   LOCAL_TOKENS        — JSON map with one key per local machine door:
+#                         { "joe-local": "<t1>", "dell-local": "<t2>" }.
+#                         Joe's door began Phase 1, 2026-08-13 (decision
+#                         97e76a2f); Dell's separate sponsored door followed
+#                         2026-08-18.
 #                         Same shape and same before-the-OAuthProvider check as
 #                         PROBE_TOKENS/REVIEW_TOKENS. Authenticates
 #                         mcp-server/local-verb.mjs (via tools/call-verb.py /
-#                         `run.sh call`) as the 'joe-local' machine actor:
-#                         human:false, sponsored to 'joe' (identity.js's
-#                         LOCAL_SPONSOR), full verb parity minus humanOnly.
+#                         `run.sh call`) as the machine's own actor: joe-local
+#                         sponsored to Joe, or dell-local sponsored to Dell
+#                         (identity.js's LOCAL_SPONSOR); both are human:false
+#                         with full verb parity minus humanOnly.
 #                         This CLOSES the direct-database bypass local-verb.mjs
 #                         used to run: it is now a thin HTTPS client of this
 #                         Worker, same as any other caller. The direct-database
@@ -52,8 +56,9 @@
 #                         — see local-verb.mjs's own header. Additive secret;
 #                         never widen AGENT_TOKENS for this (see index.js's
 #                         "local token" comment for why). Provisioning:
-#                         pipelines/provision-local-client.sql (mirrors
-#                         provision-smoke-probe.sql) + a key in
+#                         pipelines/provision-local-client.sql for Joe or
+#                         pipelines/provision-dell-local-client.sql for Dell
+#                         (both mirror provision-smoke-probe.sql) + a key in
 #                         ~/.config/carr/mcp-tokens.env (CARR_MCP_LOCAL_TOKEN).
 #   (PARTNER_TOKENS     — RETIRED 2026-08-03. Was an interim per-partner bearer
 #                         for /mcp during the OAuth rollout. Both partners are on
