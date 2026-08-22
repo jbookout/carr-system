@@ -522,12 +522,71 @@ if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS "$URL" >> "$TMP"; th
 fi
 
 # The control catalog is deliberately NOT a --table dump: carrying every row
-# would let arbitrary implementation prose into a tracked snapshot. Verify the
-# two reviewed identities against the source, then append only safely quoted
-# source rows so an applied 0194 ledger cannot hide missing mutable seed rows.
-if ! "$PSQL" -X -q -v ON_ERROR_STOP=1 "$URL" <<'CONTROL_CATALOG_VERIFY'
+# would let arbitrary implementation prose into a tracked snapshot. Instead the
+# REPOSITORY names which controls may be carried, the source is verified to hold
+# every one of them, and only those are rendered — so an applied seed ledger
+# cannot hide missing mutable seed rows, and nothing reaches the snapshot that
+# this repository has not declared.
+#
+# WIDENED 2026-08-22, from two hand-listed keys to the full declared set, and the
+# reason is the trap that made it necessary. The catalog is what approve-rule
+# consults, and until this week it held three controls against the 59 the
+# repository described, so approving a rule enforced by any of the rest needed a
+# hand-written migration first. Migrations 0274 and 0275 seeded it from
+# ops/config/rule-enforcement-map.json and its companion class file. But the
+# moment those migrations entered Production's ledger they entered this snapshot
+# too, so a database rebuilt from the snapshot considered them applied, never ran
+# them, and came up with an empty catalog — failing
+# ops/control-catalog-parity-gate.py on 60 absent controls. A snapshot that
+# carries a migration's LEDGER ROW but not the rows it seeded describes a
+# database nobody can rebuild.
+#
+# THE BOUNDARY THAT MATTERS IS UNCHANGED, and it is not the number two: it is
+# that the key list comes from the repository rather than from whatever happens
+# to be in Production. ops/sync_control_catalog.py compiles it from the same two
+# declaration files the seeding migrations were generated from, so a row can only
+# ride along in this snapshot if a reviewed repository change put its key there.
+# A control present in the source and absent from the declarations is NOT
+# rendered — it is left for ops/control-catalog-parity-gate.py to report, which
+# is how ci_gates was found on 2026-08-22.
+# The declared control keys, compiled from the repository's own declarations by
+# the same module that generates the seeding migrations. A quoted, comma-joined
+# SQL list; the count is asserted separately so a silently empty list cannot pass.
+CATALOG_PY="$REPO/.venv/bin/python"
+[ -x "$CATALOG_PY" ] || CATALOG_PY=python3
+if ! DECLARED_KEYS="$("$CATALOG_PY" - "$REPO" <<'DECLARED_CONTROL_KEYS'
+import importlib.util, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("scc", repo / "ops" / "sync_control_catalog.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+keys = sorted(r["control_key"] for r in mod.compile_catalog())
+if not keys:
+    raise SystemExit("no declared control keys")
+print(",".join("'" + k.replace("'", "''") + "'" for k in keys))
+DECLARED_CONTROL_KEYS
+)"; then
+  echo "schema-snapshot: could not compile the declared control keys — nothing written" >&2
+  exit 1
+fi
+DECLARED_COUNT="$(printf '%s' "$DECLARED_KEYS" | tr ',' '\n' | grep -c .)"
+if [ "$DECLARED_COUNT" -lt 2 ]; then
+  echo "schema-snapshot: declared control key list is implausibly short — nothing written" >&2
+  exit 1
+fi
+
+if ! sed -e "s/__DECLARED_KEYS__/$DECLARED_KEYS/g" -e "s/__DECLARED_COUNT__/$DECLARED_COUNT/g" <<'CONTROL_CATALOG_VERIFY' | "$PSQL" -X -q -v ON_ERROR_STOP=1 "$URL"
 do $$
+declare present int;
 begin
+  select count(*) into present from ops.enforcement_control_catalog
+   where control_key in (__DECLARED_KEYS__);
+  if present <> __DECLARED_COUNT__ then
+    raise exception 'schema snapshot refused: exact reviewed control catalog is missing or drifted';
+  end if;
+  -- The two controls that predate the declaration files are still pinned by
+  -- their full identity, because they are the ones no repository file generated
+  -- and so the ones a drift would be silent about.
   if (select count(*) from ops.enforcement_control_catalog where
         (control_key='human_authority_runtime'
          and implementation_ref='migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js'
@@ -549,21 +608,23 @@ then
 fi
 
 cat >> "$TMP" <<'CONTROL_CATALOG_HEADER'
--- CARR REVIEWED CONTROL CATALOG (bin/schema-snapshot.sh) — exact two-row seed.
--- Verified against the source immediately before this block is written. The
--- following safely quoted rows preserve the source verification and update
--- timestamps; never dump arbitrary ops.enforcement_control_catalog rows.
+-- CARR REVIEWED CONTROL CATALOG (bin/schema-snapshot.sh) — exact declared seed.
+-- Every key here is declared in ops/config/rule-enforcement-map.json and its
+-- companion class file, and the source was verified to hold all of them
+-- immediately before this block was written. The following safely quoted rows
+-- preserve the source verification and update timestamps.
+-- never dump arbitrary ops.enforcement_control_catalog rows.
 CONTROL_CATALOG_HEADER
 
-if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" <<'CONTROL_CATALOG_ROWS' >> "$TMP"
+if ! sed -e "s/__DECLARED_KEYS__/$DECLARED_KEYS/g" <<'CONTROL_CATALOG_ROWS' | "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP"
 select format(
   'insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values (%L,%L,%L,%L,%L,%L::timestamptz,%L::timestamptz) on conflict (control_key) do nothing;',
   control_key,implementation_ref,test_ref,enforcement_class,installed,
   to_char(verified_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
   to_char(updated_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
   from ops.enforcement_control_catalog
- where control_key in ('human_authority_runtime','platform_metering_pre_dispatch')
- order by array_position(array['human_authority_runtime','platform_metering_pre_dispatch'],control_key);
+ where control_key in (__DECLARED_KEYS__)
+ order by control_key;
 CONTROL_CATALOG_ROWS
 then
   echo "schema-snapshot: could not render the reviewed control catalog — nothing written" >&2
