@@ -458,7 +458,21 @@ check_migration() {
   if ! PGOPTIONS='--client-min-messages=warning' run_quiet "$LOGDIR/migration-load.log" \
        "$psql_bin" -v ON_ERROR_STOP=1 -q -d "$dsn" -f db/schema.sql; then
     tail -25 "$LOGDIR/migration-load.log" >&2
-    bad migration "db/schema.sql did not load — the committed structure is not loadable"
+    # SAY WHICH FAILURE THIS IS. "The committed structure is not loadable" is a
+    # serious claim and was, until 2026-08-22, also what a session saw for the
+    # entirely ordinary case of pointing CARR_CI_DATABASE_URL at a database that
+    # ALREADY HAS the schema. This class loads db/schema.sql from scratch, so a
+    # second run against the same database always fails on "already exists" —
+    # and the message accused the repository instead. A session chasing that on
+    # its own hand-built cluster hit it repeatedly in one night.
+    if grep -qE 'already exists' "$LOGDIR/migration-load.log"; then
+      bad migration "this database already carries the schema — it is not a fresh one. \
+This class loads db/schema.sql from scratch, so it needs a database nobody has loaded yet. \
+The supported lane builds and removes one for you: ./run.sh local-db-ci --class migration \
+(add --port N if the default is taken by another session)."
+    else
+      bad migration "db/schema.sql did not load — the committed structure is not loadable"
+    fi
     return
   fi
 
