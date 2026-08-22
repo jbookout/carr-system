@@ -92,7 +92,8 @@
         "EngineeringRequest"
       ],
       "api_or_action": [
-        "GET /api/v1/command-center"
+        "GET /api/v1/command-center",
+        "GET /api/v1/workspace/command-center/deal-attention"
       ],
       "authority": [
         "partner-specific W0"
@@ -106,10 +107,13 @@
         "why_it_matters",
         "next_action",
         "deep_link",
-        "source freshness"
+        "source freshness",
+        "pilot read uses v_deal_room_board and reports observed read time without fabricating record freshness",
+        "pilot destination is /deals?workspace=team&filter=flagged&owner=me"
       ],
       "rollback": [
-        "disable home read-model flag"
+        "disable home read-model flag",
+        "set WORKSPACE_COMMAND_CENTER_READ_ENABLED=false; the prior root and canonical Deal Room records remain unchanged"
       ],
       "tests": [
         "FLOW-WS-01",

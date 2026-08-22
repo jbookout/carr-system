@@ -87,6 +87,7 @@ import { createProgram6RoutineController } from "./program6-routine-controller.j
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
+import { readDealAttentionSummary } from "./workspace-command-center.js";
 import { wrapWithCorrelation } from "./correlation.js";
 import { withFailureRecording, scheduleFailureRecord, actorUnresolvedFailureClass } from "./trace.js";
 
@@ -560,6 +561,11 @@ const dealroomHandler = createDealroomHandler({
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
   program6Handler: (request, env, ctx, actor, session) =>
     program6RoutineController.fetch(request, env, ctx, actor, session),
+  dealAttentionReader: async (env, actor) => {
+    const sql = neon(env.DATABASE_URL_READER);
+    const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
+    return readDealAttentionSummary({ client, actor });
+  },
 });
 
 // The staging workers.dev origin carries both the browser and provider API.

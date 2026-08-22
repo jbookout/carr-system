@@ -11,7 +11,7 @@
 // node --test can exercise the actual payload-building logic with a fake
 // env and a fake `sql` tag function — no live database, no deploy required.
 //
-// SIX FIELDS, EACH HONEST ON ITS OWN:
+// RELEASE FIELDS, EACH HONEST ON ITS OWN:
 //   verb_count          — Object.keys(TOOLS).length, computed from the code
 //                          bundled INTO THIS DEPLOY. Never a written marker
 //                          (mcp-server/.last-deployed-verb-count is exactly
@@ -56,6 +56,9 @@
 //   program6_actions      — exact public posture of the reviewed browser
 //                          mutation flag. It is derived by the same parser as
 //                          the Deal Room gate and never echoes arbitrary env.
+//   workspace_command_center — exact public posture of the first Workspace
+//                          read slice. The same parser gates the typed endpoint
+//                          and root shell, so release evidence cannot disagree.
 //
 // A field that cannot be read returns { value: null, reason: "<why>" } (or
 // the schema-shaped equivalent) — never omitted, never a guess. A stale or
@@ -63,6 +66,7 @@
 // built against.
 
 import { program6ActionPosture } from "./program6-feature-flag.js";
+import { workspaceCommandCenterPosture } from "./workspace-feature-flag.js";
 
 export async function buildRelease({ env, sql, verbCount, now = () => new Date() }) {
   const sha = (env && env.GIT_SHA) || null;
@@ -166,5 +170,6 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
     // checked-in Wrangler configuration is fingerprinted in each release plan,
     // so changing false→true requires a reviewed immutable version promotion.
     program6_actions: program6ActionPosture(env),
+    workspace_command_center: workspaceCommandCenterPosture(env),
   };
 }

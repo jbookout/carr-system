@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createDealroomHandler, isDealroomRequest } from "../src/dealroom-web.js";
 
 const SHELL_ROOT = fileURLToPath(new URL("../../dealroom/public-shell/", import.meta.url));
+const DEALROOM_ROOT = fileURLToPath(new URL("../../dealroom/", import.meta.url));
 const WRANGLER_PATH = fileURLToPath(new URL("../wrangler.toml", import.meta.url));
 const INDEX_PATH = fileURLToPath(new URL("../src/index.js", import.meta.url));
 const PRODUCTION_HOST = "dealroom.doctorcre.com";
@@ -24,9 +25,10 @@ class MemoryKv {
 class ShellAssets {
   async fetch(request) {
     const pathname = new URL(request.url).pathname;
-    if (!pathname.startsWith("/public-shell/")) return new Response("missing", { status: 404 });
     try {
-      return new Response(await readFile(SHELL_ROOT + pathname.slice("/public-shell/".length)));
+      if (pathname.startsWith("/public-shell/"))
+        return new Response(await readFile(SHELL_ROOT + pathname.slice("/public-shell/".length)));
+      return new Response(await readFile(DEALROOM_ROOT + pathname.slice(1)));
     } catch {
       return new Response("missing", { status: 404 });
     }
@@ -93,6 +95,8 @@ test("Deal Room host is explicit per environment and request matching fails clos
   assert.match(wrangler, /\[vars\]\nCARR_ENV = "production"\nDEALROOM_HOST = "dealroom\.doctorcre\.com"/);
   assert.match(wrangler,
     /\[env\.staging\.vars\]\nCARR_ENV = "staging"\nDEALROOM_HOST = "carr-mcp-staging\.joe-bookout-carr-us\.workers\.dev"/);
+  assert.match(wrangler, /WORKSPACE_COMMAND_CENTER_READ_ENABLED = "false"/);
+  assert.match(wrangler, /\[env\.staging\.vars\][\s\S]*WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"/);
 
   assert.equal(isDealroomRequest(new Request(`https://${PRODUCTION_HOST}/`), { DEALROOM_HOST: PRODUCTION_HOST }), true);
   assert.equal(isDealroomRequest(new Request(`https://${STAGING_HOST}/`), { DEALROOM_HOST: STAGING_HOST }), true);
@@ -114,7 +118,8 @@ test("shared staging origin routes only exact Deal Room surfaces", () => {
   const request = (path, headers = {}) => new Request(`https://${STAGING_HOST}${path}`, { headers });
 
   for (const path of ["/", "/index.html", "/system-work.html", "/auth/login", "/auth/callback",
-    "/api/system-work/session", "/css/app.css", "/js/app.js", "/data/board-seed.json",
+    "/deals", "/api/system-work/session", "/api/v1/workspace/command-center/deal-attention",
+    "/css/app.css", "/js/app.js", "/data/board-seed.json",
     "/manifest.webmanifest", "/sw.js", "/offline.html", "/icons/dealroom.svg"]) {
     assert.equal(isDealroomRequest(request(path), environment), true, path);
   }
@@ -133,6 +138,121 @@ test("shared staging origin routes only exact Deal Room surfaces", () => {
       cookie: "__Host-dealroom_session=browser-session", authorization: "Bearer provider-token",
     }), environment), false, `${path} bearer wins over browser cookie`);
   }
+});
+
+test("typed Workspace deal-attention read is feature-gated, actor-bound, and deep-links to exact Deal Room rows", async () => {
+  const environment = env();
+  const calls = [];
+  const events = [];
+  const handler = createDealroomHandler({
+    ...identityOverrides("joe.bookout.carr.us@gmail.com"),
+    recordWorkspaceReadFn: (event) => events.push(event),
+    dealAttentionReader: async (_env, actor) => {
+      calls.push(actor.slug);
+      return {
+        schema_version: "workspace-command-center-deal-attention/v1",
+        state: "attention",
+        actor: { slug: actor.slug },
+        source: { kind: "canonical_view", ref: "v_deal_room_board" },
+        observed_at: "2026-08-22T02:50:00.000Z",
+        freshness: { status: "unknown", basis: "read_time_only" },
+        summary: { owned_active: 2, owned_flagged: 1 },
+        destination: "/deals?workspace=team&filter=flagged&owner=me",
+      };
+    },
+  });
+  const path = "/api/v1/workspace/command-center/deal-attention";
+
+  let response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}${path}`), environment, {});
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: "unauthorized", state: "sign_in_required" });
+  const anonymousDeals = await handler.fetch(new Request(
+    `https://${PRODUCTION_HOST}/deals?workspace=team&filter=flagged&owner=me`, { headers: { accept: "text/html" } },
+  ), environment, {});
+  assert.equal(anonymousDeals.status, 302);
+  assert.equal(new URL(anonymousDeals.headers.get("location")).searchParams.get("return_to"),
+    "/deals?workspace=team&filter=flagged&owner=me");
+
+  const callback = await login(handler, environment, "joe.bookout.carr.us@gmail.com");
+  const session = namedCookie(callback, "__Host-dealroom_session");
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}${path}`, { headers: { cookie: session } }), environment, {});
+  assert.equal(response.status, 404);
+  assert.deepEqual(calls, []);
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}/`, {
+    headers: { cookie: session, accept: "text/html" },
+  }), environment, {});
+  assert.match(await response.text(), /The Deal Room/);
+
+  environment.WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true";
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}/`, {
+    headers: { cookie: session, accept: "text/html" },
+  }), environment, {});
+  assert.match(await response.text(), /CARR Workspace/);
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}${path}`, { headers: { cookie: session } }), environment, {});
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual((await response.json()).summary, { owned_active: 2, owned_flagged: 1 });
+  assert.deepEqual(calls, ["joe"]);
+  assert.deepEqual(events, [{
+    ts: "2027-01-15T08:00:00.000Z",
+    event: "workspace_command_center_read",
+    operation_id: "deal-attention",
+    organization_tenant_id: "carr-internal",
+    principal_class: "partner",
+    outcome: "success",
+    freshness_status: "unknown",
+    duration_ms: 0,
+    correlation_id: null,
+  }]);
+  assert.doesNotMatch(JSON.stringify(events), /owned_flagged|"outcome":"attention"|"outcome":"empty"|joe|dell/);
+
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}${path}?owner=dell`, { headers: { cookie: session } }), environment, {});
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "invalid_request");
+  assert.deepEqual(calls, ["joe"]);
+
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}${path}`, { method: "POST", headers: { cookie: session } }), environment, {});
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "GET, HEAD, OPTIONS");
+
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}${path}`, { method: "HEAD", headers: { cookie: session } }), environment, {});
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "");
+  assert.deepEqual(calls, ["joe", "joe"]);
+  assert.equal(events.length, 2);
+
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}${path}`, { method: "OPTIONS", headers: { cookie: session } }), environment, {});
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get("allow"), "GET, HEAD, OPTIONS");
+
+  response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}/deals?workspace=team&filter=flagged&owner=me`, {
+    headers: { cookie: session, accept: "text/html" },
+  }), environment, {});
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /The Deal Room/);
+});
+
+test("Workspace read failures are unavailable, never an authored zero", async () => {
+  const environment = { ...env(), WORKSPACE_COMMAND_CENTER_READ_ENABLED: "true" };
+  environment.CORRELATION_ID = "9f3b2c1a-4d5e-4f60-8a1b-0123456789ab";
+  const events = [];
+  const handler = createDealroomHandler({
+    ...identityOverrides("dell.mccraney.carr.us@gmail.com"),
+    recordWorkspaceReadFn: (event) => events.push(event),
+    dealAttentionReader: async () => { throw new Error("reader down"); },
+  });
+  const callback = await login(handler, environment, "dell.mccraney.carr.us@gmail.com");
+  const session = namedCookie(callback, "__Host-dealroom_session");
+  const response = await handler.fetch(new Request(
+    `https://${PRODUCTION_HOST}/api/v1/workspace/command-center/deal-attention`, { headers: { cookie: session } },
+  ), environment, {});
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "canonical_read_unavailable" });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].principal_class, "partner");
+  assert.equal(events[0].outcome, "canonical_read_unavailable");
+  assert.equal(events[0].correlation_id, environment.CORRELATION_ID);
+  assert.doesNotMatch(JSON.stringify(events), /reader down|joe|dell/);
 });
 
 test("machine-token MCP dispatch precedes browser routing on the shared host", async () => {

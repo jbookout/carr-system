@@ -2,6 +2,7 @@ import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
 import { createPostCallClient } from './post-call-client.js';
+import { resolveDealroomDeepLink, dealMatchesDeepLink } from './deep-link.js';
 
 const POLL_MS = 1400;
 const CALL_MODE_URL = 'http://127.0.0.1:4682';
@@ -9,6 +10,7 @@ const CALL_MODE_HEADER = { 'X-CARR-Call-Mode': 'deal-room-v1' };
 const state = {
   client: null, selfActor: null, deals: new Map(), accounts: [], cursor: null,
   workspace: 'team', accountId: null, filter: 'active', query: '',
+  deepLink: null,
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
   confirms: [], review: null, pollTimer: null, undoEventId: null,
   callMode: { state: 'idle' }, callModeTimer: null,
@@ -157,6 +159,8 @@ function userIsEditing() {
 
 function workspaceDeals() {
   let deals = [...state.deals.values()];
+  if (state.deepLink) return deals.filter((deal) => dealMatchesDeepLink(deal, state.selfActor, state.deepLink))
+    .sort((a,b) => priority(b) - priority(a) || a.name.localeCompare(b.name));
   if (state.query) {
     const query = state.query.toLowerCase();
     deals = deals.filter((deal) => [deal.name,deal.client_name,deal.account_name,deal.market,
@@ -195,6 +199,7 @@ function renderChrome() {
   $('#workspaceTitle').textContent = state.query ? 'Search results' : state.workspace === 'team' ? 'Team Book'
     : selected?.account_name || 'National Accounts';
   $('#workspaceSubtitle').textContent = state.query ? 'Searching work records across the territory and every national account.'
+    : state.deepLink ? 'Your explicitly flagged active Team Book deals.'
     : state.workspace === 'team' ? 'The active work Joe and Dell are moving now.'
     : selected ? `${actorName(selected.account_owner)} owns the account; each market deal keeps its assigned agent and owner.`
     : 'One account can hold dozens of market-level transactions without crowding the territory agenda.';
@@ -232,6 +237,7 @@ function renderBoardOnly() {
   rows.innerHTML = deals.map(rowHtml).join('');
   $('#emptyState').hidden = deals.length > 0;
   $('#emptyState').textContent = state.query ? 'No work record matches this search.'
+    : state.deepLink ? 'No active flagged Team Book deals are assigned to you.'
     : state.filter === 'parked' ? 'No parked work records.' : 'No active work matches this filter.';
   applyPresence();
 }
@@ -899,7 +905,7 @@ async function finishAgenda(status = 'completed') {
 function wireEvents() {
   document.addEventListener('click', async (event) => {
     const workspace = event.target.closest('[data-workspace]');
-    if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'active'; state.query = ''; $('#search').value = ''; render(); return; }
+    if (workspace) { state.deepLink = null; state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'active'; state.query = ''; $('#search').value = ''; render(); return; }
     const accountButton = event.target.closest('[data-account]');
     if (accountButton) { state.workspace = 'national_account'; state.accountId = accountButton.dataset.account; render(); return; }
     const operating = event.target.closest('[data-operating-state]');
@@ -913,7 +919,7 @@ function wireEvents() {
     const attention = event.target.closest('[data-attention]'); if (attention) { const deal=state.deals.get(attention.dataset.attention); await patchField(deal.id,'attention',!deal.attention); return; }
     const step = event.target.closest('[data-next-step],[data-agenda-step]'); if (step) { nextStepForm(step.dataset.nextStep || step.dataset.agendaStep); return; }
     const agent = event.target.closest('[data-market-agent]'); if (agent) { marketAgentForm(agent.dataset.marketAgent); return; }
-    const filter = event.target.closest('[data-filter]'); if (filter) { state.filter=filter.dataset.filter; $$('.filter').forEach((b)=>b.classList.toggle('on',b===filter)); renderBoardOnly(); return; }
+    const filter = event.target.closest('[data-filter]'); if (filter) { state.deepLink=null; state.filter=filter.dataset.filter; render(); return; }
     if (event.target.closest('[data-close-deal]')) { $('#dealDialog').close(); return; }
     if (event.target.closest('[data-undo]') && state.undoEventId) { await state.client.revertDealField({ event_id:state.undoEventId,idempotency_key:uuidv4() }); state.undoEventId=null; await loadHome(); showToast('Change undone'); return; }
     const confirm = event.target.closest('[data-confirm]'); if (confirm) { const chip=confirm.closest('[data-proposal]'); const yes=confirm.dataset.confirm==='yes'; await state.client.resolveConfirm({proposal_id:chip.dataset.proposal,accept:yes,idempotency_key:uuidv4()}); state.confirms=state.confirms.filter((p)=>p.id!==chip.dataset.proposal); renderConfirms(); if(yes)await loadHome(); showToast(yes?'Suggestion confirmed':'Suggestion skipped'); return; }
@@ -937,7 +943,7 @@ function wireEvents() {
     if (event.target.matches('[data-owner]')) await patchField(event.target.dataset.owner,'owner',event.target.value || null);
   });
 
-  $('#search').addEventListener('input', (event) => { state.query=event.target.value.trim(); render(); });
+  $('#search').addEventListener('input', (event) => { state.deepLink=null; state.query=event.target.value.trim(); render(); });
   $('#accountBack').onclick = () => { state.accountId=null; render(); };
   const openAddForm = () => state.workspace === 'team' ? addTeamDealForm() : state.accountId ? addMarketDealForm() : addAccountForm();
   $('#stickyAddButton').onclick = openAddForm;
@@ -973,6 +979,11 @@ async function boot() {
     $('#colorAssistButton').setAttribute('aria-label', 'Turn off color-blind-friendly view');
   }
   const bootConfig = resolveDealroomBoot(location);
+  state.deepLink = resolveDealroomDeepLink(location.search);
+  if (state.deepLink) {
+    state.workspace = state.deepLink.workspace;
+    state.filter = state.deepLink.filter;
+  }
   state.client = await createClient(bootConfig.mode, bootConfig.options);
   state.postCallClient = createPostCallClient({ loopbackUrl:CALL_MODE_URL,
     postHeaders:CALL_MODE_HEADER });

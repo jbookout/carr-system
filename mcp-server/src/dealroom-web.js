@@ -11,9 +11,11 @@ import {
   randomString,
   verifyGoogleIdToken,
 } from "./google-oidc.js";
-import { actorFromProps, propsForSlug, slugForEmail } from "./identity.js";
+import { actorFromProps, organizationTenantForActor, propsForSlug, slugForEmail } from "./identity.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
+import { workspaceCommandCenterEnabled } from "./workspace-feature-flag.js";
+import { DEAL_ATTENTION_PATH } from "./workspace-command-center.js";
 
 export const DEALROOM_ASSET_DIRECTORY = "../dealroom"; // mirrors wrangler.toml [assets]
 
@@ -30,6 +32,7 @@ const REAUTH_TTL = 10 * 60;
 const ACTION_CHALLENGE_TTL = 5 * 60;
 const SYSTEM_WORK_MAX_BODY = 16 * 1024;
 const SYSTEM_WORK_PREFIX = "/api/system-work";
+const WORKSPACE_API_PREFIX = "/api/v1/workspace/";
 const APPROVAL_ACTIONS = new Map([
   ["accept-ready-plan", "plan_hash"],
   ["accept-outcome-feedback", "feedback_hash"],
@@ -43,10 +46,10 @@ const PUBLIC_SHELL = new Map([
 ]);
 const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEALROOM_EXACT_PATHS = new Set([
-  "/", "/index.html", "/system-work.html",
+  "/", "/index.html", "/deals", "/system-work.html",
   "/manifest.webmanifest", "/sw.js", "/offline.html",
 ]);
-const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/css/", "/js/", "/data/", "/icons/"];
+const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", WORKSPACE_API_PREFIX, "/css/", "/js/", "/data/", "/icons/"];
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -462,9 +465,9 @@ async function startReauth(request, env, dependencies) {
   return attachRefresh(response, session.refreshCookie);
 }
 
-async function bundleAsset(env, request) {
+async function bundleAsset(env, request, requestedPath = null) {
   const url = new URL(request.url);
-  const requested = url.pathname === "/" ? "/index.html" : url.pathname;
+  const requested = requestedPath || (url.pathname === "/" ? "/index.html" : url.pathname);
   for (const pathname of [requested, `/dist${requested}`]) {
     const response = await asset(env, request, pathname);
     if (response) return withHeaders(response, { "cache-control": "no-cache" });
@@ -478,6 +481,51 @@ async function bundleAsset(env, request) {
   return json({ error: "not_found" }, 404);
 }
 
+async function dealAttentionResponse(request, env, session, dependencies) {
+  const url = new URL(request.url);
+  if (!workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
+  if ([...url.searchParams.keys()].length) return json({ error: "invalid_request" }, 400);
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { allow: "GET, HEAD, OPTIONS", "cache-control": "no-store" } });
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(JSON.stringify({ error: "method_not_allowed" }), {
+      status: 405,
+      headers: { ...JSON_HEADERS, allow: "GET, HEAD, OPTIONS" },
+    });
+  }
+  if (typeof dependencies.dealAttentionReader !== "function") return json({ error: "canonical_read_unavailable" }, 503);
+  const startedAt = dependencies.now();
+  const record = (outcome, freshnessStatus) => {
+    try {
+      const endedAt = dependencies.now();
+      dependencies.recordWorkspaceReadFn({
+        ts: new Date(endedAt).toISOString(),
+        event: "workspace_command_center_read",
+        operation_id: "deal-attention",
+        organization_tenant_id: organizationTenantForActor(session.actor),
+        principal_class: "partner",
+        outcome,
+        freshness_status: freshnessStatus,
+        duration_ms: Math.max(0, endedAt - startedAt),
+        correlation_id: env.CORRELATION_ID || null,
+      });
+    } catch {
+      // Observation is never allowed to turn a healthy canonical read into a
+      // failed product read. The response remains the primary operation.
+    }
+  };
+  try {
+    const payload = await dependencies.dealAttentionReader(env, session.actor);
+    record("success", payload?.freshness?.status || "unknown");
+    if (request.method === "HEAD") return new Response(null, { status: 200, headers: JSON_HEADERS });
+    return json(payload);
+  } catch {
+    record("canonical_read_unavailable", "unknown");
+    return json({ error: "canonical_read_unavailable" }, 503);
+  }
+}
+
 /** Injectable dependencies keep the gate testable without Google or a database. */
 export function createDealroomHandler(overrides = {}) {
   const dependencies = {
@@ -487,6 +535,7 @@ export function createDealroomHandler(overrides = {}) {
     propsForSlugFn: propsForSlug,
     actorFromPropsFn: actorFromProps,
     now: () => Date.now(),
+    recordWorkspaceReadFn: (event) => console.log(JSON.stringify(event)),
     ...overrides,
   };
 
@@ -521,7 +570,8 @@ async function handleRequest(request, env, ctx, dependencies) {
 
       const session = await sessionFor(request, env, dependencies);
       if (!session) {
-        if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" || url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
+        if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
+            url.pathname.startsWith(SYSTEM_WORK_PREFIX) || url.pathname.startsWith(WORKSPACE_API_PREFIX)) {
           return json({ error: "unauthorized", state: "sign_in_required" }, 401);
         }
         return redirect(`${origin}/auth/login?return_to=${encodeURIComponent(url.pathname + url.search)}`);
@@ -539,6 +589,10 @@ async function handleRequest(request, env, ctx, dependencies) {
           const prepared = await prepareSystemWorkControllerRequest(request, env, session);
           response = prepared.error || await dependencies.program6Handler(prepared.request, env, ctx, session.actor, session);
         } else response = json({ error: "not_found" }, 404);
+      } else if (url.pathname.startsWith(WORKSPACE_API_PREFIX)) {
+        response = url.pathname === DEAL_ATTENTION_PATH
+          ? await dealAttentionResponse(request, env, session, dependencies)
+          : json({ error: "not_found" }, 404);
       } else if (url.pathname === "/mcp") {
         // SameSite limits cross-site cookies, but sibling subdomains are still
         // the same site. Origin equality closes that remaining CSRF door for
@@ -549,7 +603,9 @@ async function handleRequest(request, env, ctx, dependencies) {
         response = await dependencies.mcpHandler(request, env, ctx, session.actor);
       }
       else if (url.pathname === "/pipeline/changes") response = await dependencies.pipelineHandler(request, env, ctx, session.actor);
-      else response = await bundleAsset(env, request);
+      else if (url.pathname === "/deals") response = await bundleAsset(env, request, "/index.html");
+      else response = await bundleAsset(env, request,
+        url.pathname === "/" && workspaceCommandCenterEnabled(env) ? "/workspace.html" : null);
       return attachRefresh(response, session.refreshCookie);
 }
 

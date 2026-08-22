@@ -93,8 +93,33 @@ test("UI exposes two workspaces, explicit controls, mobile cards, and Call Mode"
   assert.match(app, /<select class="cell-select" data-owner/);
   assert.match(css, /@media\(max-width:680px\)/);
   assert.match(css, /min-height:44px/);
-  assert.match(sw, /dealroom-shell-v3/);
+  assert.match(sw, /dealroom-shell-v4/);
   assert.match(sw, /Deliberately no Cache API fallback/);
+});
+
+test("Workspace Command Center card is truthful, accessible, and deep-links to exact flagged rows", async () => {
+  const [html, script, css, app, sw] = await Promise.all([
+    file("dealroom/workspace.html"), file("dealroom/js/workspace-command-center.js"),
+    file("dealroom/css/workspace.css"), file("dealroom/js/app.js"),
+    file("dealroom/public-shell/sw.js"),
+  ]);
+  assert.match(html, /id="dealAttention"/);
+  assert.match(html, /Loading flagged Team Book deals/);
+  assert.match(script, /\/api\/v1\/workspace\/command-center\/deal-attention/);
+  assert.match(script, /canonical_read_unavailable/);
+  assert.match(script, /Sign in again/);
+  assert.match(script, /No flagged deals need your attention/);
+  assert.match(script, /\/deals\?workspace=team&filter=flagged&owner=me/);
+  assert.match(script, /v_deal_room_board/);
+  assert.match(script, /observed_at/);
+  assert.match(css, /min-height:\s*44px/);
+  assert.match(css, /@media\s*\(max-width:/);
+  assert.match(app, /resolveDealroomDeepLink/);
+  assert.match(app, /dealMatchesDeepLink/);
+  assert.match(app, /if \(filter\) \{ state\.deepLink=null; state\.filter=filter\.dataset\.filter; render\(\); return; \}/);
+  assert.match(sw, /\/api\/v1\/workspace\//);
+  assert.match(sw, /new URL\(request\.url\)\.pathname !== "\/"/);
+  assert.doesNotMatch(html + script, /lead name|client name|send email|\/mcp/i);
 });
 
 test("parking separates Salesforce record existence from active work", async () => {

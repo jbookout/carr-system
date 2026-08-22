@@ -16,6 +16,7 @@ import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { partnerRoomTools } from "./partner-room.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { readDealRoomDeals } from "./dealroom-read-service.js";
 
 // ---------- envelope helpers ----------
 
@@ -2625,20 +2626,10 @@ export const TOOLS = {
     } },
     handler: async (c, actor, args) => {
       const workspace = args.workspace || "all";
-      const deals = await c.query(
-        `select id, name, type, phase, owner, attention,
-                to_jsonb(next_date)#>>'{}' as next_date, next_step, market, segment,
-                client_id, client_ref, client_name, account_client_id, account_client_ref,
-                account_name, account_owner, market_agent,
-                to_jsonb(last_touch)#>>'{}' as last_touch,
-                to_jsonb(last_review_at)#>>'{}' as last_review_at, workspace_kind,
-                operating_state, parking_reason, parking_note,
-                to_jsonb(parked_at)#>>'{}' as parked_at, parked_by
-           from v_deal_room_board
-          where ($1 = 'all' or workspace_kind = $1)
-            and ($2::uuid is null or account_client_id = $2::uuid)
-          order by attention desc, next_date nulls last, name`,
-        [workspace, args.account_client_id || null]);
+      const deals = await readDealRoomDeals(c, {
+        workspace,
+        accountClientId: args.account_client_id || null,
+      });
       const accounts = await c.query(
         `select account_client_id, account_client_ref, account_name, account_owner,
                 open_deals, attention_deals, overdue_deals, stale_deals,
@@ -2653,7 +2644,7 @@ export const TOOLS = {
             and ($3::uuid is null or account_client_id=$3::uuid)
           order by started_at desc limit 1`,
         [actor.slug, workspace, args.account_client_id || null]);
-      return { actor: actor.slug, deals: deals.rows, accounts: accounts.rows,
+      return { actor: actor.slug, deals, accounts: accounts.rows,
         open_session: session.rows[0] || null };
     },
   },

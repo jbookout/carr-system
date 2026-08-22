@@ -1,4 +1,4 @@
-const SHELL_CACHE = "dealroom-shell-v3";
+const SHELL_CACHE = "dealroom-shell-v4";
 const SHELL = [
   "/offline.html",
   "/manifest.webmanifest",
@@ -6,6 +6,7 @@ const SHELL = [
   "/icons/dealroom-512.png",
 ];
 const DATA_PATHS = new Set(["/pipeline/changes", "/mcp"]);
+const isDataPath = (pathname) => DATA_PATHS.has(pathname) || pathname.startsWith("/api/v1/workspace/");
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL)));
@@ -39,7 +40,10 @@ async function liveData(request) {
 async function navigation(request) {
   try {
     const response = await fetch(request);
-    if (response.ok) {
+    // Root is selected by a deployment flag. Caching it would let a disabled
+    // Workspace shell survive rollback while offline, so root deliberately
+    // degrades to offline.html instead. Stable /deals navigations may cache.
+    if (response.ok && new URL(request.url).pathname !== "/") {
       const cache = await caches.open(SHELL_CACHE);
       await cache.put(request, response.clone());
     }
@@ -65,7 +69,7 @@ async function shellAsset(request) {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
-  if (DATA_PATHS.has(url.pathname)) {
+  if (isDataPath(url.pathname)) {
     // Deliberately no Cache API fallback: stale deal data must never look live.
     event.respondWith(liveData(event.request));
   } else if (event.request.method !== "GET") {
