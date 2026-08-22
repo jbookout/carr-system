@@ -42,10 +42,9 @@ Usage:
   ./run.sh brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda]
                       [--date YYYY-MM-DD] [--quiet] [--recovery]
 
-Normal mode reads canonical database views only. Calendar ICS files are device
-exports, not canonical records, so prebriefs fail closed until a canonical
-calendar receipt/source exists. ``--recovery`` explicitly opts into those Drive
-exports during an acknowledged recovery exercise.
+Normal mode reads canonical database views only, including the redacted rolling
+Calendar projection in ``v_calendar_prebrief_events``. ``--recovery`` explicitly
+opts into legacy Drive ICS exports during an acknowledged recovery exercise.
 
 EXIT CODES
   0  ran, including when a section is honestly empty.
@@ -73,6 +72,10 @@ RECOVERY_MODE = False
 RECOVERY_VAULT: Path | None = None
 CURRENT_PRINCIPAL: str | None = None
 PARTNERS = ("joe", "dell")
+
+
+class CanonicalPrebriefUnavailable(RuntimeError):
+    """The record layer cannot distinguish an empty calendar from stale data."""
 
 # Phase is the value proxy. Later phase = nearer a fee, which is the only
 # ordering the record can actually support today (see the header).
@@ -287,7 +290,139 @@ def match_event(title: str, index, touch, today):
     return None, None
 
 
+def canonical_prebrief_rows(cur, today):
+    """Read the one redacted record product built for meeting preparation.
+
+    Participant email, EventKit identifiers, notes, descriptions, URLs and
+    recurrence data never cross this reader boundary. Identity, last-touch and
+    open-action context are resolved inside the view so the brief does not need
+    broad joins or a heuristic title match in normal mode.
+    """
+    return q(cur, """select sponsor, occurrence_key, starts_at, ends_at, title, location,
+                            participant_ref, participant_display_name,
+                            participant_org_name, participant_status,
+                            participant_last_touch, open_owner, open_action
+                       from v_calendar_prebrief_events
+                      where starts_at >= %s::date
+                        and starts_at < (%s::date + interval '1 day')
+                      order by sponsor, starts_at, occurrence_key,
+                               participant_display_name nulls last,
+                               open_action nulls last""", (today, today))
+
+
+def require_current_prebrief_snapshot(cur, today) -> None:
+    rows = q(cur, """select sponsor, snapshot_at, captured_at, event_count, participant_count
+                        from v_calendar_prebrief_snapshot_status
+                       where sponsor in ('joe','dell')""")
+    latest = {str(row.get("sponsor") or "").lower(): row for row in rows}
+    # The scheduled brief is weekday-only. A manually requested weekend brief
+    # may use Friday's last-good full snapshot; Monday must have Monday evidence.
+    cutoff = today
+    if today.weekday() == 5:
+        cutoff -= timedelta(days=1)
+    elif today.weekday() == 6:
+        cutoff -= timedelta(days=2)
+    stale: list[str] = []
+    for partner in PARTNERS:
+        value = latest.get(partner, {}).get("snapshot_at")
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                value = None
+        snapshot_day = value.date() if isinstance(value, datetime) else value
+        if snapshot_day is None or snapshot_day < cutoff:
+            stale.append(partner)
+    if stale:
+        raise CanonicalPrebriefUnavailable(
+            "current canonical calendar snapshot is absent or stale for " + ", ".join(stale))
+
+
+def _clock(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return plain(value)
+    return value.strftime("%-I:%M%p").lower()
+
+
+def render_canonical_prebriefs(cur, today, out: list[str]) -> str:
+    require_current_prebrief_snapshot(cur, today)
+    rows = canonical_prebrief_rows(cur, today)
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        sponsor = str(row.get("sponsor") or "").lower()
+        if sponsor not in PARTNERS:
+            continue
+        key = (sponsor, str(row.get("occurrence_key") or ""))
+        event = grouped.setdefault(key, {
+            "sponsor": sponsor,
+            "starts_at": row.get("starts_at"),
+            "title": plain(row.get("title") or "(untitled)"),
+            "location": plain(row.get("location") or ""),
+            "participants": {},
+        })
+        ref = plain(row.get("participant_ref") or "")
+        if not ref:
+            continue
+        participant = event["participants"].setdefault(ref, {
+            "name": plain(row.get("participant_display_name")
+                          or row.get("participant_org_name") or "a record participant"),
+            "status": plain(row.get("participant_status") or "").replace("_", " ")
+                      or "no stage on file",
+            "last_touch": row.get("participant_last_touch"),
+            "actions": [],
+        })
+        action = plain(row.get("open_action") or "")
+        owner = str(row.get("open_owner") or "").lower()
+        if action and owner == sponsor and action not in participant["actions"]:
+            participant["actions"].append(action)
+
+    for partner in PARTNERS:
+        partner_events = [e for e in grouped.values() if e["sponsor"] == partner]
+        partner_events.sort(key=lambda e: e["starts_at"])
+        out += [f"## {partner.capitalize()}", ""]
+        if not partner_events:
+            out += ["Nothing on the calendar today.", ""]
+            continue
+        for event in partner_events:
+            head = f"**{_clock(event['starts_at'])} · {event['title']}**"
+            if event["location"]:
+                head += f" · {event['location'][:60]}"
+            out.append(head)
+            if not event["participants"]:
+                out.append("  No external record participant is attached to this meeting.")
+                out.append("")
+                continue
+            for participant in event["participants"].values():
+                quiet = days_since(participant["last_touch"], today)
+                touch_word = (f"last touched {quiet} days ago" if quiet is not None
+                              else "no touch has ever been logged")
+                out.append(f"  {participant['name']} is {participant['status']}. {touch_word}.")
+                if participant["actions"]:
+                    out.append(f"  The one thing to get: {participant['actions'][0][:150]}")
+                else:
+                    out.append("  The one thing to get: what has to happen next, and by when. "
+                               "Nobody holds an open item on them right now.")
+            out.append("")
+    if not grouped:
+        out.append("_No meetings on either calendar today._")
+    return "\n".join(out)
+
+
 def section_prebriefs(cur, today) -> str:
+    out = ["# Today's meetings", "",
+           f"_{today.strftime('%A, %B %-d')}. Everyone on today's calendars, with where they "
+           "stand and the one thing to come away with. Written once this morning; nothing here "
+           "interrupts you before a meeting._", ""]
+
+    if not RECOVERY_MODE:
+        return render_canonical_prebriefs(cur, today, out)
+
+    assert RECOVERY_VAULT is not None
     index = q(cur, """select subject_type, subject_id, ref, display_name, org_name, status
                         from v_ref_index where merged is not true""")
     touch = {(r["subject_type"], str(r["subject_id"])): r["last_touch"]
@@ -295,22 +430,6 @@ def section_prebriefs(cur, today) -> str:
     balls: dict[tuple[Any, str], list[dict[str, Any]]] = {}
     for b in q(cur, "select subject_type, subject_id, owner, what from v_today_triage"):
         balls.setdefault((b["subject_type"], str(b["subject_id"])), []).append(b)
-
-    out = ["# Today's meetings", "",
-           f"_{today.strftime('%A, %B %-d')}. Everyone on today's calendars, with where they "
-           "stand and the one thing to come away with. Written once this morning; nothing here "
-           "interrupts you before a meeting._", ""]
-
-    if not RECOVERY_MODE:
-        out += [
-            "Calendar prebriefs are unavailable in normal mode: the current ICS feeds are "
-            "Drive exports, not canonical record-layer evidence. Run with --recovery only "
-            "during an acknowledged recovery exercise.",
-            "",
-        ]
-        return "\n".join(out)
-
-    assert RECOVERY_VAULT is not None
     calendars = {
         "joe": RECOVERY_VAULT / "DNA/Team/calendar-latest.ics",
         "dell": RECOVERY_VAULT / "DNA/Team/calendar-latest-dell.ics",
@@ -728,15 +847,6 @@ def main() -> int:
         return 78
 
     wanted = list(SECTIONS) if a.section == "all" else [a.section]
-    if "prebriefs" in wanted and not a.recovery:
-        print(
-            "brief_pack: REFUSED - prebriefs have no canonical calendar receipt/source; "
-            "normal mode will not produce a degraded brief. Use --recovery only for an "
-            "acknowledged outage.",
-            file=sys.stderr,
-        )
-        return 69
-
     today = date.fromisoformat(a.date) if a.date else date.today()
     url = db_url()
     if not url:
@@ -751,7 +861,11 @@ def main() -> int:
     with psycopg.connect(url) as conn, conn.cursor() as cur:
         for key in wanted:
             fname, fn = SECTIONS[key]
-            body = fn(cur, today)
+            try:
+                body = fn(cur, today)
+            except CanonicalPrebriefUnavailable as exc:
+                print(f"brief_pack: REFUSED - {exc}", file=sys.stderr)
+                return 69
             findings += [f"{key}: {f}" for f in lint(body)]
             (OUT / fname).write_text(body.rstrip() + "\n", encoding="utf-8")
             written.append(fname)

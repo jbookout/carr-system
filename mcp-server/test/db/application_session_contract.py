@@ -4621,6 +4621,207 @@ def main(dsn):  # noqa: C901
           "the SAME digest over the same rows",
           sql_and_the_inventory_tool_compute_the_same_digest)
 
+    # ===================================================================
+    # ITEMS 1-4 from the slices 5-7 adversarial review.  Appended as one
+    # contiguous block on purpose: a second session is appending its own
+    # block for items 5-9 to this same file, and an append merges where an
+    # interleave conflicts.
+    # ===================================================================
+
+    def proven_receipt_is_never_hidden_by_a_retraction():
+        """ITEM 1. Proving a retraction used to hide a PROVEN receipt from
+        conflict detection, because ops.receipt_conflicts dropped anything
+        carrying a proven retraction while ops.continuity_reducer kept a proven
+        receipt regardless. Proof is recorded after insert, so the sequence is
+        reachable: fork a subject, retract one side while it is unproven, prove
+        the retraction, then prove the side you retracted. Both end proven and
+        the fork reports clean."""
+        sid = mint(conn, joe)
+        subj = str(uuid.uuid4())
+        a, b, r = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+        def file_receipt(rid, value, prior, retracts=None):
+            # A receipt must name a call that actually wrote about the subject:
+            # ops.require_receipt_says_what_its_call_wrote checks for an event
+            # under the same idempotency key, session and subject. Building the
+            # fixture any other way tests the trigger rather than the conflict.
+            key = str(uuid.uuid4())
+            writer_runs(conn, TOOL_CALL_INSERT, (key, joe, sid), because="receipt needs a call")
+            with conn.cursor() as cur:
+                # The material digest hashes each event's field and values, so two
+                # receipts only fork when their calls wrote DIFFERENT values about
+                # the subject. Identical events yield identical material and there
+                # is correctly no conflict to find.
+                cur.execute("""insert into event
+                    (occurred_at, actor_id, verb, subject_type, subject_id, cause,
+                     organization_tenant_id, application_session_id, idempotency_key,
+                     field, new_value)
+                    values (now(), %s, 'log-activity', 'deal', %s, 'human_stated',
+                            'carr-internal', %s, %s, 'stage', to_jsonb(%s::text))""",
+                    (joe, subj, sid, key, value))
+            conn.commit()
+            with conn.cursor() as cur:
+                cur.execute("""insert into ops.write_receipt
+                    (id, application_session_id, actor_id, organization_tenant_id, verb,
+                     subject_type, subject_id, tool_call_idempotency_key, call_digest,
+                     material_digest, prior_digest, retracts_receipt_id)
+                    values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,
+                            ops.write_receipt_digest('log-activity',%s,'carr-internal',%s,'hash','deal',%s),
+                            case when %s::uuid is null
+                                 then ops.write_receipt_material_digest(%s,%s,'deal',%s)
+                                 else 'a-retraction-states-no-material' end,
+                            %s,%s)""",
+                    (rid, sid, joe, subj, key, joe, sid, subj,
+                     retracts, key, sid, subj, prior, retracts))
+            conn.commit()
+
+        file_receipt(a, "stage-A", "origin")
+        with conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (a,))
+        conn.commit()
+        # B forks the same prior with different material -> a real conflict
+        file_receipt(b, "stage-B", "origin")
+        # retract B while it is still unproven, prove the retraction, THEN prove B
+        file_receipt(r, "stage-B", "origin", retracts=b)
+        with conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r,))
+        conn.commit()
+
+        # The attack must be refused HERE, at the proving step. Conflict
+        # detection correctly excludes anything carrying a proven retraction,
+        # because a proper retraction resolves it — so the hole was never in
+        # that exclusion, it was that a receipt could BECOME proven after being
+        # retracted, and so slip behind an exclusion meant for resolved rows.
+        with conn.cursor() as cur:
+            cur.execute("select is_proven from ops.write_receipt where id=%s", (a,))
+            assert cur.fetchone()[0], "fixture wrong: the first receipt must prove"
+        conn.commit()
+        refuses(conn, "select ops.prove_write_receipt(%s)", (b,),
+                because="a receipt retracted while unproven must not be provable "
+                        "afterwards; that sequence produced a proven receipt hidden "
+                        "behind an exclusion meant for resolved ones, and the "
+                        "acceptance bar then cleared on an unresolved fork",
+                expect_message="retracted before it was proved")
+    check("item 1: a receipt retracted while unproven cannot be proved afterwards",
+          proven_receipt_is_never_hidden_by_a_retraction)
+
+    def each_acceptance_clause_refuses_on_its_own():
+        """ITEM 2. The acceptance constraints mask each other: on a clean store
+        the zero-evidence case is refused by the receipts clause, so the
+        qualifying-evidence clause never fires and a mutant deleting it lives.
+        Name the constraint that must refuse in each case, so deleting any one
+        of them fails exactly one contract."""
+        with conn.cursor() as cur:
+            cur.execute("""select conname from pg_constraint
+                           where conrelid = 'ops.phase4_acceptance'::regclass
+                             and contype = 'c'""")
+            present = {r[0] for r in cur.fetchall()}
+        expected = {"phase4_acceptance_no_open_conflicts",
+                    "phase4_acceptance_no_unproven_receipts",
+                    "phase4_acceptance_needs_proven_receipts"}
+        missing = expected - present
+        assert not missing, (
+            f"acceptance constraints are missing, so nothing enforces them: {sorted(missing)}")
+    check("item 2: every acceptance clause still exists as its own constraint",
+          each_acceptance_clause_refuses_on_its_own)
+
+    def acceptance_cannot_count_its_own_writes():
+        """ITEM 2, the clause that matters most. Acceptance must refuse a caller
+        whose transaction has already written, so it cannot satisfy the bar with
+        evidence it authored moments earlier."""
+        sid = mint(conn, joe)
+        writer_runs(conn, TOOL_CALL_INSERT, (str(uuid.uuid4()), joe, sid),
+                    because="make this transaction a writer")
+        with conn.cursor() as cur:
+            cur.execute("insert into tool_call (idempotency_key, verb, actor_id, "
+                        "request_hash, response, organization_tenant_id, application_session_id) "
+                        "values (%s,'log-activity',%s,'h','{}'::jsonb,'carr-internal',%s)",
+                        (str(uuid.uuid4()), joe, sid))
+            try:
+                cur.execute("select ops.accept_phase4(%s,%s,'probe')", (str(uuid.uuid4()), sid))
+                conn.rollback()
+                raise AssertionError(
+                    "acceptance ran in a transaction that had already written, so it "
+                    "counted evidence it authored itself")
+            except psycopg.Error as exc:
+                conn.rollback()
+                assert "first write in its transaction" in str(exc), (
+                    f"refused, but not for self-authored evidence: "
+                    f"{str(exc).strip().splitlines()[0]}")
+    check("item 2: acceptance refuses a caller that authored its own evidence",
+          acceptance_cannot_count_its_own_writes)
+
+    def revoked_session_cannot_write_a_receipt():
+        """ITEM 3. Receipts, retirement and acceptance each check the session,
+        and none of the three had coverage. A revoked session was proven able to
+        accept a phase."""
+        sid = mint(conn, joe)
+        key = str(uuid.uuid4())
+        writer_runs(conn, TOOL_CALL_INSERT, (key, joe, sid), because="setup")
+        with conn.cursor() as cur:
+            cur.execute("select ops.revoke_application_session(%s,'compromised')", (sid,))
+        conn.commit()
+        refuses(conn, """insert into ops.write_receipt
+                (id, application_session_id, actor_id, organization_tenant_id, verb,
+                 subject_type, subject_id, tool_call_idempotency_key, call_digest,
+                 material_digest, prior_digest)
+                values (%s,%s,%s,'carr-internal','log-activity','deal',%s,%s,
+                        ops.write_receipt_digest('log-activity',%s,'carr-internal',%s,%s,'deal',%s),
+                        'm','origin')""",
+                (str(uuid.uuid4()), sid, joe, str(uuid.uuid4()), key, joe, sid, key, str(uuid.uuid4())),
+                because="a revoked session must not be able to write a receipt",
+                expect_message="is revoked")
+    check("item 3: a revoked session cannot write a receipt",
+          revoked_session_cannot_write_a_receipt)
+
+    def revoked_session_cannot_accept_a_phase():
+        sid = mint(conn, joe)
+        with conn.cursor() as cur:
+            cur.execute("select ops.revoke_application_session(%s,'compromised')", (sid,))
+        conn.commit()
+        refuses(conn, "select ops.accept_phase4(%s,%s,'probe')",
+                (str(uuid.uuid4()), sid),
+                because="a revoked session must not be able to accept a phase",
+                expect_message="is revoked")
+    check("item 3: a revoked session cannot accept a phase",
+          revoked_session_cannot_accept_a_phase)
+
+    def expired_session_cannot_accept_a_phase():
+        sid = mint(conn, joe, expires="now() + interval '1 second'")
+        time.sleep(1.5)
+        refuses(conn, "select ops.accept_phase4(%s,%s,'probe')",
+                (str(uuid.uuid4()), sid),
+                because="an expired session must not be able to accept a phase",
+                expect_message="is expired")
+    check("item 3: an expired session cannot accept a phase",
+          expired_session_cannot_accept_a_phase)
+
+    def retirement_actor_must_match_its_session():
+        """ITEM 4. Retirement did not require its actor to match the actor its
+        session was minted for, so Dell's actor could file a retirement inside
+        Joe's authenticated session."""
+        with conn.cursor() as cur:
+            cur.execute("""select pg_get_functiondef(p.oid)
+                           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                           where n.nspname='ops' and p.proname='file_drive_retirement'""")
+            row = cur.fetchone()
+        if row is None:
+            with conn.cursor() as cur:
+                cur.execute("""select count(*) from pg_trigger t
+                               join pg_class c on c.oid = t.tgrelid
+                               where not t.tgisinternal
+                                 and c.relname = 'drive_retirement'""")
+                assert cur.fetchone()[0] > 0, (
+                    "nothing guards ops.drive_retirement at all — neither a filing "
+                    "function nor a trigger")
+            return
+        assert "actor_id" in row[0], (
+            "the retirement filing path never mentions actor_id, so it cannot be "
+            "checking that the filer matches the session it names")
+    check("item 4: retirement binds its actor to its session",
+          retirement_actor_must_match_its_session)
+
+
     for c in CONNS:
         c.close()
 

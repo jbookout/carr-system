@@ -43,6 +43,7 @@ import importlib.util
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -52,9 +53,19 @@ from datetime import datetime, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 NEONCTL = os.path.join(REPO, "mcp-server", "node_modules", ".bin", "neonctl")
+# A CARR Mac IS NOT GUARANTEED TO HAVE HOMEBREW. bin/notes-sweep-post.sh already
+# states the reason in full: Dell's Mac has no /opt/homebrew at all, because
+# installing Homebrew needs sudo his session cannot invoke, so his toolchain
+# lives under the user-local prefix instead. A candidate list that knew only the
+# two Homebrew prefixes therefore resolved to the bare name on that machine and
+# every psql path died as FileNotFoundError deep inside subprocess — see
+# psql_bin() below, which now refuses in words instead.
+_USER_LOCAL = os.path.join(os.path.expanduser("~"), ".local")
 PSQL_CANDIDATES = [
     "/opt/homebrew/opt/libpq/bin/psql",
     "/usr/local/opt/libpq/bin/psql",
+    os.path.join(_USER_LOCAL, "bin", "psql"),
+    os.path.join(_USER_LOCAL, "pgsql", "bin", "psql"),
     "psql",
 ]
 from lib.local_principal import LocalPrincipalError, local_actor_slug as _established_actor_slug
@@ -234,6 +245,38 @@ def _staging_file_dsn(role_name: str, branch: str | None, env: dict) -> str:
     return stored.value
 
 
+# ONE DERIVATION PER PROCESS, NOT ONE PER CALL. Every neonctl spawn costs about
+# 1.5-3 seconds on a healthy machine, and a single `run.sh health` asks for the
+# production string several times, so the repeated spawns were a real share of
+# "everything takes forever" even with nothing broken. This cache is IN-PROCESS
+# ONLY and is deliberately never written to disk: the property this file exists
+# to hold is that the credential is derived, used, and never echoed or stored,
+# and an in-memory dict keeps that exactly. bin/outage-drill.py already caches
+# the staging string the same way for the same reason.
+_DSN_CACHE: dict[tuple, str] = {}
+
+
+def _no_dsn_message(detail: str, key: str) -> str:
+    """The ONE explanation of a failed derivation, shared by both routes out.
+
+    NAME THE ACTUAL CAUSE. Printing neonctl's stderr alone is true and useless:
+    on an expired login it is a browser URL and an "authentication timed out"
+    line, which points the reader at another browser trip when the fix is a
+    stored key. Rule a8c55a47 — a manual path and an automated path that do the
+    same job must be the same code — binds across the timeout route and the
+    nonzero-exit route, so they answer in the same words.
+    """
+    if not key:
+        return (
+            "neonctl could not derive a connection string, and NEON_API_KEY is NOT SET.\n"
+            "  This is almost certainly the expired-browser-login failure: neonctl\n"
+            "  prompts for a browser, waits 60 seconds, and gives up.\n"
+            "  Fix it once: create a Neon API key in the console and add it to\n"
+            "  ~/.config/carr/db.env as NEON_API_KEY=... (chmod 600, already gitignored).\n"
+            f"  neonctl said: {detail}")
+    return f"neonctl failed with NEON_API_KEY set: {detail}"
+
+
 def dsn(branch=None, project: str = "production", role_name: str = "neondb_owner") -> str:
     """Connection string for a branch of a named PROJECT.
 
@@ -255,45 +298,84 @@ def dsn(branch=None, project: str = "production", role_name: str = "neondb_owner
     if key:
         env["NEON_API_KEY"] = key
     if project == "staging" and role_name in {"app_writer", "app_reader"}:
+        # DELIBERATELY NOT CACHED. This path re-reads the stored staging
+        # credential and REFUSES it unless its recorded state is still
+        # verified/final, so the check is the point of the call rather than
+        # overhead on the way to a value. Caching it made a credential that had
+        # since been demoted to pending keep answering with the value from
+        # before the demotion — ops/staging-database-consumer-selftest.py caught
+        # exactly that. It is also a file read with no neonctl spawn behind it,
+        # so there is nothing here worth the risk of a stale answer.
         return _staging_file_dsn(role_name, branch, env)
     project_id = spec.get("id") or _project_id_by_name(spec["name"], env)
     if branch is None:
         branch = spec["default_branch"]
-    out = subprocess.run(
-        [NEONCTL, "connection-string", branch,
-         "--project-id", project_id,
-         "--role-name", role_name,
-         # A project can hold more than one database.  All sanctioned CARR
-         # owner paths target this one explicitly rather than inheriting the
-         # provider's mutable default database selection.
-         "--database-name", "neondb",
-         "--endpoint-type", "read_write"],
-        capture_output=True, text=True, timeout=60, env=env,
-    )
+    # Keyed on the RESOLVED branch, so dsn() and dsn(branch=<the default>) are one
+    # entry rather than two spellings of the same connection.
+    cache_key = (project, branch, role_name)
+    if cache_key in _DSN_CACHE:
+        return _DSN_CACHE[cache_key]
+    try:
+        out = subprocess.run(
+            [NEONCTL, "connection-string", branch,
+             "--project-id", project_id,
+             "--role-name", role_name,
+             # A project can hold more than one database.  All sanctioned CARR
+             # owner paths target this one explicitly rather than inheriting the
+             # provider's mutable default database selection.
+             "--database-name", "neondb",
+             "--endpoint-type", "read_write"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        # THE TIMEOUT IS THE EXPIRED-LOGIN SIGNATURE, AND IT USED TO ESCAPE THIS
+        # FUNCTION UNCAUGHT. `timeout=60` raises rather than returning a nonzero
+        # result, so the carefully-worded diagnosis below — the one that names a
+        # stored API key as the fix — was unreachable on the single failure it
+        # was written for. What the reader got instead was a raw TimeoutExpired
+        # traceback, which is why on 2026-08-21 this presented as "the whole
+        # system is slow" for two minutes per command rather than as one expired
+        # credential. Same finding, same words, on both routes out.
+        raise SystemExit(_no_dsn_message("timed out after 60s with no answer", key))
     if out.returncode != 0 or not out.stdout.strip():
-        # NAME THE ACTUAL CAUSE. The old message printed neonctl's stderr, which
-        # on an expired login is a browser URL and an "authentication timed out"
-        # line — true, and it does not tell the reader that the fix is a stored
-        # key rather than another browser trip. A timeout with no key present is
-        # this failure until proven otherwise.
-        detail = out.stderr.strip()[:200]
-        if not key:
-            sys.exit(
-                "neonctl could not derive a connection string, and NEON_API_KEY is NOT SET.\n"
-                "  This is almost certainly the expired-browser-login failure: neonctl\n"
-                "  prompts for a browser, waits 60 seconds, and gives up.\n"
-                "  Fix it once: create a Neon API key in the console and add it to\n"
-                "  ~/.config/carr/db.env as NEON_API_KEY=... (chmod 600, already gitignored).\n"
-                f"  neonctl said: {detail}")
-        sys.exit(f"neonctl failed with NEON_API_KEY set (rc={out.returncode}): {detail}")
-    return out.stdout.strip()
+        detail = out.stderr.strip()[:200] or f"exit status {out.returncode}"
+        raise SystemExit(_no_dsn_message(detail, key))
+    return _DSN_CACHE.setdefault(cache_key, out.stdout.strip())
 
 
 def psql_bin() -> str:
-    for p in PSQL_CANDIDATES:
-        if os.path.sep not in p or os.path.exists(p):
-            return p
-    return "psql"
+    """The postgres client, or a refusal that NAMES THE MISSING DEPENDENCY.
+
+    The old body returned the bare name "psql" for two different reasons — the
+    loop's `os.path.sep not in p` test matched it unconditionally, and so did the
+    final fallback — so a machine with no postgres client at all got a plausible
+    string back and failed later as `FileNotFoundError: 'psql'` from inside
+    subprocess, with a traceback that named neither the dependency nor the fix.
+    On 2026-08-21 that read as four UNREADABLE sections in `run.sh health` and
+    looked like a database outage; it was a missing client binary.
+
+    A bare name is only a real answer if it actually resolves on PATH, so it is
+    resolved here rather than assumed.
+    """
+    for candidate in PSQL_CANDIDATES:
+        if os.path.sep in candidate:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+            continue
+        found = shutil.which(candidate)
+        if found:
+            return found
+    sys.exit(
+        "db-tap: NO POSTGRES CLIENT ON THIS MACHINE — `psql` is not installed.\n"
+        "  This is a missing dependency, NOT a database or credential failure;\n"
+        "  the connection string may well be fine. Looked in:\n"
+        + "".join(f"    {c}\n" for c in PSQL_CANDIDATES) +
+        "  On a Homebrew machine: brew install libpq\n"
+        "  On a machine without Homebrew (Dell's has none — installing it needs\n"
+        "  sudo his session cannot invoke, see bin/notes-sweep-post.sh), install\n"
+        "  the client under ~/.local, which needs no sudo and is already on this\n"
+        "  candidate list."
+    )
 
 
 def _engaged(reason: str) -> bool:
@@ -331,6 +413,56 @@ def append_receipt(actor: str, mode: str, target: str, host: str, reason: str,
             f'target={target} host={host} reason="{reason.strip()}"\n')
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(line)
+
+
+def _run_sql_in_process(url: str, path: str) -> int:
+    """Run a .sql file through psycopg instead of shelling out to psql.
+
+    WHY THERE IS NO psql SUBPROCESS HERE ANY MORE, 2026-08-21. `sql` mode used to
+    exec the psql client, which made a postgres CLIENT BINARY a hard dependency of
+    the everyday health path. Dell's Mac has no Homebrew and no sudo to install
+    one (bin/notes-sweep-post.sh states why), so there was no psql anywhere on the
+    machine and four `run.sh health` sections reported the canonical store
+    UNREADABLE — which reads as a database outage and was a missing binary. The
+    only npm-published client is a 147MB beta, far too much to put in the lockfile
+    that every session's record verbs load, and psycopg was already installed and
+    working. So the dependency is removed rather than satisfied.
+
+    Two properties improve on the way past. The DSN no longer appears in the
+    process argument list, where any other user on the machine could read it —
+    psql took the URI as argv[1], which this file's own docstring calls the thing
+    it exists to prevent. And ON_ERROR_STOP stops being a flag that has to be
+    remembered: one transaction wraps the whole script, so a failure halfway
+    through rolls back instead of leaving a half-applied file.
+
+    Output is unaligned pipe-separated rows, which is what tools/health-check.py
+    already parses — it splits on "|", strips, and selects rows by column count.
+    """
+    try:
+        import psycopg
+    except ImportError:
+        sys.exit("db-tap: psycopg is not installed in this interpreter — "
+                 "run through .venv/bin/python, or pip install -r requirements.txt")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            script = handle.read()
+    except OSError as exc:
+        sys.exit(f"db-tap: cannot read {path}: {exc}")
+    try:
+        with psycopg.connect(url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(script)
+                while True:
+                    if cur.description is not None:
+                        for row in cur.fetchall():
+                            print("|".join("" if v is None else str(v) for v in row))
+                    if not cur.nextset():
+                        break
+    except psycopg.Error as exc:
+        # str(exc) carries the server's message and position, never the DSN.
+        print(f"db-tap: {exc}".strip(), file=sys.stderr)
+        return 1
+    return 0
 
 
 def main() -> None:
@@ -414,7 +546,12 @@ def main() -> None:
         env["PGOPTIONS"] = f"{existing} {guard}".strip()
 
     if mode == "sql":
-        rc = subprocess.run([psql_bin(), url, "-v", "ON_ERROR_STOP=1", "-f", target_abs], env=env).returncode
+        # PGOPTIONS is read by libpq from the PROCESS environment, and psycopg is
+        # libpq, so the read-only guard has to land on os.environ here rather than
+        # on the dict that was built for a subprocess that no longer exists.
+        if "PGOPTIONS" in env:
+            os.environ["PGOPTIONS"] = env["PGOPTIONS"]
+        rc = _run_sql_in_process(url, target_abs)
     else:
         env["DATABASE_URL"] = url
         # Cloudflare ACCOUNT ID (an identifier, not a credential) — needed by

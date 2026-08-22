@@ -364,6 +364,19 @@ begin
   if r.readback_digest is not null then
     raise exception 'receipt % already carries a readback', p_receipt_id;
   end if;
+  -- A RETRACTED RECEIPT CANNOT BE PROVED AFTERWARDS, which is the mirror of
+  -- ops.require_sound_retraction refusing to retract a PROVEN one. Without both
+  -- halves the order of operations decides the outcome: proof is recorded after
+  -- insert, so retracting a receipt while it is still unproven and proving it
+  -- afterwards produced a receipt that was both proven and retracted. Conflict
+  -- detection excludes anything carrying a proven retraction — correctly, since
+  -- a proper retraction resolves it — so that sequence hid a proven receipt
+  -- from a fork it was part of, and the acceptance bar cleared on it.
+  if exists (select 1 from ops.write_receipt rr
+              where rr.retracts_receipt_id = p_receipt_id and rr.is_proven) then
+    raise exception 'receipt % was retracted before it was proved; a retracted '
+      'receipt cannot be proved afterwards', p_receipt_id;
+  end if;
 
   select * into tc from public.tool_call
    where idempotency_key = r.tool_call_idempotency_key;

@@ -33,6 +33,19 @@ def main() -> int:
     platforms = registry.get("platforms")
 
     check("registry is versioned", registry.get("schema_version") == 1)
+    standing_binding = registry.get("standing_rule_binding", {})
+    check("the approved spending rule is bound to the mechanical cost gate",
+          standing_binding.get("rule_id") == "a57d981a-8f6d-4c18-95ee-0e63a5a90b89"
+          and standing_binding.get("statement_sha256") ==
+              "c6fd62eb91d3f03b21a6098a6fd6b2848b902a45b8c0430b1717edf4e143f668"
+          and standing_binding.get("durable_decision_ref") ==
+              "8b31938a-e2f2-4b8f-9c29-187efa5c1650"
+          and standing_binding.get("decision_event_ref") ==
+              "f7ea060c-268b-47f1-8a17-7168841b77e0"
+          and standing_binding.get("control_key") == "platform_metering_pre_dispatch"
+          and standing_binding.get("approval_substance_already_recorded") is True
+          and standing_binding.get("required_post_deploy_state") ==
+              "active_hard_enforced")
     check("platform registry is nonempty", isinstance(platforms, list) and bool(platforms))
     if not isinstance(platforms, list):
         return 1

@@ -60,6 +60,34 @@ MAX_TEXT_BYTES=900000                       # socket ceiling is 1 MiB; leave hea
 # A canary reads Notes but never shares the live queue, ledger, logs, URL or
 # token.  Parse literal config only; do not source a credential file.
 CANARY=0
+CANARY_SOURCE_SNAPSHOT_ID=""
+CANARY_SOURCE_SNAPSHOT_DIGEST=""
+CANARY_RECEIPT_IDENTITY=""
+
+# Canonicalize both endpoints through one strict path before comparing them or
+# deriving the nonsecret destination identity.  Raw spelling differences such
+# as HTTPS case, default ports, and an omitted root path must never turn the
+# live destination into a seemingly isolated canary.
+normalize_ingest_endpoint() {
+  /usr/bin/python3 -c '
+import sys
+from urllib.parse import urlsplit, urlunsplit
+try:
+    p = urlsplit(sys.argv[1])
+    scheme = p.scheme.lower()
+    if scheme not in ("http", "https") or not p.hostname or p.username or p.password or p.fragment:
+        raise ValueError
+    host = p.hostname.lower()
+    if ":" in host and not host.startswith("["):
+        host = "[" + host + "]"
+    port = p.port
+    authority = host if port is None or (scheme, port) in (("http", 80), ("https", 443)) else f"{host}:{port}"
+    print(urlunsplit((scheme, authority, p.path or "/", p.query, "")))
+except Exception:
+    raise SystemExit(1)
+' "$1"
+}
+
 if [ "${CARR_CONTROL_PLANE_MODE:-}" = "canary" ] && [ "${1:-}" != "--canary" ]; then
   print -ru2 -- "notes canary mode requires --canary"; exit 78
 fi
@@ -84,7 +112,13 @@ if [ "${1:-}" = "--canary" ]; then
     ce[$k]="$v"
   done < "$CF"
   [ -n "${ce[CARR_CANARY_INGEST_URL]:-}" ] && [ -n "${ce[CARR_CANARY_INGEST_TOKEN_NOTES]:-}" ] && [ -n "${ce[CARR_CANARY_DESTINATION_ID]:-}" ] || { print -ru2 -- "notes canary config missing"; exit 78; }
-  [[ "${ce[CARR_CANARY_DESTINATION_ID]}" =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' ]] || { print -ru2 -- "notes canary destination is unsafe"; exit 78; }
+  # The destination label is the SHA-256 of the normalized canary URL,
+  # not a readable alias.  It remains nonsecret in evidence while making a
+  # config repoint visible.  Userinfo and fragments are never valid endpoints.
+  canary_normalized_url="$(normalize_ingest_endpoint "${ce[CARR_CANARY_INGEST_URL]}" 2>/dev/null || true)"
+  [[ -n "$canary_normalized_url" ]] || { print -ru2 -- "notes canary URL is unsafe"; exit 78; }
+  destination_digest="$(print -rn -- "$canary_normalized_url" | /usr/bin/python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+  [[ "$destination_digest" =~ '^[0-9a-f]{64}$' && "${ce[CARR_CANARY_DESTINATION_ID]}" = "$destination_digest" ]] || { print -ru2 -- "notes canary destination digest does not bind its URL"; exit 78; }
   live_url="${CARR_INGEST_URL:-https://api.practicecre.com/ingest}"
   live_file="$HOME/.config/carr/ingest.env"
   if [ -f "$live_file" ]; then
@@ -97,15 +131,49 @@ if [ "${1:-}" = "--canary" ]; then
       break
     done < "$live_file"
   fi
-  [ "${ce[CARR_CANARY_INGEST_URL]}" != "$live_url" ] || { print -ru2 -- "notes canary URL equals live"; exit 78; }
+  live_normalized_url="$(normalize_ingest_endpoint "$live_url" 2>/dev/null || true)"
+  [[ -n "$live_normalized_url" ]] || { print -ru2 -- "notes live URL is unsafe"; exit 78; }
+  [ "$canary_normalized_url" != "$live_normalized_url" ] || { print -ru2 -- "notes canary URL equals live"; exit 78; }
   canary_base="${REPO}/out/canary"
   canary_base="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$canary_base")"
   DIR="${CARR_NOTES_CANARY_ROOT:-$canary_base/notes}"
   DIR="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$DIR")"
   [[ "$DIR" == "$canary_base"/* ]] || { print -ru2 -- "notes canary root must stay under out/canary"; exit 78; }
   PENDING="$DIR/pending"; SENT="$DIR/sent"; FAILED="$DIR/failed"; LEDGER="$DIR/swept-ids.txt"; AUDIO_ONLY="$DIR/audio-only.txt"; LOG="$DIR/notes-sweep.log"
+  if [ "${1:-}" != "--status" ]; then
+    [[ "${CARR_NOTES_CANARY_RUN_ID:-}" =~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ]] || { print -ru2 -- "notes canary requires a leased UUID run identity"; exit 78; }
+    [[ "${CARR_NOTES_CANARY_ATTEMPT:-}" =~ '^[1-9][0-9]*$' ]] || { print -ru2 -- "notes canary requires a positive leased attempt"; exit 78; }
+    CANARY_SOURCE_SNAPSHOT_ID="notes-sweep-hourly:${CARR_NOTES_CANARY_RUN_ID}:attempt:${CARR_NOTES_CANARY_ATTEMPT}"
+    CANARY_RECEIPT_IDENTITY="job:${CARR_NOTES_CANARY_RUN_ID}:attempt:${CARR_NOTES_CANARY_ATTEMPT}"
+  fi
   shift
 fi
+
+# Emit exactly one finite, canonical, nonsecret completion aggregate for a
+# leased Notes canary.  The parent parses this before it writes the generic
+# append-only completion receipt.  IDs and transcript content stay local: only
+# the canonical source digest and aggregate counts cross the child boundary.
+emit_canary_result() {
+  [ "$CANARY" -eq 1 ] && [ -n "$CANARY_SOURCE_SNAPSHOT_ID" ] || return 0
+  /usr/bin/python3 - "${ce[CARR_CANARY_DESTINATION_ID]}" "$CANARY_SOURCE_SNAPSHOT_ID" "$CANARY_SOURCE_SNAPSHOT_DIGEST" "$CANARY_RECEIPT_IDENTITY" "$scan_note_count" "$scan_new_count" "$queued" "$attempted" "$posted" "$dup" "$failed" "$left" <<'PY'
+import json, sys
+destination_id, source_snapshot_id, source_snapshot_digest, receipt_identity = sys.argv[1:5]
+names = ("source_note_count", "source_new_count", "queued_count", "attempted_count",
+         "posted_count", "duplicate_count", "failed_count", "still_queued_count")
+counts = [int(value) for value in sys.argv[5:]]
+value = {
+    "contract": "notes-canary-result.v1",
+    "destination_id": destination_id,
+    "receipt_identity": receipt_identity,
+    "schema_version": 1,
+    "source_digest_kind": "note_id_set_sha256",
+    "source_snapshot_digest": source_snapshot_digest,
+    "source_snapshot_id": source_snapshot_id,
+    **dict(zip(names, counts)),
+}
+print("notes-sweep: notes-canary-result " + json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+PY
+}
 
 # Control-plane shadow path. It exercises the real Apple Notes collector and
 # the real local dedup predicate, but creates no directories, queue entries,
@@ -155,7 +223,7 @@ if [ "${1:-}" = "--scheduled" ]; then
 fi
 
 if [ "${1:-}" = "--status" ]; then
-  [ "$CANARY" -eq 0 ] || print -r -- "notes-sweep: source=$SOURCE_LABEL mode=canary destination=${ce[CARR_CANARY_DESTINATION_ID]} posted=0 duplicate=0 failed=0 still_queued=$(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true)"
+  [ "$CANARY" -eq 0 ] || print -r -- "notes-sweep status: mode=canary destination=${ce[CARR_CANARY_DESTINATION_ID]}"
   print -r -- "folder-to-sweep: $FOLDER_NAME"
   print -r -- "pending-dir: $PENDING"
   print -r -- "queued-now: $(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true)"
@@ -198,6 +266,25 @@ if [ "$scan_rc" -ne 0 ]; then
   exit 1
 fi
 
+if [ "$CANARY" -eq 1 ]; then
+  # The child keeps the source snapshot itself private.  It supplies only an
+  # opaque job-attempt identity and a digest over the sorted, duplicate-free
+  # Notes identifier set (not transcript contents).  A duplicate source ID is
+  # not a valid snapshot.
+  snapshot_out="$(print -r -- "$ids_out" | /usr/bin/python3 -c '
+import hashlib, json, sys
+lines = [line for line in sys.stdin.read().splitlines() if line]
+if lines == ["NOFOLDER"]:
+    lines = []
+if "NOFOLDER" in lines or len(lines) != len(set(lines)):
+    raise SystemExit(1)
+encoded = json.dumps(sorted(lines), separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+print(f"{len(lines)} {hashlib.sha256(encoded).hexdigest()}")
+')"
+  [ $? -eq 0 ] && [[ "$snapshot_out" =~ '^[0-9]+ [0-9a-f]{64}$' ]] || { print -ru2 -- "notes canary source snapshot is malformed"; exit 1; }
+  snapshot_count="${snapshot_out%% *}"; CANARY_SOURCE_SNAPSHOT_DIGEST="${snapshot_out##* }"
+fi
+
 if [ "${ids_out%%$'\n'*}" = "NOFOLDER" ]; then
   # iOS creates this folder on the FIRST recorded call. Its absence is the
   # normal empty state on a Mac where no call has been recorded yet, and it is
@@ -216,6 +303,11 @@ else
   done <<< "$ids_out"
   scan_note_count=$idx
   scan_new_count=${#new_idx[@]}
+
+  if [ "$CANARY" -eq 1 ] && [ "$snapshot_count" -ne "$scan_note_count" ]; then
+    print -ru2 -- "notes canary source snapshot count did not reconcile"
+    exit 1
+  fi
 
   if [ "$scan_new_count" -gt 0 ]; then
     fetch_out="$(/usr/bin/osascript "$ASCRIPT" fetch "$FOLDER_NAME" "$RUNTMP" "${new_idx[@]}" 2>"$ERRFILE")"
@@ -343,7 +435,8 @@ unsetopt null_glob
 
 if [ "${#files[@]}" -eq 0 ]; then
   if [ "$CANARY" -eq 1 ]; then
-    print -r -- "notes-sweep: source=$SOURCE_LABEL mode=canary destination=${ce[CARR_CANARY_DESTINATION_ID]} posted=0 duplicate=0 failed=0 still_queued=0"
+    attempted=0; posted=0; dup=0; failed=0; left=0
+    emit_canary_result
   else
     print -r -- "notes-sweep: source=$SOURCE_LABEL posted=0 duplicate=0 failed=0 still_queued=0"
   fi
@@ -351,9 +444,10 @@ if [ "${#files[@]}" -eq 0 ]; then
   exit 0
 fi
 
-posted=0; dup=0; failed=0
+attempted=0; posted=0; dup=0; failed=0
 
 for f in "${files[@]}"; do
+  attempted=$((attempted+1))
   base="$(basename "$f")"
 
   ext_id="$(/usr/bin/python3 -c 'import json,sys
@@ -408,7 +502,7 @@ done
 
 left="$(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true)"
 if [ "$CANARY" -eq 1 ]; then
-  print -r -- "notes-sweep: source=$SOURCE_LABEL mode=canary destination=${ce[CARR_CANARY_DESTINATION_ID]} posted=$posted duplicate=$dup failed=$failed still_queued=$left"
+  emit_canary_result
 else
   print -r -- "notes-sweep: source=$SOURCE_LABEL posted=$posted duplicate=$dup failed=$failed still_queued=$left"
 fi
