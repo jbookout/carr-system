@@ -1957,12 +1957,10 @@ end $$;
 -- Name: completion_capsule(jsonb); Type: FUNCTION; Schema: ops; Owner: -
 --
 
-CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_predicates jsonb, change_ref text, user_facing boolean, user_journey_ref text, attestor text)
+CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_predicates jsonb, change_ref text, user_facing boolean, user_journey_ref text, attestor text, decision_ref text)
     LANGUAGE sql IMMUTABLE
     AS $$
   select
-    -- The council's "acceptance predicates". The capability lane states them as
-    -- the acceptance tests it actually ran; an ordinary row states them directly.
     coalesce(
       case when jsonb_typeof(evidence #> '{candidate,acceptance_test_refs}') = 'array'
            then evidence #> '{candidate,acceptance_test_refs}' end,
@@ -1970,15 +1968,14 @@ CREATE FUNCTION ops.completion_capsule(evidence jsonb) RETURNS TABLE(acceptance_
            then evidence -> 'acceptance_predicates' end),
     coalesce(evidence #>> '{candidate,candidate_commit_sha}',
              evidence ->> 'change_ref'),
-    -- Null when absent, and null is refused below. It is NOT coalesced to false:
-    -- "nobody said" and "somebody said no" are different states and only one of
-    -- them is an answer.
     coalesce((evidence #>> '{candidate,user_facing}')::boolean,
              (evidence ->> 'user_facing')::boolean),
     coalesce(evidence #>> '{candidate,user_journey_ref}',
              evidence ->> 'user_journey_ref'),
     coalesce(evidence #>> '{attestation,verifier_actor_id}',
-             evidence ->> 'attested_by')
+             evidence ->> 'attested_by'),
+    coalesce(evidence #>> '{candidate,decision_ref}',
+             evidence ->> 'decision_ref')
 $$;
 
 
@@ -1986,7 +1983,7 @@ $$;
 -- Name: FUNCTION completion_capsule(evidence jsonb); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.completion_capsule(evidence jsonb) IS 'The tune-up council 2026-08-21 completion capsule, read from either the capability lane shape (candidate/attestation) or a plain one. ONE definition so the closing trigger and any reader cannot disagree about what done means.';
+COMMENT ON FUNCTION ops.completion_capsule(evidence jsonb) IS 'The tune-up council 2026-08-21 completion capsule, read from either the capability lane shape (candidate/attestation) or a plain one. ONE definition so the closing trigger and any reader cannot disagree about what done means. 0281 added decision_ref, which is what a DECLINED closure turns on instead of a change reference.';
 
 
 --
@@ -2560,72 +2557,86 @@ CREATE FUNCTION ops.enforce_completion_capsule() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 declare
-  cap        record;
+  cap         record;
   implementer text;
   n_predicates int;
+  declining   boolean;
 begin
   if new.state <> 'confirmed_closed' then
     return new;
   end if;
   if tg_op = 'UPDATE' and old.state = 'confirmed_closed' then
-    return new;   -- already closed under whatever contract applied then
+    return new;
   end if;
 
   if new.completion_evidence is null
      or jsonb_typeof(new.completion_evidence) <> 'object' then
     raise exception
-      'closing %: done needs an evidence capsule, and completion_evidence is not an object. '
-      'The council''s price for leaving the queue is acceptance predicates, a change reference, '
-      'whether it is user-facing, and who checked it.', new.ref
-      using errcode = 'check_violation';
+      'closing %: done needs an evidence capsule, and completion_evidence is not an object.',
+      new.ref using errcode = 'check_violation';
   end if;
 
   select * into cap from ops.completion_capsule(new.completion_evidence);
 
-  select count(*) into n_predicates
-    from jsonb_array_elements_text(coalesce(cap.acceptance_predicates,'[]'::jsonb)) p
-   where btrim(p) <> '';
-  if n_predicates = 0 then
-    raise exception
-      'closing %: the evidence capsule states no acceptance predicates. What would have '
-      'made this done had to be sayable before it was done.', new.ref
-      using errcode = 'check_violation';
+  -- KEYED ON THE DECLARED KIND, never on the capsule looking thin. If a missing
+  -- change reference were itself the signal, "I have no change reference" would
+  -- become the way to buy the cheaper close.
+  declining := (new.completion_kind = 'declined');
+
+  if declining then
+    -- A DECLINE HAS NO CHANGE, NO ACCEPTANCE TESTS AND NO JOURNEY. What it has
+    -- is a decision, and someone other than the implementer who checked it.
+    if coalesce(btrim(cap.decision_ref),'') = '' then
+      raise exception
+        'closing %: a decline needs the DECISION that made it. Nothing else here is '
+        'evidence — there is no change to point at and no test that passed.',
+        new.ref using errcode = 'check_violation';
+    end if;
+  else
+    select count(*) into n_predicates
+      from jsonb_array_elements_text(coalesce(cap.acceptance_predicates,'[]'::jsonb)) p
+     where btrim(p) <> '';
+    if n_predicates = 0 then
+      raise exception
+        'closing %: the evidence capsule states no acceptance predicates. What would have '
+        'made this done had to be sayable before it was done.', new.ref
+        using errcode = 'check_violation';
+    end if;
+
+    if coalesce(btrim(cap.change_ref),'') = '' then
+      raise exception
+        'closing %: the evidence capsule names no change reference, so nothing ties this '
+        'closure to what actually shipped.', new.ref
+        using errcode = 'check_violation';
+    end if;
+
+    if cap.user_facing is null then
+      raise exception
+        'closing %: the evidence capsule does not say whether this is user-facing. Say so '
+        'explicitly — silence here is how a capability gets reported live before a human '
+        'has used it.', new.ref
+        using errcode = 'check_violation';
+    end if;
+
+    if cap.user_facing and coalesce(btrim(cap.user_journey_ref),'') = '' then
+      raise exception
+        'closing %: this is declared user-facing, so the capsule must name an EXERCISED user '
+        'journey. A user-facing thing nobody has used is not done.', new.ref
+        using errcode = 'check_violation';
+    end if;
   end if;
 
-  if coalesce(btrim(cap.change_ref),'') = '' then
-    raise exception
-      'closing %: the evidence capsule names no change reference, so nothing ties this '
-      'closure to what actually shipped.', new.ref
-      using errcode = 'check_violation';
-  end if;
-
-  if cap.user_facing is null then
-    raise exception
-      'closing %: the evidence capsule does not say whether this is user-facing. Say so '
-      'explicitly — silence here is how a capability gets reported live before a human '
-      'has used it.', new.ref
-      using errcode = 'check_violation';
-  end if;
-
-  if cap.user_facing and coalesce(btrim(cap.user_journey_ref),'') = '' then
-    raise exception
-      'closing %: this is declared user-facing, so the capsule must name an EXERCISED user '
-      'journey. A user-facing thing nobody has used is not done.', new.ref
-      using errcode = 'check_violation';
-  end if;
-
+  -- IDENTICAL FOR BOTH KINDS, and that is the point. A decline waved through on
+  -- the implementer's own say-so is exactly as unaccountable as a self-attested
+  -- build. The uuid-or-slug resolution stays too: every capability-lane
+  -- attestation records a uuid, so a slug-only comparison would pass every
+  -- self-attestation ever made.
   if coalesce(btrim(cap.attestor),'') = '' then
     raise exception
       'closing %: no attestor. Done requires somebody who did not build it saying it is done.',
       new.ref using errcode = 'check_violation';
   end if;
 
-  -- THE ATTESTOR IS NOT THE IMPLEMENTER. Compared against the same
-  -- executor-then-owner fallback the work-in-progress limit uses, so the two
-  -- controls cannot disagree about who is responsible for a row. The attestor may
-  -- be recorded as an actor uuid (the capability lane) or a slug, so both are
-  -- resolved to a slug before comparing — otherwise a uuid would never equal a
-  -- slug and this check would pass for every self-attestation ever made.
   implementer := coalesce(new.executor_actor, new.owner_actor);
   if implementer is not null then
     if lower(btrim(cap.attestor)) = lower(btrim(implementer))
@@ -2647,7 +2658,7 @@ end $$;
 -- Name: FUNCTION enforce_completion_capsule(); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.enforce_completion_capsule() IS 'Tune-up council 2026-08-21: a Work Request cannot reach confirmed_closed on a timestamp alone. Fires on the TRANSITION into confirmed_closed, so the one row closed before this contract existed stands as recorded. The owner batch sign-off and the 48-hour attestor-green auto-close are NOT here: they need a scheduled job, not a constraint, and are tracked in loop 504.';
+COMMENT ON FUNCTION ops.enforce_completion_capsule() IS 'Tune-up council 2026-08-21: a Work Request cannot reach confirmed_closed on a timestamp alone. Fires on the TRANSITION into confirmed_closed. A BUILT closure pays acceptance predicates, a change reference, an explicit user-facing boolean and a journey where that is true; a DECLINED closure pays the decision that made it, because there is no change and no test (0281). The independent-attestor test is identical for both.';
 
 
 --
@@ -8115,10 +8126,10 @@ $$;
 
 
 --
--- Name: search_doctrine_situations(text, uuid, text[], integer, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: search_doctrine_situations(text, uuid, text[], integer, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20, p_policy_id text DEFAULT NULL::text) RETURNS TABLE(section_id uuid, section_key text, title text, doc_slug text, content_class text, rank double precision, snippet text, lexical_score double precision, concept_score double precision, final_score double precision, provenance jsonb)
+CREATE FUNCTION public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20, p_policy_id text DEFAULT NULL::text, p_allow_fallback boolean DEFAULT false) RETURNS TABLE(section_id uuid, section_key text, title text, doc_slug text, content_class text, rank double precision, snippet text, lexical_score double precision, concept_score double precision, final_score double precision, provenance jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
@@ -8184,20 +8195,58 @@ with
            array_agg(distinct mapping_id order by mapping_id) as mapping_ids
       from concept_evidence group by section_id
   ),
-  unioned as (
+  unioned as materialized (
     select c.*, coalesce(least(1.0, l.raw_score), 0)::double precision as lexical_score,
            coalesce(least(1.0, ce.concept_score), 0)::double precision as concept_score,
            l.snippet, coalesce(ce.phrase_ids, '{}') as phrase_ids,
            coalesce(ce.concept_ids, '{}') as concept_ids,
-           coalesce(ce.mapping_ids, '{}') as mapping_ids
+           coalesce(ce.mapping_ids, '{}') as mapping_ids,
+           false as used_fallback
       from current_set c
       left join lexical_raw l on l.section_id = c.section_id
       left join concept_by_section ce on ce.section_id = c.section_id
      where l.section_id is not null or ce.section_id is not null
   ),
+  -- THE FALLBACK LANE. Same normalized words, OR between them. websearch
+  -- syntax recognizes the OR keyword, so this stays inside the same parser
+  -- that already accepts arbitrary user text without erroring. It computes
+  -- nothing unless the caller allowed it AND the strict lane came up empty.
+  fallback_terms as materialized (
+    select websearch_to_tsquery('english', regexp_replace(q, ' ', ' OR ', 'g')) as tsq
+      from normalized
+  ),
+  fallback_raw as (
+    select c.section_id,
+           ts_rank_cd(
+             setweight(c.section_title_vector, 'A') ||
+             setweight(c.document_title_vector, 'A') ||
+             setweight(c.body_search_vector, 'B'), q.tsq) as raw_score,
+           ts_headline('english', c.plain_text, q.tsq, 'MaxWords=25, MinWords=10') as snippet
+      from current_set c cross join fallback_terms q
+     where p_allow_fallback
+       and not exists (select 1 from unioned)
+       and (c.section_title_vector @@ q.tsq
+         or c.document_title_vector @@ q.tsq
+         or c.body_search_vector @@ q.tsq)
+  ),
+  fallback_unioned as (
+    select c.*, coalesce(least(1.0, f.raw_score), 0)::double precision as lexical_score,
+           0::double precision as concept_score,
+           f.snippet, '{}'::uuid[] as phrase_ids,
+           '{}'::uuid[] as concept_ids,
+           '{}'::uuid[] as mapping_ids,
+           true as used_fallback
+      from current_set c
+      join fallback_raw f on f.section_id = c.section_id
+  ),
+  combined as (
+    select * from unioned
+    union all
+    select * from fallback_unioned
+  ),
   maxima as (
     select greatest(max(lexical_score), 0) as max_lexical,
-           greatest(max(concept_score), 0) as max_concept from unioned
+           greatest(max(concept_score), 0) as max_concept from combined
   ),
   scored as (
     select u.*,
@@ -8216,7 +8265,7 @@ with
                      then (p.config->>'dual_evidence_bonus')::double precision else 0 end)
            end::double precision as final_score,
            p.policy_id, p.version as policy_version
-      from unioned u cross join maxima x cross join policy p
+      from combined u cross join maxima x cross join policy p
   ),
   limited as materialized (
     select * from scored
@@ -8233,6 +8282,10 @@ select l.section_id, l.section_key, l.section_title, l.doc_slug, l.content_class
          'lexical_score', l.lexical_score, 'concept_score', l.concept_score,
          'final_score', l.final_score, 'phrase_ids', to_jsonb(l.phrase_ids),
          'concept_ids', to_jsonb(l.concept_ids), 'mapping_ids', to_jsonb(l.mapping_ids))
+       -- The mark rides only on fallback rows, so strict answers keep their
+       -- exact prior provenance shape and every downstream byte comparison.
+       || case when l.used_fallback then jsonb_build_object('fallback', true)
+               else '{}'::jsonb end
   from limited l
  order by l.final_score desc, l.concept_score desc, l.lexical_score desc, l.section_key asc
 $$;
@@ -27883,7 +27936,7 @@ revoke all on function public.log_retrieval_query(p_query text, p_result_count i
 revoke all on function public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) from public;
 revoke all on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) from public;
 revoke all on function public.retrieval_visibility_actor_id(p_sponsor_slug text) from public;
-revoke all on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) from public;
+revoke all on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text, p_allow_fallback boolean) from public;
 grant usage on schema ops to carr_authority;
 grant usage on schema ops to carr_calendar_prebrief_attestors;
 grant usage on schema ops to carr_calendar_prebrief_canary_jobs;
@@ -28521,8 +28574,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
@@ -28613,8 +28666,8 @@ grant execute on function public.promote_retrieval_proposal(p_proposal_id uuid, 
 grant execute on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) to carr_writer;
 grant execute on function public.retrieval_visibility_actor_id(p_sponsor_slug text) to carr_reader;
 grant execute on function public.retrieval_visibility_actor_id(p_sponsor_slug text) to carr_writer;
-grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_reader;
-grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_writer;
+grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text, p_allow_fallback boolean) to carr_reader;
+grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text, p_allow_fallback boolean) to carr_writer;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_exporter;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_reader;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_writer;
@@ -28870,6 +28923,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0278_completion_needs_a_capsule_and_a_second_pair_of_eyes.sql	1eb6de438dea6e8bf61bdee40f8aa9cc9d6424217cc93a73c6896ab86f5ac088	2026-08-22 13:37:09.424356+00
 0279_carr_lease_renewal_provider.sql	0fbdb9c026aabb34b9c5ca17644ad4b1c2e32b2357008356f1487a23f1013585	2026-08-22 15:16:52.168053+00
 0280_control_catalog_workflow_manifest.sql	204acaa7bdd419acd749db373dacdcff4de828ce84204f371bd35486d9b50bcf	2026-08-22 15:38:56.495239+00
+0281_a_decline_is_not_built_work.sql	eba7d5356775835fe67c89c96e1bbbc43f4535a200f9a7abe2639364d51cbd8a	2026-08-22 16:32:29.91838+00
+0282_zero_hit_fallback_for_doctrine_search.sql	3bdd8a30afc47b07cf036ae4d36e059e3b593422db576cc0231814b8e04a5469	2026-08-22 17:00:48.544908+00
 \.
 
 
@@ -29172,6 +29227,12 @@ d5f92043-e10b-435d-bbaa-ab3d8c393657	phrase	{"phrase": "review cycle after a rec
 7edd92a9-a803-4bff-a543-bda5a6ef2416	phrase	{"phrase": "how the operating playbook learns from mistakes", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-002", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000007	1	2026-08-16 14:49:59.066172+00	\N
 b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a record layer outage playbook", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-AMB-001 explicit review-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000010	1	2026-08-16 14:49:59.066172+00	\N
 6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000008	1	2026-08-16 14:49:59.066172+00	\N
+227897ce-1025-42d6-b96f-f9338fac3197	concept	{"label": "Relationship path finding", "definition": "Finding who can introduce whom: walking the party intro graph to answer 'who do we know that can reach X'. Served by the who-do-we-know verb over v_party_graph edges; distinct from name lookup (find) and from deal context (catch-me-up).", "concept_key": "relationship-path-finding", "review_after": null}	Golden-miss probe 2026-08-22: partner-phrased question 'who can introduce me to a hospital decision maker' returned ZERO hits on search-doctrine despite a live who-do-we-know verb and doctrine covering the intro graph.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	1743e0b3-0b23-4bf0-947e-017a9853f3c0	1	2026-08-22 16:32:49.703719+00	\N
+4f8a652c-3a89-46b2-a8af-b0e635416594	phrase	{"phrase": "who can introduce me to", "source": "golden_miss", "weight": 1, "match_mode": "trgm", "source_ref": "ox-alpha lane-3 probe 2026-08-22: 'who can introduce me to a hospital decision maker' -> 0 hits on search-doctrine", "concept_key": "relationship-path-finding", "min_similarity": 0.4}	The partner phrasing for intro-graph questions names PEOPLE and introductions, never the machine nouns (party graph, who-do-we-know); without this phrase the lane is unreachable by its natural question.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0100e2a1-b5b5-4ea5-b42d-1ba0b3e49a6c	1	2026-08-22 16:35:27.320302+00	\N
+c25b1976-3068-4048-a7ba-dc143b41b7b2	concept	{"label": "National accounts", "definition": "The national-account client type: a parent organization spanning many markets, with per-market deals under one account owner. Ruled first-class by Joe on the Musicologie case (2026-08-02); served by create-national-account, set-national-account-owner, set-market-agent and the Lead Board's national-accounts lane.", "concept_key": "national-accounts", "review_after": null}	Golden-miss probe 2026-08-22: 'national account modelling musicologie' returned ZERO hits on search-doctrine although the ruling exists in precedent search and the lane is built — the doctrine side never names the concept the way partners say it.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	d67ae31e-a5fc-4998-87b5-6e1a487c2a2b	1	2026-08-22 16:36:37.606914+00	\N
+8e46f474-4b2a-4c72-af08-dc124ec95d62	phrase	{"phrase": "national account", "source": "golden_miss", "weight": 1, "match_mode": "fts", "source_ref": "ox-alpha lane-3 probe 2026-08-22: 'national account modelling musicologie' -> 0 hits", "concept_key": "national-accounts", "min_similarity": 0.35}	Partners say 'national account' as a noun; doctrine sections describe the mechanism without the phrase.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	6ab69e17-ec21-46b8-851c-8f6103a0107f	1	2026-08-22 16:36:38.209721+00	\N
+ae218a8b-261c-49d0-8b5e-8f0ed35ae102	concept	{"label": "Merge survivorship", "definition": "Which row wins when two party records are confirmed as one person: decided in advance by rule 4c21d86b so no merge is an ad-hoc judgment. Survivors keep their ref; retired rows become navigable tombstones (retired_refs), never merge targets again.", "concept_key": "merge-survivorship", "review_after": null}	Golden-miss probe 2026-08-22: 'survivorship rule for merges' and 'duplicate party merge which row wins' returned only one weak unrelated hit — the rule exists and ~20 merges pend on it, yet its natural question does not reach it.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	01584d4c-3e33-4f37-82ce-85d9632f3399	1	2026-08-22 16:40:00.86531+00	\N
+c632cdda-8ff4-4003-9d06-d8fbfa2df956	phrase	{"phrase": "which row wins", "source": "golden_miss", "weight": 0.9, "match_mode": "trgm", "source_ref": "ox-alpha lane-3 probe 2026-08-22: 'duplicate party merge which row wins' -> only unrelated hit", "concept_key": "merge-survivorship", "min_similarity": 0.35}	The partner question about merges is phrased as which record survives, not as survivorship policy.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0959cd3f-9215-4623-bae7-4f8962f81050	1	2026-08-22 16:40:01.432213+00	\N
 \.
 
 
