@@ -134,6 +134,52 @@ test("the work-in-progress limit is reported, and over-commitment is named", asy
     "reporting a limit and enforcing it are different jobs and must not be confused");
 });
 
+test("per-executor counting resolves the responsible party exactly as the trigger does", async () => {
+  // THE DIVERGENCE THIS PINS. ops.enforce_work_in_progress_limit() resolves who
+  // a row belongs to with coalesce(executor_actor, owner_actor) and then skips
+  // the per-executor check entirely when that is null. This verb used to bucket
+  // every unnamed row under one "unassigned" pseudo-executor, so two in-flight
+  // rows nobody owned were reported as an executor over their limit — a breach
+  // the database does not refuse and nobody can act on.
+  //
+  // A limit REPORTED but not ENFORCED is worse than either alone: it teaches the
+  // reader the number is decorative, which is how a real breach later gets
+  // waved past. The verb's job is to report what the claim path enforces, so
+  // the two have to resolve ownership the same way or the report is fiction.
+  const base = { acceptance_criteria: [], project_context: {},
+    blocker_code: null, blocker_detail: null,
+    program_key: null, program_ordinal: null,
+    claimed_at: null, started_at: null, updated_at: new Date().toISOString(),
+    hours_since_change: 1 };
+
+  const unowned = new Fake([
+    { ...base, ref: "WR-N1", title: "nobody a", state: "claimed",
+      owner_actor: null, executor_actor: null },
+    { ...base, ref: "WR-N2", title: "nobody b", state: "in_progress",
+      owner_actor: null, executor_actor: null },
+  ]);
+  const out = await call(unowned);
+  assert.deepEqual(out.wip.executors_over_limit, [],
+    "two unowned rows are not one executor over their limit — the trigger refuses neither");
+  assert.equal(out.wip.in_flight, 2,
+    "they still consume the system-wide limit and must stay in that count");
+  assert.equal(out.wip.in_flight_unattributed, 2,
+    "and they are named rather than silently dropped, or the number stops meaning anything");
+
+  // FALLBACK STILL APPLIES when only the owner is named — same coalesce the
+  // trigger uses, so a row with an owner and no executor counts against them.
+  const ownerOnly = new Fake([
+    { ...base, ref: "WR-O1", title: "owner a", state: "claimed",
+      owner_actor: "dell", executor_actor: null },
+    { ...base, ref: "WR-O2", title: "owner b", state: "in_progress",
+      owner_actor: "dell", executor_actor: null },
+  ]);
+  const fell = await call(ownerOnly);
+  assert.deepEqual(fell.wip.executors_over_limit, [{ executor: "dell", in_flight: 2 }],
+    "owner is the fallback on both sides; dropping it would under-report a real breach");
+  assert.equal(fell.wip.in_flight_unattributed, 0);
+});
+
 test("an item nobody has touched for two days is surfaced", async () => {
   const out = await call();
   const stale = out.unchanged_over_48h.map(s => s.human_ref);
