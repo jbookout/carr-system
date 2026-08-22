@@ -501,6 +501,108 @@ def _migration_acl_statements(sql: str, role: str) -> list[str]:
     return statements
 
 
+# An object a later migration REMOVES takes its privileges with it: PostgreSQL
+# deletes the ACL along with the object, so a rebuilt database carries no fact
+# for it at all. This plan is accumulated from committed SQL rather than read
+# back from a catalog, so without this step a grant issued before the removal
+# outlives the object, and the plan claims an authority the database cannot
+# show.
+#
+# Not hypothetical. The receipt-digest split removes the five-argument
+# ops.write_receipt_digest that an earlier slice had granted to carr_reader and
+# carr_writer. Both staging provisioning gates failed with "differs from
+# canonical full-rebuild plan" because the plan still carried the dead grant
+# while the rebuilt database, correctly, carried nothing.
+#
+# Only the removal forms the migrations actually use are recognised, and an
+# unrecognised one simply leaves the plan as it was -- the direction that fails
+# a gate rather than the direction that invents authority.
+OBJECT_REMOVAL = re.compile(
+    r"^drop (?P<kind>table|sequence|function|view) "
+    r"(?:if exists )?(?P<object>.+?)"
+    r"(?: (?:cascade|restrict))?;$",
+    re.IGNORECASE,
+)
+
+
+def _migration_removed_objects(sql: str) -> list[tuple[str, str]]:
+    """Objects a migration removes, as (kind, identity) matching ACL facts."""
+    removed: list[tuple[str, str]] = []
+    for raw in _scrub_sql(sql).split(";"):
+        statement = " ".join(raw.lower().split())
+        if not statement:
+            continue
+        match = OBJECT_REMOVAL.fullmatch(statement + ";")
+        if match is None:
+            continue
+        kind = "table" if match.group("kind") == "view" else match.group("kind")
+        for raw_object in _split_commas(match.group("object")):
+            if kind == "function":
+                function = FUNCTION_OBJECT.fullmatch(" ".join(raw_object.split()))
+                if function is None:
+                    continue
+                arguments = [
+                    " ".join(argument.split())
+                    for argument in _split_commas(function.group("arguments"))
+                ] if function.group("arguments") else []
+                identity = (
+                    f"{_qualify(function.group('name'))}({', '.join(arguments)})"
+                )
+                removed.append(("function", identity))
+            else:
+                try:
+                    removed.append((kind, _qualify(raw_object)))
+                except SnapshotGrantError:
+                    continue
+    return removed
+
+
+def _migration_authority_events(sql: str, role: str) -> list[tuple[int, tuple]]:
+    """ACL statements and object removals in FILE ORDER.
+
+    Order inside one migration is load-bearing: the Drive-inventory slice
+    removes ops.drive_retirement_readiness, recreates it, and re-grants it in
+    that sequence. Applying every grant first and every removal afterwards
+    dropped the re-grant and understated the plan by one execute.
+    """
+    scrubbed = _NON_ACL_ROLE_MENTIONS.sub(" ", _scrub_sql(sql))
+    events: list[tuple[int, tuple]] = [
+        (match.start(), ("acl", match.group(0)))
+        for match in ACL_STATEMENT.finditer(scrubbed)
+    ]
+    offset = 0
+    for raw in scrubbed.split(";"):
+        statement = " ".join(raw.lower().split())
+        start = offset
+        offset += len(raw) + 1
+        if not statement:
+            continue
+        match = OBJECT_REMOVAL.fullmatch(statement + ";")
+        if match is None:
+            continue
+        kind = "table" if match.group("kind") == "view" else match.group("kind")
+        for raw_object in _split_commas(match.group("object")):
+            if kind == "function":
+                function = FUNCTION_OBJECT.fullmatch(" ".join(raw_object.split()))
+                if function is None:
+                    continue
+                arguments = [
+                    " ".join(argument.split())
+                    for argument in _split_commas(function.group("arguments"))
+                ] if function.group("arguments") else []
+                identity = (
+                    f"{_qualify(function.group('name'))}({', '.join(arguments)})"
+                )
+                events.append((start, ("removal", "function", identity)))
+            else:
+                try:
+                    events.append((start, ("removal", kind, _qualify(raw_object))))
+                except SnapshotGrantError:
+                    continue
+    events.sort(key=lambda item: item[0])
+    return events
+
+
 def compose_grants_to_role(
     schema_text: str, migrations: Iterable[tuple[str, str]], role: str
 ) -> list[str]:
@@ -528,8 +630,21 @@ def compose_grants_to_role(
     for name, sql in ordered:
         if name in applied:
             continue
-        for statement in _migration_acl_statements(sql, role):
-            operation = _migration_acl_operation(statement, role)
+        _migration_acl_statements(sql, role)  # review-stop validation
+        for _position, event in _migration_authority_events(sql, role):
+            if event[0] == "removal":
+                _, removed_kind, removed_identity = event
+                facts = {
+                    fact for fact in facts
+                    if not (fact[0] == removed_kind and fact[1] == removed_identity)
+                    and not (
+                        removed_kind == "table"
+                        and fact[0] == "column"
+                        and fact[1].startswith(f"{removed_identity}(")
+                    )
+                }
+                continue
+            operation = _migration_acl_operation(event[1], role)
             if operation is None:
                 continue
             action, objects, privileges = operation
