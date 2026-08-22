@@ -6,9 +6,10 @@ Every exporter runs the same poison gate:
 A failed validation leaves the previous good file untouched and writes a
 validation_failed run row: the alarm layer (digest dead-man at 26h) sees it.
 
-DRAFT vs LIVE: until cutover, exporters write ONLY to the draft dir
-(repo out/exports). Live vault paths activate with CARR_EXPORT_LIVE=1 —
-flipped once, at cutover, never casually.
+DRAFT vs LIVE: exporters write to the draft dir (repo out/exports) unless
+CARR_EXPORT_LIVE=1, which sends them to EXPORT_HOME — CARR's OneDrive since
+Joe's ruling of 2026-08-22. It is no longer the Drive vault, which the
+2026-08-19 cutoff retired.
 
 Credential: CARR_DB_EXPORTER_URL from ~/.config/carr/db.env (carr_exporter
 bundle: export views + export_run + system_config, nothing else).
@@ -27,6 +28,31 @@ import psycopg
 REPO = Path(__file__).resolve().parent.parent
 DRAFT = REPO / "out" / "exports"
 VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+
+# WHERE THE LIVE FILES GO, ruled by Joe on 2026-08-22: CARR's own OneDrive.
+#
+# THE PROBLEM THIS SOLVES. The 2026-08-19 cutoff retired the Drive vault, and
+# these exports were still addressed to it. They did not break — they build
+# cleanly in seconds — they simply had nowhere to land, so thirteen nightly
+# steps refused every night for want of a destination and the chain finished
+# red. A chain that is always red is one nobody reads.
+#
+# WHY ONEDRIVE RATHER THAN A LOCAL FOLDER. These seven are the files a PERSON
+# opens and hands to somebody: the client roster, the leads and vendor lists,
+# the deal export. That is the one thing the store cannot do for them, and it
+# is why they survived a cutoff that retired 38 generated documents. CARR's
+# OneDrive is already where this system puts finished business documents —
+# pipelines/backfill_document_attachments.py has written completed deal
+# documents to Joe's Folder/Deals/Active Deals for months — so this puts the
+# projections beside the documents rather than inventing a second home.
+#
+# READ THE FILE BACK BEFORE BELIEVING IT LANDED. OneDrive, like Google Drive
+# File Stream before it, can serve a synced file as an online-only placeholder,
+# so a path that exists is not proof that content does. The exporter's own
+# checksum step reads the finished file, which is what makes a placeholder show
+# up as a failure here rather than as a silently empty projection downstream.
+EXPORT_HOME = Path(os.environ.get("CARR_EXPORT_HOME")
+                   or "/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI")
 LIVE = os.environ.get("CARR_EXPORT_LIVE") == "1"
 KEEP_GENERATIONS = 7
 
@@ -194,9 +220,9 @@ def keep_generation(final_path: Path):
 
 def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
     """build_fn(tmp_path, cur) -> (row_count, canonical_rows). Returns True on ok."""
-    dest_dir = (VAULT / live_rel_path).parent if LIVE else DRAFT
+    dest_dir = (EXPORT_HOME / live_rel_path).parent if LIVE else DRAFT
     dest_dir.mkdir(parents=True, exist_ok=True)
-    final_path = (VAULT / live_rel_path) if LIVE else DRAFT / Path(live_rel_path).name
+    final_path = (EXPORT_HOME / live_rel_path) if LIVE else DRAFT / Path(live_rel_path).name
     tmp_path = final_path.with_name(final_path.name + ".tmp")
 
     with connect() as conn, conn.cursor() as cur:
