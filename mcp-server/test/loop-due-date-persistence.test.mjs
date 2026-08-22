@@ -66,15 +66,7 @@ class LoopFake {
 
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    // THE REPLAY READ IS MATCHED ON THE STATEMENT, NOT ON ITS COLUMN LIST.
-    // It selects two columns today and five once the receipt work lands
-    // (request_hash, response, actor_id, organization_tenant_id and
-    // application_session_id), because replay identity is four things rather
-    // than one. A fake pinned to the two-column prefix stops recognising the
-    // query the moment that widens, falls through to the throw at the bottom,
-    // and the test then fails on "unhandled fake query" instead of on the
-    // thing it was written to check.
-    if (/^select request_hash, response.* from tool_call where idempotency_key/.test(sql)) {
+    if (sql.startsWith("select request_hash, response")) {
       const prior = this.calls.get(params[0]);
       return { rows: prior ? [prior] : [] };
     }
@@ -95,15 +87,18 @@ class LoopFake {
       return { rows: [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      // Keep the columns replayDecision reads, in toolCallInsertSQL's own
-      // parameter order, so a replay is judged on identity rather than on the
-      // two fields that used to be all this fake retained.
+      // BY POSITION, from the insert's own parameter order, because that is what
+      // the row coming back out of Postgres would carry. Storing only the hash
+      // and the response made every identity column read as undefined on replay,
+      // so a replay check comparing actor, tenant or session would judge the
+      // call against a row that had forgotten who made it -- and pass, which is
+      // the direction that does not announce itself.
       this.calls.set(params[0], {
         request_hash: params[3],
         response: JSON.parse(params[4]),
         actor_id: params[2],
-        organization_tenant_id: params[7],
-        application_session_id: params[12],
+        organization_tenant_id: params[7] ?? null,
+        application_session_id: params[12] ?? null,
       });
       return { rows: [] };
     }
@@ -209,7 +204,7 @@ class AddLoopFake {
   }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
-    if (/^select request_hash, response.* from tool_call where idempotency_key/.test(sql)) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) return { rows: [] };
     if (sql.startsWith("select id, rel_path, col_order from loop_block") ||
         sql.startsWith("select id, rel_path, renders_closed from loop_block") ||
         sql.startsWith("select id, rel_path from loop_block"))
