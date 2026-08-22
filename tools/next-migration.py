@@ -123,9 +123,36 @@ def main():
         try:
             validate_migration_names(tree_names, allow_frozen_subset=True)
         except MigrationNumberError as exc:
-            print(f"ERROR: {label} violates the migration-number contract: {exc}",
+            # WHOSE TREE IS IT. A violation in origin/main or in the tree the
+            # caller is standing in is theirs to fix and genuinely blocks: the
+            # number they are about to be handed may be wrong. A violation in
+            # ANOTHER session's worktree is neither.
+            #
+            # This distinction cost most of a night on 2026-08-22. Two branches
+            # merged 0248 twice; the collision was resolved on main by renumber,
+            # and every OTHER worktree on the machine still held the old
+            # filename on disk — as stale checkouts do, harmlessly. Because this
+            # returned 1 for any tree, the allocator refused for everyone,
+            # migration-number-contract-selftest.py failed, and the pre-push
+            # gate refused pushes from branches touching no migration at all.
+            # Three unrelated pushes were blocked by a file nobody was editing,
+            # and the only way through was skipping CI entirely — which is worse
+            # than the thing being guarded against.
+            #
+            # The council ruled this class on 2026-08-22: a machine-global
+            # condition may open a loop, never veto unrelated work. So a foreign
+            # tree now WARNS and its numbers are still merged into the claim set
+            # below, which is the part that actually protects the caller — those
+            # numbers stay reserved either way.
+            if os.path.realpath(wt) == here:
+                print(f"ERROR: this tree violates the migration-number contract: {exc}",
+                      file=sys.stderr)
+                return 1
+            print(f"WARNING: {label} violates the migration-number contract: {exc}\n"
+                  f"  It is another session's checkout, not yours, and it does not make the "
+                  f"number below unsafe — its numbers are still counted as claimed. Most often "
+                  f"this is a stale worktree that has not pulled since a renumber on main.",
                   file=sys.stderr)
-            return 1
         merge(claims, numbers_from_names(tree_names), label)
 
     if not claims:
