@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import glob
 import os
+import subprocess
 
 
 def changed_lines(diff_text: str) -> set[tuple[str, str]]:
@@ -83,3 +84,112 @@ def patches_dir_for(submodule_path: str) -> str:
     """
     parent = os.path.dirname(os.path.abspath(submodule_path))          # .../vendor
     return os.path.join(os.path.dirname(parent), "patches")            # .../patches
+
+
+_WORKTREE_ROOTS = (".claude/worktrees", ".codex-worktrees", ".worktrees")
+_GENERATED_PATHS = {
+    "tools/doc-convo/assets/.render-daemon.pid",
+    "tools/doc-convo/assets/render-daemon.log",
+}
+
+
+def _porcelain_path(row: str) -> str | None:
+    """Return the live path from a v1 porcelain row, or None if malformed."""
+    if len(row) < 4:
+        return None
+    path = row[3:].strip().strip('"')
+    return path.split(" -> ", 1)[-1] if path else None
+
+
+def _registered_worktrees(repo: str) -> set[str]:
+    """Absolute paths registered to this repository's Git worktree inventory."""
+    try:
+        output = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=repo,
+            capture_output=True, text=True, timeout=20, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {os.path.realpath(line.split(" ", 1)[1]) for line in output.splitlines()
+            if line.startswith("worktree ")}
+
+
+def _verified_worktree(repo: str, relpath: str, registered: set[str]) -> bool:
+    """True only when a managed-root path belongs to a nested Git checkout.
+
+    A name below a familiar root is insufficient: a source file under that
+    root remains actionable unless the immediate worktree child has its .git
+    directory or gitdir link.  This lets a managed checkout be reported without
+    turning its root into a blanket ignore rule.
+    """
+    clean = relpath.rstrip("/")
+    for root in _WORKTREE_ROOTS:
+        if clean == root:
+            try:
+                children = list(os.scandir(os.path.join(repo, root)))
+            except OSError:
+                return False
+            return bool(children) and all(
+                child.is_dir() and os.path.exists(os.path.join(child.path, ".git"))
+                and os.path.realpath(child.path) in registered
+                for child in children)
+        if clean.startswith(root + "/"):
+            tail = clean[len(root):].lstrip("/").split("/", 1)[0]
+            child = os.path.join(repo, root, tail)
+            return (os.path.exists(os.path.join(child, ".git"))
+                    and os.path.realpath(child) in registered)
+    return False
+
+
+def _generated_artifact(relpath: str) -> bool:
+    """Known product-owned generated outputs, deliberately an exact set."""
+    return relpath.rstrip("/") in _GENERATED_PATHS
+
+
+def classify_loose_status(repo: str | os.PathLike[str], rows: list[str]) -> dict[str, list[str]]:
+    """Split porcelain rows into actionable and non-actionable loose-work.
+
+    Expected patched submodules are verified against their tracked patches;
+    managed artifacts require either a verified nested worktree or an exact,
+    source-backed generated-output path. Everything unknown remains actionable.
+    """
+    root = os.fspath(repo)
+    registered = _registered_worktrees(root)
+    buckets = {"actionable_tracked": [], "actionable_untracked": [],
+               "expected_patched_submodules": [], "managed_artifacts": []}
+    for row in rows:
+        if not row.strip():
+            continue
+        relpath = _porcelain_path(row)
+        if not relpath:
+            continue
+        full = os.path.join(root, relpath)
+        if row.startswith("??"):
+            if _verified_worktree(root, relpath, registered) or _generated_artifact(relpath):
+                buckets["managed_artifacts"].append(relpath)
+            else:
+                buckets["actionable_untracked"].append(relpath)
+            continue
+        if os.path.isdir(full) and os.path.exists(os.path.join(full, ".git")):
+            try:
+                diff = subprocess.run(["git", "diff"], cwd=full, capture_output=True,
+                                      text=True, timeout=20).stdout
+                if submodule_dirt_is_tracked_patch(diff, patches_dir_for(full)):
+                    buckets["expected_patched_submodules"].append(relpath)
+                    continue
+            except (OSError, subprocess.SubprocessError):
+                pass                    # cannot vouch for it -> actionable
+        buckets["actionable_tracked"].append(relpath)
+    return buckets
+
+
+def loose_work_requires_attention(
+    buckets: dict[str, list[str]], tracked_requires_attention: bool = True
+) -> bool:
+    """Whether a consumer must be non-green for this loose-work state.
+
+    Canonical health has no age grace and takes the default. Recovery supplies
+    its existing tracked-file age verdict; unknown untracked source is always
+    actionable in either view.
+    """
+    return bool((tracked_requires_attention and buckets["actionable_tracked"])
+                or buckets["actionable_untracked"])
