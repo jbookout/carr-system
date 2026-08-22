@@ -30,7 +30,8 @@
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
 -- widening a pattern.
 -- carr_reader, carr_writer, carr_exporter, carr_authority,
--- carr_device_evidence, and the four calendar-prebrief roles are privilege
+-- carr_device_evidence, the four calendar-prebrief roles, and the renewal
+-- source-attestor role are privilege
 -- bundles, so they stay NOLOGIN. carr_jobs is
 -- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
@@ -47,7 +48,8 @@ begin
   foreach r in array array[
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
     'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
-    'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver'
+    'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver',
+    'carr_renewal_source_attestors'
   ] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
@@ -344,6 +346,31 @@ begin
     a.slug,ar.accepted_at,w.shape_disposition,w.shape_fixed_surface_ref,false;
 end;
 $_$;
+
+
+--
+-- Name: activate_calendar_prebrief_joe_live(text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.activate_calendar_prebrief_joe_live(p_evidence_digest text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare a ops.calendar_prebrief_allowed_calendar%rowtype; rid uuid; v_definition_count integer;
+begin
+ if session_user<>'carr_authority_joe' or p_evidence_digest !~ '^[0-9a-f]{64}$' then raise exception 'Joe activation authority or evidence refused'; end if;
+ select * into a from ops.calendar_prebrief_allowed_calendar where sponsor='joe' for update;
+ if not found or a.active_revision_id is null or not exists(select 1 from ops.calendar_prebrief_allowlist_receipt where id=a.active_revision_id and sponsor='joe' and configuration_digest=a.configuration_digest) then raise exception 'Joe activation requires current allowlist receipt'; end if;
+ insert into ops.calendar_prebrief_runtime_activation_receipt(sponsor,app_evidence_digest,allowlist_revision_id,activated_by) values('joe',p_evidence_digest,a.active_revision_id,'joe') returning id into rid;
+ update ops.job_definition set enabled=true,updated_at=now()
+  where key='calendar-prebrief-projection-joe-daily' and version=1
+    and owner_actor='joe';
+ get diagnostics v_definition_count = row_count;
+ if v_definition_count<>1 then
+   raise exception 'Joe activation requires exactly one Joe live definition';
+ end if;
+ return rid;
+end $_$;
 
 
 --
@@ -1704,6 +1731,40 @@ COMMENT ON FUNCTION ops.capture_sourced_work_request(p_origin_ref text, p_title 
 
 
 --
+-- Name: claim_calendar_prebrief_joe_live_job(text, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.claim_calendar_prebrief_joe_live_job(p_worker text, p_lease_seconds integer DEFAULT 300) RETURNS TABLE(job_id uuid, lease uuid, scheduled_for timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare v ops.job%rowtype;
+begin
+ if session_user<>'carr_jobs' or btrim(coalesce(p_worker,''))='' or p_lease_seconds not between 1 and 300 then raise exception 'Joe calendar runtime identity or lease refused'; end if;
+ if not exists(
+   select 1
+     from ops.calendar_prebrief_allowed_calendar a
+     join lateral (
+       select r.allowlist_revision_id
+         from ops.calendar_prebrief_runtime_activation_receipt r
+        where r.sponsor='joe'
+        order by r.activated_at desc,r.id desc limit 1
+     ) latest on latest.allowlist_revision_id=a.active_revision_id
+     join ops.calendar_prebrief_allowlist_receipt l
+       on l.id=a.active_revision_id and l.sponsor='joe'
+      and l.configuration_digest=a.configuration_digest
+    where a.sponsor='joe'
+ ) then raise exception 'Joe claim activation gate refused'; end if;
+ perform ops.reap_expired_jobs();
+ select j.* into v from ops.job j join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version where d.enabled and j.definition_key='calendar-prebrief-projection-joe-daily' and j.definition_version=1 and d.owner_actor='joe' and j.mode='live' and j.state in ('queued','retry_wait') and j.next_attempt_at<=now() order by j.scheduled_for,j.created_at for update of j,d skip locked limit 1;
+ if not found then return; end if;
+ update ops.job set state='running',attempt=v.attempt+1,lease_owner=p_worker,lease_token=gen_random_uuid(),leased_until=now()+make_interval(secs=>p_lease_seconds),started_at=coalesce(started_at,now()),updated_at=now() where id=v.id returning * into v;
+ insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state) values(v.id,v.attempt,v.lease_owner,v.lease_token,'running');
+ return query select v.id,v.lease_token,v.scheduled_for;
+end $$;
+
+
+--
 -- Name: claim_job(text, integer, integer); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -1712,28 +1773,22 @@ CREATE FUNCTION ops.claim_job(p_worker text, p_limit integer DEFAULT 1, p_lease_
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
 begin
-  if btrim(coalesce(p_worker,''))='' or p_limit < 1 or p_lease_seconds < 1 then
+  if btrim(coalesce(p_worker,''))='' or p_limit<1 or p_lease_seconds<1 then
     raise exception 'worker, positive limit and positive lease are required';
   end if;
   perform ops.reap_expired_jobs();
   return query
   with candidate as (
-    select j.id
-      from ops.job j
-      join ops.job_definition d
-        on d.key=j.definition_key and d.version=j.definition_version
-     where d.enabled and j.state in ('queued','retry_wait')
-       and j.next_attempt_at <= now()
-     order by j.scheduled_for,j.created_at
-     for update of j,d skip locked limit p_limit
+    select j.id from ops.job j join ops.job_definition d
+      on d.key=j.definition_key and d.version=j.definition_version
+     where d.enabled and j.state in ('queued','retry_wait') and j.next_attempt_at<=now()
+       and not (j.definition_key='calendar-prebrief-projection-joe-daily' and j.definition_version=1)
+     order by j.scheduled_for,j.created_at for update of j,d skip locked limit p_limit
   ), claimed as (
-    update ops.job j set
-      state='running',attempt=j.attempt+1,lease_owner=p_worker,
-      lease_token=gen_random_uuid(),
-      leased_until=now()+make_interval(secs=>p_lease_seconds),
+    update ops.job j set state='running',attempt=j.attempt+1,lease_owner=p_worker,
+      lease_token=gen_random_uuid(),leased_until=now()+make_interval(secs=>p_lease_seconds),
       started_at=coalesce(j.started_at,now()),updated_at=now()
-    from candidate c where j.id=c.id
-    returning j.*
+      from candidate c where j.id=c.id returning j.*
   ), attempts(claimed_job_id) as (
     insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
     select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
@@ -1741,8 +1796,8 @@ begin
   )
   select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
          d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
-    from claimed c
-    join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version
+    from claimed c join ops.job_definition d
+      on d.key=c.definition_key and d.version=c.definition_version
     join attempts a on a.claimed_job_id=c.id;
 end $$;
 
@@ -1757,27 +1812,23 @@ CREATE FUNCTION ops.claim_job_mode(p_worker text, p_mode text, p_limit integer D
     AS $$
 begin
   if btrim(coalesce(p_worker,''))='' or p_mode not in ('shadow','canary','live','replay')
-     or p_limit < 1 or p_lease_seconds < 1 then
+     or p_limit<1 or p_lease_seconds<1 then
     raise exception 'worker, valid mode, positive limit and positive lease are required';
   end if;
   perform ops.reap_expired_jobs();
   return query
   with candidate as (
-    select j.id
-      from ops.job j
-      join ops.job_definition d
-        on d.key=j.definition_key and d.version=j.definition_version
-     where d.enabled and j.state in ('queued','retry_wait')
-       and j.next_attempt_at <= now() and j.mode=p_mode
-     order by j.scheduled_for,j.created_at
-     for update of j,d skip locked limit p_limit
+    select j.id from ops.job j join ops.job_definition d
+      on d.key=j.definition_key and d.version=j.definition_version
+     where d.enabled and j.state in ('queued','retry_wait') and j.next_attempt_at<=now()
+       and j.mode=p_mode
+       and not (j.definition_key='calendar-prebrief-projection-joe-daily' and j.definition_version=1)
+     order by j.scheduled_for,j.created_at for update of j,d skip locked limit p_limit
   ), claimed as (
-    update ops.job j set
-      state='running',attempt=j.attempt+1,lease_owner=p_worker,
+    update ops.job j set state='running',attempt=j.attempt+1,lease_owner=p_worker,
       lease_token=gen_random_uuid(),leased_until=now()+make_interval(secs=>p_lease_seconds),
       started_at=coalesce(j.started_at,now()),updated_at=now()
-    from candidate c where j.id=c.id
-    returning j.*
+      from candidate c where j.id=c.id returning j.*
   ), attempts(claimed_job_id) as (
     insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
     select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
@@ -1785,8 +1836,8 @@ begin
   )
   select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
          d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
-    from claimed c
-    join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version
+    from claimed c join ops.job_definition d
+      on d.key=c.definition_key and d.version=c.definition_version
     join attempts a on a.claimed_job_id=c.id;
 end $$;
 
@@ -1819,6 +1870,27 @@ begin
   return jsonb_build_object('attempt_id',attempt.id,
     'deploy_allowed',inserted_count=1,'replayed',inserted_count=0,
     'state',case when inserted_count=1 then 'claimed' else 'claimed_pending_readback' end);
+end $$;
+
+
+--
+-- Name: complete_calendar_prebrief_joe_live_job(uuid, uuid, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) RETURNS TABLE(job_id uuid, attempt integer, state text, attestation_id uuid, receipt_id uuid, allowlist_revision_id uuid, allowlist_digest text, scheduled_for timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; r ops.calendar_prebrief_projection_receipt%rowtype; a ops.calendar_prebrief_source_attestation_receipt%rowtype;
+begin
+ if session_user<>'carr_jobs' then raise exception 'Joe completion identity refused'; end if;
+ select * into j from ops.job where id=p_job for update;
+ if not found or j.definition_key<>'calendar-prebrief-projection-joe-daily' or j.definition_version<>1 or j.mode<>'live' or j.state<>'running' or j.lease_token is distinct from p_lease then raise exception 'Joe completion lease refused'; end if;
+ select * into r from ops.calendar_prebrief_projection_receipt where job_id=j.id and attempt=j.attempt and id=p_receipt;
+ select * into a from ops.calendar_prebrief_source_attestation_receipt where job_id=j.id and attempt=j.attempt and id=p_attestation;
+ if r.id is null or a.id is null or r.source_attestation_id<>a.id or r.sponsor<>'joe' or a.sponsor<>'joe' or a.lease_token<>p_lease then raise exception 'Joe completion evidence refused'; end if;
+ perform ops.complete_job(j.id,p_lease,jsonb_build_object('sponsor','joe','mode','live','attestation_id',p_attestation,'receipt_id',p_receipt,'allowlist_revision_id',r.allowlist_revision_id,'allowlist_digest',r.allowlist_digest),'calendar-prebrief:joe:'||j.id::text||':'||j.attempt::text);
+ return query select j.id,j.attempt,'succeeded'::text,a.id,r.id,r.allowlist_revision_id,r.allowlist_digest,j.scheduled_for;
 end $$;
 
 
@@ -3081,6 +3153,51 @@ end $_$;
 
 
 --
+-- Name: ingest_renewal_signed_snapshot(uuid, uuid, uuid, text, text, timestamp with time zone, text, text, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.ingest_renewal_signed_snapshot(p_job_id uuid, p_lease uuid, p_snapshot_id uuid, p_provider text, p_key_fingerprint text, p_source_observed_at timestamp with time zone, p_payload_sha256 text, p_signature_sha256 text, p_rows jsonb) RETURNS TABLE(source_run_id uuid, row_count integer)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare v_job ops.job%rowtype; v_snapshot ops.renewal_source_snapshot%rowtype; v_row jsonb; v_candidate_id uuid; v_run ops.renewal_decision_source_run%rowtype; v_count integer; v_seq integer:=0; v_key text;
+begin
+ if session_user<>'carr_renewal_source_attestor' or not pg_has_role(session_user,'carr_renewal_source_attestors','member') then raise exception using errcode='42501',message='renewal signed ingress requires the exact renewal source attestor capability'; end if;
+ if p_provider is null or btrim(p_provider)='' or octet_length(p_provider)>256 or p_key_fingerprint !~ '^[0-9a-f]{64}$' or p_payload_sha256 !~ '^[0-9a-f]{64}$' or p_signature_sha256 !~ '^[0-9a-f]{64}$' then raise exception using errcode='22023',message='renewal signed ingress provenance is malformed'; end if;
+ if jsonb_typeof(p_rows)<>'array' or jsonb_array_length(p_rows)>10000 or octet_length(p_rows::text)>8388608 then raise exception using errcode='22023',message='renewal signed ingress source rows are not bounded'; end if;
+ if exists(select 1 from jsonb_array_elements(p_rows) x(value) where jsonb_typeof(value)<>'object'
+           or (select array_agg(key order by key) from jsonb_object_keys(value) key) is distinct from array['address','city','county','email','est_basis','est_lease_event','name','org_name','phone','segment','source_key','source_row','state','vertical']
+           or nullif(btrim(value->>'source_key'),'') is null or nullif(btrim(value->>'name'),'') is null or octet_length(value->>'source_key')>512 or octet_length(value->>'name')>512 or octet_length((value->'source_row')::text)>65536 or octet_length(value::text)>131072 or jsonb_typeof(value->'source_row')<>'object') then
+   raise exception using errcode='22023',message='renewal signed ingress source row shape is malformed'; end if;
+ if exists(select 1 from jsonb_array_elements(p_rows) x(value) group by value->>'source_key' having count(*)<>1) then raise exception using errcode='23505',message='renewal signed ingress source key is duplicated'; end if;
+ select * into v_job from ops.job where id=p_job_id for update;
+ if not found or v_job.definition_key<>'renewal-radar-source-daily' or v_job.definition_version<>1 or v_job.mode<>'live' or v_job.state<>'running' or v_job.lease_token is distinct from p_lease or v_job.leased_until is null or v_job.leased_until<now() then raise exception using errcode='55000',message='renewal signed ingress requires its exact current live job lease'; end if;
+ if p_source_observed_at < now()-interval '36 hours' or p_source_observed_at > now()+interval '5 minutes' then raise exception using errcode='22023',message='renewal signed ingress source observation is outside its DB-clock window'; end if;
+ insert into ops.renewal_source_snapshot(id,job_id,attempt,provider,key_fingerprint,source_observed_at,payload_sha256,signature_sha256,row_count)
+ values(p_snapshot_id,v_job.id,v_job.attempt,p_provider,p_key_fingerprint,p_source_observed_at,p_payload_sha256,p_signature_sha256,jsonb_array_length(p_rows)) on conflict(id) do nothing;
+ select * into v_snapshot from ops.renewal_source_snapshot where id=p_snapshot_id for update;
+ if not found or v_snapshot.job_id<>v_job.id or v_snapshot.attempt<>v_job.attempt or v_snapshot.provider<>p_provider or v_snapshot.key_fingerprint<>p_key_fingerprint or v_snapshot.source_observed_at<>p_source_observed_at or v_snapshot.payload_sha256<>p_payload_sha256 or v_snapshot.signature_sha256<>p_signature_sha256 or v_snapshot.row_count<>jsonb_array_length(p_rows) then raise exception using errcode='23505',message='renewal signed ingress snapshot identity conflicts with immutable receipt'; end if;
+ select count(*) into v_count from ops.renewal_source_snapshot_member where snapshot_id=p_snapshot_id;
+ if v_count>0 then
+   if v_count<>jsonb_array_length(p_rows) or exists((select value->>'source_key' from jsonb_array_elements(p_rows) x(value)) except (select source_key from ops.renewal_source_snapshot_member where snapshot_id=p_snapshot_id)) or exists((select source_key from ops.renewal_source_snapshot_member where snapshot_id=p_snapshot_id) except (select value->>'source_key' from jsonb_array_elements(p_rows) x(value))) then raise exception using errcode='23505',message='renewal signed ingress replay conflicts with immutable source membership'; end if;
+ else
+   for v_row in select value from jsonb_array_elements(p_rows) x(value) loop
+     v_seq:=v_seq+1; v_key:=btrim(v_row->>'source_key');
+     insert into ingest_inbox(source,external_id,payload,status,triage_note) values('renewal-radar-signed',p_snapshot_id::text||':'||v_key,jsonb_build_object('provider',p_provider,'snapshot_id',p_snapshot_id,'observed_at',p_source_observed_at,'row',v_row),'new','signed renewal source ingress; payload is untrusted source data') on conflict(source,external_id) do nothing;
+     insert into candidate_pool(source,source_key,source_seq,source_row,name,org_name,vertical,address,city,county,state,email,phone,segment,score,score_basis,est_lease_event,est_basis,status,created_by,updated_by)
+       select 'renewal-radar',v_key,v_seq,v_row->'source_row',btrim(v_row->>'name'),nullif(btrim(v_row->>'org_name'),''),nullif(btrim(v_row->>'vertical'),''),nullif(btrim(v_row->>'address'),''),nullif(btrim(v_row->>'city'),''),nullif(btrim(v_row->>'county'),''),nullif(btrim(v_row->>'state'),''),nullif(btrim(v_row->>'email'),''),nullif(btrim(v_row->>'phone'),''),nullif(btrim(v_row->>'segment'),''),null,'unscored signed renewal source snapshot',nullif(v_row->>'est_lease_event','')::date,nullif(btrim(v_row->>'est_basis'),''),'pool',a.id,a.id from actor a where a.slug='system'
+       on conflict(source,source_key) do update set source_seq=excluded.source_seq,source_row=excluded.source_row,name=excluded.name,org_name=excluded.org_name,vertical=excluded.vertical,address=excluded.address,city=excluded.city,county=excluded.county,state=excluded.state,email=excluded.email,phone=excluded.phone,segment=excluded.segment,score=null,score_basis='unscored signed renewal source snapshot',est_lease_event=excluded.est_lease_event,est_basis=excluded.est_basis,updated_by=excluded.updated_by where candidate_pool.status='pool' returning id into v_candidate_id;
+     if v_candidate_id is null then raise exception using errcode='23505',message='renewal signed ingress source key conflicts with a non-pool candidate'; end if;
+     insert into ops.renewal_source_snapshot_member(snapshot_id,source_key,candidate_id) values(p_snapshot_id,v_key,v_candidate_id);
+     update ingest_inbox set status='filed',filed_refs=jsonb_build_object('candidate_pool',v_candidate_id::text) where source='renewal-radar-signed' and external_id=p_snapshot_id::text||':'||v_key and status='new';
+   end loop;
+ end if;
+ select * into v_run from ops.seal_renewal_decision_source_run(p_job_id,p_lease,p_snapshot_id);
+ source_run_id:=v_run.id; row_count:=v_snapshot.row_count; return next;
+end $_$;
+
+
+--
 -- Name: invalidate_cognition_cache(text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3877,6 +3994,16 @@ begin
   on conflict (job_id,attempt,cache_key,observation_kind) do nothing;
   return true;
 end $$;
+
+
+--
+-- Name: read_calendar_prebrief_joe_activation(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.read_calendar_prebrief_joe_activation(p_id uuid) RETURNS TABLE(id uuid, sponsor text, app_evidence_digest text, allowlist_revision_id uuid, activated_at timestamp with time zone)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$ select id,sponsor,app_evidence_digest,allowlist_revision_id,activated_at from ops.calendar_prebrief_runtime_activation_receipt where id=p_id and session_user='carr_authority_joe' $$;
 
 
 --
@@ -5758,6 +5885,39 @@ $$;
 
 
 --
+-- Name: schedule_calendar_prebrief_joe_live_job(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.schedule_calendar_prebrief_joe_live_job() RETURNS TABLE(job_id uuid, scheduled_for timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare local_now timestamp; due timestamptz; jid uuid;
+begin
+ if session_user<>'carr_jobs' then raise exception 'Joe scheduler identity refused'; end if;
+ local_now:=now() at time zone 'America/Chicago';
+ if extract(isodow from local_now) not between 1 and 5 or local_now::time < time '06:30' or local_now::time >= time '06:45' then return; end if;
+ if not exists(select 1 from ops.job_definition where key='calendar-prebrief-projection-joe-daily' and version=1 and owner_actor='joe' and enabled) or not exists(
+   select 1
+     from ops.calendar_prebrief_allowed_calendar a
+     join lateral (
+       select r.allowlist_revision_id
+         from ops.calendar_prebrief_runtime_activation_receipt r
+        where r.sponsor='joe'
+        order by r.activated_at desc,r.id desc limit 1
+     ) latest on latest.allowlist_revision_id=a.active_revision_id
+     join ops.calendar_prebrief_allowlist_receipt l
+       on l.id=a.active_revision_id and l.sponsor='joe'
+      and l.configuration_digest=a.configuration_digest
+    where a.sponsor='joe'
+ ) then raise exception 'Joe scheduler activation gate refused'; end if;
+ due:=date_trunc('day',local_now) + interval '6 hours 30 minutes'; due:=due at time zone 'America/Chicago';
+ select (ops.enqueue_job('calendar-prebrief-projection-joe-daily',1,due,jsonb_build_object('workflow_key','calendar-prebrief-projection-joe-daily','scheduled_for',due),'calendar-prebrief:joe:'||due::text,'live')).id into jid;
+ return query select jid,due;
+end $$;
+
+
+--
 -- Name: renewal_decision_source_run; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -5768,6 +5928,7 @@ CREATE TABLE ops.renewal_decision_source_run (
     snapshot_at timestamp with time zone NOT NULL,
     recorded_at timestamp with time zone DEFAULT now() NOT NULL,
     member_count integer NOT NULL,
+    source_snapshot_id uuid,
     CONSTRAINT renewal_decision_source_run_attempt_check CHECK ((attempt > 0)),
     CONSTRAINT renewal_decision_source_run_member_count_check CHECK ((member_count >= 0))
 );
@@ -5822,6 +5983,45 @@ begin
     select v_run.id,cp.id,ops.renewal_decision_candidate_digest(cp)
       from candidate_pool cp where cp.source='renewal-radar' and cp.status='pool';
   return v_run;
+end $$;
+
+
+--
+-- Name: seal_renewal_decision_source_run(uuid, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) RETURNS ops.renewal_decision_source_run
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare v_job ops.job%rowtype; v_snapshot ops.renewal_source_snapshot%rowtype; v_run ops.renewal_decision_source_run%rowtype; v_count integer;
+begin
+ if session_user<>'carr_renewal_source_attestor' or not pg_has_role(session_user,'carr_renewal_source_attestors','member') then raise exception using errcode='42501',message='renewal source-run sealing requires the exact renewal source attestor capability'; end if;
+ select * into v_job from ops.job where id=p_job_id for update;
+ if not found or v_job.definition_key<>'renewal-radar-source-daily' or v_job.definition_version<>1 or v_job.mode<>'live' or v_job.state<>'running' or v_job.lease_token is distinct from p_lease or v_job.leased_until is null or v_job.leased_until<now() then raise exception using errcode='55000',message='renewal source-run sealing requires its current static job lease'; end if;
+ if v_job.scheduled_for < now()-interval '36 hours' or v_job.scheduled_for > now()+interval '5 minutes' then raise exception using errcode='22023',message='renewal source-run sealing refuses a job outside its DB-clock window'; end if;
+ select * into v_snapshot from ops.renewal_source_snapshot where id=p_snapshot_id and job_id=v_job.id and attempt=v_job.attempt for update;
+ if not found then raise exception using errcode='22023',message='renewal source-run sealing requires the exact leased signed source snapshot'; end if;
+ if v_snapshot.row_count<>(select count(*) from ops.renewal_source_snapshot_member where snapshot_id=v_snapshot.id)
+    or exists(select 1 from ops.renewal_source_snapshot_member sm left join candidate_pool cp on cp.id=sm.candidate_id where sm.snapshot_id=v_snapshot.id and (cp.id is null or cp.source<>'renewal-radar' or cp.status<>'pool')) then
+   raise exception using errcode='23505',message='renewal source snapshot members are not a current mutable projection'; end if;
+ perform pg_advisory_xact_lock(hashtextextended('renewal-decision-source-run',0));
+ select * into v_run from ops.renewal_decision_source_run where job_id=v_job.id and attempt=v_job.attempt;
+ if found then
+   if v_run.source_snapshot_id is distinct from v_snapshot.id or v_run.member_count<>v_snapshot.row_count
+      or exists((select sm.candidate_id,ops.renewal_decision_candidate_digest(cp) from ops.renewal_source_snapshot_member sm join candidate_pool cp on cp.id=sm.candidate_id where sm.snapshot_id=v_snapshot.id)
+                except (select candidate_id,row_digest from ops.renewal_decision_source_run_member where source_run_id=v_run.id))
+      or exists((select candidate_id,row_digest from ops.renewal_decision_source_run_member where source_run_id=v_run.id)
+                except (select sm.candidate_id,ops.renewal_decision_candidate_digest(cp) from ops.renewal_source_snapshot_member sm join candidate_pool cp on cp.id=sm.candidate_id where sm.snapshot_id=v_snapshot.id)) then
+     raise exception using errcode='23505',message='renewal source-run replay conflicts with immutable signed source membership';
+   end if;
+   return v_run;
+ end if;
+ select count(*) into v_count from ops.renewal_source_snapshot_member where snapshot_id=v_snapshot.id;
+ insert into ops.renewal_decision_source_run(job_id,attempt,snapshot_at,member_count,source_snapshot_id) values(v_job.id,v_job.attempt,v_job.scheduled_for,v_count,v_snapshot.id) returning * into v_run;
+ insert into ops.renewal_decision_source_run_member(source_run_id,candidate_id,row_digest)
+ select v_run.id,sm.candidate_id,ops.renewal_decision_candidate_digest(cp) from ops.renewal_source_snapshot_member sm join candidate_pool cp on cp.id=sm.candidate_id where sm.snapshot_id=v_snapshot.id;
+ return v_run;
 end $$;
 
 
@@ -8123,6 +8323,23 @@ CREATE TABLE ops.calendar_prebrief_projection_participant (
 
 
 --
+-- Name: calendar_prebrief_runtime_activation_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.calendar_prebrief_runtime_activation_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sponsor text NOT NULL,
+    app_evidence_digest text CONSTRAINT calendar_prebrief_runtime_activati_app_evidence_digest_not_null NOT NULL,
+    allowlist_revision_id uuid CONSTRAINT calendar_prebrief_runtime_activa_allowlist_revision_id_not_null NOT NULL,
+    activated_by text CONSTRAINT calendar_prebrief_runtime_activation_rece_activated_by_not_null NOT NULL,
+    activated_at timestamp with time zone DEFAULT now() CONSTRAINT calendar_prebrief_runtime_activation_rece_activated_at_not_null NOT NULL,
+    CONSTRAINT calendar_prebrief_runtime_activation__app_evidence_digest_check CHECK ((app_evidence_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT calendar_prebrief_runtime_activation_receipt_activated_by_check CHECK ((activated_by = 'joe'::text)),
+    CONSTRAINT calendar_prebrief_runtime_activation_receipt_sponsor_check CHECK ((sponsor = 'joe'::text))
+);
+
+
+--
 -- Name: capability_agent_session; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -9363,6 +9580,42 @@ CREATE TABLE ops.renewal_decision_source_run_member (
     candidate_id uuid NOT NULL,
     row_digest text NOT NULL,
     CONSTRAINT renewal_decision_source_run_member_row_digest_check CHECK ((row_digest ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: renewal_source_snapshot; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.renewal_source_snapshot (
+    id uuid NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    provider text NOT NULL,
+    key_fingerprint text NOT NULL,
+    source_observed_at timestamp with time zone NOT NULL,
+    payload_sha256 text NOT NULL,
+    signature_sha256 text NOT NULL,
+    row_count integer NOT NULL,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT renewal_source_snapshot_attempt_check CHECK ((attempt > 0)),
+    CONSTRAINT renewal_source_snapshot_key_fingerprint_check CHECK ((key_fingerprint ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT renewal_source_snapshot_payload_sha256_check CHECK ((payload_sha256 ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT renewal_source_snapshot_provider_check CHECK ((btrim(provider) <> ''::text)),
+    CONSTRAINT renewal_source_snapshot_row_count_check CHECK (((row_count >= 0) AND (row_count <= 10000))),
+    CONSTRAINT renewal_source_snapshot_signature_sha256_check CHECK ((signature_sha256 ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: renewal_source_snapshot_member; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.renewal_source_snapshot_member (
+    snapshot_id uuid NOT NULL,
+    source_key text NOT NULL,
+    candidate_id uuid NOT NULL,
+    CONSTRAINT renewal_source_snapshot_member_source_key_check CHECK ((btrim(source_key) <> ''::text))
 );
 
 
@@ -18283,8 +18536,10 @@ CREATE VIEW public.v_renewal_decision_queue_status AS
             renewal_decision_source_run.attempt,
             renewal_decision_source_run.snapshot_at,
             renewal_decision_source_run.recorded_at,
-            renewal_decision_source_run.member_count
+            renewal_decision_source_run.member_count,
+            renewal_decision_source_run.source_snapshot_id
            FROM ops.renewal_decision_source_run
+          WHERE (renewal_decision_source_run.source_snapshot_id IS NOT NULL)
           ORDER BY renewal_decision_source_run.snapshot_at DESC, renewal_decision_source_run.recorded_at DESC, renewal_decision_source_run.id DESC
          LIMIT 1
         ), current_members AS (
@@ -18307,9 +18562,7 @@ CREATE VIEW public.v_renewal_decision_queue_status AS
  SELECT t1_candidate_count,
     source_observed_at,
         CASE
-            WHEN ((source_observed_at IS NULL) OR (source_observed_at < (now() - '36:00:00'::interval)) OR (sealed_member_count <> current_member_count) OR (sealed_member_count <> ( SELECT count(*) AS count
-               FROM public.candidate_pool
-              WHERE ((candidate_pool.source = 'renewal-radar'::text) AND (candidate_pool.status = 'pool'::text))))) THEN 'unavailable'::text
+            WHEN ((source_observed_at IS NULL) OR (source_observed_at < (now() - '36:00:00'::interval)) OR (sealed_member_count <> current_member_count)) THEN 'unavailable'::text
             WHEN (t1_candidate_count = 0) THEN 'empty'::text
             ELSE 'ready'::text
         END AS freshness_state
@@ -18334,8 +18587,10 @@ CREATE VIEW public.v_renewal_decision_queue AS
             renewal_decision_source_run.attempt,
             renewal_decision_source_run.snapshot_at,
             renewal_decision_source_run.recorded_at,
-            renewal_decision_source_run.member_count
+            renewal_decision_source_run.member_count,
+            renewal_decision_source_run.source_snapshot_id
            FROM ops.renewal_decision_source_run
+          WHERE (renewal_decision_source_run.source_snapshot_id IS NOT NULL)
           ORDER BY renewal_decision_source_run.snapshot_at DESC, renewal_decision_source_run.recorded_at DESC, renewal_decision_source_run.id DESC
          LIMIT 1
         ), current_rows AS (
@@ -19023,6 +19278,14 @@ ALTER TABLE ONLY ops.calendar_prebrief_projection_receipt
 
 ALTER TABLE ONLY ops.calendar_prebrief_projection_receipt
     ADD CONSTRAINT calendar_prebrief_projection_receipt_sponsor_snapshot_at_key UNIQUE (sponsor, snapshot_at);
+
+
+--
+-- Name: calendar_prebrief_runtime_activation_receipt calendar_prebrief_runtime_activation_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_prebrief_runtime_activation_receipt
+    ADD CONSTRAINT calendar_prebrief_runtime_activation_receipt_pkey PRIMARY KEY (id);
 
 
 --
@@ -19963,6 +20226,54 @@ ALTER TABLE ONLY ops.renewal_decision_source_run_member
 
 ALTER TABLE ONLY ops.renewal_decision_source_run
     ADD CONSTRAINT renewal_decision_source_run_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: renewal_decision_source_run renewal_source_run_snapshot_unique; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_decision_source_run
+    ADD CONSTRAINT renewal_source_run_snapshot_unique UNIQUE (source_snapshot_id);
+
+
+--
+-- Name: renewal_source_snapshot renewal_source_snapshot_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_source_snapshot
+    ADD CONSTRAINT renewal_source_snapshot_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: renewal_source_snapshot_member renewal_source_snapshot_member_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_source_snapshot_member
+    ADD CONSTRAINT renewal_source_snapshot_member_pkey PRIMARY KEY (snapshot_id, source_key);
+
+
+--
+-- Name: renewal_source_snapshot_member renewal_source_snapshot_member_snapshot_id_candidate_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_source_snapshot_member
+    ADD CONSTRAINT renewal_source_snapshot_member_snapshot_id_candidate_id_key UNIQUE (snapshot_id, candidate_id);
+
+
+--
+-- Name: renewal_source_snapshot renewal_source_snapshot_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_source_snapshot
+    ADD CONSTRAINT renewal_source_snapshot_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: renewal_source_snapshot renewal_source_snapshot_provider_key_fingerprint_payload_sh_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_source_snapshot
+    ADD CONSTRAINT renewal_source_snapshot_provider_key_fingerprint_payload_sh_key UNIQUE (provider, key_fingerprint, payload_sha256);
 
 
 --
@@ -22968,6 +23279,13 @@ CREATE TRIGGER calendar_prebrief_projection_receipt_append_only BEFORE DELETE OR
 
 
 --
+-- Name: calendar_prebrief_runtime_activation_receipt calendar_prebrief_runtime_activation_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER calendar_prebrief_runtime_activation_receipt_append_only BEFORE DELETE OR UPDATE ON ops.calendar_prebrief_runtime_activation_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
 -- Name: calendar_prebrief_source_attestation_receipt calendar_prebrief_source_attestation_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -23329,6 +23647,20 @@ CREATE TRIGGER renewal_decision_source_run_append_only BEFORE DELETE OR UPDATE O
 --
 
 CREATE TRIGGER renewal_decision_source_run_member_append_only BEFORE DELETE OR UPDATE ON ops.renewal_decision_source_run_member FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: renewal_source_snapshot renewal_source_snapshot_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER renewal_source_snapshot_append_only BEFORE DELETE OR UPDATE ON ops.renewal_source_snapshot FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: renewal_source_snapshot_member renewal_source_snapshot_member_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER renewal_source_snapshot_member_append_only BEFORE DELETE OR UPDATE ON ops.renewal_source_snapshot_member FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
 
 
 --
@@ -23865,6 +24197,14 @@ ALTER TABLE ONLY ops.calendar_prebrief_projection_receipt
 
 ALTER TABLE ONLY ops.calendar_prebrief_projection_receipt
     ADD CONSTRAINT calendar_prebrief_projection_receipt_source_attestation_id_fkey FOREIGN KEY (source_attestation_id) REFERENCES ops.calendar_prebrief_source_attestation_receipt(id);
+
+
+--
+-- Name: calendar_prebrief_runtime_activation_receipt calendar_prebrief_runtime_activation_allowlist_revision_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.calendar_prebrief_runtime_activation_receipt
+    ADD CONSTRAINT calendar_prebrief_runtime_activation_allowlist_revision_id_fkey FOREIGN KEY (allowlist_revision_id) REFERENCES ops.calendar_prebrief_allowlist_receipt(id);
 
 
 --
@@ -24585,6 +24925,38 @@ ALTER TABLE ONLY ops.renewal_decision_source_run_member
 
 ALTER TABLE ONLY ops.renewal_decision_source_run_member
     ADD CONSTRAINT renewal_decision_source_run_member_source_run_id_fkey FOREIGN KEY (source_run_id) REFERENCES ops.renewal_decision_source_run(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: renewal_decision_source_run renewal_decision_source_run_source_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_decision_source_run
+    ADD CONSTRAINT renewal_decision_source_run_source_snapshot_id_fkey FOREIGN KEY (source_snapshot_id) REFERENCES ops.renewal_source_snapshot(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: renewal_source_snapshot renewal_source_snapshot_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_source_snapshot
+    ADD CONSTRAINT renewal_source_snapshot_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: renewal_source_snapshot_member renewal_source_snapshot_member_candidate_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_source_snapshot_member
+    ADD CONSTRAINT renewal_source_snapshot_member_candidate_id_fkey FOREIGN KEY (candidate_id) REFERENCES public.candidate_pool(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: renewal_source_snapshot_member renewal_source_snapshot_member_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.renewal_source_snapshot_member
+    ADD CONSTRAINT renewal_source_snapshot_member_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES ops.renewal_source_snapshot(id) ON DELETE RESTRICT;
 
 
 --
@@ -27061,6 +27433,7 @@ ALTER TABLE ONLY public.vendor
 
 revoke all on function ops.accept_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_feedback_hash text, p_idempotency_key uuid) from public;
 revoke all on function ops.accept_sourced_work_request_plan(p_work_request text, p_base_version integer, p_plan_hash text, p_idempotency_key uuid) from public;
+revoke all on function ops.activate_calendar_prebrief_joe_live(p_evidence_digest text) from public;
 revoke all on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) from public;
 revoke all on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
@@ -27079,9 +27452,11 @@ revoke all on function ops.calendar_prebrief_attestor_sponsor() from public;
 revoke all on function ops.calendar_prebrief_canonical_event_digest(p_events jsonb) from public;
 revoke all on function ops.calendar_prebrief_resolver_sponsor() from public;
 revoke all on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) from public;
+revoke all on function ops.claim_calendar_prebrief_joe_live_job(p_worker text, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
+revoke all on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) from public;
 revoke all on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) from public;
 revoke all on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
@@ -27101,6 +27476,7 @@ revoke all on function ops.guidance_revision_contract_hash(p_revision_id uuid) f
 revoke all on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) from public;
 revoke all on function ops.ingest_calendar_prebrief_canary_projection(p_job_id uuid, p_lease uuid, p_destination text, p_observed_calendar_keys text[], p_events jsonb) from public;
 revoke all on function ops.ingest_calendar_prebrief_projection(p_job_id uuid, p_lease uuid, p_observed_calendar_keys text[], p_events jsonb) from public;
+revoke all on function ops.ingest_renewal_signed_snapshot(p_job_id uuid, p_lease uuid, p_snapshot_id uuid, p_provider text, p_key_fingerprint text, p_source_observed_at timestamp with time zone, p_payload_sha256 text, p_signature_sha256 text, p_rows jsonb) from public;
 revoke all on function ops.invalidate_cognition_cache(p_dependency_ref text) from public;
 revoke all on function ops.invalidate_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_dependency_ref text) from public;
 revoke all on function ops.issue_calendar_prebrief_capture_contract(p_job_id uuid, p_lease uuid) from public;
@@ -27114,6 +27490,7 @@ revoke all on function ops.propose_sourced_work_request_outcome_feedback(p_work_
 revoke all on function ops.propose_sourced_work_request_plan(p_work_request text, p_base_version integer, p_scope_summary text, p_runbook_ref text, p_dependency_refs jsonb, p_recovery_ref text, p_observability_ref text, p_caps jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) from public;
 revoke all on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) from public;
+revoke all on function ops.read_calendar_prebrief_joe_activation(p_id uuid) from public;
 revoke all on function ops.reap_expired_jobs() from public;
 revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
 revoke all on function ops.record_calendar_prebrief_verified_envelope(p_job_id uuid, p_lease uuid, p_challenge_id uuid, p_scheduled_for timestamp with time zone, p_window_starts_at timestamp with time zone, p_window_ends_at timestamp with time zone, p_allowlist_revision_id uuid, p_allowlist_digest text, p_calendar_keys text[], p_observed_calendar_keys text[], p_events jsonb, p_destination text, p_collector_key_fingerprint text, p_signature_sha256 text, p_collector_version text) from public;
@@ -27139,7 +27516,9 @@ revoke all on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_atte
 revoke all on function ops.resolve_calendar_prebrief_email_ref(p_email text) from public;
 revoke all on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) from public;
 revoke all on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) from public;
+revoke all on function ops.schedule_calendar_prebrief_joe_live_job() from public;
 revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid) from public;
+revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) from public;
 revoke all on function ops.select_provider_routes(p_requested text[]) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
@@ -27172,6 +27551,7 @@ grant usage on schema ops to carr_calendar_prebrief_jobs;
 grant usage on schema ops to carr_device_evidence;
 grant usage on schema ops to carr_jobs;
 grant usage on schema ops to carr_reader;
+grant usage on schema ops to carr_renewal_source_attestors;
 grant usage on schema ops to carr_writer;
 grant usage on schema public to carr_authority;
 grant usage on schema public to carr_calendar_prebrief_attestors;
@@ -27181,6 +27561,7 @@ grant usage on schema public to carr_calendar_prebrief_jobs;
 grant usage on schema public to carr_exporter;
 grant usage on schema public to carr_jobs;
 grant usage on schema public to carr_reader;
+grant usage on schema public to carr_renewal_source_attestors;
 grant usage on schema public to carr_writer;
 grant select on table ops.authority_receipt to carr_reader;
 grant insert, select on table ops.authority_receipt to carr_writer;
@@ -27790,6 +28171,7 @@ grant select (key, value) on table public.system_config to carr_jobs;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
 grant execute on function ops.accept_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_feedback_hash text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.accept_sourced_work_request_plan(p_work_request text, p_base_version integer, p_plan_hash text, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.activate_calendar_prebrief_joe_live(p_evidence_digest text) to carr_authority;
 grant execute on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) to carr_authority;
 grant execute on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
@@ -27804,9 +28186,11 @@ grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
 grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.claim_calendar_prebrief_joe_live_job(p_worker text, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
+grant execute on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) to carr_jobs;
 grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
 grant execute on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
 grant execute on function ops.create_nightly_availability_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
@@ -27828,6 +28212,7 @@ grant execute on function ops.guidance_revision_contract_hash(p_revision_id uuid
 grant execute on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.ingest_calendar_prebrief_canary_projection(p_job_id uuid, p_lease uuid, p_destination text, p_observed_calendar_keys text[], p_events jsonb) to carr_calendar_prebrief_canary_jobs;
 grant execute on function ops.ingest_calendar_prebrief_projection(p_job_id uuid, p_lease uuid, p_observed_calendar_keys text[], p_events jsonb) to carr_calendar_prebrief_jobs;
+grant execute on function ops.ingest_renewal_signed_snapshot(p_job_id uuid, p_lease uuid, p_snapshot_id uuid, p_provider text, p_key_fingerprint text, p_source_observed_at timestamp with time zone, p_payload_sha256 text, p_signature_sha256 text, p_rows jsonb) to carr_renewal_source_attestors;
 grant execute on function ops.invalidate_cognition_cache(p_dependency_ref text) to carr_jobs;
 grant execute on function ops.invalidate_cognition_cache(p_dependency_ref text) to carr_writer;
 grant execute on function ops.invalidate_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_dependency_ref text) to carr_jobs;
@@ -27841,6 +28226,7 @@ grant execute on function ops.propose_sourced_work_request_outcome_feedback(p_wo
 grant execute on function ops.propose_sourced_work_request_plan(p_work_request text, p_base_version integer, p_scope_summary text, p_runbook_ref text, p_dependency_refs jsonb, p_recovery_ref text, p_observability_ref text, p_caps jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
+grant execute on function ops.read_calendar_prebrief_joe_activation(p_id uuid) to carr_authority;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
 grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
 grant execute on function ops.record_calendar_prebrief_verified_envelope(p_job_id uuid, p_lease uuid, p_challenge_id uuid, p_scheduled_for timestamp with time zone, p_window_starts_at timestamp with time zone, p_window_ends_at timestamp with time zone, p_allowlist_revision_id uuid, p_allowlist_digest text, p_calendar_keys text[], p_observed_calendar_keys text[], p_events jsonb, p_destination text, p_collector_key_fingerprint text, p_signature_sha256 text, p_collector_version text) to carr_calendar_prebrief_attestors;
@@ -27851,8 +28237,8 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
@@ -27863,7 +28249,8 @@ grant execute on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_a
 grant execute on function ops.resolve_calendar_prebrief_email_ref(p_email text) to carr_calendar_prebrief_email_resolver;
 grant execute on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
 grant execute on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) to carr_authority;
-grant execute on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid) to carr_jobs;
+grant execute on function ops.schedule_calendar_prebrief_joe_live_job() to carr_jobs;
+grant execute on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) to carr_renewal_source_attestors;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
@@ -27899,6 +28286,7 @@ grant carr_exporter to neondb_owner;
 grant carr_jobs to neondb_owner;
 grant carr_reader to carr_exporter;
 grant carr_reader to neondb_owner;
+grant carr_renewal_source_attestors to neondb_owner;
 grant carr_writer to neondb_owner;
 --
 -- PostgreSQL database dump
@@ -28130,6 +28518,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0245_program6_current_sourced_work_requests.sql	01754b470ca657b082e484b291181927c8d5c68ecdb111592c333de79a5c9190	2026-08-21 23:24:41.793598+00
 0247_system_rule_scope_binding.sql	0bd1b9832e5d570a769aa93f7394dadb6797e949250c427b37b0046901ec6fad	2026-08-21 23:24:41.997369+00
 0248_register_conduct_stop_control.sql	1854dbc574fc14cb9f0af6546c9060df664c84879b6fdeb418c2f32d3670c7ce	2026-08-22 03:04:18.638152+00
+0249_renewal_signed_source_ingress.sql	92a47c54f14f19724aba4cf1a6f7a024bdee8ccae75aea80bcd5ab1f123afd13	2026-08-22 03:43:39.169547+00
+0250_calendar_prebrief_joe_runtime.sql	168f11248fbdf73ebbb1e25bb3cfa83b685ed3c7a8502b5ddfa3dabcd7d72c69	2026-08-22 03:43:39.472471+00
 \.
 
 
