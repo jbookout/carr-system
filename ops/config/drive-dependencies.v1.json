@@ -194,8 +194,13 @@
       ],
       "canonicality": "canonical",
       "replacement": {
-        "status": "unrepointed",
-        "target": "record/document read routes"
+        "status": "accepted",
+        "target": "record/document read routes",
+        "normal_path": "normal_path_delegates_to_scoped_recovery_boundaries",
+        "accepted_by": "joe",
+        "accepted_on": "2026-08-22",
+        "evidence_ref": "decision 463295d5 \u2014 Joe approves Drive retirement across all dependency classes",
+        "verified": "run.sh never sets or exports the vault-root variable \u2014 its only two matches in the inventory are COMMENTS (lines 17 and 103), not code. Each scoped command parses its own explicit recovery boundary instead. Verified behaviourally 2026-08-22: with a poisoned ambient vault root in the environment, lib/drive_recovery.parse_recovery_controls returns vault=None, recovery=False, removes the variable from the environment, and sets the source mode to records. ops/drive-zero-default-cli-selftest.py passes."
       }
     },
     {
@@ -348,8 +353,13 @@
       ],
       "canonicality": "canonical",
       "replacement": {
-        "status": "unrepointed",
-        "target": "record/document APIs with explicit recovery mode"
+        "status": "accepted",
+        "target": "record/document APIs with explicit recovery mode",
+        "normal_path": "normal_path_pops_ambient_root_and_resolves_drive_only_under_recovery",
+        "accepted_by": "joe",
+        "accepted_on": "2026-08-22",
+        "evidence_ref": "decision 463295d5 \u2014 Joe approves Drive retirement across all dependency classes",
+        "verified": "All six sources fail closed on the normal path. tools/health-check.py (line 103), tools/registry-audit.py (line 67) and tools/report-card.py (line 510) each sit on the same `if recovery: resolve / else: pop the ambient vault root` branch, and health-check additionally strips the variable from every child environment it spawns (lines 312, 344, 407, 697). pipelines/brief_pack.py resolves a recovery root only when --recovery is passed and errors if --vault arrives without it. tools/retrieve.py resolves Drive only inside recovery_vault(), whose own docstring states it resolves only after the caller has selected recovery mode. pipelines/review_queue.py has ZERO Drive references."
       }
     },
     {
@@ -371,8 +381,13 @@
       ],
       "canonicality": "recovery_only",
       "replacement": {
-        "status": "unrepointed",
-        "target": "canonical record/document APIs; retirement authority remains outstanding"
+        "status": "accepted",
+        "target": "canonical record/document APIs; retirement authority remains outstanding",
+        "normal_path": "normal_path_routes_every_consumer_through_the_shared_recovery_boundary",
+        "accepted_by": "joe",
+        "accepted_on": "2026-08-22",
+        "evidence_ref": "decision 463295d5 \u2014 Joe approves Drive retirement across all dependency classes",
+        "verified": "This entry IS the shared boundary plus its consumers, and every consumer goes through it. lib/drive_recovery.py provides RecoveryContext and parse_recovery_controls; fill-engine/audit_template_colors.py, pipelines/build-space-search.py, pipelines/dso-match.py, pipelines/map_radar_lanes.py, pipelines/prepare_document.py and tools/verify-emails.py all import it rather than resolving a Drive root themselves. Verified 2026-08-22 by checking each of the six for the import; none hand-rolls its own resolution."
       }
     },
     {
