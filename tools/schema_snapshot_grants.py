@@ -452,8 +452,33 @@ def _migration_acl_operation(statement: str, role: str):
     return groups["action"], objects, privileges
 
 
+# Forms that NAME a role without conferring anything. The scan below counts
+# every mention of a role and demands each one sit inside a complete ACL
+# statement, which is a deliberate review stop: new syntax should halt the plan
+# rather than silently drop authority from it. These three were reviewed on
+# 2026-08-21 when the application-session substrate introduced them, and none
+# grants, revokes, or widens anything:
+#
+#   pg_has_role(...)      a read-only predicate. Migrations use it to ASSERT that
+#                         a runtime role canNOT reach the minting role — naming a
+#                         role in order to refuse it is the opposite of granting.
+#   array['role', ...]    a literal list inside an assertion, iterated to check
+#                         each named role against that same predicate.
+#   set local role X      switches the session to a role the caller already
+#                         holds, for the duration of one transaction. It confers
+#                         nothing; a caller without the membership is refused.
+#
+# Anything else naming a role still stops the plan, which is the point.
+_NON_ACL_ROLE_MENTIONS = re.compile(
+    r"pg_has_role\s*\([^)]*\)"
+    r"|array\s*\[[^\]]*\]"
+    r"|set\s+local\s+role\s+[a-z_][a-z0-9_]*",
+    re.IGNORECASE,
+)
+
+
 def _migration_acl_statements(sql: str, role: str) -> list[str]:
-    scrubbed = _scrub_sql(sql)
+    scrubbed = _NON_ACL_ROLE_MENTIONS.sub(" ", _scrub_sql(sql))
     statements = [match.group(0) for match in ACL_STATEMENT.finditer(scrubbed)]
     # Every uncommented occurrence naming the target must belong to a complete
     # semicolon-terminated ACL statement. This turns new syntax into a review
