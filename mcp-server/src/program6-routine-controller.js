@@ -1,5 +1,5 @@
 // The Deal Room's exact Program 6 browser boundary. This module deliberately
-// knows seven fixed routes and seven fixed registered verbs; it never accepts a
+// knows only fixed routes and fixed registered verbs; it never accepts a
 // browser-selected verb, actor, tenant, state, database id, or plan internals.
 // The actual database/authority choice stays in mcp.js's callTool(), so this is
 // a route adapter rather than a second mutation implementation.
@@ -24,6 +24,7 @@ export const SAFE_READY_PLAN = Object.freeze({
 });
 
 const ROUTES = Object.freeze([
+  { method: "GET", pattern: /^\/api\/system-work\/current$/, tool: "current-work-requests", fields: [] },
   { method: "GET", pattern: /^\/api\/system-work\/(WR-[0-9]{1,12})$/, tool: "work-request-card", fields: [] },
   { method: "POST", pattern: /^\/api\/system-work\/report$/, tool: "report-problem", fields: ["idempotency_key", "situation", "title", "desired_outcome", "acceptance_criteria"] },
   { method: "POST", pattern: /^\/api\/system-work\/(WR-[0-9]{1,12})\/triage$/, tool: "review-and-triage", fields: ["idempotency_key", "base_version", "classification"] },
@@ -88,6 +89,15 @@ export function createProgram6RoutineController(overrides = {}) {
       // The card is a read-only, same-session view. Neither the browser nor the
       // route can select a different registered read verb.
       if (route.method === "GET") {
+        if (route.tool === "current-work-requests") {
+          try {
+            const result = await dependencies.callToolFn(env, actor, route.tool, {}, "full");
+            return json({ ok: true, data: result });
+          } catch (error) {
+            if (error instanceof ToolError) return json(error.payload, errorStatus(error.payload));
+            return json({ error: "system_work_read_failed" }, 500);
+          }
+        }
         const human_ref = match[1];
         if (!HUMAN_REF.test(human_ref)) return json({ error: "not_found" }, 404);
         try {

@@ -5814,6 +5814,20 @@ export const TOOLS = {
       // it. A session that cannot name a blocker has just demonstrated it could
       // have done the work.
       const blockerGated = args.kind === "open_loop";
+      // A BLOCKER ON A KIND THAT DOES NOT CARRY ONE USED TO BE DROPPED IN
+      // SILENCE. Only open_loop rows are blocker-gated, and the insert below
+      // writes `blockerGated ? args.blocker : null` — so a blocker passed on a
+      // team_loop, action_required or idea row was accepted, reported back as a
+      // successful create, and stored as NULL. Same defect class as e34d2b88
+      // (a write verb accepted a field and silently discarded it), found by the
+      // sweep loop #476 asked for. Refuse instead: the caller either meant a
+      // different kind or did not need the field.
+      if (!blockerGated && (args.blocker !== undefined || args.blocker_detail !== undefined))
+        throw new ToolError({ error: "blocker_not_carried_by_kind",
+          kind: args.kind, blocker: args.blocker || null,
+          hint: "only an open_loop carries a blocker — on every other kind the field would be " +
+                "stored as null, so this refuses rather than reporting a write that did not " +
+                "happen. Drop the blocker, or file this as kind:'open_loop'." });
       if (blockerGated) {
         if (!args.blocker)
           throw new ToolError({ error: "blocker_required",
@@ -5839,6 +5853,19 @@ export const TOOLS = {
       // the backlog on its own initiative.
       args.owner = assertSingleOwner(args.owner);
 
+      // THE CREATION-SIDE MIRROR of update-loop's due_date_needs_dated_marker.
+      // Omitting the marker and passing a date INFERS 'dated', which is the
+      // convenient path and stays. Passing an explicit non-dated marker
+      // alongside a date was the bad one: the date was stored on a row whose
+      // marker sends it elsewhere, and nothing reads due_on except on a dated
+      // row — so the value sat in the column, honoured by nobody. Stored-and-
+      // inert is the same lie as dropped, told in a way that is harder to spot.
+      if (args.due_on && args.marker !== undefined && args.marker !== "dated")
+        throw new ToolError({ error: "due_date_needs_dated_marker",
+          marker: args.marker, due_on: args.due_on,
+          hint: "a due date is only acted on when the marker is 'dated' — on any other marker " +
+                "it would sit in the column unread. Pass marker:'dated', or omit the marker " +
+                "entirely and it is inferred, or drop the date." });
       const marker = args.marker || (args.due_on ? "dated" : "none");
       const literal = marker === "bell" ? "🔔"
         : marker === "decision" ? "❓"
@@ -5909,7 +5936,13 @@ export const TOOLS = {
       domain: { type: "string", enum: ["deals","prospecting","networking","marketing","business","system"],
         description: "reclassify the loop. Same rule as add-loop: classify by what the WORK is, not who appears in it." },
       marker: { type: "string", enum: LOOP_MARKERS },
-      due_on: { type: "string", description: "YYYY-MM-DD" },
+      due_on: { type: "string", description: "YYYY-MM-DD. ONLY STORED ON A 'dated' ROW. On any " +
+        "other marker this is refused rather than silently dropped — pass marker:'dated' in the " +
+        "same call to promote the row, or omit the date. A bare due_on on a row that is already " +
+        "dated is a reschedule and is fine. add-loop documents this dependency the other way " +
+        "round (the date is required WHEN the marker is dated), which reads as a constraint on " +
+        "the marker and is why a careful caller still walked into it — defect e34d2b88, 46 " +
+        "writes lost on 2026-08-20." },
       drift_critical: { type: "boolean" },
       blocker: { type: "string", enum: ["human_only","counterparty","ruling","external_event","other_lane","capability"],
         description: "REVISE what the loop is waiting on. add-loop refuses a loop without a blocker, but until 2026-08-09 nothing could change one, so a blocker named on day one was permanent even after the real obstacle turned out to be different — found on loop #295, whose blocker read human_only until building it revealed the actual block was a missing corpus (other_lane). Changing this requires blocker_detail too: a reclassification with the old specifics attached is worse than the original, because it reads as current and is not." },
@@ -6021,6 +6054,33 @@ export const TOOLS = {
         if (marker === "dated" && !due)
           throw new ToolError({ error: "dated_marker_needs_date",
             hint: "a 🗓 row without a date is silent forever" });
+        // A DATE ON A ROW THAT IS NOT DATED USED TO BE ACCEPTED AND THROWN
+        // AWAY. The line below this block writes `marker === "dated" ? due
+        // : null`, so a due_on arriving on a row whose marker is none/bell/
+        // decision was written straight to NULL — while the call returned
+        // success, bumped the version and moved updated_at. On 2026-08-20
+        // that swallowed 46 consecutive writes during the idea-bank
+        // conversion to due-date selection, caught only because the whole
+        // board happened to be read back before reporting (defect e34d2b88,
+        // the first of its class: a write verb accepted a field and silently
+        // discarded it).
+        //
+        // REFUSING IS THE FIX, not implicitly promoting the row to "dated".
+        // The marker decides which render a row lands in — a dated row that
+        // has come due goes hot, everything else goes to the backlog — so
+        // inferring the marker from the date would silently move rows on a
+        // file Joe reads. Making the caller say both is one extra argument
+        // and no surprises.
+        //
+        // Note what is deliberately still allowed: a bare due_on on a row
+        // ALREADY marked dated, which is how a row is rescheduled and has
+        // never been ambiguous.
+        if (args.due_on !== undefined && args.due_on !== null && marker !== "dated")
+          throw new ToolError({ error: "due_date_needs_dated_marker",
+            marker, due_on: args.due_on,
+            hint: "a due date is only stored on a 'dated' row — on any other marker it " +
+                  "would be dropped, so this refuses rather than reporting a write that " +
+                  "did not happen. Pass marker:'dated' in the same call, or drop the date." });
         set("marker", marker);
         set("due_on", marker === "dated" ? due : null);
         set("marker_literal", marker === "bell" ? "🔔"

@@ -28,6 +28,13 @@ test("typed client never sends a generic verb, actor, tenant, or state", async (
   assert.equal(/verb|actor|tenant|state|command|sql/.test(JSON.stringify(calls[1].body)), false);
 });
 
+test("current collection uses the fixed read route with no caller-selected filter", async () => {
+  const { calls, client } = harness([{ status: 200, body: { actor: { slug: "joe" }, csrf_token: "csrf" } }, { status: 200, body: { ok: true, data: { items: [] } } }]);
+  await client.bootstrap();
+  assert.deepEqual(await client.current(), { items: [] });
+  assert.deepEqual(calls[1], { path: "/api/system-work/current", init: { credentials: "same-origin", headers: { accept: "application/json" } }, body: null });
+});
+
 test("approval obtains a one-time challenge bound to the exact material", async () => {
   const { calls, client } = harness([
     { status: 200, body: { actor: { slug: "dell" }, csrf_token: "csrf", reauth_required: false } },
