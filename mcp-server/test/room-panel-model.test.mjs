@@ -347,3 +347,46 @@ test("conversation mode admits exactly the turns where a model says something", 
   assert.equal(turnPasses(prose, { ...everythingOn, conversation: false }), true,
     "everything mode is unchanged");
 });
+
+/* ------------------------------ the verifier's findings, folded in and pinned */
+
+test("hidden kind filters cannot suppress the conversation (the false-empty trap)", () => {
+  const prose = { kind: "turn", seat: "claude", sponsor: "joe", body: "Real words." };
+  const system = { kind: "system", seat: "opus", sponsor: "joe", body: "WORKER SPAWNED — build." };
+  // Kind chips toggled off in Everything, then the user switches to
+  // Conversation where those controls are hidden: they must be inert.
+  const hiddenOff = { seats: new Set(), turns: false, system: false, receipts: false,
+    heartbeats: false, text: "", conversation: true };
+  assert.equal(turnPasses(prose, hiddenOff), true);
+  assert.equal(turnPasses(system, hiddenOff), true);
+  assert.equal(turnPasses(prose, { ...hiddenOff, conversation: false }), false,
+    "back in Everything the same flags apply again");
+});
+
+test("a pathologically nested receipt flattens without overflowing the stack", () => {
+  let nested = { leaf: "value" };
+  for (let i = 0; i < 5000; i += 1) nested = { wrap: nested };
+  const lines = describeReceipt(JSON.stringify({ deep_probe: nested }), NOW);
+  assert.ok(lines.length >= 1, "returns lines rather than throwing");
+  assert.match(lines.join("\n"), /deeper detail in the machine view/);
+});
+
+test("a heartbeat with a malformed desk entry is skipped, not fatal", () => {
+  const body = JSON.stringify({ heartbeat: { desks: [null, { name: "joe-desk", seat: "claude", live: true }], cursor: 7 } });
+  const text = describeReceipt(body, NOW).join("\n");
+  assert.match(text, /joe-desk/);
+  assert.match(text, /through turn 7/);
+});
+
+test("the bridge figure defends its own floor", () => {
+  assert.equal(bridgeLagLabel(NaN), "—");
+  assert.equal(bridgeLagLabel("not a number"), "—");
+  assert.equal(bridgeLagLabel(-1), "caught up", "a negative lag is a clock skew, not a debt");
+  assert.equal(bridgeLagLabel(1.5), "2 turns behind");
+});
+
+test("both boolean words render, not just one (the surviving mutation)", () => {
+  const text = describeReceipt(JSON.stringify({ probe: { ok: true, failed: false } }), NOW).join("\n");
+  assert.match(text, /Ok: yes/);
+  assert.match(text, /Failed: no/);
+});

@@ -199,11 +199,15 @@ function plainValue(value, receiptAtMs) {
 }
 
 /** A machine object flattened to "Label: value" sentences — no braces, no
- *  quoted field names, nothing a human has to mentally deserialize. */
-export function flattenReceipt(value, receiptAtMs, prefix = "") {
+ *  quoted field names, nothing a human has to mentally deserialize. Depth is
+ *  capped (verifier finding: unbounded recursion was a stack-overflow vector
+ *  on a pathologically nested receipt); past the cap the machine-detail view
+ *  still holds the whole thing. */
+export function flattenReceipt(value, receiptAtMs, prefix = "", depth = 0) {
   if (value === null || value === undefined) return [];
+  if (depth > 6) return [`${prefix ? `${prefix} · ` : ""}(deeper detail in the machine view)`];
   if (Array.isArray(value)) {
-    return value.flatMap((entry) => flattenReceipt(entry, receiptAtMs, prefix));
+    return value.flatMap((entry) => flattenReceipt(entry, receiptAtMs, prefix, depth + 1));
   }
   if (typeof value !== "object") {
     return [prefix ? `${prefix}: ${plainValue(value, receiptAtMs)}` : plainValue(value, receiptAtMs)];
@@ -212,7 +216,7 @@ export function flattenReceipt(value, receiptAtMs, prefix = "") {
   for (const [key, entry] of Object.entries(value)) {
     const label = humanizeKey(key);
     if (entry && typeof entry === "object") {
-      lines.push(...flattenReceipt(entry, receiptAtMs, prefix ? `${prefix} · ${label}` : label));
+      lines.push(...flattenReceipt(entry, receiptAtMs, prefix ? `${prefix} · ${label}` : label, depth + 1));
     } else {
       lines.push(`${prefix ? `${prefix} · ` : ""}${label}: ${plainValue(entry, receiptAtMs)}`);
     }
@@ -231,6 +235,7 @@ export function describeReceipt(body, receiptAtMs) {
   if (key === "heartbeat" && value && typeof value === "object") {
     const lines = [];
     for (const desk of Array.isArray(value.desks) ? value.desks : []) {
+      if (!desk || typeof desk !== "object") continue;
       const bits = [`${desk.name || "desk"}${desk.seat ? ` (${desk.seat})` : ""}`];
       bits.push(desk.live ? "alive" : "not answering");
       if (desk.auth === true) bits.push("signed in");
@@ -257,9 +262,11 @@ export function describeReceipt(body, receiptAtMs) {
 /** The header's bridge figure, as a phrase instead of a delivered/latest
  *  fraction only the protocol cares about. */
 export function bridgeLagLabel(lag) {
-  if (lag === null || lag === undefined) return "—";
-  if (lag === 0) return "caught up";
-  return lag === 1 ? "1 turn behind" : `${lag} turns behind`;
+  const value = Number(lag);
+  if (lag === null || lag === undefined || !Number.isFinite(value)) return "—";
+  const behind = Math.max(0, Math.round(value));
+  if (behind === 0) return "caught up";
+  return behind === 1 ? "1 turn behind" : `${behind} turns behind`;
 }
 
 /** A turn that is actually one model saying something — the conversation the
@@ -522,16 +529,21 @@ export function authState(signedIn, known, total) {
 }
 
 /** Filters compose: a turn survives only if every active filter admits it.
- *  Conversation mode is the strongest filter of all: only substantive prose
- *  survives, because "see the models talking to each other" was the ask. */
+ *  Conversation mode REPLACES the kind filters rather than stacking on them:
+ *  its controls are hidden there, and a hidden control that still filters is
+ *  how the default view ends up saying "no conversation" over a suppressed
+ *  one (the verifier reproduced exactly that). Seats and text still apply. */
 export function turnPasses(turn, filters) {
-  if (filters.conversation && !isSubstantiveTurn(turn)) return false;
-  if (turn.kind === "receipt") {
-    if (!filters.receipts) return false;
-    if (isHeartbeat(turn) && !filters.heartbeats) return false;
+  if (filters.conversation) {
+    if (!isSubstantiveTurn(turn)) return false;
+  } else {
+    if (turn.kind === "receipt") {
+      if (!filters.receipts) return false;
+      if (isHeartbeat(turn) && !filters.heartbeats) return false;
+    }
+    if (turn.kind === "turn" && !filters.turns) return false;
+    if (turn.kind === "system" && !filters.system) return false;
   }
-  if (turn.kind === "turn" && !filters.turns) return false;
-  if (turn.kind === "system" && !filters.system) return false;
   if (filters.seats.size && !filters.seats.has(String(turn.seat || "").toLowerCase())) return false;
   if (filters.text) {
     const haystack = `${turn.seat} ${turn.sponsor} ${turn.body}`.toLowerCase();
