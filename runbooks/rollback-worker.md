@@ -101,31 +101,52 @@ A production release cannot be approved without a successful
 `recovery.rehearsal.worker` receipt bound to it. That is not paperwork: it
 means somebody proved the rollback path works *before* needing it.
 
-Rehearse on staging by moving it back one build and forward again. Source
-deploys are permitted for staging, so a worktree at the previous commit is the
-cleanest way in:
+Rehearse on staging with the typed three-step recovery chain. Keep the
+Production candidate in `candidate` state while the rehearsal runs; these are
+not three independent staging releases. Use one recovery-attempt UUID for the
+whole chain, one distinct staging-receipt UUID per step, the candidate's exact
+release key, and a completed/read-back Production release as the prior:
+Run `current_before`, `prior`, and `current_after` in that order and finish all
+three within one hour. Production approval must then be recorded within 24
+hours of the completed bundle.
 
 ```sh
-git worktree add .claude/worktrees/rollback-drill <previous-sha> --detach
-./bin/worktree.sh --plumb .claude/worktrees/rollback-drill
-cd .claude/worktrees/rollback-drill
-./bin/deploy-worker.sh --env staging --allow-shrink
-curl -s https://carr-mcp-staging.joe-bookout-carr-us.workers.dev/release
+RECOVERY_ATTEMPT_ID=<one-new-uuid>
+
+# From a clean worktree at <current-sha>:
+./bin/deploy-worker.sh --env staging --release-sha <current-sha> \
+  --release-key <production-candidate-key> \
+  --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
+  --recovery-prior-release-key <completed-production-prior-key> \
+  --recovery-step current_before \
+  --staging-receipt-idempotency-key <current-before-uuid>
+
+# From a clean worktree at <prior-sha>. Run the guard first without an override:
+./bin/deploy-worker.sh --env staging --release-sha <prior-sha> \
+  --release-key <production-candidate-key> \
+  --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
+  --recovery-prior-release-key <completed-production-prior-key> \
+  --recovery-step prior \
+  --staging-receipt-idempotency-key <prior-uuid>
+
+# If and only if the refusal reports the exact verb loss expected from the
+# named prior release, repeat that same prior command with --allow-shrink.
+# An unexpected count is a stop condition, not permission to use the override.
+
+# Back in the clean <current-sha> worktree:
+./bin/deploy-worker.sh --env staging --release-sha <current-sha> \
+  --release-key <production-candidate-key> \
+  --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
+  --recovery-prior-release-key <completed-production-prior-key> \
+  --recovery-step current_after \
+  --staging-receipt-idempotency-key <current-after-uuid>
 ```
 
-Then restore forward from a worktree at the newer commit and verify again.
-Each staging deploy needs its own approved release at the exact plan hash the
-deploy computes — build the manifest, record a candidate carrying the full
-evidence set, approve, then deploy.
-
-Record the receipt only from what actually happened:
-
-```sh
-./.venv/bin/python tools/ops-record.py run --kind check --service carr-mcp \
-  --key recovery.rehearsal.worker --state succeeded --environment staging \
-  --release-key <the production release key> \
-  --source-ref bin/deploy-worker.sh --evidence-ref <what you verified>
-```
+The wrapper prepares, claims, reads back, and records each typed staging
+receipt. The final `current_after` step creates the recovery bundle and its
+`recovery.rehearsal.worker` run atomically. Do not add a manual `ops-record run`
+receipt and do not create or approve separate staging releases for these three
+steps; either would describe a different, unbound procedure.
 
 ## Verified execution, 2026-08-19
 

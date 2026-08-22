@@ -116,6 +116,14 @@ def main() -> int:
           and "select ops.sync_system_rule_control_bindings()" in scope_fix
           and "update rule" not in scope_fix
           and "from public,carr_reader,carr_writer,carr_jobs,carr_authority" in scope_fix)
+    check("retired cost restriction stays an exact inert tombstone in both sync passes",
+          "legacy retired system cost rule does not match its exact retirement tombstone preimage" in forward_sql
+          and "legacy retired system cost rule does not match its exact retirement tombstone preimage" in scope_fix
+          and "34f34e23-225b-4d0f-946f-478b59fbce63" in forward_sql
+          and "34f34e23-225b-4d0f-946f-478b59fbce63" in scope_fix
+          and "82cf84d571cbe49eb61bf9570e2c8f86a114fa216e9ab1b3799181045c881137" in forward_sql
+          and "82cf84d571cbe49eb61bf9570e2c8f86a114fa216e9ab1b3799181045c881137" in scope_fix
+          and "continue;" in forward_sql and "continue;" in scope_fix)
     check("routine roles cannot approve rules",
           "from public,carr_reader,carr_writer,carr_jobs" in sql
           and "grant execute on function ops.approve_rule" in sql
