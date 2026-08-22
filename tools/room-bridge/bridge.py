@@ -81,7 +81,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _elapsed_seconds(iso_ts: str, *, now: str | None = None) -> float:
+def _elapsed_seconds(iso_ts: str | None, *, now: str | None = None) -> float:
+    if iso_ts is None:
+        return 0.0
     try:
         t = datetime.fromisoformat(iso_ts)
     except (ValueError, TypeError):
@@ -221,9 +223,11 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         routed[str(t.get("msg_id"))] = state_mod.route_turn(state, t, desk_seats)
         outcome, parsed, reason = grammar.classify(t)
         if outcome == "ok":
+            assert parsed is not None  # guaranteed by classify() whenever outcome is "ok"
             res = grammar.apply_assignment(t, parsed, add_room_turn=add_room_turn)
             assignments.append({"seq": t.get("seq"), "outcome": outcome, **res})
         elif outcome in ("malformed", "unauthorized"):
+            assert reason is not None  # guaranteed by classify() for these two outcomes
             grammar.reject(t, outcome, reason, add_room_turn=add_room_turn)
             assignments.append({"seq": t.get("seq"), "outcome": outcome, "reason": reason})
     state_mod.advance_seq(state, turns)
@@ -235,13 +239,13 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         if not seat:
             continue
         try:
-            outcome = handle_pending(
+            pending_outcome = handle_pending(
                 name, seat, state, add_room_turn=add_room_turn,
                 log_path=desk_state_dir / f"{name}.log",
                 pending_timeout_s=pending_timeout_s,
             )
-            if outcome:
-                delivered.append(outcome)
+            if pending_outcome:
+                delivered.append(pending_outcome)
             if state_mod.get_pending(state, name) is None:
                 queued = state_mod.pop_next_queued(state, name)
                 if queued is not None:

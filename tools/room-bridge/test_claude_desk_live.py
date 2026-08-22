@@ -84,6 +84,7 @@ def main() -> int:
         cwd=str(root),
         text=True,
     )
+    assert proc.stdin is not None  # guaranteed by stdin=subprocess.PIPE above
     proc.stdin.write(json.dumps(
         {"type": "user", "message": {"role": "user", "content": SEED}}) + "\n")
     proc.stdin.flush()

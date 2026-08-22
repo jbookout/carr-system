@@ -324,6 +324,14 @@ def main() -> int:
         second = argv[-1]
         assert second[:2] == ["exec", "resume"], second
         assert first in second, f"the thread id was not passed to resume: {second}"
+        # `codex exec resume` refuses -C/-s/--add-dir outright ("unexpected
+        # argument '-C' found") — caught live 2026-08-22 dispatching a second
+        # task through this exact path against the real binary, which the
+        # stand-in codex script above never validates. A resumed session
+        # already carries the cwd/sandbox/dirs it was FIRST started with.
+        assert "-C" not in second, f"resume must never pass -C: {second}"
+        assert "-s" not in second, f"resume must never pass -s: {second}"
+        assert "--add-dir" not in second, f"resume must never pass --add-dir: {second}"
 
     check("a Codex desk resumes its own thread, so its context carries",
           codex_keeps_its_own_context)

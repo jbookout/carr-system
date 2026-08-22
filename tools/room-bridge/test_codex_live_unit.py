@@ -161,7 +161,11 @@ class FakeAppServer:
                         "item": {"type": "agentMessage", "text": self.answer}}})
 
     def methods(self) -> list[str]:
-        return [m.get("method") for m in self.seen if m.get("method")]
+        # str(...): the JSON-RPC `method` field is always a string when
+        # present; the explicit coercion is only here so mypy's comprehension
+        # narrowing (which does not apply the `if` filter to the element
+        # expression's type) does not read this as list[Any | None].
+        return [str(m.get("method")) for m in self.seen if m.get("method")]
 
     def close(self) -> None:
         try:
