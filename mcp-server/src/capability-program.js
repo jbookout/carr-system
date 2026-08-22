@@ -181,12 +181,32 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
     "capability-program": {
       write: false,
       description: "Read the one fixed CARR AI Engineering Suite. The first not-confirmed-closed item is current; blocked, failed, needs-Joe and verification rows remain current and can never be skipped. This read grants no build, merge, deploy, Production or external authority.",
-      inputSchema: { type: "object", additionalProperties: false, properties: { program_key: { type: "string", const: DEFAULT_PROGRAM }, sequence: { type: "integer" }, include_all: { type: "boolean" } } },
+      inputSchema: { type: "object", additionalProperties: false, properties: { program_key: { type: "string", const: DEFAULT_PROGRAM }, sequence: { type: "integer" }, include_all: { type: "boolean" }, summary: { type: "boolean", description: "Payload budget: headline numbers, the current item in full, and per-item only {ref, sequence, title, state, disposition, executor_actor}. Absent/false returns today's full rows." } } },
       handler: async (c, _actor, args) => {
         requireFixedProgram(args, ToolError);
         const rows = await c.query(`select * from ops.work_request where program_key=$1 order by program_ordinal`, [DEFAULT_PROGRAM]);
         if (!rows.rows.length) throw new ToolError({ error: "capability_program_not_found", program_key: DEFAULT_PROGRAM });
         const current = rows.rows.find(row => row.state !== "confirmed_closed") || null;
+        // PAYLOAD BUDGET. The full rows carry desired_outcome prose, acceptance
+        // criteria and completion evidence for every project; a queue scan that
+        // only needs where the program stands should not pay for 51 of them.
+        // The current item stays in FULL — it is the one a session acts on.
+        if (args.summary) {
+          const brief = row => row ? {
+            ref: row.ref, sequence: Number(row.program_ordinal), title: row.title,
+            state: row.state, disposition: row.disposition,
+            executor_actor: row.executor_actor || null,
+          } : null;
+          return {
+            program_key: DEFAULT_PROGRAM, total: rows.rows.length,
+            completed: rows.rows.filter(row => row.state === "confirmed_closed").length,
+            program_complete: !current,
+            current: programRow(current),
+            requested: brief(args.sequence === undefined ? current : rows.rows.find(row => Number(row.program_ordinal) === Number(args.sequence)) || null),
+            projects: rows.rows.map(brief),
+            hint: "summary mode: per-project rows are {ref, sequence, title, state, disposition, executor_actor}; re-read without summary (or with sequence) for any item in full.",
+          };
+        }
         const requested = args.sequence === undefined ? current : rows.rows.find(row => Number(row.program_ordinal) === Number(args.sequence));
         if (args.sequence !== undefined && !requested) throw new ToolError({ error: "capability_project_not_found", program_key: DEFAULT_PROGRAM, sequence: args.sequence });
         const capability_session = await readCurrentSession(c, current);

@@ -2912,6 +2912,7 @@ export const TOOLS = {
       owner: { type: "string", description: "'claude' for the autonomous drain queue — rows the system may finish and close on its own evidence. 'joe' or 'dell' for a person's pile. 'joint' for the legacy rows owned by two people at once, which no query can select for and nobody picks up." },
       search: { type: "string", description: "case-insensitive match against the title" },
       limit: { type: "integer", default: 60 },
+      summary: { type: "boolean", description: "Payload budget: counts by status, blocker class and owner, plus per-loop only {number, kind, label (title or first 80 chars of body's first line), blocker_class, owner, since_text, version}. No bodies, no blocker_detail. Absent/false returns today's full rows." },
     } },
     handler: async (c, _a, args) => {
       const where = ["kind = $1"];
@@ -2932,6 +2933,44 @@ export const TOOLS = {
         where.push(`(coalesce(title,'') || ' ' || coalesce(body,'')) ilike $${params.length}`);
       }
       params.push(Math.min(Number(args.limit) || 60, 300));
+      if (args.summary) {
+        // PAYLOAD BUDGET, not a new view. The board's full rows carry body-sized
+        // labels and blocker_detail prose; at 100+ loops one board read can
+        // outweigh every other verb call in a session. Summary mode answers the
+        // three questions the board actually exists for — what is open, what is
+        // it blocked on, who owns it — from the SAME filtered query, so both
+        // modes always agree on which rows exist.
+        const s = await c.query(
+          `select number, kind, status, owner,
+                  -- LABEL: title or first 80 chars of body's first line, bold
+                  -- markers stripped — the same fallback the full row uses.
+                  left(coalesce(
+                    nullif(title, ''),
+                    nullif(regexp_replace(split_part(body, E'\\n', 1), '\\*\\*', '', 'g'), '')
+                  ), 80) as label,
+                  blocker_class, since_text,
+                  to_jsonb(due_on)#>>'{}' as due_on, version
+             from loop_item
+            where ${where.join(" and ")}
+            order by domain nulls last,
+                     coalesce(nullif(regexp_replace(number, '[^0-9]', '', 'g'), '')::int, 999999)
+            limit $${params.length}`, params);
+        const tally = (key) => {
+          const out = {};
+          for (const row of s.rows) {
+            const k = row[key] == null ? "none" : String(row[key]);
+            out[k] = (out[k] || 0) + 1;
+          }
+          return out;
+        };
+        return {
+          summary: true, count: s.rows.length,
+          by_status: tally("status"),
+          by_blocker_class: tally("blocker_class"),
+          by_owner: tally("owner"),
+          loops: s.rows.map(({ status, ...loop }) => loop),
+        };
+      }
       const r = await c.query(
         `select number, kind, domain, status, owner, marker, title,
                 -- LABEL, not title. Almost every loop predates the title column
@@ -7857,10 +7896,22 @@ Object.assign(TOOLS, {
   "list-verbs": {
     description: "The LIVE verb registry — names, descriptions, write flags, input schemas — straight from the deployed Worker, bypassing the connector's cached tool list. Use when a verb you expect is missing from your tool list (a deploy since this session connected): find it here, then invoke it through call-verb without any reconnect.",
     inputSchema: { type: "object", properties: {
-      filter: { type: "string", description: "substring match on verb name" } } },
+      filter: { type: "string", description: "case-insensitive substring match over verb name AND description" },
+      names_only: { type: "boolean", description: "names plus first-sentence descriptions, no schemas. Composes with filter." } } },
     handler: async (c, actor, args) => {
+      const needle = args.filter ? String(args.filter).toLowerCase() : null;
+      // MATCH ON BEHAVIOR, not just the label (rule 49c627cc): a session hunting
+      // for what serves a job often does not know the verb's NAME yet, so the
+      // filter reads descriptions too.
       const names = Object.keys(TOOLS).sort()
-        .filter(n => !args.filter || n.includes(args.filter));
+        .filter(n => !needle
+          || n.toLowerCase().includes(needle)
+          || String(TOOLS[n].description || "").toLowerCase().includes(needle));
+      if (args.names_only) {
+        return { ok: true, count: names.length, names_only: true,
+                 verbs: names.map(n => ({ name: n, write: !!TOOLS[n].write,
+                   description: String(TOOLS[n].description || "").split(/(?<=\.)\s/)[0].slice(0, 200) })) };
+      }
       return { ok: true, count: names.length,
                verbs: names.map(n => ({ name: n, write: !!TOOLS[n].write,
                  description: (TOOLS[n].description || "").slice(0, 200),

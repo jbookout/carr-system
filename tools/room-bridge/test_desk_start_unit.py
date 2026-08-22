@@ -13,7 +13,7 @@ No real Claude session is booted here and no tokens are spent: a stand-in
 binds the socket and sits there, which is the only behaviour the launcher
 actually depends on.
 
-Run:  python3 spikes/hermes-dispatch/test_desk_start_unit.py
+Run:  python3 tools/room-bridge/test_desk_start_unit.py
 """
 
 from __future__ import annotations

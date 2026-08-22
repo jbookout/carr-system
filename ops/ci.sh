@@ -372,8 +372,18 @@ PYEOF
   # only, no machine state, no network, no database. Each carries its own
   # escape hatch for a genuinely mid-flight tree and names its own remedy in
   # its own output, so none is repeated here.
+  #
+  # mechanism-doctrine-gate is in this list rather than a class of its own
+  # because it is the same kind of check: repository content only, no machine
+  # state and no database. It is the compiled half of "knowledge ships with the
+  # mechanism" (open loop 504) — a newly ADDED gate, hook, launchd job or
+  # scheduled task must name the doctrine section explaining it. It reads the
+  # change against origin/main, so it is a no-op on a branch that adds none of
+  # those, which is nearly every branch. Editing an existing mechanism is
+  # deliberately out of scope.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             drive-dependency-inventory drive-retirement-readiness-gate; do
+             drive-dependency-inventory drive-retirement-readiness-gate \
+             mechanism-doctrine-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
@@ -550,8 +560,30 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # This class already stands up the one thing they need: a throwaway
     # database with the committed schema loaded and every pending migration
     # applied. So they run here, on every proposed change, against real
-    # Postgres. Each gate rolls back everything it writes, which is why running
-    # them repeatedly costs nothing.
+    # Postgres. MOST gates roll back everything they write, which is why
+    # running them repeatedly costs nothing.
+    #
+    # ONE DOES NOT, AND THE BLANKET CLAIM THAT USED TO STAND HERE WAS FALSE
+    # (2026-08-22, found while building the snapshot authority-membership
+    # gate). ops/calendar-prebrief-projection-local-pg-gate.py creates twelve
+    # login roles — including carr_authority_joe and carr_authority_dell — and
+    # COMMITS. That is deliberate and it is not a leak: the gate proves a
+    # concurrency property with two real peer connections authenticating as
+    # different roles and racing in threads, which cannot be done inside one
+    # transaction, and it hard-refuses to run unless the database is a
+    # dedicated disposable carr_ci superuser database.
+    #
+    # THE CONSEQUENCE IS WHAT MATTERS TO ANYONE WRITING A GATE. The glob below
+    # is alphabetical, so every gate ordered after `calendar-prebrief-p...`
+    # runs on a substrate where both human authority login roles already exist
+    # and already hold the carr_authority bundle. A gate that asserts an
+    # authority privilege there is asserting it under conditions it did not
+    # establish and cannot see — the same shape as a proof that passes because
+    # it happens to run as the owner. Establish the role state you depend on
+    # inside your own rolled-back transaction rather than inheriting whatever
+    # the gate before you left; ops/snapshot-authority-membership-gate.py
+    # manufactures absence that way for exactly this reason, after an earlier
+    # revision of it reported differently depending on its position.
     #
     # SELF-REGISTERING, by the marker `# ci: db-gate` in the file itself. A new
     # gate is wired by writing it, not by remembering to edit this list.
