@@ -110,10 +110,10 @@ def tier1() -> None:
     check("capability-program returns built_unclosed: []",
           "built_unclosed: []" in cp_src,
           "the Worker cannot detect disk-landed work; [] is the honest default")
-    check("capability-program hint says completed is attestation",
-          "attestation" in cp_src and "not unbuilt" in cp_src
-          and "CLOSE-BEFORE-OPEN" in cp_src,
-          "the hint must say completed is attestation, not unbuilt, and name CLOSE-BEFORE-OPEN")
+    check("capability-program hint names the local detection path",
+          "Run ops/built_unclosed.py" in cp_src and "CLOSE-BEFORE-BUILD" in cp_src
+          and "completed counts confirmed_closed only" in cp_src,
+          "the hint must say completed counts confirmed_closed only and name CLOSE-BEFORE-BUILD")
     check("sessionBrief first line is the build-discipline warning",
           "This card may already have code" in cp_src
           and "completed!=closed is not permission to rebuild" in cp_src

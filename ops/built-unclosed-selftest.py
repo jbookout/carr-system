@@ -303,6 +303,49 @@ def _(assert_):
         bu._exporter_url = saved_url
 
 
+@case("_exporter_url reads db.env when the env var is unset")
+def _(assert_):
+    saved = os.environ.pop("CARR_DB_EXPORTER_URL", None)
+    saved_home = os.environ.get("HOME")
+    try:
+        tmp = tempfile.mkdtemp()
+        os.environ["HOME"] = tmp
+        cfg_dir = os.path.join(tmp, ".config", "carr")
+        os.makedirs(cfg_dir, exist_ok=True)
+        with open(os.path.join(cfg_dir, "db.env"), "w") as fh:
+            fh.write('CARR_DB_EXPORTER_URL="postgresql://fake:5432/fake"\n')
+        url = bu._exporter_url()
+        assert_(url == "postgresql://fake:5432/fake",
+                f"_exporter_url should fall back to db.env, got {url!r}")
+    finally:
+        if saved is not None:
+            os.environ["CARR_DB_EXPORTER_URL"] = saved
+        if saved_home is not None:
+            os.environ["HOME"] = saved_home
+        else:
+            os.environ.pop("HOME", None)
+
+
+@case("_exporter_url returns None when neither env var nor db.env has a URL")
+def _(assert_):
+    saved = os.environ.pop("CARR_DB_EXPORTER_URL", None)
+    saved_home = os.environ.get("HOME")
+    try:
+        tmp = tempfile.mkdtemp()
+        os.environ["HOME"] = tmp
+        # No ~/.config/carr/db.env exists under this fake HOME
+        url = bu._exporter_url()
+        assert_(url is None,
+                f"_exporter_url with no env var and no db.env should return None, got {url!r}")
+    finally:
+        if saved is not None:
+            os.environ["CARR_DB_EXPORTER_URL"] = saved
+        if saved_home is not None:
+            os.environ["HOME"] = saved_home
+        else:
+            os.environ.pop("HOME", None)
+
+
 @case("load_live_rows accepts a program_key argument without crashing")
 def _(assert_):
     saved_url = bu._exporter_url

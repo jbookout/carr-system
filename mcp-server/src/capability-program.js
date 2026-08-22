@@ -205,7 +205,7 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
           requested: programRow(requested), capability_session,
           session_brief: sessionBrief(requested),
           landed_in_repo: null, built_unclosed: [],
-          hint: "completed is attestation (confirmed_closed), not unbuilt — code on main may already exist. Run ops/built_unclosed.py / read session-brief CLOSE-BEFORE-OPEN.",
+          hint: "completed counts confirmed_closed only; code on main is not this number. Run ops/built_unclosed.py / read session-brief CLOSE-BEFORE-BUILD.",
           projects: args.include_all ? rows.rows.map(programRow) : undefined,
         };
       },
