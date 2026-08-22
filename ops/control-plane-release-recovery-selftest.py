@@ -20,7 +20,7 @@ MIGRATIONS = [
     "0225_ops_run_fixture_row_guard", "0226_calendar_canary_record_layer",
     "0227_nightly_availability_canary_record_layer", "0228_atomic_rule_lifecycle_forward_upgrade",
     "0229_calendar_prebrief_projection", "0230_renewal_decision_delivery",
-    "0248_renewal_signed_source_ingress", "0249_calendar_prebrief_joe_runtime",
+    "0249_renewal_signed_source_ingress", "0250_calendar_prebrief_joe_runtime",
 ]
 STEPS = [
     {"id": "contain", "action_kind": "contain"},
