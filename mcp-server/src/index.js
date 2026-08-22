@@ -84,6 +84,7 @@ import { actorFromProps, agentActorForToken, hermesActorForToken } from "./ident
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
+import { appendRoomTurn, DEFAULT_ROOM, readRoomTurns } from "./partner-room.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
@@ -560,6 +561,25 @@ const dealroomHandler = createDealroomHandler({
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
   program6Handler: (request, env, ctx, actor, session) =>
     program6RoutineController.fetch(request, env, ctx, actor, session),
+  // The Model Room observatory's two doors onto the partner room. Both call the
+  // SAME functions the read-room / add-room-turn verbs call (partner-room.js) —
+  // these two adapters supply a connection and nothing else, so the panel can
+  // never read a different wire than a desk does.
+  roomReadFn: (env, params) => {
+    const sql = neon(env.DATABASE_URL_READER);
+    const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
+    return readRoomTurns(client, { room: DEFAULT_ROOM, ...params });
+  },
+  roomWriteFn: async (env, params) => {
+    const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
+    const client = await pool.connect();
+    try {
+      return await appendRoomTurn(client, { room: DEFAULT_ROOM, ...params });
+    } finally {
+      client.release();
+      await pool.end();
+    }
+  },
 });
 
 // The staging workers.dev origin carries both the browser and provider API.

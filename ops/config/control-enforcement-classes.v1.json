@@ -101,6 +101,17 @@
       "failure_mode": "CI class failure — the gates class surfaces an enforcement-layer regression on every proposed change",
       "enforcement_class": "surfacing",
       "_note": "Reconciled 2026-08-22: Production and staging carried implementation_ref 'ops/ci.sh gates class', prose naming a class inside a file rather than a path, so the reference could not resolve or be verified as tracked. Both databases now carry 'ops/ci.sh'; the class is named in test_ref and in the enforcement map already. The control was not locked by any active approved rule."
+    },
+    "control-plane-workflow-manifest": {
+      "implementation": [
+        "ops/config/control-plane-workflows.v1.json"
+      ],
+      "test": [
+        "ops/control-plane-selftest.py"
+      ],
+      "failure_mode": "Admission refusal — the manifest is the declared set of control-plane workflows, each naming a deterministic entrypoint and mode. A workflow that is not in it, or one that would reach for a model where the manifest declares a tested predicate, is refused rather than surfaced.",
+      "enforcement_class": "deny_gate",
+      "_note": "Declared 2026-08-22 after ops/control-catalog-parity-gate.py reported it live in Production and present in no inventory — the second control to be found this way, after ci_gates. Unlike that one, nothing needed reconciling: Production's row already carries both refs as real tracked paths, so this declaration matches the live row exactly (implementation_ref ops/config/control-plane-workflows.v1.json, test_ref ops/control-plane-selftest.py, class deny_gate, installed true, verified 2026-08-16). Seeded by migration 0148 alongside the active rule it backs, the one forbidding a cognition token to be spent on state, recurrence, routing, validation or any decision already expressible as a tested predicate. That rule is the code-first design test in force, and this control is how it is enforced rather than recited."
     }
   }
 }
