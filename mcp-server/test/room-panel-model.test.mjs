@@ -14,9 +14,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  authState, cycleState, deriveModel, deskState, errorState, isErrorReceipt,
-  isHeartbeat, isWorkerSpawn, lagState, receiptKey, relativeTime, seatColor,
-  sessionState, turnPasses,
+  authState, bridgeLagLabel, cycleState, deriveModel, describeReceipt, deskState,
+  errorState, humanizeKey, isErrorReceipt, isHeartbeat, isSubstantiveTurn,
+  isWorkerSpawn, lagState, receiptKey, receiptLabel, relativeAgo, relativeTime,
+  seatColor, sessionState, turnPasses,
 } from "../../dealroom/js/room.js";
 
 const NOW = Date.parse("2026-08-22T15:00:00Z");
@@ -268,4 +269,124 @@ test("an empty wire derives an honest empty model rather than throwing", () => {
   assert.equal(model.cursorLag, null);
   assert.equal(model.cycleAgeS, null);
   assert.equal(cycleState(model.cycleAgeS), "urgent");
+});
+
+/* ------------------------- the legibility round (Joe's ruling, 2026-08-22) */
+
+test("receipt rows wear plain-language labels, never machine words", () => {
+  const body = (key) => JSON.stringify({ [key]: {} });
+  assert.equal(receiptLabel(body("worker_completed")), "Build finished");
+  assert.equal(receiptLabel(body("heartbeat")), "Bridge check-in");
+  assert.equal(receiptLabel(body("session_status")), "Session gauge");
+  assert.equal(receiptLabel(body("some_future_shape")), "Some future shape",
+    "an unknown key is humanized rather than shown raw");
+  assert.equal(humanizeKey("desk_restarted"), "Desk restarted");
+});
+
+test("a heartbeat receipt reads as sentences, with no JSON syntax anywhere", () => {
+  const receiptAt = NOW;
+  const body = JSON.stringify({ heartbeat: { desks: [
+    { name: "codex-desk", seat: "codex", live: true, last_seen: at(65), auth: true },
+    { name: "joe-desk", seat: "claude", live: true, last_seen: at(3), auth: false },
+  ], cursor: 211, cycle_at: at(2) } });
+  const lines = describeReceipt(body, receiptAt);
+  const text = lines.join("\n");
+  assert.match(text, /codex-desk \(codex\)/);
+  assert.match(text, /signed in/);
+  assert.match(text, /SIGNED OUT/, "a signed-out desk is said loudly");
+  assert.match(text, /seen 1m ago/, "ages anchor to the receipt's own moment");
+  assert.match(text, /through turn 211/);
+  for (const forbidden of ["{", "}", '":', "last_seen"]) {
+    assert.ok(!text.includes(forbidden), `no machine syntax: ${forbidden}`);
+  }
+});
+
+test("an unknown receipt shape still arrives as readable lines, not JSON", () => {
+  const body = JSON.stringify({ deploy_probe: { status: "timed_out", timed_out_after_s: 30,
+    detail: { attempt: 2, ok: false } } });
+  const lines = describeReceipt(body, NOW);
+  const text = lines.join("\n");
+  assert.match(text, /Status: timed_out/);
+  assert.match(text, /Ok: no/, "booleans become words");
+  assert.ok(!text.includes("{") && !text.includes('"'), "no braces, no quoted keys");
+});
+
+test("the bridge figure is a phrase, not a delivered/latest fraction", () => {
+  assert.equal(bridgeLagLabel(null), "—");
+  assert.equal(bridgeLagLabel(0), "caught up");
+  assert.equal(bridgeLagLabel(1), "1 turn behind");
+  assert.equal(bridgeLagLabel(5), "5 turns behind");
+});
+
+test("every age says which direction it points", () => {
+  assert.equal(relativeAgo(NOW - 3_000, NOW), "just now");
+  assert.equal(relativeAgo(NOW - 2_000_000, NOW), "33m ago");
+  assert.equal(relativeAgo(0, NOW), "never");
+});
+
+test("conversation mode admits exactly the turns where a model says something", () => {
+  const prose = { kind: "turn", seat: "claude", sponsor: "joe", body: "The release chain is armed." };
+  const noop = { kind: "turn", seat: "codex", sponsor: "joe", body: "NOOP" };
+  const silent = { kind: "turn", seat: "claude", sponsor: "joe", body: "*(silent)*" };
+  const system = { kind: "system", seat: "opus", sponsor: "joe", body: "WORKER SPAWNED — the observatory build." };
+  const heartbeatTurn = { kind: "receipt", seat: "hermes", sponsor: "joe",
+    body: JSON.stringify({ heartbeat: { desks: [], cursor: 1 } }) };
+  assert.equal(isSubstantiveTurn(prose), true);
+  assert.equal(isSubstantiveTurn(noop), false, "keep-alives are not conversation");
+  assert.equal(isSubstantiveTurn(silent), false);
+  assert.equal(isSubstantiveTurn(system), true, "spawn announcements are part of the story");
+  assert.equal(isSubstantiveTurn(heartbeatTurn), false, "machine traffic by definition");
+
+  // Composing with the existing filters: conversation overrides even a
+  // receipts+heartbeats filter that would otherwise admit the machine row.
+  const everythingOn = { seats: new Set(), turns: true, system: true, receipts: true,
+    heartbeats: true, text: "", conversation: true };
+  assert.equal(turnPasses(heartbeatTurn, everythingOn), false);
+  assert.equal(turnPasses(noop, everythingOn), false);
+  assert.equal(turnPasses(prose, everythingOn), true);
+  assert.equal(turnPasses(prose, { ...everythingOn, conversation: false }), true,
+    "everything mode is unchanged");
+});
+
+/* ------------------------------ the verifier's findings, folded in and pinned */
+
+test("hidden kind filters cannot suppress the conversation (the false-empty trap)", () => {
+  const prose = { kind: "turn", seat: "claude", sponsor: "joe", body: "Real words." };
+  const system = { kind: "system", seat: "opus", sponsor: "joe", body: "WORKER SPAWNED — build." };
+  // Kind chips toggled off in Everything, then the user switches to
+  // Conversation where those controls are hidden: they must be inert.
+  const hiddenOff = { seats: new Set(), turns: false, system: false, receipts: false,
+    heartbeats: false, text: "", conversation: true };
+  assert.equal(turnPasses(prose, hiddenOff), true);
+  assert.equal(turnPasses(system, hiddenOff), true);
+  assert.equal(turnPasses(prose, { ...hiddenOff, conversation: false }), false,
+    "back in Everything the same flags apply again");
+});
+
+test("a pathologically nested receipt flattens without overflowing the stack", () => {
+  let nested = { leaf: "value" };
+  for (let i = 0; i < 5000; i += 1) nested = { wrap: nested };
+  const lines = describeReceipt(JSON.stringify({ deep_probe: nested }), NOW);
+  assert.ok(lines.length >= 1, "returns lines rather than throwing");
+  assert.match(lines.join("\n"), /deeper detail in the machine view/);
+});
+
+test("a heartbeat with a malformed desk entry is skipped, not fatal", () => {
+  const body = JSON.stringify({ heartbeat: { desks: [null, { name: "joe-desk", seat: "claude", live: true }], cursor: 7 } });
+  const text = describeReceipt(body, NOW).join("\n");
+  assert.match(text, /joe-desk/);
+  assert.match(text, /through turn 7/);
+});
+
+test("the bridge figure defends its own floor", () => {
+  assert.equal(bridgeLagLabel(NaN), "—");
+  assert.equal(bridgeLagLabel("not a number"), "—");
+  assert.equal(bridgeLagLabel(-1), "caught up", "a negative lag is a clock skew, not a debt");
+  assert.equal(bridgeLagLabel(1.5), "2 turns behind");
+});
+
+test("both boolean words render, not just one (the surviving mutation)", () => {
+  const text = describeReceipt(JSON.stringify({ probe: { ok: true, failed: false } }), NOW).join("\n");
+  assert.match(text, /Ok: yes/);
+  assert.match(text, /Failed: no/);
 });
