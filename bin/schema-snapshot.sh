@@ -185,7 +185,8 @@ cat > "$TMP" <<'ROLES'
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
 -- widening a pattern.
 -- carr_reader, carr_writer, carr_exporter, carr_authority,
--- carr_device_evidence, and the four calendar-prebrief roles are privilege
+-- carr_device_evidence, the four calendar-prebrief roles, and the renewal
+-- source-attestor role are privilege
 -- bundles, so they stay NOLOGIN. carr_jobs is
 -- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
@@ -202,7 +203,8 @@ begin
   foreach r in array array[
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
     'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
-    'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver'
+    'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver',
+    'carr_renewal_source_attestors'
   ] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
@@ -296,7 +298,8 @@ select format('revoke all on function %s.%s(%s) from public;',
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
-         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_renewal_source_attestors')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -312,7 +315,8 @@ select format('grant %s on schema %s to %s;',
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
-         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_renewal_source_attestors')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -330,7 +334,8 @@ select format('grant %s on %s %s.%s to %s;',
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
-         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_renewal_source_attestors')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -349,7 +354,8 @@ select format('grant %s (%s) on table %s.%s to %s;',
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
-         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_renewal_source_attestors')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -365,7 +371,8 @@ select format('grant execute on function %s.%s(%s) to %s;',
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
-         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_renewal_source_attestors')
 )
 -- pg_auth_members permits different grantors for the same role/member pair.
 -- The snapshot has no grantor field, so render each semantically identical
