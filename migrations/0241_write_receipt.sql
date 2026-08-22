@@ -1,4 +1,4 @@
--- 0211 — write receipts: a session, a material digest, and a readback that is
+-- 0241 — write receipts: a session, a material digest, and a readback that is
 --        computed by the database rather than asserted by the caller
 --
 -- THIS LAYER WAS REJECTED ONCE. Reading that rejection is the fastest way to
@@ -21,7 +21,7 @@
 -- THE SESSION IS THE APPLICATION SESSION, NOT THE CONNECTION. The link is NOT
 -- NULL and references ops.application_session, and a trigger requires that
 -- session to be live, unexpired, unrevoked, and to match the receipt's actor
--- and tenant — the same standard evidence rows are held to in 0208. There is no
+-- and tenant — the same standard evidence rows are held to in 0231. There is no
 -- code path that derives a receipt's session from current_user, the backend pid,
 -- or anything else about the connection.
 --
@@ -29,7 +29,7 @@
 -- THE READBACK IS COMPUTED BY THE DATABASE, FROM A FROZEN ROW. The caller
 -- supplies what it BELIEVES it wrote (claimed_digest). The database then reads
 -- the qualified public.tool_call row for that idempotency key and computes the
--- digest itself. Those rows are frozen against update and delete by 0208 once
+-- digest itself. Those rows are frozen against update and delete by 0231 once
 -- they carry a session, so the readback source cannot be edited after the fact.
 -- A receipt is VALID only when the two digests agree, and validity is a
 -- generated column rather than a flag someone sets.
@@ -60,7 +60,7 @@ create table ops.write_receipt (
   verb                     text not null,
   subject_type             text not null,
   subject_id               uuid not null,
-  -- The evidence row this receipt is a receipt FOR. Frozen by 0208 once bound.
+  -- The evidence row this receipt is a receipt FOR. Frozen by 0231 once bound.
   tool_call_idempotency_key text not null,
   -- What the caller believes it wrote.
   claimed_digest           text not null,
@@ -93,7 +93,7 @@ comment on column ops.write_receipt.readback_digest is
   'no parameter through which a caller can supply this value.';
 
 -- ------------------------------------------------------- the session guard
--- Same standard as evidence in 0208: live, unexpired, unrevoked, and matching
+-- Same standard as evidence in 0231: live, unexpired, unrevoked, and matching
 -- actor AND tenant. A receipt naming a session that does not vouch for its
 -- actor is worse than no receipt, because it looks like proof.
 create function ops.require_live_session_for_receipt()
@@ -228,7 +228,7 @@ begin
       p_receipt_id, r.tool_call_idempotency_key;
   end if;
   -- THE EVIDENCE MUST ITSELF BE QUALIFIED, and by the SAME session. A receipt
-  -- proved against a legacy row would be a proof about something 0208 says
+  -- proved against a legacy row would be a proof about something 0231 says
   -- proves nothing.
   if tc.application_session_id is null then
     raise exception 'receipt % names LEGACY evidence, which cannot be read back',
@@ -311,7 +311,7 @@ revoke update, delete on ops.write_receipt from carr_writer;
 
 -- --------------------------------------------------------------- apply-time
 -- EXERCISES the guarantees rather than describing them, and rolls every probe
--- back. Same reasoning as 0208's block: this file runs where the contract suite
+-- back. Same reasoning as 0231's block: this file runs where the contract suite
 -- does not, so shape checks alone would let a gutted guard through.
 do $$
 declare
@@ -494,10 +494,10 @@ begin
     end if;
   end;
 
-  raise notice '0211 apply-time proof passed';
-  raise exception 'ROLLBACK_0211_PROBE';
+  raise notice '0241 apply-time proof passed';
+  raise exception 'ROLLBACK_0241_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0211_PROBE' then
+  if sqlerrm = 'ROLLBACK_0241_PROBE' then
     return;
   end if;
   raise;

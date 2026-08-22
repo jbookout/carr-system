@@ -1,6 +1,6 @@
--- 0209 — the credential that may mint an authenticated application session
+-- 0239 — the credential that may mint an authenticated application session
 --
--- WHAT 0208 LEFT OPEN, DELIBERATELY. 0208 created carr_session_minter NOLOGIN
+-- WHAT 0231 LEFT OPEN, DELIBERATELY. 0231 created carr_session_minter NOLOGIN
 -- and memberless, and said so in its own comment: "Nothing can mint until a
 -- later slice decides which door credential joins this role; until then the
 -- substrate is inert by construction." This migration is that decision. It is
@@ -13,7 +13,7 @@
 -- human-bound authority identity (CARR_DB_AUTHORITY_*, see authorityDsnForActor
 -- in mcp-server/src/mcp.js). If either of those could mint, then a bug anywhere
 -- in the verb layer — or a leaked writer credential — manufactures an
--- authenticated session, and every guarantee 0208 enforces is enforced against
+-- authenticated session, and every guarantee 0231 enforces is enforced against
 -- an attacker who can simply issue themselves a session first.
 --
 -- So: a NEW role, carr_session_issuer, LOGIN, whose only privilege beyond
@@ -58,17 +58,17 @@ grant carr_session_minter to carr_session_issuer;
 -- The obvious direction is that the writer must not reach the mint. The other
 -- direction matters just as much: the issuer must not reach the writer. An
 -- issuer that could also insert evidence would let a single leaked credential
--- mint a session and then bind rows to it, which is precisely the attack 0208
+-- mint a session and then bind rows to it, which is precisely the attack 0231
 -- exists to prevent, merely performed with a different secret.
 --
 -- So the issuer mints and does nothing else. It is NOT given the writer bundle,
 -- and a leaked issuer credential can therefore create a session and then has
--- nothing to bind to it: 0208's guard requires the row's actor and tenant to
+-- nothing to bind to it: 0231's guard requires the row's actor and tenant to
 -- match, and the issuer cannot insert the row at all.
 revoke all on schema public from carr_session_issuer;
 
 -- --------------------------------------------------------------- apply-time
--- Catalog assertions only, and that is deliberate rather than lazy: 0208's
+-- Catalog assertions only, and that is deliberate rather than lazy: 0231's
 -- proof block exercises BEHAVIOUR because behaviour was what its mutants broke.
 -- What this migration changes is a MEMBERSHIP GRAPH, and a membership graph is
 -- read from the catalog — pg_has_role answers it transitively, which is the

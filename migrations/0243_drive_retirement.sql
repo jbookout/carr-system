@@ -1,4 +1,4 @@
--- 0214 — Drive retirement, resolved from receipts rather than from a report
+-- 0243 — Drive retirement, resolved from receipts rather than from a report
 --
 -- WHAT THE EXISTING PREFLIGHT ALREADY SAYS, IN ITS OWN WORDS. Asked whether a
 -- static inventory can close Phase 4, ops/drive-retirement-readiness-gate.py
@@ -8,7 +8,7 @@
 -- JSON supplied by a caller is not an immutable receipt.
 --
 -- This migration is the record layer that answer points at. It exists only
--- because 0211 gave us receipts that prove themselves by readback and 0213 gave
+-- because 0241 gave us receipts that prove themselves by readback and 0242 gave
 -- us an acceptance the runtime cannot make. Without those two, every table here
 -- would be a place to write "yes, it is fine".
 --
@@ -171,7 +171,7 @@ grant select, insert on ops.drive_retirement to carr_writer;
 grant select on ops.drive_retirement to carr_reader;
 grant execute on function ops.drive_retirement_readiness() to carr_writer, carr_reader;
 -- Retiring a dependency is operational work the runtime may do, ONCE it holds
--- two proven receipts. Declaring the phase closed is not, and lives in 0213's
+-- two proven receipts. Declaring the phase closed is not, and lives in 0242's
 -- acceptance, which carr_writer cannot execute.
 revoke update, delete on ops.drive_retirement from carr_writer;
 revoke update, delete on ops.drive_dependency from carr_writer;
@@ -228,7 +228,7 @@ begin
        qualifying_tool_calls, qualifying_events, qualifying_read_calls,
        proven_receipts, unproven_receipts, open_conflicts, note)
     values (gen_random_uuid(), sid, probe_actor, 'carr-internal',
-            1, 1, 1, 1, 0, 0, '0214 empty-case probe');
+            1, 1, 1, 1, 0, 0, '0243 empty-case probe');
     select * into rdy from ops.drive_retirement_readiness();
     if rdy.ready then
       raise exception '0243 FAILED: an empty inventory with an acceptance on record '
@@ -315,7 +315,7 @@ begin
      qualifying_tool_calls, qualifying_events, qualifying_read_calls,
      proven_receipts, unproven_receipts, open_conflicts, note)
   values (gen_random_uuid(), sid, probe_actor, 'carr-internal',
-          1, 1, 1, 1, 0, 0, '0214 probe acceptance');
+          1, 1, 1, 1, 0, 0, '0243 probe acceptance');
   select * into rdy from ops.drive_retirement_readiness();
   if not rdy.ready then
     raise exception '0243 FAILED: every dependency retired on proven receipts and an '
@@ -336,10 +336,10 @@ begin
     raise exception '0243 FAILED: a retirement record was rewritten';
   end if;
 
-  raise notice '0214 apply-time proof passed';
-  raise exception 'ROLLBACK_0214_PROBE';
+  raise notice '0243 apply-time proof passed';
+  raise exception 'ROLLBACK_0243_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0214_PROBE' then
+  if sqlerrm = 'ROLLBACK_0243_PROBE' then
     return;
   end if;
   raise;

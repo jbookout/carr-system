@@ -31,38 +31,38 @@ fi
   echo "psycopg is not importable under $PYBIN; set CARR_PYTHON to an interpreter that has it" >&2
   exit 1; }
 MIGRATION="$REPO/migrations/0231_authenticated_application_session.sql"
-# 0233 chooses the credential that joins carr_session_minter. It MUST be applied
-# after 0232 and never before: 0232 asserts the role is memberless, which is its
-# "inert by construction" contract, and 0233 is what ends that state.
+# 0239 chooses the credential that joins carr_session_minter. It MUST be applied
+# after 0231 and never before: 0231 asserts the role is memberless, which is its
+# "inert by construction" contract, and 0239 is what ends that state.
 #
-# ROLE MEMBERSHIP IS CLUSTER-WIDE WHILE MIGRATIONS ARE PER-DATABASE. Once 0233
-# has run anywhere in this cluster, 0232 can no longer apply to a FRESH database
+# ROLE MEMBERSHIP IS CLUSTER-WIDE WHILE MIGRATIONS ARE PER-DATABASE. Once 0239
+# has run anywhere in this cluster, 0231 can no longer apply to a FRESH database
 # in the same cluster -- it will find the member it requires to be absent. That
 # is an artifact of one cluster hosting many test databases, not a production
 # path (each Neon database is its own cluster), but it means this script must
 # stand up its own cluster per run, which it does.
 MIGRATION_ISSUER="$REPO/migrations/0239_session_issuer_credential.sql"
-# 0234 lets the door mint from an actor SLUG. The door has no actor id --
+# 0240 lets the door mint from an actor SLUG. The door has no actor id --
 # actor.id is not resolved until callTool, long after authentication -- and the
 # issuer holds no table privilege with which to resolve one.
 MIGRATION_SLUG_MINT="$REPO/migrations/0240_mint_session_by_actor_slug.sql"
-# 0235 adds write receipts: a session, a claimed digest, and a readback the
+# 0241 adds write receipts: a session, a claimed digest, and a readback the
 # DATABASE computes from the frozen evidence row rather than accepting.
 MIGRATION_RECEIPT="$REPO/migrations/0241_write_receipt.sql"
-# 0236 introduces the reducer and the acceptance surface — deliberately, and
+# 0242 introduces the reducer and the acceptance surface — deliberately, and
 # only after receipts can prove themselves.
 MIGRATION_ACCEPT="$REPO/migrations/0242_continuity_reducer_and_acceptance.sql"
-# 0237 is the LAST slice: Drive retirement resolved from proven receipts plus
+# 0243 is the LAST slice: Drive retirement resolved from proven receipts plus
 # an authority acceptance, which is the record-layer verifier the static
 # preflight says it cannot be.
 MIGRATION_RETIRE="$REPO/migrations/0243_drive_retirement.sql"
-# 0238 splits the receipt digest. 0235 made claimed_digest carry both the proof
+# 0244 splits the receipt digest. 0241 made claimed_digest carry both the proof
 # that a receipt is attached to a real call AND the claim about what a subject
 # now says; those are different facts, and one column could not be honest about
 # both. Under the old shape an exact reversal could never prove and a single
 # unproven receipt barred acceptance forever — this suite bricked itself on its
-# own first run. It applies AFTER 0237 because it rewrites 0237's retirement
-# trigger as well as 0235's and 0236's functions.
+# own first run. It applies AFTER 0243 because it rewrites 0243's retirement
+# trigger as well as 0241's and 0242's functions.
 MIGRATION_SPLIT="$REPO/migrations/0244_receipt_digest_split.sql"
 # 0246 takes the Drive retirement DENOMINATOR away from the runtime. 0237 granted
 # carr_writer INSERT on ops.drive_dependency and nothing in the repository ever
