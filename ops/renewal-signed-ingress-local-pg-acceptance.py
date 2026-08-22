@@ -106,9 +106,24 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     if row(cur, "sealed member count") != (1,):
         raise RuntimeError("signed source run has an unexpected member count")
     cur.execute("insert into ops.renewal_decision_source_run(job_id,attempt,snapshot_at,member_count,source_snapshot_id) values(%s,2,now(),0,null)", (job,))
-    cur.execute("select freshness_state from v_renewal_decision_queue_status")
-    if row(cur, "legacy unsigned run is unavailable")[0] != "ready":
-        raise RuntimeError("signed queue status was displaced by a legacy unsigned run")
+    status_columns = {value[0] for value in cur.execute(
+        "select column_name from information_schema.columns "
+        "where table_schema='public' and table_name='v_renewal_decision_queue_status'"
+    ).fetchall()}
+    if "owner_slug" in status_columns:
+        # 0279 keeps signed market-source ingress as disabled historical
+        # machinery, but the live renewal reader is CARR's executed-lease
+        # ledger. A signed candidate snapshot must not enter that reader.
+        cur.execute("select count(*) from v_renewal_decision_queue where display_name=%s", (source_row["name"],))
+        if row(cur, "signed market row excluded from lease ledger") != (0,):
+            raise RuntimeError("signed market row entered the CARR lease renewal reader")
+        cur.execute("select count(*) from v_renewal_decision_queue_status where freshness_state='empty'")
+        if row(cur, "empty lease-ledger partner statuses") != (2,):
+            raise RuntimeError("signed market ingress changed lease-ledger readiness")
+    else:
+        cur.execute("select freshness_state from v_renewal_decision_queue_status")
+        if row(cur, "legacy unsigned run is unavailable")[0] != "ready":
+            raise RuntimeError("signed queue status was displaced by a legacy unsigned run")
     conn.rollback()
 
 print("renewal signed ingress local acceptance passed")
