@@ -134,13 +134,23 @@ def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> 
             "--dangerously-bypass-hook-trust",
             "--json",
             "-m", entry["model"],
-            "-C", entry.get("cwd") or str(Path.cwd()),
             "-o", str(last),
         ]
-        if entry.get("sandbox"):
-            argv += ["-s", entry["sandbox"]]
-        for extra in entry.get("add_dirs") or []:
-            argv += ["--add-dir", extra]
+        # `codex exec resume` does not accept -C/-s/--add-dir at all — a
+        # resumed session already carries the cwd, sandbox and extra dirs it
+        # was FIRST started with, and passing them again is a hard CLI parse
+        # error ("unexpected argument '-C' found"), not a no-op override.
+        # Caught live 2026-08-22 dispatching a second task to an already-
+        # resumed room-bridge desk: the fresh-thread path (below) had always
+        # been exercised by the unit suite's stand-in `codex` script, which
+        # does not validate real argument parsing, so this never surfaced
+        # until a genuine second call hit the real binary.
+        if not thread:
+            argv += ["-C", entry.get("cwd") or str(Path.cwd())]
+            if entry.get("sandbox"):
+                argv += ["-s", entry["sandbox"]]
+            for extra in entry.get("add_dirs") or []:
+                argv += ["--add-dir", extra]
         if thread:
             argv.append(thread)
         argv.append(task)

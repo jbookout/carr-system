@@ -13,7 +13,7 @@ or the seed's answer races the dispatch and the test passes for the wrong
 reason. The token is a nonce minted at runtime and placed ONLY in the
 dispatched task. If it comes back, the desk read the socket.
 
-Run:  python3 spikes/hermes-dispatch/test_claude_desk_live.py
+Run:  python3 tools/room-bridge/test_claude_desk_live.py
 Exit 0 = dispatch proven end to end.
 """
 
@@ -84,6 +84,7 @@ def main() -> int:
         cwd=str(root),
         text=True,
     )
+    assert proc.stdin is not None  # guaranteed by stdin=subprocess.PIPE above
     proc.stdin.write(json.dumps(
         {"type": "user", "message": {"role": "user", "content": SEED}}) + "\n")
     proc.stdin.flush()

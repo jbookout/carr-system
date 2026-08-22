@@ -63,6 +63,40 @@ begin
     jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
+
+  -- THE AGING TRAP ONE LEVEL DOWN: not creating a role, but joining one.
+  -- 0273 grants the carr_authority bundle to the human authority login roles,
+  -- and the day a refresh carried this ledger past 0273 that grant stopped
+  -- replaying anywhere. Nothing else carried it: the CARR GRANTS section below
+  -- admits only app roles and neondb_owner as members, and neither login role
+  -- is either. So a database rebuilt from this file had carr_authority holding
+  -- its 24 grants and NOBODY holding carr_authority — the ledger claiming 0273
+  -- applied while the file it vouches for described a database where it never
+  -- had. Found by an independent review seat, loop #506 finding 3.
+  --
+  -- WHY THE LOGIN ROLES ARE NOT CREATED HERE, only joined. They are human
+  -- authority credentials, provisioned in the database provider's console
+  -- outside this repository. Minting a local carr_authority_joe so a grant has
+  -- somewhere to land would manufacture a login that authenticates as Joe's
+  -- authority principal on every machine that rebuilds. That is the carr_backup
+  -- reasoning above, except the cost is a security regression rather than an
+  -- unused role.
+  --
+  -- SO EACH IS GUARDED AND THE ABSENCE IS ANNOUNCED, which is 0273's own shape
+  -- reproduced rather than production's current state copied. Reproducing the
+  -- loop is what makes this self-maintaining: carr_authority_dell does not
+  -- exist today (the control-plane contract marks Dell's authority login
+  -- optional_nonblocking), and on the day it is provisioned a rebuild grants him
+  -- too with no edit here. Announced rather than skipped in silence, per rule
+  -- 88e9b5eb: "not authorized" and "not possible" are different findings.
+  -- Re-granting an existing membership is a no-op, so this is idempotent.
+  foreach r in array array['carr_authority_joe', 'carr_authority_dell'] loop
+    if exists (select 1 from pg_roles where rolname = r) then
+      execute format('grant carr_authority to %I', r);
+    else
+      raise notice 'authority login role % is absent, so the carr_authority membership 0273 grants it was not applied', r;
+    end if;
+  end loop;
 end $$;
 
 --
