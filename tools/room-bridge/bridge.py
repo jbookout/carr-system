@@ -229,7 +229,8 @@ def heartbeat_due(state: dict, *, now: str | None = None,
     return _elapsed_seconds(last, now=now) >= interval_s
 
 
-def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str) -> str:
+def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str,
+                   profiles: list | None = None) -> str:
     """The compact JSON the panel parses. `desks` carries every REGISTERED desk,
     seated or not: a desk with no room_seat is exactly the panel's dormant
     case, and omitting it would make an unwired desk indistinguishable from a
@@ -237,7 +238,15 @@ def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str) -> str:
 
     `auth` is this cycle's own sign-in probe (spec section 17): true, false, or
     null when the vendor CLI could not answer. Null is NOT signed-out — see
-    auth_control.probe_auth — and the panel renders it as unknown."""
+    auth_control.probe_auth — and the panel renders it as unknown.
+
+    `profiles` is the named-agent roster (loop 520): the NAME persists and the
+    model behind it is staffing detail, and any feed window must contain
+    current profile truth, so the roster is REPUBLISHED here rather than
+    assumed from older receipts. None means the roster could not be read this
+    cycle, and the key is then ABSENT — never an empty list, which would read
+    as "no profiles exist". Each desk row also names the profile bound to it,
+    when the local registry carries one."""
     rows = [
         {
             "name": name,
@@ -245,25 +254,27 @@ def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str) -> str:
             "live": bool(entry.get("last_live")),
             "last_seen": entry.get("last_seen"),
             "auth": entry.get("last_auth") if isinstance(entry.get("last_auth"), bool) else None,
+            "profile": entry.get("profile") if isinstance(entry.get("profile"), str) else None,
         }
         for name, entry in sorted(desk_entries.items())
     ]
-    return json.dumps(
-        {"heartbeat": {"desks": rows, "cursor": cursor, "cycle_at": cycle_at}},
-        separators=(",", ":"),
-    )
+    heartbeat: dict = {"desks": rows, "cursor": cursor, "cycle_at": cycle_at}
+    if profiles is not None:
+        heartbeat["profiles"] = profiles
+    return json.dumps({"heartbeat": heartbeat}, separators=(",", ":"))
 
 
 def post_heartbeat(state: dict, desk_entries: dict, *, add_room_turn, cursor: int,
                    now: str | None = None,
-                   interval_s: float = HEARTBEAT_INTERVAL_S) -> dict | None:
+                   interval_s: float = HEARTBEAT_INTERVAL_S,
+                   profiles: list | None = None) -> dict | None:
     """Publish the roster receipt if the throttle allows, and record that it
     went out. Returns None when throttled, so run_once's summary says honestly
     whether this cycle spoke."""
     if not heartbeat_due(state, now=now, interval_s=interval_s):
         return None
     stamp = now or _now()
-    body = heartbeat_body(desk_entries, cursor, stamp)
+    body = heartbeat_body(desk_entries, cursor, stamp, profiles=profiles)
     add_room_turn(body=body, seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()))
     state_mod.set_heartbeat_at(state, stamp)
     return {"posted_at": stamp, "desks": len(desk_entries), "cursor": cursor}
@@ -354,6 +365,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              dispatch_fn=dispatch.dispatch, desk_state_dir: Path = dispatch.DESK_STATE,
              probe_auth=auth_control.probe_auth, launch_login=auth_control.launch_login,
              desk_stop=dispatch.desk_stop, desk_start=dispatch.desk_start,
+             read_profiles=verb_io.read_profiles,
              log=print) -> dict:
     registry = registry or desks.Registry()
     results_path = Path(results_path or dispatch.DEFAULT_RESULTS)
@@ -433,9 +445,21 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
     # this cycle started with.
     heartbeat = None
     try:
+        # The named-agent roster (loop 520) rides the throttled heartbeat so
+        # any feed window carries current profile truth. A roster read that
+        # fails must cost the roster, never the heartbeat: profiles=None makes
+        # the key honestly absent, and the failure is a reportable cycle error.
+        profiles = None
+        if heartbeat_due(state):
+            try:
+                profiles = read_profiles()
+            except Exception as e:  # noqa: BLE001 — any fetch failure degrades the same way
+                errors.append({"desk": "(profiles)", "error": "profile_roster_unread",
+                               "detail": str(e)[:500]})
         heartbeat = post_heartbeat(
             state, registry_ext.all_desks(registry.path),
             add_room_turn=add_room_turn, cursor=state["last_seq"],
+            profiles=profiles,
         )
     except RuntimeError as e:
         # A heartbeat that cannot be posted is a reportable cycle error, never a

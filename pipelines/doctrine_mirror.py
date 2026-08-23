@@ -359,7 +359,34 @@ def verify_written_mirror(root: Path) -> list[str]:
     return problems
 
 
-def render_manifest(timestamp: str, doc_count: int, table_count: int, row_count: int) -> str:
+
+def mirror_role(connection: Any) -> str:
+    """The database role this mirror was taken as.
+
+    WHY A BACKUP HAS TO NAME ITS READER (2026-08-22). export_tables discovers
+    what to copy from information_schema.tables, and that view is ROLE-FILTERED:
+    a role that cannot see a table is not told the table exists. So the mirror's
+    coverage is a property of the credential, not of the database, and until now
+    the manifest recorded only a count. Measured on the live database the same
+    day: the exporter credential sees 36 public base tables and the jobs
+    credential sees 24. A mirror taken with the narrower one would have written
+    "Table count: 24" and looked exactly as finished as a complete mirror.
+
+    That is the worst place for a silent shrink. This file is the copy a person
+    reaches for when Postgres is unreachable and the record layer cannot answer,
+    so the one moment its completeness matters is the moment nobody can check it
+    against the source. Naming the reader does not make the mirror complete; it
+    makes an incomplete one legible, and it lets two mirrors be compared without
+    the database being up.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute("select current_user")
+        row = cursor.fetchone()
+    return str(row[0]) if row else "unknown"
+
+
+def render_manifest(timestamp: str, doc_count: int, table_count: int, row_count: int,
+                    role: str = "unknown") -> str:
     return "\n".join(
         (
             snapshot_banner(timestamp),
@@ -367,9 +394,15 @@ def render_manifest(timestamp: str, doc_count: int, table_count: int, row_count:
             "# Portability Mirror Manifest",
             "",
             f"UTC timestamp: {timestamp}",
+            f"Taken as database role: {role}",
             f"Document count: {doc_count}",
             f"Table count: {table_count}",
             f"Total row count: {row_count}",
+            "",
+            "Table coverage follows the reading role: information_schema.tables",
+            "hides what the role cannot see, so a mirror taken as a narrower role",
+            "is smaller and says so only here. Compare this line before trusting",
+            "a table count against an older mirror.",
             "",
             MANIFEST_WARNING,
             "",
@@ -437,7 +470,8 @@ def build_mirror(connection: Any, root: Path, timestamp: str) -> tuple[int, int,
     doc_count = export_documents(connection, root, timestamp)
     export_rules(connection, root, timestamp)
     table_count, row_count = export_tables(connection, root / "csv")
-    manifest = render_manifest(timestamp, doc_count, table_count, row_count)
+    manifest = render_manifest(timestamp, doc_count, table_count, row_count,
+                               mirror_role(connection))
     (root / "MANIFEST.md").write_text(manifest, encoding="utf-8")
     write_output_manifest(root, timestamp)
     return doc_count, table_count, row_count

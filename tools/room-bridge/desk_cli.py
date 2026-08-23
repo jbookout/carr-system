@@ -49,6 +49,8 @@ def cmd_register(reg: desks.Registry, args) -> int:
     )
     if args.seat:
         entry = registry_ext.set_seat(args.name, args.seat, path=reg.path)
+    if args.profile:
+        entry = registry_ext.set_profile(args.name, args.profile, path=reg.path)
     live = desks.is_live(entry.get("socket", "")) if entry.get("kind") in (
         "claude-session", "codex-live") else True
     registry_ext.stamp_heartbeat(args.name, live=live, path=reg.path)
@@ -80,6 +82,8 @@ def cmd_refresh(reg: desks.Registry, args) -> int:
         print(f"refresh: re-pointed {args.name} cwd -> {args.cwd}")
     if args.seat:
         registry_ext.set_seat(args.name, args.seat, path=reg.path)
+    if args.profile:
+        registry_ext.set_profile(args.name, args.profile, path=reg.path)
     try:
         live = True
         if entry.get("kind") in ("claude-session", "codex-live"):
@@ -138,6 +142,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--model", default=None)
     r.add_argument("--cwd", default=None)
     r.add_argument("--seat", default=None, help="the room seat this desk speaks for")
+    r.add_argument("--profile", default=None,
+                   help="named agent profile this desk carries (builder, designer, "
+                        "reviewer, doc) — presentation and routing only, never authority")
     r.add_argument("--sandbox", default=None,
                    choices=["read-only", "workspace-write", "danger-full-access"])
     r.add_argument("--add-dir", dest="add_dirs", action="append", default=None)
@@ -146,6 +153,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("name")
     f.add_argument("--cwd", default=None, help="repoint a stale codex-session cwd")
     f.add_argument("--seat", default=None)
+    f.add_argument("--profile", default=None,
+                   help="bind a named agent profile to this desk (presentation only)")
 
     sub.add_parser("list")
 

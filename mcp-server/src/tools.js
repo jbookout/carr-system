@@ -14,6 +14,7 @@ import { workShapeTools } from "./work-shape.js";
 import { workRequestIntakeTools } from "./work-request-intake.js";
 import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { partnerRoomTools } from "./partner-room.js";
+import { agentProfileTools } from "./agent-profiles.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -8204,3 +8205,4 @@ Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));
 // The partner room (Idea 78): shared AI-to-AI transcript both Macs poll; raw
 // turns, server-derived attribution, human-watchable. See src/partner-room.js.
 Object.assign(TOOLS, partnerRoomTools({ withEnvelope, ToolError }));
+Object.assign(TOOLS, agentProfileTools({ withEnvelope, writeEvent, ToolError }));
