@@ -16,7 +16,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 GATE = REPO / "ops" / "scheduler-cutover-coverage-gate.py"
-passed, failures = 0, []
+passed: int = 0
+failures: list[str] = []
 
 
 def check(name, cond, detail=""):
