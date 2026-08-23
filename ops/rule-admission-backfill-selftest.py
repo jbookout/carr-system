@@ -10,9 +10,11 @@ sys.path.insert(0,str(REPO))
 
 
 def main() -> int:
-    from lib.rule_admission import admission_contract
+    from lib.rule_admission import BACKFILL_REASON, admission_contract, backfill_owns_row
     failures=[]
+    ran=[]
     def check(name,condition):
+        ran.append(name)
         print(f"  {'ok  ' if condition else 'FAIL'} {name}")
         if not condition: failures.append(name)
     catalog={"gate":{"implementation":["hooks/gate.py"],"test":["ops/gate-test.py"],
@@ -54,7 +56,19 @@ def main() -> int:
               "execution", "input_schema_version", "output_schema_version", "budget",
               "canonical_write_authority"]
           and cognition["projection"]["targets"]==["workflow-manifest", "typed-broker"])
-    print(f"\nrule-admission-backfill-selftest: {8-len(failures)}/8 passed")
+    # WHO OWNS THE ROW. Added 2026-08-23 after the first real run against
+    # Production stopped on migration 0228's immutability trigger: the backfill
+    # tried to rewrite the contract of a rule Joe had already approved.
+    check("a rule with no contract yet is the backfill's to write",
+          backfill_owns_row(None,False) is True)
+    check("a row the backfill itself wrote stays the backfill's, so re-runs are idempotent",
+          backfill_owns_row(BACKFILL_REASON,False) is True)
+    check("an approved rule is never rewritten, whoever wrote its contract",
+          backfill_owns_row(None,True) is False
+          and backfill_owns_row(BACKFILL_REASON,True) is False)
+    check("a contract admitted by hand through admit-rule is never overwritten",
+          backfill_owns_row("Joe's explicit approval order, given live this session",False) is False)
+    print(f"\nrule-admission-backfill-selftest: {len(ran)-len(failures)}/{len(ran)} passed")
     return 1 if failures else 0
 
 

@@ -7,6 +7,27 @@ BUILT = {
     "schema":"schema",
 }
 
+# The reason stamped on every row this compiler produces. tools/sync-rule-admission.py
+# reads it back to tell its OWN rows apart from a contract someone wrote by hand
+# through admit-rule, which it must never overwrite.
+BACKFILL_REASON = "Backfilled from the reviewed active rule enforcement map"
+
+
+def backfill_owns_row(existing_reason: str | None, approved: bool) -> bool:
+    """May the map-driven backfill write this rule's contract?
+
+    No for an APPROVED rule: migration 0228 freezes the contract an approval
+    receipt covers, and the enforcement-point trigger raises on any touch.
+    No for a contract admitted through admit-rule: its reason is someone's own
+    words, and its enforcement points name controls the map's catalog does not
+    carry. Yes for a rule with no contract yet, and yes for a row the backfill
+    itself wrote, so re-running stays idempotent and a map correction still
+    propagates to the rows the map is actually the authority for.
+    """
+    if approved:
+        return False
+    return existing_reason is None or existing_reason == BACKFILL_REASON
+
 
 def admission_contract(rule_id: str, scope: str, entry: dict[str,Any],
                        catalog: dict[str,Any]) -> dict[str,Any]:
@@ -31,7 +52,7 @@ def admission_contract(rule_id: str, scope: str, entry: dict[str,Any],
     base={"rule_id":rule_id,"applicability":applicability,"projection":projection,
           "reachability":reachability,
           "input_contract":input_contract,
-          "reason":"Backfilled from the reviewed active rule enforcement map"}
+          "reason":BACKFILL_REASON}
     if cls=="judgment_ambient":
         return {**base,"state":"admitted","enforcement_class":"judgment_advisory",
                 "binding_moment":"when the named contextual judgment is required",
