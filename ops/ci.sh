@@ -391,10 +391,16 @@ PYEOF
   # a real defect — rule 3fa422b7 categorized session_task_rail without the
   # matching override — only at the NEXT session's boot, after the change had
   # merged with CI green. Here it catches it before the merge.
+  # scheduler-cutover-coverage-gate JOINED 2026-08-23. Same kind again:
+  # repository content only, no machine state and no database — it reads the
+  # launchd declarations and the cutover registry. It is a RATCHET rather than a
+  # threshold, because coverage stands at three of twenty-three and a check that
+  # fails every run is one people learn to scroll past. It fails only when a job
+  # that HAD a workflow binding loses it.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
-             mechanism-doctrine-gate; do
+             mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
