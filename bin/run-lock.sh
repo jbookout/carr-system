@@ -79,6 +79,15 @@
 # thing this file was written to prevent.
 : ${CARR_LOCK_STALE_AFTER_SECONDS:=5400}
 
+# How long a broken holder gets to honour TERM before it is KILLed. Ten seconds
+# because this chain's holder is a zsh script that spends nearly all its time
+# waiting on a child: zsh does not run its TERM handler until that child returns,
+# so the polite signal frequently does nothing at all and the escalation is the
+# path actually taken. Configurable for the same reason the bound above is —
+# ops/nightly-tombstone-selftest.py exercises the real escalation and should not
+# spend ten seconds of every CI run proving that a sleep ignores TERM.
+: ${CARR_LOCK_TERM_GRACE_SECONDS:=10}
+
 CARR_LOCK_DIR="${CARR_LOCK_DIR:-$HOME/carr-system/out/locks}"
 CARR_LOCK_PATH=""
 
@@ -121,7 +130,7 @@ carr_take_lock() {              # carr_take_lock <name> -> 0 took it, 1 held els
         # syscall no signal handler runs during will not go on TERM alone.
         kill -TERM "$holder" 2>/dev/null
         local waited=0
-        while [ "$waited" -lt 10 ] && kill -0 "$holder" 2>/dev/null; do
+        while [ "$waited" -lt "$CARR_LOCK_TERM_GRACE_SECONDS" ] && kill -0 "$holder" 2>/dev/null; do
           sleep 1
           waited=$((waited + 1))
         done

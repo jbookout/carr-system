@@ -212,6 +212,64 @@ try:
           "a step still executes the refusal script to produce its message")
     check("and no step is a bare `true` standing in for retired work",
           not re.search(r'^step "[^"]*" true$', code_only, re.M))
+
+    # ── THE RECEIPT THE ACCEPTANCE ASKS FOR, FROM THE REAL CALLSITES ─────────
+    # Every `tombstone` callsite in bin/nightly.sh, lifted verbatim (they carry
+    # backslash continuations) and replayed against the real function. This is
+    # the closest honest thing to running the chain: the arguments executed here
+    # are the exact arguments tonight's run will pass. What it cannot cover is
+    # the ~19 steps that DO work, which is why it asserts the tombstone count and
+    # blocked=0 rather than claiming to be a full chain.
+    #
+    # RUNNING THE ACTUAL CHAIN IS NOT AN OPTION FOR A TEST. It writes exports to
+    # OneDrive, pushes the corpus to ~/.claude/skills, takes the real singleton
+    # lock and dumps the production database. A selftest that does all that as a
+    # side effect of asking "how many steps were gated out" is a worse bargain
+    # than the question is worth.
+    calls = re.findall(r'^\s*tombstone "(?:(?!^\s*(?:tombstone|step|drive_projection) ).)*?"\s*$',
+                       code_only, re.M | re.S)
+    # The call inside drive_projection()'s own body is a definition, not a step:
+    # its arguments are that function's parameters and mean nothing at top level.
+    # It is replayed a few lines below by calling the wrapper itself, which is the
+    # only way to exercise the normal-route branch as the chain reaches it.
+    calls = [c for c in calls if '"$label"' not in c]
+    projections = len(re.findall(r'^drive_projection "', NIGHTLY, re.M))
+    expected = len(calls) + projections
+    check("bin/nightly.sh has tombstone callsites to replay", len(calls) >= 5,
+          f"found {len(calls)}")
+
+    replay_log = scratch / "replay.log"
+    replay = subprocess.run(
+        ["/bin/zsh", "-c", "\n".join([
+            "set -u", f'LOG="{replay_log}"', "LEDGER_OFF=1",
+            "tombstoned=0", "seam_blocked=0", "timed_out=0", "LAST_STEP_RC=0",
+            shell_func("say"), shell_func("record_run"), shell_func("tombstone"),
+            *calls,
+            # The drive_projection steps, through the real wrapper on the normal route.
+            "RECOVERY=0", shell_func("step"), shell_func("drive_projection"),
+            *[f'drive_projection "replayed projection {i}" "a seam" true'
+              for i in range(projections)],
+            receipt,
+        ])],
+        capture_output=True, text=True, timeout=120)
+    replayed = replay_log.read_text() if replay_log.exists() else ""
+
+    check("every real tombstone callsite replays cleanly", replay.returncode == 0,
+          f"rc={replay.returncode} stderr={replay.stderr!r}")
+    check(f"all {expected} gated-out steps write a TOMBSTONE line",
+          replayed.count("  TOMBSTONE  ") == expected,
+          f"{replayed.count('  TOMBSTONE  ')} lines for {expected} steps")
+    # Every one of them must say BOTH things. A tombstone that names what is
+    # missing and not what reopens it is a shrug with a timestamp, and the reopen
+    # condition is the half that makes it a filed duty rather than a deletion.
+    tomb_lines = [ln for ln in replayed.splitlines() if "  TOMBSTONE  " in ln]
+    check("...and each names what is missing AND what would reopen it",
+          all(re.search(r"· missing: \S.*· reopens when: \S", ln) for ln in tomb_lines),
+          "\n".join(ln for ln in tomb_lines
+                    if not re.search(r"· missing: \S.*· reopens when: \S", ln)))
+    check("THE ACCEPTANCE: the receipt reads blocked=0 with the work accounted for as tombstoned",
+          f"nightly receipt: blocked=0 tombstoned={expected} timed_out=0" in replay.stdout,
+          f"stdout={replay.stdout!r}")
 finally:
     shutil.rmtree(scratch, ignore_errors=True)
 
@@ -235,6 +293,12 @@ try:
                        capture_output=True, text=True, timeout=180, env=env)
         return list(PingRecorder.hits)
 
+    # TWO INVOCATIONS COVER THREE OUTCOMES, and the packing is deliberate rather
+    # than tidy. hc-ping.sh ends by curling the live Worker's /health, so every
+    # extra run costs a real network round trip — up to its 15s timeout on a
+    # runner that cannot reach it. Each case below still asserts one outcome per
+    # check; they are only being carried by fewer processes.
+
     # 78 = the step ran and found its credential absent. This already alarmed and
     # must keep alarming; it is the case the local backup is in on this Mac.
     hits = ping(HC_BACKUP_RC="78", HC_EXPORTS_RC="0", HC_CHAIN_RC="0")
@@ -246,15 +310,14 @@ try:
     # 69 is the case the old mute swallowed, and it is the code a tombstoned step
     # now carries. THIS IS THE REGRESSION TEST FOR THE MUTE: before 2026-08-23
     # this pinged nothing at all and the check went late instead of alarming.
-    hits = ping(HC_BACKUP_RC="69", HC_EXPORTS_RC="0", HC_CHAIN_RC="0")
+    # Exports is left unsupplied in the same run to cover the one honest silence
+    # that remains — nobody said, so nothing is claimed and the dead-man runs its
+    # own clock.
+    hits = ping(HC_BACKUP_RC="69", HC_CHAIN_RC="0")
     check("a BLOCKED/TOMBSTONED backup (69) pings /fail rather than going late",
           "/backup/fail" in hits, f"hits={hits}")
-
-    # The one honest silence, kept deliberately: nobody supplied an outcome, so
-    # nothing is claimed either way and the dead-man runs its own clock.
-    hits = ping(HC_EXPORTS_RC="0", HC_CHAIN_RC="0")
     check("an UNSUPPLIED outcome still pings nothing, which is the honest signal",
-          "/backup" not in hits and "/backup/fail" not in hits, f"hits={hits}")
+          "/exports" not in hits and "/exports/fail" not in hits, f"hits={hits}")
 finally:
     server.shutdown()
     shutil.rmtree(ping_home, ignore_errors=True)
@@ -297,7 +360,12 @@ try:
     broke = subprocess.run(
         ["/bin/zsh", "-c", f'source "{RUN_LOCK}"\ncarr_take_lock wedged && print -r -- TOOK'],
         env={**os.environ, "CARR_LOCK_DIR": str(lockdir),
-             "CARR_LOCK_STALE_AFTER_SECONDS": "60"},
+             "CARR_LOCK_STALE_AFTER_SECONDS": "60",
+             # The holder here is `zsh -c '... sleep 300'`, which does NOT honour
+             # TERM while it waits on that child — so this exercises the real
+             # KILL escalation, not the polite path. The grace is shortened only
+             # so the escalation is proven in two seconds instead of ten.
+             "CARR_LOCK_TERM_GRACE_SECONDS": "2"},
         capture_output=True, text=True, timeout=120)
     elapsed = time.monotonic() - t0
     check("a wedged holder past the bound is broken and the lock is taken",
@@ -313,11 +381,33 @@ try:
     check("...and the stalled run itself is stopped, not merely stepped around",
           holder.poll() is not None, "the wedged holder is still running")
 
-    # THE RACE THE BOUND CREATED. The broken holder's own exit trap fires while
-    # the breaker may already own a new lock at the same path; an unconditional
-    # release there deletes the breaker's claim and lets a third run in.
-    check("the breaker's lock survives the broken holder's release",
-          (lock / "pid").exists(), "the lock directory was removed by the loser")
+    check("the breaker's lock is intact after the break",
+          (lock / "pid").exists(), "the lock directory was removed")
+
+    # THE RACE THE BOUND CREATED, asserted DIRECTLY on carr_release_lock rather
+    # than through the break above. Breaking a wedge introduces a second way to
+    # lose a lock: the TERMed holder's own exit trap runs while the breaker may
+    # already own a new directory at the same path, and an unconditional remove
+    # there deletes the breaker's claim and admits a third run — two chains
+    # against one database, which is the failure this whole helper exists to
+    # prevent, reintroduced by the fix for a different one.
+    #
+    # Driving it through a real break does NOT test this: the breaker waits for
+    # the holder to be gone before it recreates anything, so the window never
+    # opens on that path and a version with the guard removed passes. Measured —
+    # this check was written that way first and the mutation survived it. The
+    # property is "release only what still names us", so it is tested as one.
+    stolen = subprocess.run(
+        ["/bin/zsh", "-c",
+         f'source "{RUN_LOCK}"\n'
+         'carr_take_lock stolen-case || exit 9\n'
+         'print -r -- 999999 > "$CARR_LOCK_PATH/pid"\n'   # another run took it over
+         'carr_release_lock\n'
+         '[ -d "$CARR_LOCK_DIR/carr-stolen-case.lock" ] && print -r -- "SURVIVED"'],
+        env={**os.environ, "CARR_LOCK_DIR": str(lockdir)},
+        capture_output=True, text=True, timeout=60)
+    check("a holder does not delete a lock that now names a different run",
+          "SURVIVED" in stolen.stdout, f"stdout={stolen.stdout!r}")
 finally:
     if holder and holder.poll() is None:
         holder.kill()
@@ -362,12 +452,24 @@ try:
     check("the induced unset variable does kill the shell",
           r.returncode != 0 and "must never be reached" not in logged,
           f"rc={r.returncode}")
+    # THE VARIABLE MUST BE ON THE FATAL LINE, not merely somewhere in the log.
+    # The first cut of this check searched the whole file and passed on a
+    # mutation that reduced the FATAL line to "the chain died" — because the
+    # captured stderr dump a few lines above happens to contain the name too.
+    # Both halves matter and they are different guarantees: capturing the shell's
+    # stderr is what puts the evidence in the log at all, and PARSING it is what
+    # puts the answer on the line a reader finds first. Asserting only the union
+    # of the two lets either one rot silently.
+    fatal_lines = [ln for ln in logged.splitlines() if "FATAL" in ln]
     check("the death leaves a FATAL line in the log at all",
-          "FATAL" in logged, f"log={logged!r}")
-    check("...and the line NAMES the variable that killed it",
-          "CARR_DB_NOBODY_PROVISIONED_THIS" in logged, f"log={logged!r}")
+          bool(fatal_lines), f"log={logged!r}")
+    check("...and that line NAMES the variable that killed it",
+          any("CARR_DB_NOBODY_PROVISIONED_THIS" in ln for ln in fatal_lines),
+          f"fatal={fatal_lines!r}")
     check("...and says the steps below it did not run, not merely that something failed",
-          "did not run tonight" in logged, f"log={logged!r}")
+          any("did not run tonight" in ln for ln in fatal_lines), f"fatal={fatal_lines!r}")
+    check("...and the raw shell stderr is in the log too, so the evidence outlives the parse",
+          "CARR_DB_NOBODY_PROVISIONED_THIS: parameter not set" in logged, f"log={logged!r}")
     check("the log carries a completion line, so a reader is not left guessing",
           "FINISHED WITH FAILURES" in logged, f"log={logged!r}")
     check("the whole-chain dead-man ping fires /fail on a chain that ran nothing",
