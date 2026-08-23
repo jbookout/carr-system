@@ -1,0 +1,97 @@
+{
+  "_doc": [
+    "What each wired gate catches, and whether anything ELSE catches the same class.",
+    "",
+    "This file exists to make the 2026-08-23 council's retire-candidate rule",
+    "evaluable instead of arguable. That rule, report-only: a gate is a retire",
+    "CANDIDATE when it has zero live denies in 7 days AND its catch-class is",
+    "already owned by pre-commit or ops/ci.sh AND it sits on the hot path.",
+    "Two of those three come from measurement — ops/hook-telemetry-rollup.py reads",
+    "live denies from out/hook-telemetry.jsonl and derives hot-path membership from",
+    "the wiring in ops/config/hooks.json. The third cannot be measured; somebody has",
+    "to look at the other control and confirm it covers the same class.",
+    "",
+    "So 'also_caught_by' defaults to \"unverified\" and MUST stay that way until",
+    "someone checks. An unverified entry is never reported as a retire candidate —",
+    "a gate deleted on a guess about who else was watching is exactly the incident",
+    "this system keeps having. The rollup prints how many entries are still",
+    "unverified, so the gap is visible rather than silently empty.",
+    "",
+    "also_caught_by vocabulary:",
+    "  \"unverified\"            nobody has checked. The default. Blocks candidacy.",
+    "  \"none-known\"            checked, and this gate is the only control. Blocks candidacy.",
+    "  \"pre-commit:<check>\"    ops/githooks/pre-commit runs <check>, verified.",
+    "  \"ops-ci:<class>\"        ops/ci.sh's <class> covers it, verified.",
+    "Add the date and initials of the check in 'verified'."
+  ],
+  "hooks": {
+    "guard-unattended.py": {
+      "catch_class": "destructive-or-exfiltrating action from a session (rm/force-git/key-read/unknown-host/destructive-SQL)",
+      "also_caught_by": "none-known",
+      "verified": "2026-08-23 — no pre-commit or ops/ci.sh check sees a tool call before it runs; both are commit-time and this is call-time. Nothing else covers it.",
+      "note": "Fires on every Bash and WebFetch. Highest-volume gate in the stack."
+    },
+    "gate-edit-gate.py": {
+      "catch_class": "quiet edit of an enforcement file (hooks/*.py, hooks.json, settings.json, gate-baseline.json)",
+      "also_caught_by": "pre-commit:staged-gate-bless-check.py",
+      "verified": "2026-08-23 — ops/githooks/pre-commit runs staged-gate-bless-check.py, and ops/ci.sh's gates class runs hooks/gate-integrity.py --strict.",
+      "note": "NOT interchangeable with those two, and the rollup must not be read as saying it is: this gate PREVENTS a quiet edit at the moment it is attempted; the pre-commit and CI checks DETECT one that already landed. Same class, different times. Retiring it would trade prevention for detection, which is a decision for Joe, not an inference from a zero-deny week."
+    },
+    "canonical-edit-gate.py": {
+      "catch_class": "edit aimed at the canonical checkout instead of a worktree",
+      "also_caught_by": "none-known",
+      "verified": "2026-08-23 — ops/githooks/pre-commit refuses a COMMIT on main, which is a narrower class: it does not see an edit to a canonical checkout sitting on any other branch, and it does not see an edit that is never committed. Not the same catch, so not recorded as an owner.",
+      "note": "Documented as making a real catch during the 2026-08-23 audit session itself."
+    },
+    "one-repo-gate.py": {"catch_class": "code written outside the repo", "also_caught_by": "unverified"},
+    "record-home-gate.py": {"catch_class": "record written to a file instead of the database (rule 14181e60)", "also_caught_by": "unverified"},
+    "bash-write-gate.py": {
+      "catch_class": "the Bash door onto record-home-gate and one-repo-gate's policies",
+      "also_caught_by": "none-known",
+      "verified": "2026-08-23 — it exists precisely because the file-tool gates did not see Bash; no commit-time check covers a write that never becomes a commit.",
+      "note": "Decides nothing itself: it extracts write targets and delegates to the two policy gates."
+    },
+    "close-before-open-gate.py": {"catch_class": "new work opened while prior work is unclosed", "also_caught_by": "unverified"},
+    "git-writer-gate.py": {"catch_class": "git write from a session that does not own the tree", "also_caught_by": "unverified"},
+    "staging-attribution-gate.py": {"catch_class": "staged change with no attributed owner", "also_caught_by": "unverified"},
+    "staging-observation-tracker.py": {"catch_class": "observation tracking for staged work", "also_caught_by": "unverified"},
+    "settings-change-gate.py": {"catch_class": "change to installed machine configuration", "also_caught_by": "unverified"},
+    "write-effect-check.py": {"catch_class": "declared-versus-actual effect of a write", "also_caught_by": "unverified"},
+    "draft-export-gate.py": {"catch_class": "draft exported outside the sanctioned path", "also_caught_by": "unverified"},
+    "executor-tier-gate.py": {"catch_class": "subagent dispatched with no named model tier", "also_caught_by": "unverified"},
+    "model-floor-gate.py": {"catch_class": "work below the model floor for its class", "also_caught_by": "unverified"},
+    "costar-lane-gate.py": {"catch_class": "browser lane discipline", "also_caught_by": "unverified"},
+    "escalation-gate.py": {"catch_class": "question escalated to the human that the system should settle", "also_caught_by": "unverified"},
+    "blocker-decider-gate.py": {"catch_class": "blocker recorded with no decider named", "also_caught_by": "unverified"},
+    "weekend-quiet-gate.py": {"catch_class": "outbound message in quiet hours", "also_caught_by": "unverified"},
+    "peer-broadcast-gate.py": {"catch_class": "broadcast to peer sessions", "also_caught_by": "unverified"},
+    "rule-shape-gate.py": {"catch_class": "taught rule with no trigger or audit shape", "also_caught_by": "unverified"},
+    "run-record-gate.py": {"catch_class": "drift claim or assertion recorded without a run record", "also_caught_by": "unverified"},
+    "lint-gate.py": {"catch_class": "writing lint on a file just written", "also_caught_by": "unverified"},
+    "map-architecture-gate.py": {"catch_class": "map work finished without the doctrine front door", "also_caught_by": "unverified"},
+    "conduct-stop-gate.py": {"catch_class": "conduct violation in the turn being ended", "also_caught_by": "unverified"},
+    "completion-evidence-gate.py": {"catch_class": "completion claimed without evidence", "also_caught_by": "unverified"},
+    "ledger-sweep.py": {"catch_class": "ruling in the turn that belongs in the decision ledger", "also_caught_by": "unverified"},
+    "context-handoff-gate.py": {"catch_class": "context ending with no handoff written", "also_caught_by": "unverified"},
+    "scheduled-run-record.py": {"catch_class": "scheduled run finishing with no run row", "also_caught_by": "unverified"},
+    "chat-lint-gate.py": {"catch_class": "writing lint on the turn's prose", "also_caught_by": "unverified"},
+    "chat-lint-carryover.py": {"catch_class": "carryover of the previous turn's lint", "also_caught_by": "unverified"},
+    "stale-claim-gate.py": {"catch_class": "claim asserted from stale state", "also_caught_by": "unverified"},
+    "loose-work-gate.py": {"catch_class": "turn ended with loose work outstanding", "also_caught_by": "unverified"},
+    "unread-artifact-gate.py": {"catch_class": "artifact referenced but never read", "also_caught_by": "unverified"},
+    "drift-claim-gate.py": {"catch_class": "drift claimed without a record", "also_caught_by": "unverified"},
+    "drift-assertion-gate.py": {"catch_class": "drift asserted at turn end without a record", "also_caught_by": "unverified"},
+    "gate-integrity.py": {
+      "catch_class": "gate content or wiring drifted from the blessed baseline",
+      "also_caught_by": "ops-ci:gates",
+      "verified": "2026-08-23 — ops/ci.sh's gates class runs hooks/gate-integrity.py --strict, the same check.",
+      "note": "SessionStart, not the hot path, so the retire rule does not reach it."
+    },
+    "ledger-boundary-sweep.py": {
+      "catch_class": "none — registered in no settings file",
+      "also_caught_by": "none-known",
+      "verified": "2026-08-23 — hooks/SETTINGS-BLOCK.md documents it as 'WRITTEN BUT REGISTERED NOWHERE...blocks nothing', and it appears in no wiring.",
+      "note": "Already dead weight both council chairs marked safe to tombstone. It will never appear in the rollup because it never fires."
+    }
+  }
+}

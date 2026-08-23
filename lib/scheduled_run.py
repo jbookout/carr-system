@@ -57,7 +57,12 @@ import sys
 from datetime import datetime, timezone
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LOG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.join(REPO, "hooks"))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.join(REPO, "out", "hook-guard.log")
 PYTHON = os.path.join(REPO, ".venv", "bin", "python")
 OPS_RECORD = os.path.join(REPO, "tools", "ops-record.py")
 

@@ -73,7 +73,11 @@ def heredoc_body(cmd):
     return match.group(3) if match else ""
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOG = os.path.join(REPO, "out", "hook-guard.log")
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.join(REPO, "out", "hook-guard.log")
 DELEGATION_STATE = os.path.join(REPO, "out", "delegation-gate-state.json")
 DELEGATION_LOCK = DELEGATION_STATE + ".lock"
 

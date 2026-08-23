@@ -72,7 +72,12 @@ REPO = os.environ.get("CARR_ONE_REPO_ROOT") or os.path.abspath(
     os.path.join(os.path.dirname(__file__), ".."))
 
 CODE_EXTENSIONS = (".py", ".js", ".mjs", ".ts", ".sql", ".sh")
-LOG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.join(REPO, "out", "hook-guard.log")
 
 # THE ESCAPE, and it is not optional. This gate installs at USER level, so it sees
 # every session on the machine — including Life AI and any ordinary side project
