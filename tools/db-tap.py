@@ -34,7 +34,9 @@ against production fails at the server unless you deliberately break glass:
 Both CARR_BREAK_GLASS=1 and a non-empty --reason are required together. A
 break-glass run is banner-announced, requires a local actor identity
 (~/.config/carr/local-actor.json, see bin/set-local-actor.sh), and appends a
-receipt to out/break-glass-receipts.log before the target ever runs.
+receipt to out/break-glass-receipts.log before the target ever runs. That
+receipt records whether an agent session or a person in a shell engaged the
+guard (run_by=, see run_by() below).
 
 Never prints the DSN. ON_ERROR_STOP is always set for sql mode.
 """
@@ -400,6 +402,30 @@ def local_actor_slug() -> str:
         return "identity-not-set"
 
 
+def run_by() -> str:
+    """Who is at the keyboard: an agent session, or a person in a shell.
+
+    Joe's ruling of 2026-08-23 lets an agent session close an evidence-complete
+    incident through break-glass, but only after it asks the main host model for
+    approval first. Before this, every receipt read actor=joe whether a person
+    or a session engaged the guard, so the condition the ruling turns on was
+    invisible in the one place that records the act.
+
+    Derived here rather than passed in, so every break-glass path — this tool,
+    tools/call-verb.py, the staging attribution hook — carries it without a
+    call-site change and the log cannot drift into two shapes.
+
+    SELF-REPORTED, exactly as honest as _engaged() above: the environment says
+    it is an agent session, and any process may unset that. This distinguishes
+    an agent close from a human one for the audit trail; it does not defend
+    against one dressing as the other, which stays a server-side concern.
+    """
+    if os.environ.get("CLAUDECODE") != "1":
+        return "human-shell"
+    session = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    return f"agent-session:{session.split('-')[0]}" if session else "agent-session"
+
+
 def append_receipt(actor: str, mode: str, target: str, host: str, reason: str,
                     log_path: str = RECEIPT_LOG) -> None:
     """Public (Phase 1, 2026-08-13): same reuse rationale as local_actor_slug
@@ -407,10 +433,14 @@ def append_receipt(actor: str, mode: str, target: str, host: str, reason: str,
     in this exact line shape, so out/break-glass-receipts.log stays ONE audit
     trail for every break-glass act in the repo rather than two files that
     could drift in format. Was `_append_receipt`; renamed, no other caller
-    referenced the old name."""
+    referenced the old name.
+
+    run_by= is appended LAST (2026-08-23) so a reader or parser written against
+    the older shape still matches every field it knew."""
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     line = (f"{datetime.now(timezone.utc).isoformat()} actor={actor} mode={mode} "
-            f'target={target} host={host} reason="{reason.strip()}"\n')
+            f'target={target} host={host} reason="{reason.strip()}" '
+            f"run_by={run_by()}\n")
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(line)
 
