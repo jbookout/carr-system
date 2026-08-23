@@ -201,10 +201,23 @@ def wiring_cases():
     with tempfile.TemporaryDirectory(prefix="gwg-cwd-") as outside:
         # End to end, unspied: a cwd that is not a worktree of this repo cannot
         # earn the worktree reading, so the gate falls back to the shared tree
-        # and refuses exactly as it always did.
-        denied = fire("git add -A", cwd=outside)
-        results.append(("cwd-outside-still-judged-shared", denied is True,
-                        f"got={'DENY' if denied else 'allow'}"))
+        # and behaves exactly as it always did.
+        #
+        # THE EXPECTATION IS DERIVED, NOT HARDCODED, and hardcoding it is what
+        # made this case fail on the hosted runner: a fresh CI checkout is CLEAN,
+        # the gate is silent on a clean tree by design, and asserting DENY was
+        # asserting the state of the machine rather than the behaviour of the
+        # gate. The whole point of the case is that an outside cwd is judged
+        # against the shared tree — so the shared tree's own dirtiness is the
+        # only honest expectation, and it holds on a dirty laptop and a clean
+        # runner alike.
+        shared_dirty = bool(subprocess.run(
+            ["git", "-C", REPO, "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True, text=True).stdout.strip())
+        got = fire("git add -A", cwd=outside)
+        results.append(("cwd-outside-still-judged-shared", got is shared_dirty,
+                        f"shared tree dirty={shared_dirty} "
+                        f"got={'DENY' if got else 'allow'}"))
 
     return results
 

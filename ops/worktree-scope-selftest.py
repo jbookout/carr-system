@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks"))
 from worktree_scope import target_tree, tree_label, worktree_root  # noqa: E402
 
-failures = []
+failures: list[str] = []
 
 
 def main():
