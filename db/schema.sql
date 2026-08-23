@@ -28683,6 +28683,7 @@ grant select (id, registry_ref, party_id, est_lease_event, client_id, owner_id) 
 grant select (slug, side) on table public.participant_role to carr_writer;
 grant select (id, name) on table public.party to carr_jobs;
 grant select (id) on table public.placement to carr_jobs;
+grant select (id, status) on table public.rule to carr_jobs;
 grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
 grant select (key, value) on table public.system_config to carr_jobs;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
@@ -29050,6 +29051,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0282_zero_hit_fallback_for_doctrine_search.sql	3bdd8a30afc47b07cf036ae4d36e059e3b593422db576cc0231814b8e04a5469	2026-08-22 17:00:48.544908+00
 0283_concept_scores_stop_being_free.sql	18031ebf9e28201a30c9e2400d2e1fb9229541c8f4d3abcb0e57c9137d5b484d	2026-08-22 17:41:45.996977+00
 0284_named_agent_profiles.sql	03b53b8ec28212752d066670a2836b999c0689acc022f88771de09532e723522	2026-08-23 03:20:17.462342+00
+0285_the_admission_watch_reads_rule_status.sql	4c52e59b91a9c1e4b07b1cf2306d9a066848b560282916f7dcfa918009c4e6f1	2026-08-23 14:12:08.250619+00
 \.
 
 
