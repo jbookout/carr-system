@@ -395,13 +395,33 @@ def cost_cases(tmp):
             open(os.path.join(tmp, "cost.jsonl"), encoding="utf-8") if line.strip()]
     costs = sorted(r["meter_ms"] for r in rows if isinstance(r.get("meter_ms"), (int, float)))
     check("every firing recorded its own cost", len(costs) == 12, len(costs))
-    # MINIMUM, not mean: this machine runs 20+ parallel sessions and has
-    # documented memory-thrash episodes, so the mean of anything timed here is a
-    # measure of the machine's load. The floor is the honest figure, and against
-    # a 35ms interpreter start plus a 20ms+ gate it is the number the ~2%
-    # instrumentation budget is about.
-    check("the meter's floor cost stays under 5ms", costs and costs[0] < 5.0,
-          f"min {costs[0] if costs else '—'}ms")
+
+    # NO ABSOLUTE MILLISECOND THRESHOLD HERE, and that is a correction rather
+    # than a convenience. This check first read "floor cost stays under 5ms" and
+    # failed inside CI at 5.76ms on 2026-08-23 — not because the meter regressed
+    # but because the gates class runs 231 selftests on a 16GB machine that was
+    # already carrying three other CI runs at load average 110. A wall-clock
+    # constant asserted on this host measures the host, and a check that goes red
+    # on normal work is the check people learn to scroll past.
+    #
+    # So the assertion is a RATIO against a real gate timed in the same run,
+    # under whatever load exists: the instrument must stay small next to the
+    # thing it measures, and load moves both terms together. The actual ~2%
+    # budget is not decided here at all — ops/hook-telemetry-rollup.py computes
+    # meter share continuously from thousands of live firings, which is a far
+    # better instrument than twelve samples on a busy laptop.
+    real_env = env_for(tmp, CARR_HOOK_TELEMETRY=os.path.join(tmp, "real.jsonl"))
+    gate = os.path.join(HOOKS, "guard-unattended.py")
+    for _ in range(8):
+        fire([RUNNER, gate], payload(), real_env)
+    real = [json.loads(line) for line in
+            open(os.path.join(tmp, "real.jsonl"), encoding="utf-8") if line.strip()]
+    meter = sorted(r["meter_ms"] for r in real)
+    gate_ms = sorted(r["elapsed_ms"] for r in real)
+    mid = lambda v: v[len(v) // 2]           # noqa: E731 — median, no import
+    check("the meter costs a small fraction of the gate it measures",
+          real and mid(meter) <= 0.25 * mid(gate_ms),
+          f"meter {mid(meter) if real else '—'}ms vs gate {mid(gate_ms) if real else '—'}ms")
 
     procs = []
     conc_env = env_for(tmp, CARR_HOOK_TELEMETRY=os.path.join(tmp, "conc.jsonl"))

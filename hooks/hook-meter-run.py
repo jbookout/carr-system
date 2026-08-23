@@ -67,6 +67,7 @@ folded into a deny total.
 
 Fixtures: ops/hook-meter-selftest.py
 """
+# doctrine: enforcement-gate-telemetry
 
 import time as _time
 _T0 = _time.monotonic() * 1000.0        # first statement: the meter's own clock
