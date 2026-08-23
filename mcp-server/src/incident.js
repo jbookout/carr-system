@@ -184,19 +184,36 @@ export function closePreconditions(incident, { rootCause, evidence, allowEarly, 
   // permitted — ops-record.py's rule, kept: "the reason an early close was
   // allowed belongs ON the incident, not in a shell history nobody reads back."
   const until = incident?.monitoring_until ? new Date(incident.monitoring_until) : null;
-  const inWindow = until && now && until.getTime() > new Date(now).getTime();
-  if (inWindow && duplicateOf) {
-    facts.push(`closed inside its monitoring window as a duplicate of ${duplicateOf}, which carries ` +
-               `the watch for this event`);
-  } else if (inWindow) {
-    const reason = String(allowEarly || "").trim();
-    if (!reason)
-      return { ok: false, fields: {}, facts,
-        error: `${incident?.ref} is still inside its monitoring window until ` +
-               `${formatWindow(until)} — a green run says the symptom stopped, not that the cause ` +
-               `is understood. Pass allow_early with a reason if the window cannot apply.` };
-    facts.push(`closed before its monitoring window elapsed: ${reason}`);
-  }
+  const inWindow = Boolean(until && now && until.getTime() > new Date(now).getTime());
+  const reason = String(allowEarly || "").trim();
+  if (inWindow && !duplicateOf && !reason)
+    return { ok: false, fields: {}, facts,
+      error: `${incident?.ref} is still inside its monitoring window until ` +
+             `${formatWindow(until)} — a green run says the symptom stopped, not that the cause ` +
+             `is understood. Pass allow_early with a reason if the window cannot apply.` };
+
+  // NOTHING A PARTNER SAID IS DROPPED, AND NOTHING WRITTEN IS FALSE. The first
+  // build recorded a fact only when the window happened to be open, which meant
+  // a partner who typed a reason for closing early could get silence back if
+  // the row carried no window at all — the reason existed in their head and the
+  // request and nowhere in the record. It also meant a duplicate closed outside
+  // a window left no trace of WHY its evidence was another incident.
+  //
+  // So both are always recorded, and the sentence says which case it was. The
+  // Python side records "closed before its monitoring window elapsed" whenever
+  // --allow-early is passed, which on a row whose window already ran out is a
+  // false sentence in the ledger; this is the one place the two implementations
+  // deliberately differ, and it differs by being truthful rather than by being
+  // laxer — the REFUSAL logic above is identical.
+  if (duplicateOf && !incident?.recovery_evidence_ref && !String(evidence || "").trim())
+    facts.push(inWindow
+      ? `closed inside its monitoring window as a duplicate of ${duplicateOf}, which carries the ` +
+        `investigation and the watch for this event`
+      : `closed as a duplicate of ${duplicateOf}, which carries the investigation for this event`);
+  if (reason)
+    facts.push(inWindow
+      ? `closed before its monitoring window elapsed: ${reason}`
+      : `closed with a stated exception, though no monitoring window was open at the time: ${reason}`);
 
   // monitoring_until is NOT NULL under 0115's resolved constraint. An incident
   // closed early, or one that never had a window, still needs a value: stamp
@@ -534,11 +551,24 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
         // first, and the list is capped: a row carrying eighty recurrences
         // would otherwise return eighty journeys nobody asked for. The cap
         // is REPORTED rather than silently applied.
+        //
+        // ASKED OF THE WHOLE FACT TABLE, NOT OF THE PAGE ABOVE. The first build
+        // scanned `facts.rows`, which is the newest fact_limit rows — so
+        // get-incident with fact_limit:3 on a row carrying eighty-seven
+        // recurrences reported "correlations 2/2", a cap notice that was
+        // truthfully computed and completely wrong. A count derived from a page
+        // is a count of the page.
+        const known = await c.query(
+          // 13 is one past 'correlation:' — the same twelve characters
+          // occurrenceSourceRef writes and trace.js has written since 0122.
+          `select substring(source_ref from 13) as correlation_id, max(recorded_at) as newest
+             from ops.incident_fact
+            where incident_id = $1
+              and source_ref ~ '^correlation:[0-9a-fA-F-]{36}$'
+            group by 1 order by newest desc`, [inc.id]);
         const correlations = [inc.correlation_id];
-        for (const f of facts.rows) {
-          const m = /^correlation:([0-9a-fA-F-]{36})$/.exec(f.source_ref || "");
-          if (m && !correlations.includes(m[1])) correlations.push(m[1]);
-        }
+        for (const row of known.rows)
+          if (!correlations.includes(row.correlation_id)) correlations.push(row.correlation_id);
         const followed = correlations.slice(0, TRACE_CORRELATION_MAX);
         const trace = await c.query(
           `select correlation_id, kind, ref, state, environment, service_key, failure_class,

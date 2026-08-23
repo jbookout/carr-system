@@ -29,8 +29,8 @@ import {
   partnerAuthority, readinessFor, occurrenceSourceRef, SEVERITIES, OWNERS,
 } from "../src/incident.js";
 import { incidentSignature } from "../src/trace.js";
-import { TOOLS, ToolError } from "../src/tools.js";
-import { PROFILES } from "../src/mcp.js";
+import { TOOLS, ToolError, executeRegisteredTool } from "../src/tools.js";
+import { PROFILES, callTool } from "../src/mcp.js";
 
 const NOW = "2026-08-23T12:00:00.000Z";
 const LATER = "2026-08-24T12:00:00.000Z";
@@ -179,7 +179,7 @@ test("a duplicate carries its own evidence and its own window waiver, and says s
   assert.equal(r.ok, true);
   assert.equal(r.fields.recovery_evidence_ref, "ops.incident:INC-1");
   assert.match(r.facts[0], /duplicate of INC-1/);
-  assert.match(r.facts[0], /carries the watch/,
+  assert.match(r.facts[0], /carries the investigation and the watch/,
     "the waiver must state WHY the window did not apply, not merely that it did not");
 });
 
@@ -514,4 +514,138 @@ test("a partner's close is still refused by the same guard the CLI uses", async 
   assert.match(payload.hint, /same refusal tools\/ops-record\.py resolve gives/,
     "partner authority buys the door, never a weaker guard behind it");
   assert.ok(!fake.sql.some(([s]) => s.includes("update ops.incident")));
+});
+
+// ── 10. THE DISPATCHER'S OWN GATES, not just the handler's ──────────────────
+//
+// The handler tests above prove requirePartner refuses. These prove the two
+// gates ABOVE it refuse too, which matters because they are the ones that fire
+// for a caller who never reaches a handler: executeRegisteredTool's humanOnly
+// check (every machine door), and callTool's allowedIn check (a narrowed
+// profile). A boundary held by exactly one mechanism is a boundary one refactor
+// from being held by none.
+
+test("the registry's humanOnly gate refuses the machine doors before the handler runs", async () => {
+  for (const machine of [agent, probe, localMachine]) {
+    const fake = new Fake();
+    const payload = await refuse(() => executeRegisteredTool(fake, machine, "close-incident",
+      { idempotency_key: "k", ref: "INC-20260823-01", root_cause: "x" }));
+    assert.equal(payload.error, "human_only", `${machine.slug} must be refused by the registry gate`);
+    assert.deepEqual(fake.sql, []);
+  }
+});
+
+test("a narrowed profile refuses the close by name, and still allows the open", async () => {
+  const blocked = await refuse(() => callTool({}, joe, "close-incident",
+    { idempotency_key: "k", ref: "INC-1", root_cause: "x" }, "capture"));
+  assert.equal(blocked.error, "not_in_profile");
+  assert.equal(blocked.verb, "close-incident");
+
+  // The positive half. open-incident must clear the profile gate — if it did
+  // not, an unattended run could not file what it saw, which is the whole
+  // reason it is in that profile. It fails LATER, on the absent writer
+  // credential, and that is the proof it got past the gate.
+  let reached = false;
+  try {
+    await callTool({}, joe, "open-incident", { idempotency_key: "k", service: "carr-mcp",
+      environment: "production", operation: "x", failure_class: "y" }, "capture");
+  } catch (e) {
+    reached = !(e instanceof ToolError && e.payload?.error === "not_in_profile");
+  }
+  assert.ok(reached, "open-incident must clear the capture profile's gate");
+});
+
+test("no incident verb accepts a caller-claimed authority field", async () => {
+  for (const name of ["incident-board", "open-incident", "close-incident", "adjudicate-incident"]) {
+    const payload = await refuse(() => executeRegisteredTool(new Fake(), joe, name,
+      { idempotency_key: "k", ref: "INC-1", sponsor: "joe" }));
+    assert.equal(payload.error, "caller_authority_field_forbidden", name);
+  }
+});
+
+// ── 11. THE THREE DEFECTS THE LIVE REPLAY FOUND (2026-08-23) ────────────────
+//
+// Every case here failed against the real ledger before it passed. Written
+// after, deliberately kept: each one is a shape of "the code did something
+// defensible and told the reader something false", which is the class this
+// whole ledger exists to prevent.
+
+test("a stated reason for an early close is never silently dropped", () => {
+  // FOUND LIVE: an incident opened by open-incident carries expires_at but no
+  // monitoring_until, so `inWindow` was false and the partner's typed reason
+  // went nowhere. The close succeeded and the record said nothing about why.
+  const r = closePreconditions(
+    { ref: "INC-1", state: "detected", monitoring_until: null },
+    { rootCause: "a probe", evidence: "the replay", allowEarly: "a probe never goes green", now: NOW });
+  assert.equal(r.ok, true);
+  assert.equal(r.facts.length, 1, "the reason must reach the incident");
+  assert.match(r.facts[0], /a probe never goes green/);
+  assert.match(r.facts[0], /no monitoring window was open/,
+    "and the sentence must be TRUE — 'closed before its window elapsed' about a row with no " +
+    "window is a false statement in the ledger, which is worse than a missing one");
+});
+
+test("a duplicate close records why its evidence was another incident, window or not", () => {
+  // FOUND LIVE: the waiver fact was conditional on an open window, so a
+  // duplicate closed outside one left no trace of the reasoning at all.
+  const outside = closePreconditions(
+    { ref: "INC-2", state: "detected", duplicate_of_ref: "INC-1", monitoring_until: null },
+    { rootCause: "same event", now: NOW });
+  assert.equal(outside.ok, true);
+  assert.match(outside.facts[0], /duplicate of INC-1/);
+  assert.ok(!/monitoring window/.test(outside.facts[0]),
+    "there was no window, so the fact must not claim one was waived");
+
+  const inside = closePreconditions(
+    { ref: "INC-2", state: "detected", duplicate_of_ref: "INC-1", monitoring_until: LATER },
+    { rootCause: "same event", now: NOW });
+  assert.match(inside.facts[0], /inside its monitoring window/);
+  assert.match(inside.facts[0], /carries the investigation and the watch/);
+});
+
+test("an incident that carries its OWN evidence does not claim to be closed as a duplicate", () => {
+  // The pointer can be set on a row that also recovered for real. The fact
+  // should describe what the close actually stood on.
+  const r = closePreconditions(
+    { ref: "INC-2", state: "monitoring", duplicate_of_ref: "INC-1",
+      recovery_evidence_ref: "ops.run:green", monitoring_until: "2026-08-01T00:00:00.000Z" },
+    { rootCause: "same event", now: NOW });
+  assert.equal(r.ok, true);
+  assert.equal(r.fields.recovery_evidence_ref, "ops.run:green");
+  assert.deepEqual(r.facts, [], "it closed on its own green run, not on the other incident");
+});
+
+test("both exceptions on one close each get their own line", () => {
+  const r = closePreconditions(
+    { ref: "INC-2", state: "detected", duplicate_of_ref: "INC-1", monitoring_until: LATER },
+    { rootCause: "same event", allowEarly: "and the window cannot apply anyway", now: NOW });
+  assert.equal(r.facts.length, 2, "two different reasons are two entries in the history");
+});
+
+test("the refusal itself is unchanged by any of that", () => {
+  const r = closePreconditions(
+    { ref: "INC-1", state: "monitoring", recovery_evidence_ref: "ops.run:green",
+      monitoring_until: LATER },
+    { rootCause: "x", now: NOW });
+  assert.equal(r.ok, false, "an open window with no duplicate and no reason still refuses");
+});
+
+test("get-incident counts correlations from the whole fact table, not from the page it returned", async () => {
+  // FOUND LIVE: get-incident with fact_limit:3 on a row carrying 87 recurrences
+  // reported "correlations 2/2" — a cap notice computed truthfully from the
+  // wrong set. A count derived from a page is a count of the page.
+  const fake = new Fake({
+    "from ops.incident i left join": [{ id: "inc-1", ref: "INC-1", state: "detected",
+      correlation_id: "00000000-0000-0000-0000-000000000000", db_now: NOW, duplicate_of: null }],
+    "order by recorded_at desc limit": [{ text: "one", source_ref: "ops.run:1", recorded_at: NOW }],
+    "group by 1 order by newest desc": Array.from({ length: 40 }, (_, i) =>
+      ({ correlation_id: `1111111${i % 10}-2222-3333-4444-5555555555${String(i).padStart(2, "0")}` })),
+    "count(*)::int as n from ops.incident_fact": [{ n: 173 }],
+  });
+  const out = await TOOLS["get-incident"].handler(fake, joe, { ref: "INC-1", fact_limit: 1 });
+  assert.ok(out.correlations_total > out.facts.length,
+    "the correlation count must not be bounded by the fact page size");
+  assert.equal(out.correlations_followed, 25, "and the cap is the cap, applied to the real list");
+  assert.ok(out.correlations_total > out.correlations_followed,
+    "a cap that is never reported is a silent truncation");
 });
