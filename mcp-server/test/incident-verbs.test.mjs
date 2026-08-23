@@ -475,10 +475,35 @@ test("open-incident takes the same ref-allocation lock the Python writer takes",
     "the day and the sequence both come from the query — a client-formatted date is how every " +
     "incident in a timezone gap ends up numbered 01");
 
+  // DOUBLE-CHECKED: look, then lock, then look again. The lock is the same one
+  // ops-record.py holds to transaction end, so an unconditional take would put
+  // every attach behind the nightly assessment's whole run.
   const lock = fake.sql.findIndex(([s]) => s.includes("ops.incident.ref-allocation"));
-  const look = fake.sql.findIndex(([s]) => s.includes("from ops.incident where signature"));
+  const looks = fake.sql.map(([s], i) => [s, i])
+    .filter(([s]) => s.includes("from ops.incident where signature")).map(([, i]) => i);
   assert.ok(lock >= 0, "without the lock two writers both observe absence and both mint");
-  assert.ok(lock < look, "the lock has to be taken BEFORE the lookup it protects");
+  assert.equal(looks.length, 2, "a miss must re-ask under the lock, or the lock protects nothing");
+  assert.ok(looks[0] < lock && lock < looks[1],
+    "the first look is unlocked, the second is the one the lock protects");
+});
+
+test("an attach never takes the global mint lock", async () => {
+  // The liveness half. ops-record.py's assess holds this lock for its whole
+  // transaction; an unattended run recording a repeat must not queue behind it
+  // for a row it was never going to insert.
+  const fake = new Fake({
+    "from tool_call where idempotency_key": [],
+    "from ops.service where key": [{ id: "svc-1", key: "carr-mcp" }],
+    "from ops.incident where signature": [{ id: "inc-1", ref: "INC-20260823-01",
+      severity: "SEV-3", state: "detected", owner_actor: "joe" }],
+    "as occurrences from ops.incident": [{ occurrences: 2 }],
+  });
+  await TOOLS["open-incident"].handler(fake, joe, {
+    idempotency_key: "k9", service: "carr-mcp", environment: "production",
+    operation: "mcp:tools/call:find", failure_class: "verb_internal_error",
+  });
+  assert.ok(!fake.sql.some(([s]) => s.includes("ops.incident.ref-allocation")),
+    "the attach path must not serialize itself against the nightly collector");
 });
 
 test("a partner's close writes the outcome and refuses to leave the row bare", async () => {

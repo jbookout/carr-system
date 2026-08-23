@@ -649,18 +649,31 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
                   "against it — a service this ledger has never heard of cannot be watched" });
         const serviceId = svc.rows[0].id;
 
-        // ONE LOCK, TAKEN BEFORE THE LOOKUP, AND IT IS THE SAME LOCK
-        // tools/ops-record.py takes for ref allocation. Two writers that both
-        // observe "no open incident for this fingerprint" both mint, and the
-        // second dies on either incident_ref_key or 0116's partial unique
-        // index. Python takes the correlation lock and THEN this one; this
-        // path takes only this one, so the two orderings cannot form a cycle.
-        await c.query("select pg_advisory_xact_lock(hashtextextended('ops.incident.ref-allocation', 0))");
-
-        const open = await c.query(
+        // DOUBLE-CHECKED, AND THE LOCK IS ONLY ON THE MINT PATH. Two writers
+        // that both observe "no open incident for this fingerprint" both mint,
+        // and the second dies on either incident_ref_key or 0116's partial
+        // unique index — so the mint has to be serialized. The lock that does
+        // it is the SAME one tools/ops-record.py takes for ref allocation, and
+        // that writer holds it to transaction end: `assess` opening one
+        // incident holds it for its whole run over every job.
+        //
+        // So an unconditional lock here would put the COMMON path — an
+        // unattended run attaching an occurrence to an incident that is already
+        // open — behind the nightly assessment's transaction, for a row it was
+        // never going to insert. The lookup runs first and unlocked, and only a
+        // miss pays for the lock and re-asks under it. That is ops-record.py's
+        // own pattern, and it takes the correlation lock BEFORE this one while
+        // this path takes only this one, so the two orderings cannot form a
+        // cycle.
+        const findOpen = () => c.query(
           `select id, ref, severity, state, owner_actor from ops.incident
             where signature = $1 and state not in ('resolved','reviewed') limit 1`,
           [fingerprint.signature]);
+        let open = await findOpen();
+        if (!open.rows.length) {
+          await c.query("select pg_advisory_xact_lock(hashtextextended('ops.incident.ref-allocation', 0))");
+          open = await findOpen();   // another writer may have opened it while we waited
+        }
 
         // The occurrence's source. actor.correlation_id is the x-correlation-id
         // of the request that produced this write, set server-side by mcp.js's
