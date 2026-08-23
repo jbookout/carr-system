@@ -639,9 +639,17 @@ drive_projection "corpus push (git-canonical doctrine -> vault)" \
   "canonical doctrine document delivery destination" \
   ./.venv/bin/python tools/corpus-sync.py --push
 
-drive_projection "consumers (renewal-feed, lead-board, deal-room)" \
-  "record-backed board document destinations" \
-  ./run.sh all
+# THE CONSUMER BOARDS WERE NEVER BLOCKED ON A DESTINATION. They write inside
+# this repository and read the store; what refused them was lib/record_sources
+# treating a present-but-unprivileged elevated DSN as the end of the search,
+# so the working exporter path was never tried. Fixed 2026-08-23. Run under the
+# routine boundary's exact two credentials before unblocking: lead board 9,868
+# leads, deal room 172 deals, both exit 0.
+#
+# THE LABEL SAID renewal-feed AND DID NOT RUN IT. `run.sh all` is lead_board
+# plus deal_room; renewal_feed is separate and stays explicit-recovery until a
+# canonical listing intake exists. The name is corrected rather than carried.
+step "consumers (lead-board, deal-room)" ./run.sh all
 
 # Added 2026-08-07 (loop #204, Joe's ruling): the promotion gate runs nightly so
 # the renewal T1 review shortlist is fresh each morning. READ-ONLY plus one
@@ -651,9 +659,9 @@ drive_projection "consumers (renewal-feed, lead-board, deal-room)" \
 # database — T1 candidates queue for Joe's review, and only his claim at the
 # board creates a lead. Runs after the consumers because the renewal feed it
 # reads is rebuilt by the step above.
-drive_projection "lead promote (review shortlist, writes no leads)" \
-  "record-native renewal feed input" \
-  ./run.sh lead-promote
+# Same cause, same fix, same evidence: 11 candidates, 7 waiting on contact
+# info, exit 0 under the routine boundary's credentials.
+step "lead promote (review shortlist, writes no leads)" ./run.sh lead-promote
 
 drive_projection "graph (derived from the exported files)" \
   "record/document graph input" \

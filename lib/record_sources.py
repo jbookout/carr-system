@@ -358,10 +358,12 @@ def load_ref_index(mode):
 
 def _elevated_url():
     """A DSN that can read candidate_pool itself. `tools/db-tap.py run` sets DATABASE_URL."""
-    # The scheduled-jobs role already has the narrow pool grant needed to map
-    # lane output.  Let that same non-owner role read the canonical rows during
-    # the run, instead of making an unattended routine fall back to Drive simply
-    # because it does not carry an exporter credential.
+    # WAS: "the scheduled-jobs role already has the narrow pool grant needed to
+    # map lane output". Measured against production 2026-08-23 it does not: the
+    # jobs role is refused on candidate_pool AND on v_export_pool_all. The
+    # preference order is kept, because a pool-specific credential should still
+    # win when one exists, but pool_reach no longer treats a DSN it cannot read
+    # as the end of the search.
     return (os.environ.get("CARR_DB_POOL_URL")
             or os.environ.get("CARR_DB_JOBS_URL")
             or os.environ.get("DATABASE_URL"))
@@ -392,6 +394,26 @@ def pool_reach(wanted):
     except ImportError:
         return False, "psycopg not importable by this interpreter (use .venv/bin/python)", None, None
     url = _elevated_url()
+    # A PRESENT-BUT-UNPRIVILEGED ELEVATED DSN NO LONGER ENDS THE SEARCH.
+    #
+    # This used to return failure the moment the elevated probe raised, so the
+    # exporter path below was reachable only when there was NO elevated URL at
+    # all. That is the wrong test: what matters is whether the elevated DSN can
+    # READ the pool, not whether one is configured.
+    #
+    # It cost the nightly chain two steps. carr_routine_exec hands children
+    # CARR_DB_JOBS_URL and CARR_DB_EXPORTER_URL, _elevated_url() prefers the jobs
+    # one, and measured against the live database on 2026-08-23 the jobs role can
+    # read NEITHER candidate_pool NOR v_export_pool_all — while the exporter
+    # credential sitting in the same environment reads v_export_pool_all with
+    # 9,870 rows. So the lead board and lead promote refused a path that was
+    # working, and reported it as a privilege problem, which is what sent two
+    # sessions looking for a grant to add.
+    #
+    # THE FALLBACK IS LOUD. A downgrade from the base table to the export view is
+    # announced on stderr, because a silent downgrade would hide exactly the
+    # privilege regression this branch exists to notice.
+    elevated_problem = ""
     if url:
         def _c():
             import psycopg
@@ -400,10 +422,17 @@ def pool_reach(wanted):
             with _c() as conn, conn.cursor() as cur:
                 cur.execute("select 1 from candidate_pool limit 1")
         except Exception as e:                                  # noqa: BLE001
-            return False, f"elevated DSN cannot read candidate_pool ({type(e).__name__})", None, None
-        return True, "", _c, POOL_BASE
+            elevated_problem = f"elevated DSN cannot read candidate_pool ({type(e).__name__})"
+        else:
+            return True, "", _c, POOL_BASE
     if not _exporter_url():
-        return False, "no CARR_DB_POOL_URL and no CARR_DB_EXPORTER_URL", None, None
+        reason = "no CARR_DB_POOL_URL and no CARR_DB_EXPORTER_URL"
+        if elevated_problem:
+            reason = f"{elevated_problem}, and {reason}"
+        return False, reason, None, None
+    if elevated_problem:
+        print(f"pool: {elevated_problem}; falling back to the exporter view path",
+              file=sys.stderr)
     if not set(wanted) - {ROUTER_SOURCE}:
         return True, "", _connect, POOL_ROUTER
     # Lanes wanted. Prove the all-source view rather than assuming the grant:
@@ -412,11 +441,12 @@ def pool_reach(wanted):
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(f"select 1 from {POOL_ALL} limit 1")
     except Exception as e:                                      # noqa: BLE001
-        return (False,
-                f"the exporter credential cannot read {POOL_ALL} ({type(e).__name__}), so "
-                f"{sorted(set(wanted) - {ROUTER_SOURCE})} are unreachable; "
-                "migration 0025 creates and grants it",
-                None, None)
+        reason = (f"the exporter credential cannot read {POOL_ALL} ({type(e).__name__}), so "
+                  f"{sorted(set(wanted) - {ROUTER_SOURCE})} are unreachable; "
+                  "migration 0025 creates and grants it")
+        if elevated_problem:
+            reason = f"{elevated_problem}, and {reason}"
+        return False, reason, None, None
     return True, "", _connect, POOL_ALL
 
 
