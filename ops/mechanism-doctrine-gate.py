@@ -79,12 +79,43 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# A HOOKS FILE IS A MECHANISM ONLY IF IT CAN ACT, not because of where it lives.
+# This gate first classified every hooks/*.py as a session gate, which is where
+# the gates are but not what makes one. It caught hooks/turn_origin.py on
+# 2026-08-23 — a shared detector two gates import, which reads no payload,
+# refuses nothing and runs on no schedule. The gate's own --explain text already
+# said a library is not covered; the predicate did not agree with it.
+#
+# The honest discriminator is behavioural: a gate READS THE HOOK PAYLOAD or has
+# an entry point to be invoked through. A library has neither — it is imported.
+# Checked across all 50 files in hooks/ when this was written: 43 have an entry
+# point and are mechanisms, 7 do not and are the shared modules
+# (cmd_text, conduct_patterns, corpus_renders, gate_paths, md_manifest,
+# refused_content, turn_origin). No file changed side.
+#
+# NOT keyed on the underscore-versus-hyphen naming convention those 7 happen to
+# share. That convention is real and it would work today, but it is a habit
+# rather than a contract, and a gate named with an underscore would then be
+# waved through silently — the failure this gate exists to prevent.
+_ENTRY_POINT = re.compile(r"sys\.stdin|def main\(|__main__", re.M)
+
+
+def _has_entry_point(path):
+    try:
+        return bool(_ENTRY_POINT.search(
+            open(os.path.join(REPO, path), encoding="utf-8", errors="replace").read()))
+    except OSError:
+        # Unreadable is not a licence to skip: treat it as a mechanism so the
+        # failure is a refusal to classify rather than a silent pass.
+        return True
+
+
 # The four kinds. Each entry is (human name, predicate on a repo-relative path).
 MECHANISM_KINDS = (
     ("a check that can refuse work",
      lambda p: p.startswith("ops/") and p.endswith("-gate.py")),
     ("a gate that runs inside the session",
-     lambda p: p.startswith("hooks/") and p.endswith(".py")),
+     lambda p: p.startswith("hooks/") and p.endswith(".py") and _has_entry_point(p)),
     ("a job that runs on its own schedule",
      lambda p: p.startswith("ops/launchd/") and p.endswith(".plist")),
     ("a job that asks an AI client to act later",
