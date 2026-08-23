@@ -460,8 +460,15 @@ drive_projection() {            # drive_projection <label> <missing-seam> <comma
   if [ "$RECOVERY" -eq 1 ]; then
     step "RECOVERY NONCANONICAL $label" "$@"
   else
+    # THE REOPEN CONDITION POINTS AT THE STEP'S OWN BLOCK rather than asserting
+    # what reopening takes. For most projections it is a build; for upstream
+    # corroborate it is not — #539 established that the block there is a decision
+    # about how external provider datasets are acquired and how long they may be
+    # kept, which no amount of wiring settles. A line that told every reader "that
+    # seam exists" would send them looking for something to build, which is the
+    # exact wrong turn the old seam NAME already cost two sessions.
     tombstone "$label" "canonical seam — $seam" \
-      "that seam exists, and this step moves out of drive_projection onto the normal route"
+      "that seam exists — read this step's block in bin/nightly.sh for what it would take — and the step moves out of drive_projection onto the normal route"
   fi
 }
 
