@@ -157,7 +157,10 @@ def main() -> int:
         # decisions rather than housekeeping. When this fails, update the number
         # in the same commit that changes the chain and say which step moved.
         #
-        # Five as of 2026-08-22, down from thirteen. The portability mirror
+        # Three as of 2026-08-23, down from thirteen. The consumer boards and
+# lead promote left last: neither was ever blocked on a destination,
+# only on a pool read that gave up before trying the path that worked.
+# Before that, five as of 2026-08-22. The portability mirror
 # left last, repointed to the same OneDrive root as the exports.
 # Before that, six: the exports gained a
         # canonical destination (CARR OneDrive, decision bdbb7441), the section
@@ -166,7 +169,7 @@ def main() -> int:
         # vault drift watch at both ends, and the settings mirror.
         projections = len(re.findall(r'^drive_projection "', nightly, re.M))
         check("every remaining Drive projection is routed through the recovery envelope",
-              projections == 5 and "RECOVERY NONCANONICAL" in nightly
+              projections == 3 and "RECOVERY NONCANONICAL" in nightly
               and "routine-canonical-seam-refusal.sh" in nightly,
               f"{projections} drive_projection step(s) in bin/nightly.sh")
         check("nightly recognizes the record-native dashboard replacement",
