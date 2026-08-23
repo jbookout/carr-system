@@ -41,13 +41,14 @@
 CODEX_MODEL="gpt-5.6-sol"
 CODEX_EFFORT="high"
 
-# GROK / "SuperGrok 4.5 Expert" -> grok-4.5 at high. IMPORTANT: the CLI accepts
-# ONLY high | medium | low; `expert` is rejected outright. "SuperGrok Expert" is
-# the grok.com ACCOUNT TIER that entitles the session, not a per-call setting,
-# and `grok models` lists exactly one model. So `high` is the top of the CLI's
-# scale and is what Joe's instruction resolves to. If xAI ever exposes an expert
-# effort or model id, change it here.
-GROK_MODEL="grok-4.5"
+# GROK / "SuperGrok 4.6" -> grok-4.6 at high. Joe named 4.6 on 2026-08-23 and
+# `grok models` now lists grok-4.6 as the CLI default (grok-4.5 still offered).
+# IMPORTANT: the CLI accepts ONLY high | medium | low; `expert` is rejected
+# outright. "SuperGrok Expert" is the grok.com ACCOUNT TIER that entitles the
+# session, not a per-call setting. So `high` is the top of the CLI's scale and
+# is what Joe's instruction resolves to. If xAI ever exposes an expert effort
+# or a newer model id, change it here.
+GROK_MODEL="grok-4.6"
 GROK_EFFORT="high"
 
 # ── PRECHECK TIER — deliberately NOT the council tier ────────────────────────
