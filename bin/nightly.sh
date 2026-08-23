@@ -537,8 +537,31 @@ step "availability matcher (digest, never sent)"     ./.venv/bin/python pipeline
 # nightly before: it existed only as a hand-run command, which is why
 # candidate_pool saw no renewal-radar/upstream writes between 2026-08-01 and
 # 2026-08-07.
+# THE SEAM NAME WAS WRONG AND COST A SESSION A DAY. It read "record-backed
+# pre-entity-watch document destination", which describes the OUTPUT and sent
+# two readers looking for somewhere to write. The output was never the problem.
+#
+# WHAT ACTUALLY BLOCKS IT IS THE INPUT, and it is not a wiring job. corroborate
+# joins seven weak signal families — tips, deeds, PECOS enrolments, NPPES moves,
+# job posts, new licences, domains — and surfaces a person only at weight 3
+# across at least 2 distinct classes. One signal is noise; two is somebody
+# packing boxes. Those seven files are built by five scripts in pipelines/radar,
+# and checked 2026-08-23, NONE of the five is called by this chain, by ops/ or by
+# run.sh. They are hand-run tools.
+#
+# AND THEY CANNOT SIMPLY BE CALLED FROM HERE. build-pecos-pool.py consumes a
+# quarterly CMS provider-enrolment extract a person downloads; build-license-pool
+# .py consumes a licensing file filtered in browser memory so the raw statewide
+# file never touches disk. Both DELETE their input immediately after running,
+# because it is identifiable data about real practitioners. That discard rule is
+# a privacy control somebody chose, not an oversight to automate around.
+#
+# So this step stays refused, and the refusal is honest. Making it nightly means
+# deciding how external provider datasets are acquired and how long they may be
+# kept — a question about handling other people's data, which is not a session's
+# to answer.
 drive_projection "upstream corroborate (pre-entity-watch + pool mapping)" \
-  "record-backed pre-entity-watch document destination" \
+  "upstream signal INTAKE: five hand-run pool builders, no caller, inputs are externally acquired and discarded by design" \
   ./run.sh corroborate
 
 # FETCH ALLOWLIST (2026-08-09): regenerate the record-derived practice domains
