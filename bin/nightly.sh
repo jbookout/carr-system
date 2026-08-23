@@ -723,6 +723,16 @@ step "vendor level drift (reports, never changes a level)" ./.venv/bin/python op
 # with no credential, same contract as the step above.
 step "control-plane registry drift (reports, never installs)" ./.venv/bin/python ops/control-plane-registry-drift.py
 
+# RULE-ADMISSION DRIFT, added 2026-08-23, the other half of the step above. The
+# admission contract is the control-plane roadmap's Phase 1 exit condition, and
+# it reopens on its own: a rule taught after ops/config/rule-enforcement-map.json
+# was last extended carries no contract until someone notices, which took two
+# days the one time it happened. This could not run unattended until migration
+# 0285, because the audit joins the authority-scoped `rule` table; that grant is
+# exactly two columns, id and status, so this counts rules and cannot read one.
+# Same contract as its sibling: 0 whether or not it finds a gap, 78 = SKIP.
+step "rule-admission drift (reports, never admits)" ./.venv/bin/python ops/rule-admission-drift.py
+
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
