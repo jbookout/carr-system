@@ -332,12 +332,54 @@ try:
         env={**os.environ, "CARR_LOCK_DIR": str(lockdir)},
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     lock = lockdir / "carr-wedged.lock"
-    for _ in range(100):
-        if (lock / "since").exists():
-            break
+    # WAIT FOR CONTENT, NOT FOR THE FILE. `date ... > "$lock/since"` creates the
+    # file the instant the redirect is set up and writes into it a moment later,
+    # so an exists() poll returns while the file is still empty — and this test
+    # then backdates a claim the holder promptly overwrites with the current
+    # time. That made the age read 0 and the staleness check fail for a reason
+    # nowhere near the code under test. It would also have been intermittent:
+    # whether it bites depends on losing a sub-millisecond race.
+    for _ in range(200):
+        try:
+            if (lock / "since").read_text().strip():
+                break
+        except OSError:
+            pass
         time.sleep(0.05)
     check("the holder took the lock and is alive", (lock / "since").exists()
           and holder.poll() is None)
+
+    # THE AGE FUNCTION IS TESTED DIRECTLY, ahead of anything that depends on it.
+    # It parses a timestamp with `date`, whose flags differ between the BSD one
+    # on Joe's Mac and the GNU one on ubuntu-latest, where strict CI runs. A
+    # dialect it cannot parse returns NOTHING, and returning nothing is
+    # indistinguishable from "not stale" — so the bound would go quietly inert on
+    # one platform while every other check in this section still passed there.
+    # Asserting a real number means that failure names itself instead of
+    # surfacing three checks later as a wedge that would not break.
+    (lock / "since").write_text("2020-01-01T00:00:00Z\n")
+    aged = subprocess.run(
+        ["/bin/zsh", "-c",
+         f'source "{RUN_LOCK}"\ncarr_lock_age_seconds "{lock}"'],
+        env={**os.environ, "CARR_LOCK_DIR": str(lockdir)},
+        capture_output=True, text=True, timeout=60)
+    check("the lock's age parses to a real number on this platform's `date`",
+          aged.stdout.strip().isdigit() and int(aged.stdout) > 60 * 60 * 24 * 365,
+          f"stdout={aged.stdout!r} — neither date dialect parsed the timestamp")
+    # And an unreadable claim yields no age at all, which the caller reads as
+    # "not shown to be stale" rather than as "infinitely old".
+    unknown = subprocess.run(
+        ["/bin/zsh", "-c",
+         f'source "{RUN_LOCK}"\ncarr_lock_age_seconds "{lockdir}/carr-nonexistent.lock"'],
+        env={**os.environ, "CARR_LOCK_DIR": str(lockdir)},
+        capture_output=True, text=True, timeout=60)
+    check("an unreadable claim yields no age, so absence of evidence cannot break a lock",
+          unknown.stdout.strip() == "" and unknown.returncode == 0,
+          f"stdout={unknown.stdout!r} rc={unknown.returncode}")
+    # Put the claim back so the live-holder case below reads a fresh lock.
+    (lock / "since").write_text(
+        subprocess.run(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"],
+                       capture_output=True, text=True).stdout)
 
     # A LIVE, RECENT HOLDER IS STILL RESPECTED. Without this case the bound would
     # be satisfied by a version that breaks every lock it meets, which is worse

@@ -95,13 +95,23 @@ CARR_LOCK_PATH=""
 # when that cannot be established. UNKNOWN IS NEVER TREATED AS OLD: a lock whose
 # `since` file is missing or unreadable has not been shown to be stale, and
 # breaking one on an absence of evidence is how a healthy run gets killed.
+# BOTH DATE DIALECTS, and this is not defensive padding. `date -j -f` is BSD and
+# is what Joe's Mac has, where the chain actually runs; `date -d` is GNU and is
+# what ubuntu-latest has, where ops/ci.sh's strict check actually runs. Parsing
+# only the BSD way makes this function return nothing on the runner, which makes
+# the bound silently inert there and the wedge test red in CI while green on the
+# Mac — the exact green-locally/red-in-strict split the 18% failure rate is made
+# of. Whichever dialect answers first wins; if neither does, the age is unknown.
 carr_lock_age_seconds() {
   local lock="$1" since born now
   since="$(cat "$lock/since" 2>/dev/null)" || return 0
   [ -n "$since" ] || return 0
-  # BSD date, which is what this Mac has. A parse failure prints nothing.
-  born="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$since" '+%s' 2>/dev/null)" || return 0
-  [ -n "$born" ] || return 0
+  born="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$since" '+%s' 2>/dev/null)" \
+    || born="$(date -u -d "$since" '+%s' 2>/dev/null)" \
+    || return 0
+  # UNKNOWN IS NEVER TREATED AS OLD (see above): a non-numeric answer is no
+  # answer, and breaking a lock on one would kill a healthy run.
+  case "$born" in ''|*[!0-9]*) return 0 ;; esac
   now="$(date -u '+%s')"
   print -r -- "$(( now - born ))"
   return 0
