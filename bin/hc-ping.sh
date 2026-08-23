@@ -40,22 +40,28 @@ ping_outcome() {
     echo "         late on its own, which is the honest signal when nobody knows."
     return 0
   fi
-  # 69 = the step refused for want of a canonical seam (see the 69 branch in
-  # bin/nightly.sh). We know it did not run, we know exactly why, and through the
-  # store-first cutover that is true every night. Pinging OK would lie about work
-  # that did not happen. Pinging /fail would page nightly for a state nobody is
-  # going to fix before the seam lands — the alarm-fatigue failure the BLOCKED
-  # outcome was introduced to end, reintroduced one layer down.
+  # THE 69 MUTE IS GONE (2026-08-23, process-audit council R2). This function
+  # used to take a third path for exit 69 — a step that refused for want of a
+  # canonical seam — and ping NOTHING, on the argument that paging nightly for a
+  # state nobody would fix before the seam landed was alarm fatigue one layer
+  # down. That argument was right about the noise and wrong about where to fix
+  # it. The noise came from EXECUTING a step known in advance to be unable to
+  # work; bin/nightly.sh now gates those out as tombstones, so no step reaches
+  # this function having refused for a seam.
   #
-  # So take the third path this function already has for the unknown case
-  # directly below: ping NOTHING and let the dead-man go late on its own clock.
-  # A gap that persists still surfaces, on a slow timer instead of every morning,
-  # and nothing anywhere claims the export ran.
-  if [ "$step_rc" -eq 69 ]; then
-    echo "hc-ping: $label BLOCKED on a missing canonical seam (exit 69) — NOT pinging."
-    echo "         The check goes late on its own rather than paging every night."
-    return 0
-  fi
+  # WHAT THE MUTE COST WHILE IT STOOD. These checks exist for exactly one class
+  # of failure: the work silently not happening. A step that did not run IS that
+  # class. Muting it made a missing backup GO LATE — surfacing on the dead-man's
+  # slow grace period instead of alarming — which is the difference between
+  # finding out in minutes and finding out the next time somebody looks. A cover
+  # path elsewhere (the cloud backup workflow) is a reason the gap may not bite;
+  # it is not a reason to stop reporting the gap.
+  #
+  # So there are two paths now, not three. An outcome NOBODY SUPPLIED still pings
+  # nothing, in the branch directly above — that is genuine ignorance and stays
+  # honest. Any supplied non-zero outcome, whether it means failed, skipped,
+  # blocked, tombstoned or timed out, pings /fail: the check is named after work,
+  # and the work did not happen.
   if [ "$step_rc" -eq 0 ]; then
     curl -fsS -m 15 --retry 3 "$url" > /dev/null || rc=1
     echo "hc-ping: $label OK -> pinged"
