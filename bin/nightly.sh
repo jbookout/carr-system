@@ -162,6 +162,11 @@ CHAIN_OUTCOME=incomplete
 LOCK_HELD=0
 CHAIN_EXIT_RAN=0
 CHAIN_STDERR="$REPO/out/.nightly-stderr.$$"
+# The handler removes this file; SIGKILL, a panic and a reboot all run no
+# handler, so sweep anything a previous run left behind. A day old, not an hour:
+# a capture belonging to a chain still running must never be taken out from
+# under it, and no run of this chain lasts anywhere near that long.
+find "$REPO/out" -maxdepth 1 -name '.nightly-stderr.*' -mtime +1 -delete 2>/dev/null
 exec 3>&2
 exec 2>"$CHAIN_STDERR"
 
