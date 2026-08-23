@@ -7,7 +7,7 @@ import psycopg
 
 REPO=Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(REPO))
-from lib.rule_admission import admission_contract  # noqa:E402
+from lib.rule_admission import admission_contract, backfill_owns_row  # noqa:E402
 
 MAP=REPO/"ops"/"config"/"rule-enforcement-map.json"
 
@@ -21,23 +21,46 @@ def main()->int:
     if not dsn: raise SystemExit("DATABASE_URL is required")
     data=json.loads(MAP.read_text(encoding="utf-8"))
     scope_by_id={rid:scope for scope,ids in data["active_rule_ids"].items() for rid in ids}
-    counts={"admitted":0,"needs_revision":0}
+    counts={"admitted":0,"needs_revision":0,"kept_approved":0,"kept_hand_authored":0}
     with psycopg.connect(dsn) as conn,conn.cursor() as cur:
-        cur.execute("select id,statement,taught_by,coalesce(activated_by,taught_by) from rule where status='active'")
+        # A RULE THAT ALREADY CARRIES A CONTRACT SOMEONE ELSE WROTE IS NOT THIS
+        # TOOL'S TO REWRITE. Two shapes, learned against Production 2026-08-23:
+        #
+        # 1. An APPROVED rule is immutable by database law — migration 0228's
+        #    approved_rule_enforcement_point_immutable trigger raises the moment
+        #    this backfill touches it, and it is right to. Joe's approval receipt
+        #    covers the exact contract text; rewriting it would leave the receipt
+        #    making the rule look enforced against terms it no longer names.
+        # 2. A rule admitted through the admit-rule verb carries a hand-authored
+        #    contract with rule-specific fixtures and controls this map's coarser
+        #    catalog cannot express — bd4a6d22 names a NOT-installed control as
+        #    honest signal, and a blanket upsert would erase it.
+        #
+        # Both stay in the reviewed map: the map is a coverage inventory of every
+        # active rule, and the parity check below still demands the entry exist.
+        # Only the WRITE is skipped, and the counts say how many.
+        cur.execute("""select r.id,r.statement,r.taught_by,coalesce(r.activated_by,r.taught_by),
+                              a.reason,
+                              exists(select 1 from ops.rule_approval_receipt ar where ar.rule_id=r.id)
+                         from rule r left join ops.rule_admission a on a.rule_id=r.id
+                        where r.status='active'""")
         rules=cur.fetchall()
         if not rules and args.allow_empty_store:
             print(json.dumps({"active_rules":0,"admitted":0,"needs_revision":0,
                               "note":"sanitized empty store; contract covered by rollback gate"},sort_keys=True))
             return 0
         matched={}
-        for rid,statement,taught_by,authority_actor in rules:
+        for rid,statement,taught_by,authority_actor,existing_reason,approved in rules:
             short=str(rid)[:8]
             if short not in scope_by_id or short not in data["rule_controls"]:
                 raise RuntimeError(f"active rule {short} is absent from reviewed enforcement map")
+            matched[short]=True
+            if not backfill_owns_row(existing_reason,approved):
+                counts["kept_approved" if approved else "kept_hand_authored"]+=1
+                continue
             contract=admission_contract(short,scope_by_id[short],data["rule_controls"][short],data["control_catalog"])
             contract_json=json.dumps(contract,sort_keys=True,separators=(",",":"))
             contract_hash=hashlib.sha256(contract_json.encode()).hexdigest()
-            matched[short]=True
             source=f"rule:{rid}"
             cur.execute("""insert into ops.guidance_intake
                          (lane,source_kind,source_ref,statement,state,normalized_contract,captured_by)
