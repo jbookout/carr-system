@@ -269,6 +269,64 @@ def main():
         rc, _, _ = run_rollup(tmp)
         check("the default run never fails the nightly chain", rc == 0)
 
+        # ── the budget is about an EVENT, not a hook ──
+        # In its own fixture, because the shared one above deliberately stamps
+        # many records with the same timestamp and would blur the grouping this
+        # section exists to pin. A Bash call fires 13 hooks; a table of per-hook
+        # p95s all reading 80ms would report OK while the event costs ten times
+        # the budget, which is the false green this whole exercise is about.
+        events = tempfile.mkdtemp(prefix="rollup-events-")
+        try:
+            rows = []
+            for n, (ts_hour, hooks_ms) in enumerate((
+                    (1, [10, 20, 30]), (2, [10, 20, 300]), (3, [10, 20, 30]))):
+                ts, _ = stamp(1, hour=ts_hour)
+                for i, elapsed in enumerate(hooks_ms):
+                    rec = record(f"gate{i}.py", 1, elapsed)
+                    rec["ts"] = ts
+                    rec["session"] = f"session-{n}"
+                    rows.append(rec)
+            build_fixture(events, rows)
+            rc, out, _ = run_rollup(events, "--json")
+            report = json.loads(out)
+            cost = report["event_cost"]["PreToolUse"]
+            check("firings are grouped back into the event that caused them",
+                  cost["events_seen"] == 3, cost)
+            check("the report says how many hooks one event fires",
+                  cost["hooks_per_event"] == 3.0, cost)
+            check("the event's cost is the SUM of its hooks, not one hook",
+                  cost["sum_p95_ms"] == 330, cost)
+            check("the slowest single hook is reported alongside, as the wall floor",
+                  cost["max_p95_ms"] == 300, cost)
+            rc, text, _ = run_rollup(events)
+            check("the budget line names the event and its hook count",
+                  "of hook CPU across 3.0 hooks" in text, text[:600])
+            check("330ms of hook CPU is over the 150ms Bash budget",
+                  "OVER" in text, text[:600])
+            check("a per-hook p95 that would have read OK is still available",
+                  report["hook_p95_ms"]["PreToolUse"] == 300, report["hook_p95_ms"])
+        finally:
+            shutil.rmtree(events, ignore_errors=True)
+
+        # ── a window shortened by rotation must not pass as a full one ──
+        rotated = tempfile.mkdtemp(prefix="rollup-rotated-")
+        try:
+            fresh = [record("gate0.py", 1, 10) for _ in range(3)]
+            build_fixture(rotated, fresh)
+            # the mere existence of a rotation generation is what makes a short
+            # window suspicious rather than merely quiet
+            open(os.path.join(rotated, "out", "hook-telemetry.jsonl.1"), "w").close()
+            rc, text, _ = run_rollup(rotated)
+            check("a window truncated by rotation says so", "rotated away" in text,
+                  text[:500])
+            rc, out, _ = run_rollup(rotated, "--json")
+            trunc = json.loads(out)["window_truncated_by_rotation"]
+            check("and reports what it actually covers",
+                  trunc and trunc["requested_days"] == 7 and trunc["covered_days"] < 7,
+                  trunc)
+        finally:
+            shutil.rmtree(rotated, ignore_errors=True)
+
         # ── an empty window says so instead of printing zeros ──
         empty = tempfile.mkdtemp(prefix="rollup-empty-")
         try:

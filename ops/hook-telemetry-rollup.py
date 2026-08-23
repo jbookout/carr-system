@@ -129,14 +129,19 @@ def wiring():
             for hook in block.get("hooks", []):
                 cmd = hook.get("command", "")
                 names = [part.rsplit("/", 1)[-1] for part in cmd.split()
-                         if part.endswith(".py")]
-                # The wrapper is not a gate; the gate is what it wraps. An entry
-                # with a trailing argument names two gates and both are wired.
-                for name in names:
-                    if name == "hook-meter-run.py":
-                        continue
-                    out[name]["events"].add(event)
-                    out[name]["matchers"].append(matcher)
+                         if part.endswith(".py") and
+                         part.rsplit("/", 1)[-1] != "hook-meter-run.py"]
+                if not names:
+                    continue
+                # The wrapper is not a gate; the gate is the first .py it wraps,
+                # and anything after that is that gate's ARGUMENT, not a second
+                # gate. run-record-gate.py is wired twice and told which claim to
+                # check — so the key here has to be the same composite the
+                # telemetry records use, or the argument's name gets reported
+                # every night as a gate that never fires.
+                key = names[0] if len(names) == 1 else f"{names[0]} {names[1]}"
+                out[key]["events"].add(event)
+                out[key]["matchers"].append(matcher)
     return out
 
 
@@ -149,12 +154,17 @@ def catch_classes():
 
 
 def pct(values, q):
-    """Nearest-rank percentile. Explicit because n is often small here."""
+    """Nearest-rank percentile — the ceil(q*n)th value. Explicit because n is
+    often small here, and because an averaged 'p95' over 40 firings would be a
+    number with no owner."""
     if not values:
         return None
     ordered = sorted(values)
-    idx = max(0, min(len(ordered) - 1, int(round(q * len(ordered) + 0.5)) - 1))
-    return ordered[idx]
+    n = len(ordered)
+    rank = int(q * n)
+    if rank < q * n:                    # ceil, without importing math
+        rank += 1
+    return ordered[max(0, min(n - 1, rank - 1))]
 
 
 def hot(entry):
@@ -177,6 +187,22 @@ def build(days, now=None):
         "reopens": 0, "days": defaultdict(list), "deny_classes": defaultdict(int),
     })
     per_event_ms = defaultdict(list)
+    # THE BUDGET IS ABOUT AN EVENT, NOT A HOOK, and confusing the two would have
+    # made this report a false green. The council's ~150ms is what a Bash tool
+    # call pays for its hooks — and a Bash call fires THIRTEEN of them. A table
+    # of per-hook p95s all reading 80ms says "OK" while the event they belong to
+    # costs an order of magnitude more. So firings are also grouped back into
+    # the event that caused them.
+    #
+    # THE GROUPING IS APPROXIMATE AND MUST BE READ AS SUCH: the harness gives a
+    # hook no per-event correlation id, so the key is session + event + the
+    # second the firing was stamped with. Two tool calls inside one second in
+    # one session merge into one apparent event, which overstates that event.
+    # Both aggregates are reported because they bound the truth from either
+    # side: SUM is the CPU the event cost, and MAX is the floor on its wall time
+    # if the harness runs the hooks concurrently. The real wall cost sits
+    # between them.
+    per_event_group = defaultdict(list)
     reopen_by_day = defaultdict(lambda: defaultdict(int))
     meter_ms = []
     total_ms = 0.0
@@ -199,6 +225,7 @@ def build(days, now=None):
             event = rec.get("event")
             if event:
                 per_event_ms[event].append(elapsed)
+                per_event_group[(rec.get("session"), event, rec.get("ts"))].append(elapsed)
         outcome = rec.get("outcome")
         if outcome == "deny":
             bucket["denies"] += 1
@@ -214,10 +241,26 @@ def build(days, now=None):
         if isinstance(rec.get("meter_ms"), (int, float)):
             meter_ms.append(rec["meter_ms"])
 
+    events = {}
+    for (_, event, _), group in per_event_group.items():
+        slot = events.setdefault(event, {"sum": [], "max": [], "hooks": []})
+        slot["sum"].append(sum(group))
+        slot["max"].append(max(group))
+        slot["hooks"].append(len(group))
+    event_cost = {
+        event: {
+            "events_seen": len(slot["sum"]),
+            "hooks_per_event": round(sum(slot["hooks"]) / max(1, len(slot["hooks"])), 1),
+            "sum_p95_ms": pct(slot["sum"], 0.95),
+            "max_p95_ms": pct(slot["max"], 0.95),
+        }
+        for event, slot in sorted(events.items())
+    }
+
     hooks = {}
     for name, bucket in per_hook.items():
         base = name.split(" ")[0]
-        entry = wired.get(base, {"events": set(), "matchers": []})
+        entry = wired.get(name) or wired.get(base) or {"events": set(), "matchers": []}
         by_day = {d: pct(v, 0.95) for d, v in sorted(bucket["days"].items())}
         recent = list(by_day.values())
         trend = None
@@ -251,13 +294,24 @@ def build(days, now=None):
 
     unverified = [name for name, entry in hooks.items()
                   if entry["also_caught_by"] == "unverified"]
-    wired_never_fired = sorted(
-        base for base in wired
-        if base not in {n.split(" ")[0] for n in hooks})
+    wired_never_fired = sorted(key for key in wired if key not in hooks)
 
     meter_share = None
     if meter_ms and total_ms:
         meter_share = 100.0 * sum(meter_ms) / total_ms
+
+    # A ROTATED-AWAY WINDOW MUST NOT PASS AS A FULL ONE. Only two generations of
+    # the live stream survive, so on a busy enough week a "7-day trend" could
+    # quietly be a four-day trend with a seven-day label — the dated-artifact
+    # failure this system logs more than any other. Rather than guess a bigger
+    # cap, say what the data actually covers, which stays correct at any cap.
+    truncation = None
+    stamps = [parse_ts(rec.get("ts")) for rec in rows]
+    stamps = [s for s in stamps if s]
+    if stamps and os.path.exists(LIVE_STREAM + ".1"):
+        covered = (now - min(stamps)).total_seconds() / 86400.0
+        if covered < days - 0.5:
+            truncation = {"covered_days": round(covered, 1), "requested_days": days}
 
     return {
         "days": days,
@@ -268,7 +322,9 @@ def build(days, now=None):
             "fixture": count_lines(FIXTURE_STREAM),
             "unclassified": count_lines(UNCLASSIFIED_STREAM),
         },
-        "event_p95_ms": {ev: pct(v, 0.95) for ev, v in sorted(per_event_ms.items())},
+        "hook_p95_ms": {ev: pct(v, 0.95) for ev, v in sorted(per_event_ms.items())},
+        "event_cost": event_cost,
+        "window_truncated_by_rotation": truncation,
         "budgets": BUDGET_MS,
         "meter_share_pct": meter_share,
         "meter_p50_ms": pct(meter_ms, 0.50),
@@ -306,17 +362,26 @@ def render(report):
         add("  to roll up.")
         return "\n".join(lines)
 
+    trunc = report.get("window_truncated_by_rotation")
+    if trunc:
+        add(f"  WINDOW    only {trunc['covered_days']} of the requested "
+            f"{trunc['requested_days']} days survive in the live stream — the rest "
+            f"rotated away.")
+        add("            Raise ROTATE_BYTES in hooks/hook_meter.py or ask for fewer "
+            "days; the trend below covers the shorter window, not the label.")
+
     for event, budget in sorted(BUDGET_MS.items()):
-        observed = None
-        if event == "Bash":
-            observed = report["event_p95_ms"].get("PreToolUse")
-        else:
-            observed = report["event_p95_ms"].get(event)
-        if observed is None:
+        measured = event if event != "Bash" else "PreToolUse"
+        cost = report["event_cost"].get(measured)
+        if not cost or cost["sum_p95_ms"] is None:
             continue
-        verdict = "OK" if observed <= budget else "OVER"
+        verdict = "OK" if cost["sum_p95_ms"] <= budget else "OVER"
         label = "PreToolUse (Bash budget)" if event == "Bash" else event
-        add(f"  budget    {label} p95 {ms(observed)}ms vs {budget:.0f}ms  {verdict}")
+        # The event, not one of its hooks — that distinction is the whole point.
+        add(f"  budget    {label} p95 {ms(cost['sum_p95_ms'])}ms of hook CPU across "
+            f"{cost['hooks_per_event']} hooks vs {budget:.0f}ms  {verdict}")
+        add(f"            slowest single hook in one event, p95 "
+            f"{ms(cost['max_p95_ms'])}ms — wall cost sits between the two")
 
     if report["meter_share_pct"] is not None:
         share = report["meter_share_pct"]
@@ -326,14 +391,14 @@ def render(report):
             f"vs {METER_SHARE_BUDGET:.0f}%  {verdict}")
 
     add("")
-    add(f"  {'gate':38} {'fires/d':>8} {'p50':>5} {'p95':>6} {'deny':>5} "
+    add(f"  {'gate':44} {'fires/d':>8} {'p50':>5} {'p95':>6} {'deny':>5} "
         f"{'reopen':>7} {'err':>4}  {'p95 7d':>7}")
     ordered = sorted(report["hooks"].items(),
                      key=lambda kv: (kv[1]["p95_ms"] or 0), reverse=True)
     for name, entry in ordered:
         trend = entry["p95_trend_pct"]
         trend_text = "—" if trend is None else f"{trend:+.0f}%"
-        add(f"  {name[:38]:38} {entry['fires_per_day']:>8} {ms(entry['p50_ms']):>5} "
+        add(f"  {name[:44]:44} {entry['fires_per_day']:>8} {ms(entry['p50_ms']):>5} "
             f"{ms(entry['p95_ms']):>6} {entry['denies']:>5} {entry['reopens']:>7} "
             f"{entry['errors']:>4}  {trend_text:>7}")
 
@@ -362,9 +427,10 @@ def render(report):
                 add(f"      CAVEAT: {entry['note']}")
     else:
         add("    none.")
-    add(f"    {report['unverified_owner_count']} of {len(report['hooks'])} firing gates have")
-    add("    no verified second owner in ops/config/hook-catch-classes.json, so the rule")
-    add("    cannot be evaluated for them. That is a research gap, not a clean bill.")
+    add(f"    {report['unverified_owner_count']} of {len(report['hooks'])} firing gates have no "
+        "verified second owner recorded in")
+    add("    ops/config/hook-catch-classes.json, so the rule cannot be evaluated for")
+    add("    them at all. That is a research gap, not a clean bill.")
 
     if report["wired_but_never_fired"]:
         add("")
@@ -392,12 +458,11 @@ def main():
 
     if args.strict:
         over = []
-        pre = report["event_p95_ms"].get("PreToolUse")
-        if pre is not None and pre > BUDGET_MS["Bash"]:
-            over.append(f"PreToolUse p95 {pre:.0f}ms > {BUDGET_MS['Bash']:.0f}ms")
-        stop = report["event_p95_ms"].get("Stop")
-        if stop is not None and stop > BUDGET_MS["Stop"]:
-            over.append(f"Stop p95 {stop:.0f}ms > {BUDGET_MS['Stop']:.0f}ms")
+        for event, budget in (("PreToolUse", BUDGET_MS["Bash"]), ("Stop", BUDGET_MS["Stop"])):
+            cost = report["event_cost"].get(event) or {}
+            observed = cost.get("sum_p95_ms")
+            if observed is not None and observed > budget:
+                over.append(f"{event} p95 {observed:.0f}ms > {budget:.0f}ms")
         share = report["meter_share_pct"]
         if share is not None and share > METER_SHARE_BUDGET:
             over.append(f"meter {share:.2f}% > {METER_SHARE_BUDGET:.0f}%")
