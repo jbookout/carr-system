@@ -318,6 +318,47 @@ try:
           "/backup/fail" in hits, f"hits={hits}")
     check("an UNSUPPLIED outcome still pings nothing, which is the honest signal",
           "/exports" not in hits and "/exports/fail" not in hits, f"hits={hits}")
+
+    # ── THE CHECK MUST REPORT ON THE STEP IT IS NAMED AFTER ─────────────────
+    # Pinging correctly is worthless if the wrong step's outcome arrives. Until
+    # 2026-08-23 `BACKUP_RC=$LAST_STEP_RC` sat at the bottom of the PORTABILITY
+    # MIRROR, several steps below the encrypted backup, so HC_BACKUP_RC carried
+    # the mirror's exit code — a different program doing a different job. A
+    # backup that FAILED while the mirror succeeded pinged the backup check OK.
+    #
+    # It stayed invisible because on this Mac both steps SKIP for the same absent
+    # credential, so the wrong answer and the right answer have been identical.
+    # This gives them DIFFERENT codes, which is the only way to see which arrived.
+    #
+    # Replays the real region from the backup step to the ping export with a fake
+    # step() that reports a per-label code. Asserting which outcome ARRIVES,
+    # rather than where the assignment sits, is what keeps this true the next
+    # time somebody moves the line.
+    region = slice_between('step "encrypted backup -> R2"',
+                           'export HC_BACKUP_RC="$BACKUP_RC"')
+    wired = subprocess.run(
+        ["/bin/zsh", "-c", "\n".join([
+            "set -u",
+            f'LOG="{ping_home}/wiring.log"', "LEDGER_OFF=1",
+            'REPO="."', "RECOVERY=0", "EXPORTS_RC=0", "LAST_STEP_RC=0",
+            'CARR_DB_BACKUP_URL=""', "rc_total=0", "tombstoned=0",
+            "seam_blocked=0", "timed_out=0",
+            shell_func("say"), shell_func("record_run"), shell_func("tombstone"),
+            "step() {",
+            '  case "$1" in',
+            '    "encrypted backup -> R2") LAST_STEP_RC=41 ;;',
+            '    "portability mirror"*)    LAST_STEP_RC=42 ;;',
+            "    *)                        LAST_STEP_RC=43 ;;",
+            "  esac",
+            "}",
+            region,
+            'print -r -- "HC_BACKUP_RC=$HC_BACKUP_RC"',
+        ])],
+        capture_output=True, text=True, timeout=60)
+    check("the backup check is pinged with the BACKUP's outcome, not a later step's",
+          "HC_BACKUP_RC=41" in wired.stdout,
+          f"stdout={wired.stdout!r} (42 = the portability mirror, 43 = some other "
+          f"step) stderr={wired.stderr!r}")
 finally:
     server.shutdown()
     shutil.rmtree(ping_home, ignore_errors=True)

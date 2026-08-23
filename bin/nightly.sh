@@ -965,6 +965,24 @@ step "control-plane registry drift (reports, never installs)" ./.venv/bin/python
 step "rule-admission drift (reports, never admits)" ./.venv/bin/python ops/rule-admission-drift.py
 
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+# CAPTURED HERE, ON THE NEXT LINE, AND THAT IS THE WHOLE POINT (fixed 2026-08-23).
+# This assignment used to sit at the bottom of the portability mirror below, so
+# `HC_BACKUP_RC` — the value the "backup" dead-man check is pinged with — carried
+# the MIRROR's exit code and not the backup's. Two different steps: one dumps and
+# encrypts the database, the other renders markdown and csv.
+#
+# WHAT THAT WOULD HAVE COST. A backup that FAILED while the mirror succeeded
+# pinged the backup check OK. That is the 2026-08-07 corrupt-backup defect
+# exactly — "a success signal that does not look at the thing it reports on is
+# worse than no signal, because it is believed" — reintroduced one variable over,
+# and hidden because on this Mac both steps happen to SKIP for the same absent
+# credential, so the wrong answer and the right answer have been identical.
+#
+# LAST_STEP_RC is overwritten by every step() call, so the only safe place to
+# read it is immediately after the step you mean. ops/nightly-tombstone-selftest.py
+# replays this region with a fake step() and asserts that the value reaching the
+# ping is the backup's, wherever this assignment happens to sit.
+BACKUP_RC=$LAST_STEP_RC
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
 # NO GUARD HERE. #391 wrapped this in `if [ -n "$CARR_DB_BACKUP_URL" ]` because
@@ -1011,7 +1029,10 @@ step "portability mirror (md+csv, 2 locations)" \
   env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py \
     --out "$portability_root/Backups/portability-mirror" \
     --also "$HOME/carr-system/out/mirror"
-BACKUP_RC=$LAST_STEP_RC
+# NO BACKUP_RC HERE ANY MORE — it is captured beside the encrypted backup above,
+# which is the step the check is named after. The mirror has no registered ping
+# of its own: it fails into rc_total and alarms through the whole-chain check,
+# and it skips silently on an absent credential like every other 78 in this file.
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
 # (~1 month back on current publish settings), so history that scrolls out is
