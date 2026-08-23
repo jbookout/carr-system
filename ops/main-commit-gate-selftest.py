@@ -55,6 +55,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "ops" / "githooks" / "pre-commit"
 
+# The one scrubber (ops/git_env.py), not a local copy of the leak guard: git
+# hands every hook a GIT_DIR pointing at the repository that invoked it, and on
+# 2026-08-14 that leaked a fixture commit onto live main. A hand-rolled list
+# here would be a second copy to drift out of sync with the real one.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 passed = 0
 failures: list[str] = []
 
@@ -70,14 +77,7 @@ def check(name, cond, detail=""):
 
 
 def git(repo, *args, env=None, check_rc=False):
-    e = dict(os.environ)
-    # THE LEAK GUARD. git hands every hook a GIT_DIR pointing at the repository
-    # that invoked it; if any of these survive into a fixture command, the
-    # fixture silently drives the real checkout instead.
-    for var in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX",
-                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                "GIT_COMMON_DIR", "GIT_NAMESPACE"):
-        e.pop(var, None)
+    e = fixture_env()
     if env:
         e.update(env)
     p = subprocess.run(["git", "-C", str(repo)] + list(args),

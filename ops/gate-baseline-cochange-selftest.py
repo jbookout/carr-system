@@ -57,6 +57,14 @@ REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "ops" / "githooks" / "pre-commit"
 HELPER = REPO / "ops" / "githooks" / "staged-gate-bless-check.py"
 
+# ops/git_env.py is the one scrub list; every git hook exports GIT_DIR, which
+# outranks both cwd and -C, so the hand-rolled loop this file used to carry
+# (see item 9's "the ops/git_env.py leak" in the docstring above) is exactly
+# the kind of second copy that can drift from the real list. __file__'s
+# directory is ops/, so this reaches it directly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 passed = 0
 failures: list[str] = []
 
@@ -72,13 +80,11 @@ def check(name, cond, detail=""):
 
 
 def git(repo, *args, env=None, check_rc=False):
-    e = dict(os.environ)
     # THE LEAK GUARD, same as main-commit-gate-selftest.py: git hands every hook
-    # a GIT_DIR pointing at the repository that invoked it.
-    for var in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX",
-                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                "GIT_COMMON_DIR", "GIT_NAMESPACE"):
-        e.pop(var, None)
+    # a GIT_DIR pointing at the repository that invoked it. fixture_env() is
+    # ops/git_env.py's one definition of the scrub list, used here instead of
+    # a second hand-rolled copy of it.
+    e = fixture_env()
     if env:
         e.update(env)
     p = subprocess.run(["git", "-C", str(repo)] + list(args),
