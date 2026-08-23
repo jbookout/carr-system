@@ -342,6 +342,23 @@ def run_local_ci(
                     else:
                         print("local-db-ci: authenticated renewal lease ledger acceptance passed")
                 if exit_code == 0:
+                    incident_recovery_script = repo / "ops/incident-recovery-local-pg-acceptance.py"
+                    incident_recovery = command_runner.run(
+                        [acceptance_python, incident_recovery_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if incident_recovery.returncode:
+                        print(
+                            f"local-db-ci: incident fingerprint and recovery acceptance failed: "
+                            f"{_failure_detail(incident_recovery)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = incident_recovery.returncode
+                    else:
+                        print("local-db-ci: incident fingerprint and success-clears acceptance passed")
+                if exit_code == 0:
                     print(
                         f"local-db-ci: {ci_class} proof and atomic Joe authority lifecycle "
                         "passed on disposable PostgreSQL"

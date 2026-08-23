@@ -69,6 +69,29 @@ test("rpcInternalErrorFailureClass: -32603 (the outer catch's only code) is verb
   assert.equal(RPC_INTERNAL_ERROR_CODE, -32603);
 });
 
+test("every failure class this Worker can produce is a name, not a bare exit code", () => {
+  // 0286 gave the incident fingerprint a normalized fourth field: ops-record.py
+  // rewrites `exit_<n>` before it lands, because bin/nightly.sh passes wrapper
+  // exit codes through and exit_1 and exit_2 from one step are one problem. The
+  // Worker does NOT run that rule — restating it in a third language is how two
+  // writers drift — and it does not have to, because every class it can emit is
+  // already a name. This is the assertion that keeps that true: a new class
+  // shaped like an exit code would fingerprint one failure two ways depending
+  // on which writer saw it, silently.
+  const everyClass = [
+    httpFailureClass(500),
+    httpFailureClass(503),
+    rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE),
+    actorUnresolvedFailureClass(),
+  ];
+  for (const cls of everyClass) {
+    assert.ok(cls, "a producible failure class must not be empty");
+    assert.ok(!/^exit[_-]?\d{1,3}$/i.test(cls),
+      `${cls} is shaped like a bare exit code; ops-record.py would normalize it ` +
+      `and this Worker would not, so one failure would get two fingerprints`);
+  }
+});
+
 test("rpcInternalErrorFailureClass: every ToolError-shaped JSON-RPC code is null — a refusal is not a failure", () => {
   // -32601 (method not found) and every ToolError the system returns at 200 —
   // this file records neither; the inclusion rule names -32603 specifically
