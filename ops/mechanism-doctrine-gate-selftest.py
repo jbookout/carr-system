@@ -64,6 +64,15 @@ for mech_path, want in (
     ("ops/test/probe-gate.py", False),
     ("hooks/fixtures/probe.py", False),
     ("ops/control-catalog-parity-gate-selftest.py", False),
+    # A SHARED MODULE IN hooks/ IS NOT A GATE. This gate first classified every
+    # hooks/*.py as a session gate — where the gates live, but not what makes
+    # one — and refused hooks/turn_origin.py, a detector two gates import that
+    # reads no payload and refuses nothing. Both real modules are listed because
+    # one is pre-existing and one was the file that exposed it, and a predicate
+    # keyed on the underscore naming habit rather than on behaviour would pass
+    # both while still waving through an underscore-named gate.
+    ("hooks/conduct_patterns.py", False),
+    ("hooks/turn_origin.py", False),
     ("mcp-server/test/decision-short-id.test.mjs", False),
 ):
     covered = mdg.classify(mech_path) is not None

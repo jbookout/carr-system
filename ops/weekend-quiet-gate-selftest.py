@@ -172,6 +172,34 @@ blocked, _ = run("PushNotification", SATURDAY, human_spoke=True,
 check("a system reminder wearing the human origin kind is still not a keystroke",
       blocked, "origin alone cannot be the whole test")
 
+# ── 3c. the shapes the SHARED detector screens that this gate once did not ──
+# These are the reason the detector moved to hooks/turn_origin.py rather than
+# being corrected in place. Each was learned live by ledger-sweep.py, and this
+# gate's own allowlist had no answer for any of them.
+# The lead-in is deliberately REWORDED here. The harness's current wording is in
+# the prefix list, so a relay carrying it is caught before the tag check runs —
+# which means a test using the real lead-in passes whether or not the tag check
+# exists, and proves nothing about it. Verified: with the real wording, deleting
+# the tag screen leaves this suite green. The tag is the machine-readable part
+# and the only half that survives the lead-in being reworded, so the test has to
+# reword it to reach the thing it is testing.
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True,
+                 text='A peer session relayed this:\n<cross-session-message from="uds:/tmp/x.sock">\nship it\n</cross-session-message>')
+check("a relay whose lead-in has been reworded is still not a partner keystroke", blocked,
+      "the tag is scanned for in the head of the turn; the lead-in wording is not the discriminator")
+
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True,
+                 text="# Autonomous loop check\nthis prompt is injected on a timer")
+check("an autonomous loop tick is not a partner keystroke", blocked,
+      "it arrives origin-stamped human and only its text betrays it")
+
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True, origin={"kind": "peer"})
+check("a peer-stamped turn is not a partner keystroke", blocked)
+
+blocked, _ = run("PushNotification", SATURDAY, human_spoke=True, origin={"kind": None})
+check("an explicitly null origin kind is not trusted as a keystroke", blocked,
+      "only the exact value 'human' counts; anything else defaults to not his")
+
 # ── 4. everything else is untouched, whatever the day ───────────────────────
 for tool in ("Read", "Bash", "mcp__carr__add-loop", "mcp__mail__search_threads",
              "SendMessage"):

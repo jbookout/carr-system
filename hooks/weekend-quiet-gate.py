@@ -61,16 +61,19 @@ SEND_TOOLS = re.compile(
     re.I)
 
 
-# Transcript origin kinds, OBSERVED on this harness rather than assumed — see
-# partner_is_here below for what assuming them cost. A record with no `origin`
-# key at all is the ordinary older shape and is judged on its content instead,
-# which is why None and "" are here.
-HUMAN_ORIGIN_KINDS = frozenset({None, "", "human", "user", "keyboard"})
-
-# Kinds we have seen and know are NOT a partner typing. Listed only so an
-# unknown kind can be told apart from a known-injected one and logged; both are
-# refused either way.
-INJECTED_ORIGIN_KINDS = frozenset({"task-notification"})
+# WHOSE TURN IS IT — ANSWERED IN ONE PLACE (hooks/turn_origin.py).
+# This gate used to carry its own allowlist of origin kinds, accepting "user"
+# and "keyboard". The harness has never written either; a typed turn carries
+# {"kind": "human"}. Across sixteen real transcripts that allowlist matched ZERO
+# of 3,271 candidate records, so the carve-out below could not fire once.
+#
+# The corrected allowlist that replaced it was better and still weaker than the
+# detector ledger-sweep.py had already earned the hard way — patched four times
+# in nine days, ending at a POSITIVE test with two screens this gate lacked: the
+# cross-session relay tag, and the refusal to trust any origin kind that is not
+# exactly "human". Rather than keep a second, thinner answer to the same
+# question, this now asks the shared one.
+from turn_origin import partner_typed_this  # noqa: E402
 
 
 def dlog(msg):
@@ -92,6 +95,18 @@ def now():
         except ValueError:
             return None
     return datetime.now(ZONE)
+
+
+def text_of(rec):
+    """The record's human-visible text, or empty when it carries none."""
+    msg = rec.get("message") or rec
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content
+                          if isinstance(b, dict) and b.get("type") == "text")
+    return ""
 
 
 def partner_is_here(transcript_path):
@@ -136,26 +151,11 @@ def partner_is_here(transcript_path):
             continue
         if rec.get("isMeta") or rec.get("isCompactSummary"):
             continue
-        origin = rec.get("origin") or {}
-        if isinstance(origin, dict):
-            kind = origin.get("kind")
-            if kind not in HUMAN_ORIGIN_KINDS:
-                if kind not in INJECTED_ORIGIN_KINDS:
-                    dlog(f"unknown transcript origin kind {kind!r} — treated as NOT a "
-                         "partner keystroke; if a partner typed it, add it to "
-                         "HUMAN_ORIGIN_KINDS in hooks/weekend-quiet-gate.py")
-                continue
-        msg = rec.get("message") or rec
-        content = msg.get("content")
-        text = content if isinstance(content, str) else "\n".join(
-            b.get("text", "") for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        ) if isinstance(content, list) else ""
-        if not text.strip():
-            continue
-        if text.lstrip().startswith(("<system-reminder>", "<task-notification>",
-                                     "[SYSTEM NOTIFICATION", "<local-command",
-                                     "<command-name>", "Caveat:")):
+        # The shared detector decides. It screens harness commentary, injected
+        # content shapes, cross-session relays and any origin kind that is not
+        # exactly "human" — and it defaults to NOT the partner, so a shape
+        # nobody has met yet keeps the weekend quiet instead of ending it.
+        if not partner_typed_this(rec, text_of(rec)):
             continue
         return True
     return False
