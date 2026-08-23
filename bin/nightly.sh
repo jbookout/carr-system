@@ -710,6 +710,19 @@ step "system graph (Graph-System/, derived)" ./run.sh graph-system
 # credential, same contract as the other steps.
 step "vendor level drift (reports, never changes a level)" ./.venv/bin/python ops/vendor-level-drift-check.py
 
+# CONTROL-PLANE REGISTRY DRIFT, added 2026-08-23. ops/control-plane-registry-gate.py
+# proves the manifest and the schema agree on a throwaway database on every
+# proposed change, and said nothing about Production for as long as it existed:
+# the first run against Production found 5 job definitions where the manifest
+# declares 25 and a downgraded risk colour on the one enabled definition. The
+# door that installs the manifest is bin/sync-control-plane-prod.sh, but a door
+# only reports when a human opens it. This is the same comparison, nightly,
+# under the routine jobs role in a read-only transaction — it needs no new grant
+# and cannot write. It reports the one bit that role may not read rather than
+# counting it as a pass. Exits 0 whether or not it finds drift, and 78 = SKIP
+# with no credential, same contract as the step above.
+step "control-plane registry drift (reports, never installs)" ./.venv/bin/python ops/control-plane-registry-drift.py
+
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.

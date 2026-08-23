@@ -381,7 +381,18 @@ PYEOF
   # change against origin/main, so it is a no-op on a branch that adds none of
   # those, which is nearly every branch. Editing an existing mechanism is
   # deliberately out of scope.
+  # rule-enforcement-map-check JOINED THIS LIST 2026-08-23, and the reason is a
+  # merged mistake. hooks/gate-integrity.py runs it too, but classifies it an
+  # ENVIRONMENT problem that --strict deliberately does not fail CI on, because
+  # it was once "the vault-backed rule map" and a bare runner had no vault. The
+  # markdown-render cutoff on 2026-08-19 retired that dependency: the check now
+  # reads one repository file and passes under `env -i`, which is the same
+  # standard every other check in this loop meets. Left where it was, it caught
+  # a real defect — rule 3fa422b7 categorized session_task_rail without the
+  # matching override — only at the NEXT session's boot, after the change had
+  # merged with CI green. Here it catches it before the merge.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
+             rule-enforcement-map-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate; do
     [ -f "ops/$inv.py" ] || continue
