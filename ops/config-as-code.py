@@ -216,7 +216,8 @@ PRIMARY_ONLY = {
     # plist as designed, and bin/preflight-watch.sh is retired with this entry —
     # which had been naming a plist that exists in neither ops/launchd/ nor
     # ~/Library/LaunchAgents. A lifecycle that completes should leave nothing
-    # behind pointing at it (rule 61c64d91).
+    # behind pointing at it (rule def3e84e, artifact tombstones: nothing
+    # silently rots).
     "com.carr.nightly-record-layer.plist",
     "com.carr.rules-refresh.plist",
     "com.carr.local-briefs.plist",
