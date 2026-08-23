@@ -860,7 +860,8 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       inputSchema: { type: "object", properties: {
         detail: { type: "string", enum: ["gist", "full"], description: "gist (DEFAULT) = one line per rule, no human_quote. full = every rule's complete text; ~180KB at 147 rules, which overflows a tool result on most clients. Prefer gist + rule_ids." },
         rule_ids: { type: "array", items: { type: "string" }, description: "Short ids (the 8-char form the gist prints, e.g. '4e104d4c'). These rules come back in FULL regardless of detail — the lookup path for 'read the binding text before acting on a gist'." },
-        workflow: { type: "string", description: "Optional current workflow key used to select applicable typed constraints after registry activation." },
+        workflow: { type: "string", description: "Optional current workflow key used to select applicable typed constraints after registry activation. It is ALSO read as a rule pack name: pass the pack the observed work belongs to and its rules compile into the payload. `rule_delivery.pack_index` lists the names and what triggers each." },
+        packs: { type: "array", items: { type: "string" }, description: "Rule packs to compile, when the work spans more than one (git AND a deal, say). Loading is MONOTONIC by design — a pack adds rules and never removes Layer 0. Unknown names come back in rule_delivery.packs_not_found rather than silently loading nothing." },
         surface: { type: "string", description: "Optional execution surface used to select applicable typed constraints; defaults to the authenticated runtime." },
         tier: { type: "string", description: "Optional work tier used to select applicable typed constraints." } },
         },
@@ -929,11 +930,76 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
             if (wanted.has(id)) selectedById.set(id, r);
           }
         }
+        // ── THE DELIVERY PLAN (2026-08-23 rules council, migration 0288) ──────
+        //
+        // Until now this verb had ONE mode: recite every active rule into every
+        // session, whatever that session turned out to be doing. Rule 1fddcffb
+        // says the always-read core holds only what every session needs
+        // regardless of task, and this verb was the thing violating it at every
+        // boot. The council's answer is three load layers — layer0 recited
+        // always, `control` delivered by the installed gate that refuses the
+        // action, `pack` delivered when the observed work matches a trigger —
+        // and a PACK INDEX so an undeclared session can see what it has not
+        // loaded.
+        //
+        // SHADOW FIRST, and that is enforced by a row rather than by this code.
+        // Both chairs required a week of running the selector beside full
+        // recitation before anything is cut, so ops.rule_delivery_policy.mode
+        // starts 'shadow': the plan is computed and REPORTED, the recitation is
+        // untouched, and `would_omit` is the evidence the week produces. When
+        // Joe flips that row to 'enforced', this same code path delivers the
+        // scoped set. No deploy sits between the decision and the behaviour, in
+        // either direction.
+        //
+        // EVERY QUERY HERE FAILS SOFT. A worker running ahead of migration 0288
+        // must behave exactly as it did before, not error at the one verb every
+        // session calls first.
+        const requestedPacks = [...new Set(
+          [...(Array.isArray(args.packs) ? args.packs : []),
+           ...(args.workflow ? [args.workflow] : [])]
+            .map(s => String(s || "").trim().toLowerCase()).filter(Boolean))];
+        const deliveryMode = (await c.query(
+          `select mode from ops.rule_delivery_policy limit 1`)
+          .catch(() => ({ rows: [] }))).rows[0]?.mode || null;
+        const plan = deliveryMode ? (await c.query(
+          `select short_id, load_layer, packs, scope, selected
+             from ops.rule_delivery_plan($1,$2)`,
+          [scope.status === "personal" ? who : null, requestedPacks])
+          .catch(() => ({ rows: [] }))).rows : [];
+        const packIndex = deliveryMode ? (await c.query(
+          `select pack, title, triggers, rule_count from ops.rule_pack_index()`)
+          .catch(() => ({ rows: [] }))).rows : [];
+        const knownPacks = new Set(packIndex.map(p => p.pack));
+        const packsNotFound = requestedPacks.filter(p => !knownPacks.has(p));
+        const selectedShortIds = new Set(
+          plan.filter(r => r.selected).map(r => String(r.short_id).toLowerCase()));
+        // "Null workflow returns Layer 0, never all 204 and never nothing" — the
+        // second half of that sentence is this line. An empty plan means the tags
+        // are not installed here, and an empty selection means the compiler found
+        // nothing to hand over; either way the honest fallback is the full set,
+        // said out loud, rather than a session that boots with no rules at all.
+        const deliveryUsable = plan.length > 0 && selectedShortIds.size > 0;
+        const enforcing = deliveryMode === "enforced" && deliveryUsable;
+
         const rules = [...selectedById.values()];
         const shared = rules.filter(r => !r.personal_to);
         const personal = rules.filter(r => r.personal_to);
         const allShared = allRules.filter(r => !r.personal_to);
         const allPersonal = allRules.filter(r => r.personal_to);
+        // A rule the caller asked for by id is ALWAYS returned. Scoping decides
+        // what arrives unasked; it never removes the lookup path that rule
+        // d5dcfe26 and the gist hint both send sessions down.
+        const deliverable = (r) => {
+          const id = String(r.id).slice(0, 8).toLowerCase();
+          return !enforcing || detail === "full" || wanted.has(id)
+                 || selectedShortIds.has(id);
+        };
+        const deliveredShared = shared.filter(deliverable);
+        const deliveredPersonal = personal.filter(deliverable);
+        const omitted = enforcing
+          ? [...shared, ...personal].filter(r => !deliverable(r))
+              .map(r => String(r.id).slice(0, 8))
+          : plan.filter(r => !r.selected).map(r => r.short_id);
         const actionReq = (await c.query(
           `select number, title, body, owner
              from loop_item
@@ -1030,10 +1096,18 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           .map(r => [r.guidance_type,
             Math.max(0, Number(r.active_items) - (constitutionByType.get(r.guidance_type) || 0))])
           .filter(([, count]) => count > 0));
+        const reciteCounts = enforcing
+          ? (scope.status === "personal"
+              ? `Rules loaded: ${deliveredShared.length} of ${allShared.length} shared, `
+                + `${deliveredPersonal.length} of ${allPersonal.length} ${who}-personal `
+                + `(Layer 0${requestedPacks.length ? " + " + requestedPacks.join(", ") : ""})`
+              : `Rules loaded: ${deliveredShared.length} of ${allShared.length} shared, `
+                + `0 personal (unsponsored runtime)`)
+          : (scope.status === "personal"
+              ? `Rules loaded: ${allShared.length} shared, ${allPersonal.length} ${who}-personal`
+              : `Rules loaded: ${allShared.length} shared, 0 personal (unsponsored runtime)`);
         return { ok: true,
-          recite: scope.status === "personal"
-            ? `Rules loaded: ${allShared.length} shared, ${allPersonal.length} ${who}-personal`
-            : `Rules loaded: ${allShared.length} shared, 0 personal (unsponsored runtime)`,
+          recite: reciteCounts,
           identity: {
             organization_tenant_id: organizationTenantForActor(actor),
             sponsoring_human_id: who,
@@ -1049,8 +1123,35 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           ...(missing.length ? { rule_ids_not_found: missing } : {}),
           ...(detail === "gist" ? { hint_full_text:
             "One line per rule. NEVER quote a gist as the rule — call standing-context again with rule_ids:['<id>',…] for the binding text before acting on one." } : {}),
-          shared_rules: shared.map(r => shape(r, true)),
-          personal_rules: personal.map(r => shape(r, false)),
+          shared_rules: deliveredShared.map(r => shape(r, true)),
+          personal_rules: deliveredPersonal.map(r => shape(r, false)),
+          ...(deliveryMode ? { rule_delivery: {
+            mode: deliveryMode,
+            enforcing,
+            say: enforcing
+              ? "Layer 0 plus the packs this session declared. The rest is one "
+                + "standing-context call away with packs:[…]."
+              : "SHADOW: the scoped selector ran beside the full recitation and "
+                + "changed nothing. `would_omit` is what a scoped boot would not "
+                + "have handed you — if you needed one of those rules this turn, "
+                + "that is the miss the shadow week exists to find.",
+            declared_packs: requestedPacks,
+            ...(packsNotFound.length ? { packs_not_found: packsNotFound,
+              hint: "an unknown pack loads nothing; check pack_index for the name" } : {}),
+            layer0: plan.filter(r => r.load_layer === "layer0").length,
+            selected: selectedShortIds.size,
+            in_scope: plan.length,
+            would_omit_count: omitted.length,
+            would_omit: omitted,
+            ...(deliveryMode && !deliveryUsable ? { fallback:
+              "no usable delivery plan (the tags are not installed here), so the "
+              + "FULL set was recited — a scoped boot never returns nothing" } : {}),
+            pack_index: packIndex.map(p => ({ pack: p.pack, title: p.title,
+              triggers: p.triggers, rules: Number(p.rule_count) })),
+            hint: "Packs load on OBSERVED WORK, never on the session's name "
+              + "(rule 347a9ca6). If this turn drifted into git, a deal or a "
+              + "surface, call standing-context again with that pack.",
+          } } : {}),
           ...(registryActive ? { guidance_registry: {
             state: "active",
             manifest_digest: registryState.manifest_digest,

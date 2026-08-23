@@ -405,8 +405,16 @@ PYEOF
   # threshold, because coverage stands at three of twenty-three and a check that
   # fails every run is one people learn to scroll past. It fails only when a job
   # that HAD a workflow binding loses it.
+  # rule-load-layer-check JOINED 2026-08-23, alongside the delivery tags it
+  # validates. Same kind again: one repository file, no machine state, no
+  # database. It is the check that stops the scoping change from becoming the
+  # thing the council warned about — a wildcard tag, an untagged rule, or a
+  # `control` claim on a rule nothing can actually refuse would all ship a
+  # smaller boot payload that silently drops law, and the failure is invisible
+  # afterwards because a session that boots with fewer rules looks exactly like
+  # one that boots correctly.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             rule-enforcement-map-check \
+             rule-enforcement-map-check rule-load-layer-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
     [ -f "ops/$inv.py" ] || continue
