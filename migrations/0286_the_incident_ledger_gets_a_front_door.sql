@@ -159,6 +159,76 @@ begin
                     'writable home for its duplicate decision';
   end if;
 
+  -- 1b. AND THE ROLES THAT ACTUALLY LOG IN, which are not the roles above.
+  --
+  -- carr_reader and carr_writer are BUNDLES. The Worker's secrets authenticate
+  -- as app_reader and app_writer, which are granted those bundles
+  -- (tools/provision-staging-app-writer.py: READER_ROLE 'app_reader',
+  -- READER_BUNDLE_ROLE 'carr_reader'). Every assertion above is therefore about
+  -- a role no connection uses, and it holds for the connection only if the
+  -- membership inherits.
+  --
+  -- THAT DISTINCTION IS NOT ACADEMIC HERE. mcp-server/smoke-reads.sh exists
+  -- because exactly this went wrong: `find` and `catch-me-up` queried base
+  -- tables "carr_reader cannot see", and the gap "survived from build day"
+  -- until a done-test tripped over it. A grant proof that stops at the bundle
+  -- is the same proof that missed it.
+  --
+  -- SKIPPED, NOT FAILED, WHERE THE LOGIN ROLES ARE ABSENT: a disposable cluster
+  -- built from db/schema.sql has the bundles (0115 creates them) and no login
+  -- roles, because those are provisioned per environment rather than by a
+  -- migration. Silence would be wrong, so it says which case it was.
+  -- TWO HALVES, BECAUSE has_table_privilege ONLY ANSWERS ONE OF THEM. It counts
+  -- privileges reachable through role MEMBERSHIP and does not model the INHERIT
+  -- attribute at all: a login role granted its bundle WITH NOINHERIT still reads
+  -- as privileged here, while its actual sessions hold nothing until they SET
+  -- ROLE. Proven on a disposable cluster while writing this — `alter role
+  -- app_reader noinherit` changed no answer below. So the membership half is the
+  -- loop, and the inherit half is asserted separately and explicitly. Either one
+  -- alone would be a check that claims more than it proves.
+  --
+  -- The existence test is INSIDE the loop body, not in the WHERE clause.
+  -- has_table_privilege RAISES on a role that does not exist, and a planner is
+  -- free to evaluate it before an `exists` predicate sitting beside it — which
+  -- is how the first draft of this block died with `role "app_reader" does not
+  -- exist` on a disposable cluster instead of skipping. A plpgsql IF is ordered;
+  -- a WHERE conjunct is not.
+  for v_need in select rolname from pg_roles
+                 where rolname in ('app_reader', 'app_writer') and not rolinherit
+  loop
+    raise exception '0286 FAILED: login role % does not inherit its bundle. It is granted '
+                    'carr_reader/carr_writer and reads as privileged to has_table_privilege, '
+                    'which counts membership and ignores INHERIT — but its sessions hold nothing '
+                    'until they SET ROLE, and the Worker never does.', v_need.rolname;
+  end loop;
+
+  for v_need in
+    select * from (values
+      ('app_reader', 'ops.incident', 'select'),
+      ('app_reader', 'ops.incident_fact', 'select'),
+      ('app_reader', 'ops.incident_link', 'select'),
+      ('app_reader', 'ops.v_trace', 'select'),
+      ('app_writer', 'ops.incident', 'insert'),
+      ('app_writer', 'ops.incident', 'update'),
+      ('app_writer', 'ops.incident_fact', 'insert'),
+      ('app_writer', 'ops.incident_service', 'insert'),
+      ('app_writer', 'ops.service', 'select')
+    ) as t(grantee, relation, privilege)
+  loop
+    if exists (select 1 from pg_roles where rolname = v_need.grantee)
+       and not has_table_privilege(v_need.grantee, v_need.relation, v_need.privilege) then
+      raise exception '0286 FAILED: login role % cannot reach % on % through any membership it '
+                      'holds — the connection the verbs actually open cannot do what the bundle '
+                      'above says it can.',
+                      v_need.grantee, v_need.privilege, v_need.relation;
+    end if;
+  end loop;
+  if not exists (select 1 from pg_roles where rolname = 'app_reader') then
+    raise notice '0286: app_reader/app_writer are absent here, so the login-role half of the '
+                 'grant check did not run — the bundle half above did. Expected on a disposable '
+                 'cluster; NOT expected in staging or production.';
+  end if;
+
   -- 2. THE COLLECTOR STILL CANNOT ADJUDICATE. 0117 scoped carr_jobs to six
   --    columns so a machine could report a recovery and never reclassify an
   --    incident. duplicate_of_id is the newest judgment column and it must
