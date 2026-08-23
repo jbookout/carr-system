@@ -58,6 +58,10 @@ export const PROFILES = {
     "record-signal", "record-branch-evidence",
     "report-problem",
     "propose-outcome-feedback",
+    // add-room-turn is append-only, keyed, and cannot re-point a record. It
+    // lands here because hermes must stay a strict subset of capture; Joe
+    // granted the hermes seat a voice on the partner line on 2026-08-23.
+    "add-room-turn",
     // record-defect (0103) belongs in the NARROWEST writing profile, not the widest.
     // An unattended run is exactly where an error is least likely to be caught by a
     // human, so it is the seat that most needs to be able to file its own — and the
@@ -211,6 +215,7 @@ export const PROFILES = {
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-defect",
+    "add-room-turn",
   ]),
 };
 
@@ -254,14 +259,15 @@ const PROFILE_NOTICE = {
     "model, the commit sha, and the contract version), and a clean run with nothing to flag is still " +
     "a finding worth recording (found:false), not silence.</notice>",
   hermes:
-    "\n\n<notice>This session runs on the HERMES profile: every read verb, plus exactly nine " +
+    "\n\n<notice>This session runs on the HERMES profile: every read verb, plus these " +
     "additive write verbs — log-activity, stamp-touch, add-loop, update-loop, set-next-action, " +
-    "complete-action, add-critical-date, record-finding, record-defect. Every other write verb " +
+    "complete-action, add-critical-date, record-finding, record-defect, add-room-turn. Every other write verb " +
     "refuses with not_in_profile: no advancing a deal, no creating a party, no merging, no touching " +
-    "a rule, no drafting a client document, and there is no send verb in this system at all. This " +
+    "a rule, no drafting a client document, and there is no outbound send verb in this system at all. " +
+    "add-room-turn is the partner-line wire, not a send: this seat may speak only as hermes. This " +
     "profile is locked server-side by a HERMES_TOKENS bearer, not by ?profile=, and cannot be " +
     "widened by this token under any request. You carry Joe's personal brain and never Dell's. " +
-    "File what he tells you to file; for anything outside those nine verbs, say what you would have " +
+    "File what he tells you to file; for anything outside that write set, say what you would have " +
     "written and hand it back for a human.</notice>",
 };
 

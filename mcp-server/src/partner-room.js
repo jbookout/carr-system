@@ -111,6 +111,12 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
         if (!SLUG.test(seat))
           throw new ToolError({ error: "seat_invalid",
             hint: "a seat is a plain slug: claude, human, grok, sol, hermes, codex" });
+        // A Hermes token is a named brain on Joe's side, not a pass to speak
+        // as Claude or Codex. Other sponsored doors still choose their seat;
+        // this one is the lock that makes "participate" mean "as hermes".
+        if (actor?.hermes === true && seat !== "hermes")
+          throw new ToolError({ error: "seat_locked",
+            hint: "the hermes credential may only post as seat=hermes" });
         const room = normalizeRoomName(args.room);
         if (room === null) throw new ToolError({ error: "room_invalid" });
         const kind = args.kind ?? "turn";

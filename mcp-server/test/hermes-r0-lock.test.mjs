@@ -172,7 +172,7 @@ test("HERMES-CASE-006 — the consequential write verbs still refuse", () => {
 test("the granted additive verbs are allowed", () => {
   for (const verb of ["log-activity", "stamp-touch", "add-loop", "update-loop",
                       "set-next-action", "complete-action", "add-critical-date",
-                      "record-finding", "record-defect"]) {
+                      "record-finding", "record-defect", "add-room-turn"]) {
     assert.equal(allowedIn("hermes", verb, WRITE), true, `${verb} should be callable`);
   }
 });

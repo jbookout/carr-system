@@ -23,6 +23,8 @@ const dellLocal = { id: "actor-dell-local", slug: "dell-local", human: false,
   via: "local-token", agent: true, sponsoring_human_slug: "dell" };
 const reviewer = { id: "actor-reviewer", slug: "codex-reviewer", human: false,
   via: "review-token", review: true };
+const hermesPilot = { id: "actor-hermes-pilot", slug: "hermes-pilot", human: false,
+  via: "hermes-token", hermes: true, sponsoring_human_slug: "joe" };
 
 // ── fake client ─────────────────────────────────────────────────────────────
 // House style: pattern-match on SQL prefixes, track state as fields. It must
@@ -172,6 +174,29 @@ test("add-room-turn: a msg_id already in the room dedups instead of double-landi
   assert.equal(out.ok, true);
   assert.equal(out.deduplicated, true);
   assert.equal(out.seq, 42);
+  assert.equal(db.inserted.length, 0);
+});
+
+test("add-room-turn: the hermes door lands as Joe's hermes seat", async () => {
+  const db = new RoomFake();
+  const out = await TOOLS["add-room-turn"].handler(db, hermesPilot, {
+    idempotency_key: "k-say-hermes-1", seat: "hermes", body: "from the phone seat",
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.sponsor, "joe");
+  assert.equal(out.seat, "hermes");
+  assert.equal(db.inserted[0][1], "joe");
+  assert.equal(db.inserted[0][2], "hermes");
+});
+
+test("add-room-turn: the hermes door cannot speak as another seat", async () => {
+  const db = new RoomFake();
+  await assert.rejects(
+    TOOLS["add-room-turn"].handler(db, hermesPilot, {
+      idempotency_key: "k-say-hermes-2", seat: "claude", body: "should not land",
+    }),
+    (err) => err.payload?.error === "seat_locked",
+  );
   assert.equal(db.inserted.length, 0);
 });
 
