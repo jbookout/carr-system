@@ -157,7 +157,10 @@ def main() -> int:
         # decisions rather than housekeeping. When this fails, update the number
         # in the same commit that changes the chain and say which step moved.
         #
-        # Two as of 2026-08-23, down from thirteen. The corpus push left once the
+        # One as of 2026-08-23, down from thirteen. The graph left once its
+# last raw disk read was sourced from the records instead. Only
+# upstream corroborate is left, and it waits on an external intake.
+# Two as of 2026-08-23, down from thirteen. The corpus push left once the
 # tool learned to hold its vault rows itself, so its twelve live
 # home-rooted rows stopped being switched off by a retired root.
 # Before that, three. The consumer boards and
@@ -172,7 +175,7 @@ def main() -> int:
         # vault drift watch at both ends, and the settings mirror.
         projections = len(re.findall(r'^drive_projection "', nightly, re.M))
         check("every remaining Drive projection is routed through the recovery envelope",
-              projections == 2 and "RECOVERY NONCANONICAL" in nightly
+              projections == 1 and "RECOVERY NONCANONICAL" in nightly
               and "routine-canonical-seam-refusal.sh" in nightly,
               f"{projections} drive_projection step(s) in bin/nightly.sh")
         check("nightly recognizes the record-native dashboard replacement",

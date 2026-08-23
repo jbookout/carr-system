@@ -675,9 +675,22 @@ step "consumers (lead-board, deal-room)" ./run.sh all
 # info, exit 0 under the routine boundary's credentials.
 step "lead promote (review shortlist, writes no leads)" ./run.sh lead-promote
 
-drive_projection "graph (derived from the exported files)" \
-  "record/document graph input" \
-  ./run.sh graph
+# THE GRAPH IS NOT DERIVED FROM EXPORTED FILES, whatever the old label said.
+# Both halves read the doctrine store and write out/Graph inside this repository.
+# What actually stopped it was one raw disk read left behind when the rest moved
+# to records: a listing of DNA/Clients/prospects, used to recover the exact
+# casing of hand-written client dossiers so a client's node is titled after its
+# dossier rather than a generated slug. That directory lived in the vault, the
+# cutoff retired it, and in normal mode the root is this repository, which never
+# had it — so the listing raised and took the whole graph with it. Behind a
+# refusal about a destination sat a crash that needed fixing.
+#
+# The records carry those names themselves: 23 of 201 client rows name a detail
+# file. The map is built from the rows now, which returns the stem the record
+# states rather than confirming it against a file that no longer exists.
+# Measured under the routine boundary's two credentials: 77 nodes, 1,895 edges,
+# 178 client nodes, exit 0.
+step "graph (client, lead, deal and vendor notes)" ./run.sh graph
 
 # Added 2026-08-13 (Phase 1): the retrieval index and the system graph were
 # invoked by NOTHING — not this chain, not any launchd plist, not brief_pack.py,

@@ -166,8 +166,47 @@ party_links = load_party_links(MODE)
 # [loop #133] Every ref the record layer carries, so an edge endpoint with no
 # business ref can still be identified. None in files mode, same as above.
 ref_index = load_ref_index(MODE)
-detail_files = {os.path.splitext(f)[0].lower(): os.path.splitext(f)[0]
-                for f in os.listdir(os.path.join(ROOT, "DNA/Clients/prospects")) if f.endswith(".md")}
+# THE HAND-WRITTEN DOSSIER NAMES, and where they come from now.
+#
+# A client whose record names a detail file gets its graph node titled after
+# that file rather than a generated slug — "the hand note wins as the node",
+# a few lines below. This needed the exact casing, so it listed
+# DNA/Clients/prospects on disk and mapped lowercased stem -> real stem.
+#
+# THAT DIRECTORY IS GONE. It lived in the Drive vault, the 2026-08-19 cutoff
+# retired it, and in normal mode ROOT is this repository, which never had it.
+# So the listing raised FileNotFoundError and took the whole graph with it —
+# the nightly step had been refusing for a destination it did not need, and
+# behind that refusal sat a crash it did need fixing.
+#
+# THE RECORDS ALREADY CARRY THE ANSWER. Every client row that has a dossier
+# carries its path in "Detail File" (23 of 201, measured 2026-08-23), and the
+# lookup below is by lowercased stem of that same field. Building the map from
+# the rows is therefore exact rather than approximate: it returns the stem the
+# record itself states, which is the value the old disk listing was being
+# consulted to confirm.
+#
+# Files mode still reads the directory, because that mode means a recovery
+# operator has deliberately pointed ROOT at a real vault — and it no longer dies
+# when the directory is absent, since a missing tree there is a thing to report
+# rather than a traceback.
+detail_files: dict[str, str] = {}
+if MODE == "records":
+    for _c in clients:
+        _det = s(_c.get("Detail File"))
+        if not _det:
+            continue
+        _stem = os.path.splitext(os.path.basename(_det))[0]
+        if _stem:
+            detail_files.setdefault(_stem.lower(), _stem)
+else:
+    _prospect_dir = os.path.join(ROOT, "DNA/Clients/prospects")
+    if os.path.isdir(_prospect_dir):
+        detail_files = {os.path.splitext(f)[0].lower(): os.path.splitext(f)[0]
+                        for f in os.listdir(_prospect_dir) if f.endswith(".md")}
+    else:
+        print(f"graph: no prospect dossier directory at {_prospect_dir}; "
+              "client nodes will use generated slugs", file=sys.stderr)
 
 # ---------- index for exact-match linking ----------
 taken: set[str] = set()
