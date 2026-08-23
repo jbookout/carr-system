@@ -121,12 +121,20 @@ FAILED_CLASSES=""
 # pointed at Neon pass silently.
 HARD_FAILED=0
 SKIPPED=0
+SKIPPED_CLASSES=""
 RAN=0
+# Per-class wall-clock, written by the run loop. The 2026-08-23 council's first
+# recommendation was a failure taxonomy and class timings, because neither
+# existed: the suite crept 249s -> 317s across a week and nobody could say
+# which class grew, and 40 CI failures in three days could not be split into
+# "real defect" vs "environment skew" without opening forty logs. Plain string,
+# not an associative array — see the bash 3.2 note above CLASS_ORDER.
+CLASS_TIMINGS=""
 
 ok()   { RAN=$((RAN+1)); printf '  \033[32mOK\033[0m    %-11s %s\n' "$1" "${2:-}"; }
 bad()  { RAN=$((RAN+1)); printf '  \033[31mFAIL\033[0m  %-11s %s\n' "$1" "${2:-}"; FAILED=$((FAILED+1)); FAILED_CLASSES="$FAILED_CLASSES $1"; }
 hard() { bad "$1" "${2:-}"; HARD_FAILED=$((HARD_FAILED+1)); }
-skip() { RAN=$((RAN+1)); printf '  \033[33mSKIP\033[0m  %-11s %s\n' "$1" "${2:-}"; SKIPPED=$((SKIPPED+1)); }
+skip() { RAN=$((RAN+1)); printf '  \033[33mSKIP\033[0m  %-11s %s\n' "$1" "${2:-}"; SKIPPED=$((SKIPPED+1)); SKIPPED_CLASSES="$SKIPPED_CLASSES $1"; }
 
 run_quiet() {  # run_quiet <logfile> <cmd...>  — capture output, return status
   local log="$1"; shift
@@ -825,8 +833,22 @@ fi
 
 for c in $CLASS_ORDER; do
   if [ -n "$ONLY" ] && [ "$ONLY" != "$c" ]; then continue; fi
+  _class_t0="$(date +%s)"
   "check_$c"
+  CLASS_TIMINGS="$CLASS_TIMINGS $c=$(( $(date +%s) - _class_t0 ))s"
 done
+
+# One greppable line each, every run, pass or fail — this is the raw material
+# for the failure taxonomy and the duration budget. `ci-timing` answers "which
+# class grew" across runs without opening a single job log; the two class lists
+# split every red run into FAIL (a defect, or local/CI skew if the same tree
+# passed at pre-push) vs SKIP (environment, promoted to failure under --strict)
+# at grep speed. FAILED_CLASSES is printed here, before the known-gaps block
+# below rewrites FAILED, so the line always names the raw result.
+echo
+echo "ci-timing:${CLASS_TIMINGS}"
+[ -n "$FAILED_CLASSES" ]  && echo "ci-failed-classes:${FAILED_CLASSES}"
+[ -n "$SKIPPED_CLASSES" ] && echo "ci-skipped-classes:${SKIPPED_CLASSES}"
 
 # KNOWN GAPS. A class that is red because a DESIGN RULING is outstanding, not
 # because of a bug someone could fix. It still runs, it still prints its failure
