@@ -310,6 +310,55 @@ def export_rules(connection: Any, root: Path, timestamp: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def verify_written_mirror(root: Path) -> list[str]:
+    """Re-read the mirror FROM DISK and check it against its own manifest.
+
+    WHY THE PRODUCER NOW CHECKS ITS OWN WORK (2026-08-22). Until the Drive vault
+    was retired, this verification lived in ops/vault-drift-watch.py: the watch
+    loaded Backups/portability-mirror/manifest.json and hashed every mirror file
+    against it, so a divergent hash, an extra file or a missing one all read as
+    drift rather than being trusted wholesale (that was the point of #64 — verify
+    the mirror instead of blanket-trusting it).
+
+    That check was keyed to the vault path. When the mirror stopped writing there
+    it had nothing left to read, and when the mirror was repointed to OneDrive on
+    2026-08-22 the producer came back without its checker. Restoring the check
+    HERE rather than in a path-scanning watch makes it independent of where the
+    mirror lands, which is the property the last two months kept breaking.
+
+    IT IS NOT SELF-CONGRATULATION. The manifest records hashes computed from the
+    bytes this process wrote; this reads the files BACK OFF THE DESTINATION and
+    hashes them again. That difference is the whole value at the new location: a
+    cloud-synced folder can dehydrate a file to a placeholder, truncate a partial
+    upload, or drop one, and every one of those still leaves a path that exists.
+    The one moment this mirror matters is when the database cannot be reached to
+    compare it against, so it has to be checked when it is written or not at all.
+    """
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        return ["manifest.json is missing from the written mirror"]
+    recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+    claimed = recorded.get("files") if isinstance(recorded, dict) else None
+    if not isinstance(claimed, dict) or not claimed:
+        return ["manifest.json records no files"]
+
+    actual = compute_file_hashes(root)
+    # manifest.json cannot vouch for its own hash; it is written after the
+    # others and is excluded on both sides rather than special-cased on one.
+    actual.pop("manifest.json", None)
+    claimed = {k: v for k, v in claimed.items() if k != "manifest.json"}
+
+    problems = []
+    for rel, digest in sorted(claimed.items()):
+        if rel not in actual:
+            problems.append(f"missing from the destination: {rel}")
+        elif actual[rel] != digest:
+            problems.append(f"content does not match the manifest: {rel}")
+    for rel in sorted(set(actual) - set(claimed)):
+        problems.append(f"present but unrecorded: {rel}")
+    return problems
+
+
 def render_manifest(timestamp: str, doc_count: int, table_count: int, row_count: int) -> str:
     return "\n".join(
         (
@@ -439,6 +488,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         doc_count, table_count, row_count = build_and_swap(args.out, builder)
         if args.also is not None:
             copy_and_swap(args.out, args.also)
+        # Both copies are checked, because the second one is the one nobody
+        # looks at until the first is gone.
+        for written in [args.out] + ([args.also] if args.also is not None else []):
+            problems = verify_written_mirror(written)
+            if problems:
+                print(f"mirror VERIFY FAILED at {written}", file=sys.stderr)
+                for problem in problems[:20]:
+                    print(f"  {problem}", file=sys.stderr)
+                if len(problems) > 20:
+                    print(f"  ...and {len(problems) - 20} more", file=sys.stderr)
+                return 1
     except Exception as error:
         # The type name alone is not a diagnosis. "mirror failed: TypeError"
         # is what the 2026-08-17 nightly chain printed, and finding the actual
@@ -449,7 +509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     print(
-        f"mirror OK: {doc_count} md docs, {table_count} tables, "
+        f"mirror OK (verified on disk): {doc_count} md docs, {table_count} tables, "
         f"{row_count} rows -> {args.out}"
     )
     return 0
