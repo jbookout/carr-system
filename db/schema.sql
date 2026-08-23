@@ -7661,6 +7661,19 @@ $$;
 
 
 --
+-- Name: agent_profile_assignment_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.agent_profile_assignment_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'agent_profile_assignment is append-only: correct a staffing
+ mistake with the next assignment row, never by editing history';
+end $$;
+
+
+--
 -- Name: assert_no_orphaned_edges(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -12336,6 +12349,49 @@ CREATE TABLE public.actor_profile (
     key text NOT NULL,
     value jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: agent_profile; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.agent_profile (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    profile_key text NOT NULL,
+    display_name text NOT NULL,
+    charter jsonb DEFAULT '[]'::jsonb NOT NULL,
+    current_model text,
+    current_desk text,
+    sponsor_scope text DEFAULT 'shared'::text NOT NULL,
+    status text NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_profile_charter_check CHECK ((jsonb_typeof(charter) = 'array'::text)),
+    CONSTRAINT agent_profile_display_name_check CHECK (((length(display_name) >= 1) AND (length(display_name) <= 60))),
+    CONSTRAINT agent_profile_profile_key_check CHECK ((profile_key ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'::text)),
+    CONSTRAINT agent_profile_status_check CHECK ((status = ANY (ARRAY['active'::text, 'unstaffed'::text, 'parked'::text])))
+);
+
+
+--
+-- Name: agent_profile_assignment; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.agent_profile_assignment (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    profile_id uuid NOT NULL,
+    model text,
+    desk text,
+    status text NOT NULL,
+    ruled_by uuid NOT NULL,
+    ruling_basis text NOT NULL,
+    note text,
+    idempotency_key uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_profile_assignment_ruling_basis_check CHECK ((ruling_basis = ANY (ARRAY['human'::text, 'standing_delegation'::text]))),
+    CONSTRAINT agent_profile_assignment_status_check CHECK ((status = ANY (ARRAY['active'::text, 'unstaffed'::text, 'parked'::text])))
 );
 
 
@@ -21227,6 +21283,38 @@ ALTER TABLE ONLY public.actor
 
 
 --
+-- Name: agent_profile_assignment agent_profile_assignment_idempotency_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_profile_assignment
+    ADD CONSTRAINT agent_profile_assignment_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: agent_profile_assignment agent_profile_assignment_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_profile_assignment
+    ADD CONSTRAINT agent_profile_assignment_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: agent_profile agent_profile_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_profile
+    ADD CONSTRAINT agent_profile_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: agent_profile agent_profile_profile_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_profile
+    ADD CONSTRAINT agent_profile_profile_key_key UNIQUE (profile_key);
+
+
+--
 -- Name: agreement agreement_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -22829,6 +22917,13 @@ CREATE INDEX activity_deal_idx ON public.activity USING btree (deal_id, occurred
 
 
 --
+-- Name: agent_profile_assignment_profile_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX agent_profile_assignment_profile_idx ON public.agent_profile_assignment USING btree (profile_id, created_at DESC);
+
+
+--
 -- Name: building_addr_trgm; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -24179,6 +24274,13 @@ CREATE TRIGGER workflow_acceptance_append_only BEFORE DELETE OR UPDATE ON ops.wo
 --
 
 CREATE TRIGGER activity_touch BEFORE UPDATE ON public.activity FOR EACH ROW EXECUTE FUNCTION public.trg_touch_row();
+
+
+--
+-- Name: agent_profile_assignment agent_profile_assignment_append_only; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER agent_profile_assignment_append_only BEFORE DELETE OR UPDATE ON public.agent_profile_assignment FOR EACH ROW EXECUTE FUNCTION public.agent_profile_assignment_guard();
 
 
 --
@@ -25879,6 +25981,22 @@ ALTER TABLE ONLY public.activity
 
 ALTER TABLE ONLY public.actor_profile
     ADD CONSTRAINT actor_profile_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: agent_profile_assignment agent_profile_assignment_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_profile_assignment
+    ADD CONSTRAINT agent_profile_assignment_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES public.agent_profile(id);
+
+
+--
+-- Name: agent_profile_assignment agent_profile_assignment_ruled_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_profile_assignment
+    ADD CONSTRAINT agent_profile_assignment_ruled_by_fkey FOREIGN KEY (ruled_by) REFERENCES public.actor(id);
 
 
 --
@@ -28197,6 +28315,10 @@ grant insert, select, update on table public.activity to carr_writer;
 grant select on table public.actor to carr_authority;
 grant insert, select, update on table public.actor to carr_writer;
 grant insert, select, update on table public.actor_profile to carr_writer;
+grant select on table public.agent_profile to carr_reader;
+grant select, update on table public.agent_profile to carr_writer;
+grant select on table public.agent_profile_assignment to carr_reader;
+grant insert, select on table public.agent_profile_assignment to carr_writer;
 grant insert, select, update on table public.agreement to carr_writer;
 grant insert, select, update on table public.ammo_item to carr_writer;
 grant insert, select, update on table public.attachment to carr_writer;
@@ -28927,6 +29049,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0281_a_decline_is_not_built_work.sql	eba7d5356775835fe67c89c96e1bbbc43f4535a200f9a7abe2639364d51cbd8a	2026-08-22 16:32:29.91838+00
 0282_zero_hit_fallback_for_doctrine_search.sql	3bdd8a30afc47b07cf036ae4d36e059e3b593422db576cc0231814b8e04a5469	2026-08-22 17:00:48.544908+00
 0283_concept_scores_stop_being_free.sql	18031ebf9e28201a30c9e2400d2e1fb9229541c8f4d3abcb0e57c9137d5b484d	2026-08-22 17:41:45.996977+00
+0284_named_agent_profiles.sql	03b53b8ec28212752d066670a2836b999c0689acc022f88771de09532e723522	2026-08-23 03:20:17.462342+00
 \.
 
 
