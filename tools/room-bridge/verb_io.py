@@ -50,6 +50,27 @@ def read_room(after_seq: int, *, room: str = DEFAULT_ROOM, limit: int = 50,
     )
 
 
+def read_profiles(*, call_verb_path: Path = CALL_VERB) -> list:
+    """The named-agent roster (loop 520), in the exact compact shape the
+    heartbeat republishes: key, name, model, desk, status per profile. Raises
+    on any failure — the caller (bridge.run_once) degrades to an absent
+    roster key rather than a dead heartbeat."""
+    result = _run_verb("read-profiles", {}, call_verb_path=call_verb_path)
+    profiles = result.get("profiles")
+    if not isinstance(profiles, list):
+        raise RuntimeError(f"read-profiles returned no profile list: {str(result)[:300]!r}")
+    return [
+        {
+            "key": p.get("profile_key"),
+            "name": p.get("display_name"),
+            "model": p.get("current_model"),
+            "desk": p.get("current_desk"),
+            "status": p.get("status"),
+        }
+        for p in profiles
+    ]
+
+
 def add_room_turn(body: str, seat: str, *, kind: str = "turn", room: str = DEFAULT_ROOM,
                    msg_id: str | None = None, call_verb_path: Path = CALL_VERB) -> dict:
     args = {

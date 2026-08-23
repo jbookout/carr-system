@@ -250,6 +250,13 @@ export function describeReceipt(body, receiptAtMs) {
     return lines.length ? lines : ["A bridge check-in with nothing to report."];
   }
 
+  if (key === "agent_profile" && value && typeof value === "object") {
+    const name = value.name || value.key || "profile";
+    if (value.status === "active" && value.model) {
+      return [`${name} staffed with ${value.model}${value.desk ? ` on ${value.desk}` : ""}`];
+    }
+    return [`${name} ${value.status || "unstaffed"}`];
+  }
   if (key === "session_status" && value && typeof value === "object") {
     const pct = Number(value.context_pct);
     return [`Session "${value.name || "unnamed"}" is at ${Number.isFinite(pct) ? `${Math.round(pct)}%` : "unknown"} context${value.claimed ? `, working on: ${value.claimed}` : ", with nothing claimed"}.`];
@@ -324,10 +331,30 @@ export function deriveModel(turns, { now = Date.now(), viewer = "joe" } = {}) {
   const workers = new Map();
   const assignments = [];
   const sessionRows = new Map();
+  const profileRows = new Map();
   let heartbeat = null;
   let heartbeatAt = 0;
   let errors = 0;
   let latestSeq = 0;
+
+  // Named agent profiles (loop 520): the NAME persists, the model is staffing
+  // detail. Truth arrives two ways — an {"agent_profile":...} receipt the
+  // moment an assignment changes, and the full roster republished inside the
+  // throttled heartbeat — and both flow through here, latest-at winning per
+  // profile key, so a feed window is never stuck with a stale staffing.
+  const upsertProfile = (raw, at) => {
+    if (!raw || typeof raw.key !== "string" || !raw.key) return;
+    const prior = profileRows.get(raw.key);
+    if (prior && prior.at > at) return;
+    profileRows.set(raw.key, {
+      key: raw.key,
+      name: typeof raw.name === "string" && raw.name ? raw.name : raw.key,
+      model: typeof raw.model === "string" && raw.model ? raw.model : null,
+      desk: typeof raw.desk === "string" && raw.desk ? raw.desk : null,
+      status: typeof raw.status === "string" ? raw.status : "unstaffed",
+      at,
+    });
+  };
 
   for (const turn of turns) {
     const seq = seqOf(turn);
@@ -347,6 +374,10 @@ export function deriveModel(turns, { now = Date.now(), viewer = "joe" } = {}) {
         heartbeat = parsed.heartbeat;
         heartbeatAt = at;
       }
+      if (Array.isArray(parsed?.heartbeat?.profiles)) {
+        for (const profile of parsed.heartbeat.profiles) upsertProfile(profile, at);
+      }
+      if (parsed?.agent_profile) upsertProfile(parsed.agent_profile, at);
       if (parsed?.assignment) {
         assignments.push({ ...parsed.assignment, at, seq, status: parsed.status || null });
       }
@@ -385,18 +416,33 @@ export function deriveModel(turns, { now = Date.now(), viewer = "joe" } = {}) {
   const deskSeats = new Set(desks.map((d) => String(d.seat || "").toLowerCase()).filter(Boolean));
   const heartbeatSponsor = seats.get("hermes")?.sponsor || viewer;
 
+  // A desk learns its profile from either side of the wire: the record layer
+  // (profile.desk names this desk) or the local registry (the desk row carries
+  // a profile key). The record layer wins when both speak, because staffing is
+  // its recorded act.
+  const profiles = [...profileRows.values()].sort((a, b) => a.key.localeCompare(b.key));
+  const profileByDesk = new Map();
+  for (const profile of profiles) {
+    if (profile.desk) profileByDesk.set(profile.desk, profile);
+  }
+
   const roster = desks.map((desk) => {
     const seat = String(desk.seat || "").toLowerCase();
     const activity = seat ? seats.get(seat) : null;
     const lastSeen = Date.parse(desk.last_seen ?? "") || 0;
     const seenAt = Math.max(lastSeen, activity?.at || 0);
+    const name = String(desk.name || "desk");
+    const boundKey = typeof desk.profile === "string" ? desk.profile : null;
+    const profile = profileByDesk.get(name)
+      || (boundKey ? profileRows.get(boundKey) : null) || null;
     return {
-      name: String(desk.name || "desk"),
+      name,
       seat: seat || null,
       live: desk.live === true,
       auth: typeof desk.auth === "boolean" ? desk.auth : null,
       seenAt,
       partner: activity?.sponsor || heartbeatSponsor,
+      profile,
       state: deskState({ seat, live: desk.live === true, auth: desk.auth, seenAt }, now),
     };
   });
@@ -448,6 +494,7 @@ export function deriveModel(turns, { now = Date.now(), viewer = "joe" } = {}) {
     cursorLag: Number.isFinite(cursor) ? Math.max(0, latestSeq - cursor) : null,
     errors,
     desks: roster,
+    profiles,
     orbiters,
     workers,
     assignments: assignments.sort((a, b) => b.seq - a.seq),
@@ -767,12 +814,20 @@ function boot() {
 
   function stageNodes(model) {
     const nodes = [];
+    const boundKeys = new Set();
     for (const desk of model.desks) {
       if (!desk.seat) continue;
+      // Named agent profiles (loop 520): where a profile is bound to a desk,
+      // the PROFILE NAME is the primary label and the model staffing it is
+      // the sub-line — the name persists, the model is visible detail.
+      const profile = desk.profile || null;
+      if (profile) boundKeys.add(profile.key);
       nodes.push({ id: `desk:${desk.name}`, ring: "inner", seat: desk.seat, partner: desk.partner,
-        label: desk.name, state: desk.state, worker: false, seenAt: desk.seenAt,
+        label: profile ? profile.name : desk.name, state: desk.state, worker: false, seenAt: desk.seenAt,
         auth: desk.auth,
-        sub: desk.auth === false ? "signed out" : (desk.live ? "live wire" : "no live wire") });
+        sub: profile && profile.model
+          ? (desk.auth === false ? `${profile.model} · signed out` : profile.model)
+          : (desk.auth === false ? "signed out" : (desk.live ? "live wire" : "no live wire")) });
     }
     for (const orbiter of model.orbiters) {
       nodes.push({ id: `seat:${orbiter.seat}`, ring: "outer", seat: orbiter.seat, partner: orbiter.partner,
@@ -781,6 +836,17 @@ function boot() {
         sub: orbiter.worker
           ? (orbiter.worker.completedAt ? "worker · finished" : "worker · running")
           : "seen on the wire" });
+    }
+    // Identities without a desk still exist — that is the point of a persistent
+    // name (Doc stays visible while parked, months before its runtime). They
+    // ride the outer ring, dormant, with their staffing state as the sub-line.
+    for (const profile of model.profiles || []) {
+      if (boundKeys.has(profile.key)) continue;
+      nodes.push({ id: `profile:${profile.key}`, ring: "outer", seat: profile.key,
+        partner: model.viewer, label: profile.name,
+        state: profile.status === "active" ? "healthy" : "dormant",
+        worker: false, seenAt: profile.at || 0, auth: null,
+        sub: profile.model || profile.status });
     }
     return nodes;
   }

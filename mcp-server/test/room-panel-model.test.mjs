@@ -390,3 +390,78 @@ test("both boolean words render, not just one (the surviving mutation)", () => {
   assert.match(text, /Ok: yes/);
   assert.match(text, /Failed: no/);
 });
+
+// ── Named agent profiles (loop 520) ─────────────────────────────────────────
+// The NAME persists; the model behind it is staffing detail. Profile truth
+// reaches the panel two ways and both must land in the model: an
+// {"agent_profile":...} receipt the moment an assignment changes, and the full
+// roster republished inside the throttled heartbeat so any feed window carries
+// current truth. Latest-at wins per profile key.
+
+function profileReceipt(seq, ageSeconds, profile) {
+  return { seq: String(seq), at: at(ageSeconds), sponsor: "joe", seat: "claude",
+    kind: "receipt", msg_id: `p${seq}`,
+    body: JSON.stringify({ agent_profile: profile }) };
+}
+
+test("an assignment receipt lands the profile in the model", () => {
+  const model = deriveModel([
+    profileReceipt(10, 120, { key: "builder", name: "Builder", model: "opus", desk: null, status: "active" }),
+  ], { now: NOW, viewer: "joe" });
+  assert.equal(model.profiles.length, 1);
+  assert.equal(model.profiles[0].key, "builder");
+  assert.equal(model.profiles[0].model, "opus");
+  assert.equal(model.profiles[0].status, "active");
+});
+
+test("the heartbeat roster republishes profile truth, and latest-at wins per key", () => {
+  const hb = { seq: "200", at: at(20), sponsor: "joe", seat: "hermes", kind: "receipt",
+    msg_id: "hbp", body: JSON.stringify({ heartbeat: {
+      desks: DESK_ROWS, cursor: 200, cycle_at: at(20),
+      profiles: [
+        { key: "builder", name: "Builder", model: "sonnet", desk: "joe-desk", status: "active" },
+        { key: "doc", name: "Doc", model: null, desk: null, status: "parked" },
+      ] } }) };
+  const model = deriveModel([
+    profileReceipt(10, 120, { key: "builder", name: "Builder", model: "opus", desk: null, status: "active" }),
+    hb,
+  ], { now: NOW, viewer: "joe" });
+  const byKey = Object.fromEntries(model.profiles.map((p) => [p.key, p]));
+  assert.equal(byKey.builder.model, "sonnet", "the newer heartbeat roster outranks the older receipt");
+  assert.equal(byKey.doc.status, "parked", "a parked identity is still on the roster — identity now, runtime later");
+});
+
+test("an older heartbeat roster never overwrites a newer assignment receipt", () => {
+  const hb = { seq: "200", at: at(300), sponsor: "joe", seat: "hermes", kind: "receipt",
+    msg_id: "hbp2", body: JSON.stringify({ heartbeat: {
+      desks: [], cursor: 200, cycle_at: at(300),
+      profiles: [{ key: "builder", name: "Builder", model: "sonnet", desk: null, status: "active" }] } }) };
+  const model = deriveModel([
+    hb,
+    profileReceipt(300, 10, { key: "builder", name: "Builder", model: "opus", desk: null, status: "active" }),
+  ], { now: NOW, viewer: "joe" });
+  assert.equal(model.profiles[0].model, "opus");
+});
+
+test("a desk bound to a profile carries the profile for the label switch", () => {
+  const hb = { seq: "200", at: at(20), sponsor: "joe", seat: "hermes", kind: "receipt",
+    msg_id: "hbp3", body: JSON.stringify({ heartbeat: {
+      desks: [{ name: "joe-desk", seat: "claude", live: true, last_seen: at(30), auth: true, profile: "builder" }],
+      cursor: 200, cycle_at: at(20),
+      profiles: [{ key: "builder", name: "Builder", model: "opus", desk: "joe-desk", status: "active" }] } }) };
+  const model = deriveModel([hb], { now: NOW, viewer: "joe" });
+  assert.equal(model.desks[0].profile?.name, "Builder");
+  assert.equal(model.desks[0].profile?.model, "opus");
+});
+
+test("a profile receipt reads as a sentence, not flattened keys", () => {
+  const staffed = describeReceipt(JSON.stringify(
+    { agent_profile: { key: "builder", name: "Builder", model: "opus", desk: "joe-desk", status: "active" } }), NOW).join("\n");
+  assert.match(staffed, /Builder staffed with opus on joe-desk/);
+  const parked = describeReceipt(JSON.stringify(
+    { agent_profile: { key: "doc", name: "Doc", model: null, desk: null, status: "parked" } }), NOW).join("\n");
+  assert.match(parked, /Doc parked/);
+  const unstaffed = describeReceipt(JSON.stringify(
+    { agent_profile: { key: "reviewer", name: "Reviewer", model: null, desk: null, status: "unstaffed" } }), NOW).join("\n");
+  assert.match(unstaffed, /Reviewer unstaffed/);
+});

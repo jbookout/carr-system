@@ -149,7 +149,7 @@ def the_body_carries_every_registered_desk_including_the_unwired_one():
     # is exactly the class of defect an inclusion-only assertion lets through.
     assert by_name["joe-desk"] == {"name": "joe-desk", "seat": "claude", "live": True,
                                    "last_seen": "2026-08-22T14:00:00+00:00",
-                                   "auth": True}, by_name
+                                   "auth": True, "profile": None}, by_name
     assert by_name["codex-desk"]["live"] is False, by_name
     assert by_name["codex-desk"]["auth"] is False, by_name
     # the dormant case the panel renders as "no wire registered"
@@ -167,6 +167,53 @@ def the_body_carries_every_registered_desk_including_the_unwired_one():
     assert ", " not in bridge.heartbeat_body(DESKS, 68, "2026-08-22T14:00:00+00:00")
 
 
+PROFILES = [
+    {"key": "builder", "name": "Builder", "model": "opus", "desk": "joe-desk", "status": "active"},
+    {"key": "doc", "name": "Doc", "model": None, "desk": None, "status": "parked"},
+]
+
+
+def the_body_republishes_the_profile_roster_when_one_is_known():
+    # Named agent profiles (loop 520): the NAME persists, the model is staffing
+    # detail, and presence is REPUBLISHED, not assumed — any feed window must
+    # contain current profile truth, so the roster rides the throttled
+    # heartbeat beside the desks.
+    payload = json.loads(bridge.heartbeat_body(
+        DESKS, 68, "2026-08-22T14:00:00+00:00", profiles=PROFILES))
+    hb = payload["heartbeat"]
+    assert hb["profiles"] == PROFILES, hb
+    # desks and cursor are untouched by the roster riding along
+    assert {d["name"] for d in hb["desks"]} == {"joe-desk", "codex-desk", "unwired-desk"}, hb
+    assert hb["cursor"] == 68, hb
+
+
+def a_roster_that_cannot_be_fetched_degrades_to_an_absent_key():
+    # The heartbeat must never die because the roster read failed: desk truth
+    # still ships, and the ABSENT key says honestly that profile truth is
+    # unknown this window — never an empty list, which would read as "no
+    # profiles exist".
+    payload = json.loads(bridge.heartbeat_body(
+        DESKS, 68, "2026-08-22T14:00:00+00:00", profiles=None))
+    assert "profiles" not in payload["heartbeat"], payload
+
+
+def a_desk_bound_to_a_profile_carries_the_binding_on_the_wire():
+    bound = {"joe-desk": {"kind": "claude-session", "room_seat": "claude",
+                          "last_live": True, "profile": "builder"}}
+    row = json.loads(bridge.heartbeat_body(bound, 1, "t"))["heartbeat"]["desks"][0]
+    assert row["profile"] == "builder", row
+
+
+def post_heartbeat_carries_the_roster_through():
+    state = state_mod.default_state()
+    room = RecordingRoom()
+    bridge.post_heartbeat(state, DESKS, add_room_turn=room.add_room_turn,
+                          cursor=68, now="2026-08-22T14:00:00+00:00",
+                          profiles=PROFILES)
+    body = json.loads(room.calls[0]["body"])
+    assert body["heartbeat"]["profiles"] == PROFILES, body
+
+
 def main() -> int:
     check("a bridge that has never spoken posts its first heartbeat at once",
           a_bridge_that_has_never_spoken_posts_its_first_heartbeat_at_once)
@@ -178,6 +225,14 @@ def main() -> int:
           the_throttle_survives_the_process_exiting_between_cycles)
     check("a broken or backwards timestamp fails closed rather than flooding",
           a_broken_or_backwards_timestamp_fails_closed_rather_than_flooding)
+    check("the body republishes the profile roster when one is known",
+          the_body_republishes_the_profile_roster_when_one_is_known)
+    check("a roster that cannot be fetched degrades to an absent key",
+          a_roster_that_cannot_be_fetched_degrades_to_an_absent_key)
+    check("a desk bound to a profile carries the binding on the wire",
+          a_desk_bound_to_a_profile_carries_the_binding_on_the_wire)
+    check("post_heartbeat carries the roster through",
+          post_heartbeat_carries_the_roster_through)
     check("the receipt body carries every registered desk, unwired ones included",
           the_body_carries_every_registered_desk_including_the_unwired_one)
 
