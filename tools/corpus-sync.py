@@ -74,6 +74,45 @@ def vault_reachable():
     return os.path.isdir(VAULT)
 
 
+# The Drive-rooted classes are RETIRED, not merely unmounted (cutoff 2026-08-19,
+# and Joe's approval of Drive retirement across the dependency classes). The
+# mount still resolves on this Mac, so a reachability probe says yes and would
+# happily write doctrine renders back into a vault the cutoff turned off. Being
+# able to write somewhere is not permission to.
+RETIRED_ROOTS = ("vault", "drive")
+
+
+def row_root_writable(rel):
+    """(may this row be pushed now, why not) — asked per row, not once per run.
+
+    WHY PER ROW (2026-08-23). --push refused the whole run unless the vault
+    resolved. That was right when every row lived in the vault and wrong from the
+    moment the set gained `home:` rows, which address ~/.claude/skills on this Mac
+    and need no Drive at all. Twelve of the fifty-four rows are those. So a
+    precondition written for one root switched off a dozen rows that never shared
+    it — the same shape as the portability mirror the day before, where a step
+    with a live half and a dead half failed whole and the live half went quiet
+    without anyone deciding it should.
+
+    WHY RETIREMENT AND NOT REACHABILITY DECIDES THE DRIVE ROWS. The vault is
+    still mounted here. A reachability probe therefore returns True and the push
+    would rewrite retired doctrine renders into it, which is precisely what the
+    cutoff stopped and what the nightly acceptance requires stay stopped. They
+    move only inside an explicitly opened recovery envelope — the same
+    CARR_DRIVE_RECOVERY flag the routine boundary uses to decide whether a Drive
+    root may cross into a child at all.
+    """
+    prefix = rel.partition(":")[0] if ":" in rel else "vault"
+    if prefix not in ROOTS and prefix != "vault":
+        prefix = "vault"
+    if prefix in RETIRED_ROOTS and os.environ.get("CARR_DRIVE_RECOVERY") != "1":
+        return False, f"{prefix} root retired 2026-08-19; open a recovery envelope to push it"
+    root = VAULT if prefix == "vault" else ROOTS[prefix][0]
+    if not os.path.isdir(root):
+        return False, f"{prefix} root is not mounted on this machine"
+    return True, ""
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -347,7 +386,16 @@ def push():
     pushed, conflicts, refused, unchanged = [], [], [], []
     files_by_source = dict(recorded)   # start from the manifest; only pushed rows get rewritten
 
+    unreachable = []
     for rel, klass, why in load_set():
+        # A row whose ROOT is not mounted is not a refusal and not a conflict: it
+        # is a destination that does not exist on this machine right now. Counted
+        # and named so the skip is visible, kept out of the exit code so a
+        # retired root cannot make every run look broken.
+        ok_root, root_why = row_root_writable(rel)
+        if not ok_root:
+            unreachable.append((rel, root_why))
+            continue
         src, dst = resolve(rel)   # src = source-side (Drive/vault/home); dst = git copy under corpus/
 
         if not os.path.exists(dst):
@@ -413,7 +461,7 @@ def push():
     }
     wrote = write_manifest(out)
     return {"pushed": pushed, "conflicts": conflicts, "refused": refused,
-            "unchanged": unchanged, "manifest_written": wrote}
+            "unchanged": unchanged, "unreachable": unreachable, "manifest_written": wrote}
 
 
 # States that mean "the source-side copy no longer matches what git last pushed" — post-flip
@@ -472,13 +520,23 @@ def main(argv):
         print(json.dumps(status(), indent=2))
         return 0
     if do_push:
-        if not vault_reachable():
-            print(f"corpus push — SKIP: vault not reachable at {VAULT}")
-            print("  The Drive mount is not up (or the path changed). Nothing pushed; safe to retry.")
-            return 78
+        # THE WHOLE-RUN VAULT GATE IS GONE, and this is the point of the change.
+        # It returned 78 for every row unless the vault resolved, which was right
+        # when every row lived in the vault and wrong from the moment the set
+        # gained `home:` rows addressing this Mac. After the 2026-08-19 cutoff
+        # retired the vault it switched off twelve rows that never needed it.
+        # push() now asks each root for itself; the run only skips when NOTHING
+        # is reachable, which is the original contract with the original meaning.
         r = push()
+        reachable_any = bool(r["pushed"] or r["unchanged"] or r["conflicts"] or r["refused"])
+        if not reachable_any and r["unreachable"]:
+            print(f"corpus push — SKIP: no configured root is reachable "
+                  f"({len(r['unreachable'])} row(s) waiting on one)")
+            print("  Nothing pushed; safe to retry once a root is mounted.")
+            return 78
         print(f"corpus push — {len(r['pushed'])} pushed, {len(r['unchanged'])} already in sync, "
-              f"{len(r['conflicts'])} CONFLICT, {len(r['refused'])} refused")
+              f"{len(r['conflicts'])} CONFLICT, {len(r['refused'])} refused, "
+              f"{len(r['unreachable'])} root unreachable")
         print(f"  manifest {'rewritten' if r['manifest_written'] else 'unchanged (nothing moved)'}")
         for p in r["pushed"]:
             print(f"  >> PUSHED    {p}")
@@ -490,6 +548,15 @@ def main(argv):
             print("     into git deliberately, then re-run --push.")
         for rel, why in r["refused"]:
             print(f"  -- REFUSED   {rel}\n     {why}")
+        if r["unreachable"]:
+            # Named rather than counted alone: a silent skip of a retired root is
+            # how a live row would disappear next time the set changes.
+            reasons = sorted({why for _rel, why in r["unreachable"]})
+            print(f"  ~~ ROOT NOT WRITABLE  {len(r['unreachable'])} row(s)")
+            for why in reasons:
+                print(f"     {why}")
+            print("     Not a conflict and not a refusal; excluded from the exit code on "
+                  "purpose, because a retired root must not make every run look broken.")
         return 2 if (r["conflicts"] or r["refused"]) else 0
     if do_sync:
         print("NOTE: git is canonical since 2026-08-06 — pulling source into git is the "
