@@ -116,7 +116,18 @@ export function actorUnresolvedFailureClass() {
  * batch job/check incident interleave under one dedup rule (0116's partial
  * unique index) rather than two incompatible ones. routeKey plays run_key's
  * role: the path for a generic failure, or `mcp:<verb>` where the verb is
- * known (a more specific signature than the bare route gives). */
+ * known (a more specific signature than the bare route gives).
+ *
+ * THE FOURTH FIELD IS NOT NORMALIZED HERE, AND DOES NOT NEED TO BE (0286).
+ * ops-record.py rewrites the bare `exit_<n>` shape before it lands in this
+ * column, because bin/nightly.sh passes wrapper exit codes through and exit_1
+ * and exit_2 from one step are one problem. Every class this file can produce
+ * — http_5xx, verb_internal_error, actor_unresolved — is already a name, so
+ * the two writers agree by construction rather than by a rule restated in a
+ * third language. That agreement holds only while that stays true, which is
+ * why trace.test.mjs asserts it directly. A new class here shaped like
+ * `exit_<n>` would silently fingerprint differently from the same failure
+ * recorded by a job. */
 export function incidentSignature({ serviceKey, environment, routeKey, failureClass }) {
   return `${serviceKey}|${environment}|${routeKey}|${failureClass}`;
 }

@@ -69,6 +69,7 @@ meant to be run through tools/db-tap.py.
 import argparse
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -671,7 +672,18 @@ def cmd_run(args) -> int:
                  args.evidence_ref, (args.detail or None),
                  sid, args.environment))
             run_id = cur.fetchone()[0]
-            if args.state in ("failed", "timed_out"):
+            recovered = []
+            if args.state == "succeeded":
+                # THE NONZERO-TO-ZERO TRANSITION, on the path that already runs.
+                # The council preferred this to the spool flusher precisely
+                # because it is where the transition is visible: the flusher
+                # replays argv it is forbidden to interpret, while this is the
+                # writer that already decides what a failed run means and is
+                # the only place both halves of the rule can stay together.
+                recovered = _record_success_recovery(
+                    cur=cur, service_key=args.service, environment=args.environment,
+                    run_key=args.key, run_id=run_id)
+            elif args.state in ("failed", "timed_out"):
                 cur.execute("select criticality from ops.service where id = %s", (sid,))
                 criticality = cur.fetchone()[0]
                 _record_failure_incident(
@@ -697,6 +709,22 @@ def cmd_run(args) -> int:
                   "migration 0115 is unapplied here. Nothing recorded.",
                   file=sys.stderr)
             return 78
+        # THE SAME STATE, ONE MIGRATION LATER. 0286 added the occurrence
+        # counters this writer now sets on every incident and the
+        # clear_recovered_incident function it calls on a recovery, so a
+        # database carrying 0115 but not 0286 fails on a column or a function
+        # rather than on a relation. That is still "not provisioned here" and
+        # still deserves 78 — a deploy that runs ahead of its migration should
+        # say which migration, once, not fail every step of the night with a
+        # constraint name.
+        if ("clear_recovered_incident" in str(e)
+                or ('column "occurrence_count"' in str(e)
+                    or 'column "last_seen_at"' in str(e)
+                    or 'column "first_seen_at"' in str(e))):
+            print("ops-record: incident fingerprint columns and the recovery "
+                  "function are missing — migration 0286 is unapplied here. "
+                  "Nothing recorded.", file=sys.stderr)
+            return 78
         # Otherwise the caller ignores this exit code on purpose. The failure is
         # still not hidden: an absent run row makes this service read unknown on
         # the next health look, which is the honest outcome and the reason
@@ -706,6 +734,8 @@ def cmd_run(args) -> int:
         return 1
 
     print(f"{corr} {run_id}")
+    for ref, action, reason in recovered:
+        print(f"  {'cleared' if action == 'clear' else 'recovering'} {ref}  {reason}")
     return 0
 
 
@@ -738,6 +768,178 @@ SEVERITY_BY_CRITICALITY = {
 # The doctrine requires a monitoring interval on resolution; this is the interval
 # the machine proposes, never the resolution itself.
 MONITORING_HOURS = 24
+
+
+# ── the fingerprint, and why a raw exit code is not one ──────────────────────
+# THE MEASUREMENT, 2026-08-23 (process-audit council, recommendation 3, marked
+# safe by both chairs). 26 incidents open, and the ledger showed exactly which
+# ones the machine should never have asked a human about:
+#
+#   nightly.vault-drift-watch   open twice — exit_2 and exit_69
+#   nightly.portability-mirror  failed exit_1, exit_2 and exit_69 across four days
+#
+# 0116 made the signature service|environment|run_key|failure_class and made two
+# open incidents with the same signature impossible, which is right. What it
+# could not know is that `failure_class` arrives in two different registers.
+# Some callers name a diagnosis — pubkey_mismatch, keepalive_not_accepting,
+# performance_budget_exceeded — and two of those on one job really are two
+# problems with two remedies. bin/run-scheduled.sh and bin/nightly.sh instead
+# pass the wrapper's exit code through as `exit_<n>`, and an exit code is not a
+# diagnosis: exit_1 and exit_2 from one step mean "it returned nonzero" twice.
+# Splitting a row on that number pages a human a second time for the same job
+# failing the same way, which is the churn the council measured.
+#
+# SO NORMALIZATION IS DELIBERATELY NARROW. It touches ONLY the `exit_<n>` shape,
+# and even there it keeps every code this codebase has given its own meaning —
+# 69 is "a dependency was unavailable" and 78 is "not configured here", which
+# call for different work than a plain nonzero and must not be folded into it.
+# A named class is never rewritten. That is the council's kill-test condition
+# ("distinct failure classes on the same job must NOT collapse into one row")
+# expressed as a rule rather than a hope, and ops/incident-fingerprint-selftest.py
+# is where it is held.
+NAMED_EXIT_CLASSES = {
+    64:  "usage",                   # EX_USAGE — the caller invoked it wrong
+    69:  "dependency_unavailable",  # EX_UNAVAILABLE — a seam it needs was down
+    77:  "permission_denied",       # EX_NOPERM
+    78:  "configuration",           # EX_CONFIG — this repo's "not provisioned here"
+    124: "timed_out",               # coreutils timeout(1)
+    137: "killed",                  # SIGKILL
+    143: "terminated",              # SIGTERM
+}
+
+# What an unnamed nonzero exit collapses to. It says exactly what is known —
+# the step returned nonzero — and no more. The exact code stays on the run row
+# and in the incident's facts, so nothing is lost, only un-paged.
+GENERIC_EXIT_CLASS = "exit_status"
+
+_EXIT_CLASS_RE = re.compile(r"^exit[_-]?([0-9]{1,3})$", re.IGNORECASE)
+
+# A failure with no class at all. The `run` subcommand refuses one, but
+# deployments and hand-written rows can still arrive without it, and a
+# fingerprint ending in an empty field silently matched every other classless
+# failure on the same job.
+UNCLASSIFIED = "unclassified"
+
+
+def normalize_failure_class(failure_class: str | None) -> str:
+    """The failure class as the fingerprint should see it.
+
+    Named classes pass through untouched — that is the whole guard. Only the
+    `exit_<n>` shape is rewritten, and only where the number carries no meaning
+    of its own.
+    """
+    raw = (failure_class or "").strip()
+    if not raw:
+        return UNCLASSIFIED
+    m = _EXIT_CLASS_RE.match(raw)
+    if not m:
+        return raw
+    return NAMED_EXIT_CLASSES.get(int(m.group(1)), GENERIC_EXIT_CLASS)
+
+
+def incident_fingerprint(service_key: str, environment: str, operation: str,
+                         failure_class: str | None) -> str:
+    """service|environment|operation|failure-class — the identity of one problem.
+
+    Kept in the `signature` column 0116 already constrains, in 0116's exact
+    four-field shape, so the partial unique index over open incidents remains
+    the guarantee and every existing reader (ops.v_trace, the sweep, the
+    Worker's own recordWorkerFailure) keeps working unchanged. The only thing
+    that moved is which string goes in the fourth field.
+    """
+    return "|".join((service_key, environment, operation,
+                     normalize_failure_class(failure_class)))
+
+
+def fingerprint_job(signature: str | None) -> tuple[str, str, str] | None:
+    """(service, environment, run_key) for a run-sourced fingerprint, or None.
+
+    The failure class is dropped on purpose: "has this job recovered?" is a
+    question about the job, not about the way it last broke.
+    """
+    parts = (signature or "").split("|", 3)
+    if len(parts) != 4 or not all(parts[:3]):
+        return None
+    return parts[0], parts[1], parts[2]
+
+
+# ── success-clears ───────────────────────────────────────────────────────────
+# THE OTHER HALF OF THE SAME MEASUREMENT. On 2026-08-23 five incidents sat open
+# with twelve consecutive green runs behind them: partner-ping, rules-refresh,
+# run-spool-flush, room-bridge and doc-engine's liveness probe. Nothing was
+# wrong with any of them and nothing could say so, because the only close path
+# in the repo (`sweep`) needs the owner credential — 0117 withholds resolved_at
+# from carr_jobs — and bin/nightly.sh, which runs as carr_jobs, therefore prints
+# `incident sweep (admin capability unavailable)` every single night instead of
+# sweeping. A close path a scheduled job cannot reach never runs.
+#
+# AND THE 24-HOUR WINDOW CANNOT BE MET BY A TICKER. sweep_decision asks for a
+# full MONITORING_HOURS with no failure recorded. partner-ping runs every 120s;
+# one bad minute anywhere in a day resets that, so a job that flaps hourly and
+# is healthy in between can never clear on the clock even though it is fine
+# right now. The council asked for a success SEQUENCE instead — three
+# consecutive healthy RUN ROWS — which a genuinely broken job never satisfies
+# at all and a recovered one satisfies in bounded time.
+#
+# HOW LONG THAT ACTUALLY IS, measured rather than assumed: it is three recorded
+# rows, not three wakes. bin/run-scheduled.sh's --heartbeat-interval throttles
+# a SUCCEEDED row to one per 1800s for partner-ping and capture-poll and one
+# per 900s for room-bridge, because recording ~720 fires a day from a healthy
+# channel is noise. So partner-ping clears about 90 minutes after it recovers,
+# not six. That is the right trade and worth stating plainly: the alternative
+# is counting wakes nobody recorded. Every FAILURE is still recorded
+# immediately regardless of the throttle, so nothing delays the incident — only
+# the all-clear.
+#
+# SEV-1 IS UNTOUCHED, HERE AND IN THE DATABASE. This function refuses it, and
+# ops.clear_recovered_incident (migration 0286) refuses it again in a
+# SECURITY DEFINER body the job role cannot edit — so the automatic path cannot
+# close a critical incident even if this Python is wrong. Evidence-required,
+# human-approved SEV-1 closure stays exactly where 0117 put it.
+HEALTHY_RUNS_TO_CLEAR = 3
+
+# Severities the machine may close on its own. SEV-0 and SEV-1 are absent on
+# purpose and the absence is the rule.
+AUTO_CLEARED_SEVERITIES = frozenset({"SEV-2", "SEV-3", "SEV-4"})
+
+
+def recovery_decision(incident, healthy_streak, required=HEALTHY_RUNS_TO_CLEAR):
+    """('clear' | 'monitor' | 'none', reason) for one open incident.
+
+    Pure, and separated from the write for the same reason
+    resolve_preconditions is: the guards ARE the substance, and a clear path
+    that rubber-stamps anything is worse than none because then the pile only
+    LOOKS handled. ops/incident-fingerprint-selftest.py holds every branch.
+
+    `healthy_streak` is how many consecutive terminal runs of this job ended
+    succeeded, counting back from the most recent one. It is derived from
+    ops.run by the caller and re-derived inside the database function before
+    anything closes, so a wrong number here cannot close anything.
+    """
+    state = (incident.get("state") or "")
+    if state in ("resolved", "reviewed"):
+        return "none", f"already {state}"
+    if (incident.get("source_kind") or "") != "collector":
+        return "none", ("opened by hand, so a human closes it — the machine only "
+                        "clears what the machine opened")
+    if not incident.get("signature"):
+        return "none", "no fingerprint, so there is no job whose health to read"
+    if healthy_streak <= 0:
+        return "none", "the latest run of this job is not green"
+
+    severity = (incident.get("severity") or "")
+    if severity not in AUTO_CLEARED_SEVERITIES:
+        return "monitor", (
+            f"{severity} never closes on a machine's say-so — recovery is recorded "
+            f"and the close stays with a human")
+    if healthy_streak < required:
+        return "monitor", (
+            f"{healthy_streak} of {required} consecutive healthy runs — recovery "
+            f"recorded, watching for the rest")
+    return "clear", (
+        f"the job has run green {healthy_streak} consecutive times, "
+        f"{required} being the sequence this system calls recovered. Closed by "
+        f"the success-clears path with the green runs as evidence.")
 
 
 # THE CLOSE PATH, added 2026-08-14. Until this existed, nothing in the repo
@@ -843,8 +1045,8 @@ def _record_failure_incident(
         raise ValueError("incident source must be run or deployment")
 
     signature_label = source_label if source_kind == "run" else "deployment"
-    signature = (f"{service_key}|{environment}|{signature_label}|"
-                 f"{failure_class or ''}")
+    signature = incident_fingerprint(service_key, environment, signature_label,
+                                     failure_class)
 
     # ONE JOURNEY FIRST. A golden/performance check and the failed deployment
     # that follows it have different signatures but one correlation, so they
@@ -915,10 +1117,12 @@ def _record_failure_incident(
             """insert into ops.incident
                    (ref, correlation_id, title, severity, state, environment,
                     owner_actor, next_action, detected_source, detected_at,
-                    source_kind, source_ref, signature, observed_at, expires_at)
+                    source_kind, source_ref, signature, observed_at, expires_at,
+                    occurrence_count, first_seen_at, last_seen_at)
                values (%s,%s,%s,%s,'detected',%s,'joe',%s,%s, now(),
                        'collector','tools/ops-record.py immediate',%s, now(),
-                       now() + make_interval(hours => %s))
+                       now() + make_interval(hours => %s),
+                       1, now(), now())
                returning id""",
             (_next_incident_ref(cur), correlation_id,
              f"{source_label} {state} on {service_key} ({environment})",
@@ -969,7 +1173,145 @@ def _record_failure_incident(
             """insert into ops.incident_fact (incident_id, text, source_ref)
                values (%s, %s, %s)""",
             (incident_id, fact, f"ops.{source_kind}:{source_id}"))
+
+    # A RECURRENCE IS A HEARTBEAT ON THE OPEN ROW, NOT A SECOND PAGE (0286).
+    # Before this, the append wrote a fact and nothing else, so all 26 open
+    # incidents read alike on 2026-08-23: nothing distinguished partner-ping's
+    # 89 failures from a verb that threw once. last_seen_at and the count are
+    # the two numbers that separate a fire from a blip, and they cost one UPDATE
+    # on a row this transaction already holds.
+    #
+    # COUNTED OFF THE LINK, not off the call, so it counts DISTINCT evidence
+    # rows. ops.incident_link's primary key already refuses a second link to the
+    # same run, and the spool replays a row it could not land — without this
+    # condition a retried flush would inflate the count while adding no new
+    # evidence, and a count that drifts from the evidence is worse than none.
+    #
+    # IT ALSO ENDS A LIE THE LEDGER WAS TELLING. `assess` moves an incident to
+    # monitoring the moment its job goes green and never moves it back, so
+    # partner-ping and room-bridge both read `monitoring` while actively
+    # failing. A failure recorded against a monitoring incident means the watch
+    # found something: the row returns to detected and drops the recovery
+    # evidence it can no longer stand on. carr_jobs holds a column-scoped update
+    # on exactly these fields (0117, widened for the counters in 0286), so this
+    # runs on the collector path without any escalation.
+    if linked and not opened:
+        cur.execute(
+            """update ops.incident
+                  set occurrence_count = occurrence_count + 1,
+                      last_seen_at = now(),
+                      observed_at = now(),
+                      state = case when state = 'monitoring'
+                                   then 'detected' else state end,
+                      recovery_evidence_ref = case when state = 'monitoring'
+                                   then null else recovery_evidence_ref end,
+                      monitoring_until = case when state = 'monitoring'
+                                   then null else monitoring_until end,
+                      next_action = case when state = 'monitoring'
+                                   then 'failed again during its watch — read the '
+                                        'trace: ops-record trace ' || %s::text
+                                   else next_action end
+                where id = %s""",
+            (str(correlation_id), incident_id))
     return incident_id, opened, linked
+
+
+def _healthy_streak(cur, service_key, environment, run_key,
+                    limit=HEALTHY_RUNS_TO_CLEAR) -> int:
+    """Consecutive succeeded runs of one job, counting back from the latest.
+
+    skipped and cancelled runs are neither health nor failure and are left out
+    of the sequence entirely rather than breaking it — a nightly step that was
+    gated out is not evidence that anything recovered, and it is not evidence
+    that anything broke either.
+    """
+    cur.execute(
+        """select r.state
+             from ops.run r join ops.service s on s.id = r.service_id
+            where s.key = %s and r.environment = %s and r.run_key = %s
+              and r.state in ('succeeded','failed','timed_out')
+         order by r.observed_at desc, r.id desc
+            limit %s""",
+        (service_key, environment, run_key, limit))
+    streak = 0
+    for (state,) in cur.fetchall():
+        if state != "succeeded":
+            break
+        streak += 1
+    return streak
+
+
+def _record_success_recovery(*, cur, service_key, environment, run_key, run_id):
+    """Let a green run speak for the incidents its own job opened.
+
+    CALLED FROM THE WRITE PATH THAT ALREADY RUNS — every `ops-record.py run`
+    that records a success, which is also every row tools/ops-spool.py replays
+    at its 30-minute flush. No new scheduled job, no agent, no LLM: the council
+    ruled out a 21st launchd entry for a fleet that already fails daily, and a
+    recovery nobody is running is the state this is fixing.
+
+    Returns [(ref, action, reason)] for the caller to print. Silent when the
+    job has no open incidents, which is the overwhelmingly common case and the
+    reason this costs one indexed lookup on a healthy fleet.
+    """
+    prefix = f"{service_key}|{environment}|{run_key}|"
+    cur.execute(
+        # The predicate is 0116's partial-index predicate verbatim, so this
+        # reads the open rows through incident_one_open_per_signature rather
+        # than the whole history of everything that ever broke.
+        """select ref, state, severity, source_kind, signature, occurrence_count
+             from ops.incident
+            where state not in ('resolved','reviewed')
+              and starts_with(signature, %s)
+         order by detected_at""",
+        (prefix,))
+    cols = ("ref", "state", "severity", "source_kind", "signature",
+            "occurrence_count")
+    open_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    if not open_rows:
+        return []
+
+    streak = _healthy_streak(cur, service_key, environment, run_key)
+    outcomes = []
+    for inc in open_rows:
+        action, reason = recovery_decision(inc, streak)
+        if action == "none":
+            continue
+        if action == "monitor":
+            # 0117's column grant covers exactly these fields. This is the same
+            # move `assess` has always made on a green run, with two
+            # differences: it now also refreshes an incident ALREADY in
+            # monitoring, so recovery_evidence_ref points at the latest green
+            # run instead of the first one ever seen, and it says how far
+            # through the sequence the job has got.
+            cur.execute(
+                """update ops.incident
+                      set state = 'monitoring',
+                          recovery_evidence_ref = %s,
+                          monitoring_until = now() + make_interval(hours => %s),
+                          next_action = %s,
+                          observed_at = now()
+                    where ref = %s and state not in ('resolved','reviewed')""",
+                (f"ops.run:{run_id}", MONITORING_HOURS, reason, inc["ref"]))
+        elif action == "clear":
+            # THE ONLY AUTOMATIC CLOSE, AND THE DATABASE IS STILL THE GATE.
+            # carr_jobs has no grant on resolved_at or root_cause and does not
+            # get one here (0117 stands). It gets EXECUTE on one SECURITY
+            # DEFINER function that re-derives the success sequence from
+            # ops.run itself and refuses SEV-1, refuses anything a human
+            # opened, and refuses anything whose evidence does not hold up —
+            # so a wrong number in this Python cannot close anything.
+            #
+            # IT TAKES NO STORY FROM ITS CALLER. The root_cause written on a
+            # closed incident is built inside the function out of the numbers
+            # the function verified, so the sentence a human reads on a closed
+            # row can never be one this process made up.
+            cur.execute("select ops.clear_recovered_incident(%s, %s)",
+                        (inc["ref"], HEALTHY_RUNS_TO_CLEAR))
+            if not cur.fetchone()[0]:
+                action, reason = "none", "the database declined the close"
+        outcomes.append((inc["ref"], action, reason))
+    return outcomes
 
 
 def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
@@ -1004,22 +1346,25 @@ def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
             opened += int(was_opened)
 
         elif state == "succeeded":
-            # RECOVERY IS NOT RESOLUTION. One green run says the symptom stopped,
-            # not that the cause is understood — so this moves the incident to
-            # monitoring with evidence and an interval, and leaves resolved_at
-            # null for a human. The database would refuse the dishonest version
-            # anyway; this does not try it.
-            cur.execute(
-                """update ops.incident
-                      set state = 'monitoring',
-                          recovery_evidence_ref = %s,
-                          monitoring_until = now() + make_interval(hours => %s),
-                          next_action = %s
-                    where signature like %s
-                      and state in ('detected','triaged','investigating','mitigating')""",
-                (f"ops.run:{run_id}", MONITORING_HOURS,
-                 f"watch until {MONITORING_HOURS}h clear, then close with an outcome",
-                 f"{service_key}|{env}|{run_key}|%"))
+            # RECOVERY IS NOT RESOLUTION — for anything a machine may not close.
+            # One green run says the symptom stopped, not that the cause is
+            # understood, so a SEV-1 still moves only as far as monitoring and
+            # keeps its human close. What changed in 0286 is that a SEV-2 or
+            # SEV-3 job incident with a full success SEQUENCE behind it now
+            # closes here, because "watch until 24h clear" was a promise this
+            # chain could not keep: the sweep that performs it needs the owner
+            # credential 0117 withholds from carr_jobs, so bin/nightly.sh has
+            # printed `incident sweep (admin capability unavailable)` every
+            # night since it shipped and five fully-recovered incidents were
+            # still open with twelve green runs behind them on 2026-08-23.
+            #
+            # SHARED WITH THE `run` PATH ON PURPOSE. This nightly pass is the
+            # backstop, not the mechanism: the same function runs inside every
+            # successful `ops-record.py run`, so a ticker that recovers at
+            # 09:02 clears at 09:06 rather than waiting for the night.
+            _record_success_recovery(
+                cur=cur, service_key=service_key, environment=env,
+                run_key=run_key, run_id=run_id)
 
         # skipped and cancelled raise nothing. exit 78 means a step ran, found
         # something it needs absent, wrote nothing and said so — alarming on that
@@ -1227,7 +1572,8 @@ def cmd_assess(args) -> int:
     with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
         opened = assess(cur, environment=args.environment, window_hours=args.window_hours)
         cur.execute(
-            """select ref, severity, state, title, next_action
+            """select ref, severity, state, title, next_action,
+                      occurrence_count, last_seen_at
                  from ops.incident
                 where state not in ('resolved','reviewed')
                   and (%s::text is null or environment = %s)
@@ -1236,8 +1582,15 @@ def cmd_assess(args) -> int:
         live = cur.fetchall()
 
     print(f"assess: {opened} incident(s) opened · {len(live)} live incident(s)")
-    for ref, severity, state, title, next_action in live:
+    for ref, severity, state, title, next_action, count, last_seen in live:
         print(f"  {severity}  {state:<12} {ref}  {title}")
+        # THE TWO NUMBERS THAT SEPARATE A FIRE FROM A BLIP. Before 0286 this
+        # list printed 26 lines that all read alike, so partner-ping failing 89
+        # times and a verb that threw once were the same single line and a
+        # reader had no way to sort the pile by anything but date.
+        if count and count > 1:
+            seen = f", last {last_seen:%Y-%m-%d %H:%M}Z" if last_seen else ""
+            print(f"        {count} occurrences{seen}")
         if next_action:
             print(f"        next: {next_action}")
     if not live:

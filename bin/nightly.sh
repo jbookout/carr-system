@@ -982,32 +982,40 @@ step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 # exists to remove.
 #
 # It opens an incident for each job whose LATEST run failed, appends a fact to
-# one that is already open rather than raising a second, and moves an incident to
-# monitoring when its job starts passing again. It cannot close one — the grant
-# withholds resolved_at, so only a human declares an incident resolved (0117).
+# one that is already open rather than raising a second, and counts recurrences
+# on the row instead of reprinting them (0286). Since 0286 it also CLOSES a
+# SEV-2 or SEV-3 job incident whose job has run green three consecutive times,
+# through ops.clear_recovered_incident — a SECURITY DEFINER function that
+# re-derives that sequence itself. 0117's grant is untouched: carr_jobs still
+# cannot write resolved_at, and a SEV-1 still waits for a human.
+#
+# THIS PASS IS THE BACKSTOP, NOT THE MECHANISM. The same recovery runs inside
+# every successful `ops-record.py run`, so a ticker that recovers at 09:02 is
+# cleared by 09:06 rather than by the next night.
 step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/ops-record.py assess --environment production
 
-# THE OTHER HALF OF THAT SENTENCE. Every incident assess opens carries the line
-# "watch until 24h clear, then close with an outcome", and until 2026-08-14
-# nothing performed the close: assess only moves a recovered incident INTO
-# monitoring, and no job, agent or service entry called a close path, because
-# none existed. The windows expired and the pile stayed, reprinted in full every
-# night — a list that can only grow teaches people to stop reading it, the same
-# way a check that goes red on normal work does.
+# WHAT IS LEFT FOR A HUMAN, AND WHY THIS LINE IS STILL A REFUSAL.
 #
-# WHAT THIS DOES NOT DO. It does not close on one green run, which is the thing
-# 0117's grant was written to prevent. It closes only what has nothing left to
-# decide: recovered against real evidence, window fully elapsed, and NO failure
-# recorded against that same service/environment/run_key for the whole window.
-# Anything still flapping, never recovered, or missing evidence stays open and
-# keeps its human outcome — that is what `ops-record.py resolve` is for.
+# Until 2026-08-14 nothing performed the close at all, and this step was written
+# to say so honestly rather than pretend. 0286 removed the larger half of the
+# problem — a recovered job incident now clears itself on the evidence of its
+# own green runs — but it deliberately did not touch the half that matters most:
 #
-# WHY BREAK-GLASS. carr_jobs cannot write resolved_at or root_cause at all
-# (0117's column-scoped grant), so this needs the owner credential, and db-tap
-# holds every write behind default_transaction_read_only unless break-glass is
-# set. The reason is stated here rather than typed fresh each night, and every
-# run appends to out/break-glass-receipts.log, so the escalation is auditable
-# instead of invisible.
+#   SEV-1 closure. Evidence-required and human-approved, in the grant, on
+#   purpose. The 2026-08-23 council was explicit that the critical incidents
+#   are the work, not hygiene.
+#
+#   Anything a human opened. The run ledger cannot see what a person saw, so it
+#   has no standing to declare it over.
+#
+#   Anything that never recovered. Four days of restore-rehearse-weekly
+#   failures do not close because nothing about them is fixed.
+#
+# Closing those needs resolved_at, which carr_jobs cannot write and will not be
+# granted, so this chain says the capability is absent instead of quietly
+# skipping. `ops-record.py resolve` through the receipted break-glass path is
+# the door, and every use appends to out/break-glass-receipts.log so the
+# escalation is auditable instead of invisible.
 step "incident sweep (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "incident closure requires separately provisioned authority capability"
 
 if [ "$seam_blocked" -gt 0 ]; then
