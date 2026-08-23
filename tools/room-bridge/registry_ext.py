@@ -74,6 +74,33 @@ def get_seat(name: str, *, path: Path = DEFAULT_REGISTRY) -> str | None:
     return (entry or {}).get("room_seat")
 
 
+def set_profile(name: str, profile: str | None, *, path: Path = DEFAULT_REGISTRY) -> dict:
+    """Bind (or with None, unbind) a desk to a named agent profile — the
+    persistent identity (builder, designer, reviewer, doc) whose name the
+    observatory shows as the desk's primary label. PRESENTATION AND ROUTING
+    ONLY: this key changes what the heartbeat publishes and how the panel
+    labels the node, and it grants nothing — the desk's credentials and the
+    record layer's actor rules are untouched by any value written here. Same
+    register-first stance as set_seat: metadata ON an entry, never a way to
+    create one."""
+    data = _load(path)
+    entry = data.get("desks", {}).get(name)
+    if entry is None:
+        raise DeskError("unknown_desk", f"no desk named {name!r} — register it first")
+    if profile is None:
+        entry.pop("profile", None)
+    else:
+        entry["profile"] = profile
+    _save(path, data)
+    return entry
+
+
+def get_profile(name: str, *, path: Path = DEFAULT_REGISTRY) -> str | None:
+    data = _load(path)
+    entry = data.get("desks", {}).get(name)
+    return (entry or {}).get("profile")
+
+
 def stamp_heartbeat(name: str, *, live: bool, path: Path = DEFAULT_REGISTRY) -> dict:
     """Record 'this desk was checked, and here is what we found' — called by
     the bridge every cycle and by `desk_cli.py heartbeat` on demand, so the
