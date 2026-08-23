@@ -164,6 +164,22 @@ LAST_STEP_RC=0
 # a red chain every night or nothing at all. Reported on the completion line.
 seam_blocked=0
 
+# ── THE PER-STEP WALL CLOCK (2026-08-23) ─────────────────────────────────────
+# How many steps were cut off tonight for making no progress. Counted separately
+# from seam_blocked for the same reason that one is separate from rc_total: a
+# step that refused for a known missing seam and a step that WEDGED are
+# different mornings' work. A timeout IS a failure and does set rc_total, unlike
+# 78 and 69 below.
+#
+# What this buys is not the killing, it is the CONTINUING. The chain already
+# survived a step that fails; it did not survive one that hangs, and the
+# encrypted backup is the last step, so a hang anywhere earlier took the backup
+# down with it and left the singleton lock held — which made every later
+# invocation a silent exit 0. See bin/step-timeout.zsh for the measurements
+# behind the limit.
+timed_out=0
+source "$REPO/bin/step-timeout.zsh"
+
 # ── THE JOB-RUN LEDGER (Program 3, 2026-08-14) ───────────────────────────────
 # Until this existed, step() computed exactly the right outcome for every step,
 # including the SKIP distinction below that nothing else in the system makes,
@@ -216,9 +232,14 @@ record_run() {                  # record_run <label> <state> <rc> <started_at>
 step() {                        # step <label> <command...>
   local label="$1"; shift
   local t0; t0="$(date -u +%FT%TZ)"
+  # The wall clock goes INSIDE carr_routine_exec, not around it: that function
+  # ends in `env -i` and a python wrapper cannot exec a zsh function. The
+  # stripped environment passes straight through the wrapper to the real
+  # command, so the credential boundary is unchanged.
+  carr_step_timeout_prefix "$(carr_step_timeout_for "$label")"
   say "START $label"
   LAST_STEP_RC=0
-  if carr_routine_exec "$@" >> "$LOG" 2>&1; then
+  if carr_routine_exec "${CARR_STEP_TIMEOUT_ARGV[@]}" "$@" >> "$LOG" 2>&1; then
     say "OK    $label"
     record_run "$label" succeeded 0 "$t0"
   else
@@ -256,6 +277,21 @@ step() {                        # step <label> <command...>
       say "BLOCKED  $label (exit 69 — canonical seam missing; see the step's own message above)"
       record_run "$label" skipped "$rc" "$t0"
       seam_blocked=$((seam_blocked + 1))
+    # 124 = the per-step wall clock fired: the step stopped making progress and
+    # was cut off, along with any grandchildren still holding what it was stuck
+    # on. THIS IS A FAILURE, not a SKIP — unlike 78 and 69 above it sets
+    # rc_total and turns the night red, because a wedged step is never expected.
+    #
+    # It gets its own word rather than reading as a plain FAIL because the two
+    # need different mornings' work: an ordinary FAIL ran and reported a reason,
+    # while a TIMEOUT reported nothing at all and the reason has to be found in
+    # what it was waiting on. The 2026-08-23 case was a Postgres socket the
+    # server had already closed.
+    elif [ "$rc" -eq 124 ]; then
+      say "TIMEOUT  $label (exit 124 — no progress inside its wall clock; the step and its children were stopped)"
+      record_run "$label" failed "$rc" "$t0"
+      timed_out=$((timed_out + 1))
+      rc_total=1
     else
       say "FAIL  $label (exit $rc)"
       record_run "$label" failed "$rc" "$t0"
@@ -897,6 +933,14 @@ step "incident sweep (admin capability unavailable)" sh ./bin/routine-admin-refu
 
 if [ "$seam_blocked" -gt 0 ]; then
   say "===== $seam_blocked step(s) BLOCKED on a missing canonical seam — not counted as failures ====="
+fi
+
+# A timeout rides the completion line for the same reason the seam backlog does:
+# a count nobody sees is a count nobody acts on. Unlike the seam backlog this one
+# IS counted as a failure, so it names itself rather than trusting the reader to
+# spot one TIMEOUT line in a long log.
+if [ "$timed_out" -gt 0 ]; then
+  say "===== $timed_out step(s) TIMED OUT — cut off for making no progress; the chain continued past them ====="
 fi
 
 if [ "$rc_total" -eq 0 ]; then

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import tempfile
 from typing import Any
@@ -26,7 +27,26 @@ def main() -> int:
     nightly = NIGHTLY.read_text(encoding="utf-8")
     restore = RESTORE.read_text(encoding="utf-8")
     check("nightly never sources db.env", '. "$HOME/.config/carr/db.env"' not in nightly)
-    check("nightly uses a clean child environment", "carr_routine_exec \"$@\"" in nightly)
+    # The property being guarded is that step()'s command reaches the child
+    # THROUGH carr_routine_exec, which is what strips the environment down to
+    # the declared database capabilities.
+    #
+    # WHY THIS IS A REGEX AND NOT THE OLD LITERAL `carr_routine_exec "$@"`.
+    # On 2026-08-23 the per-step wall clock was added, and it has to sit INSIDE
+    # carr_routine_exec rather than around it: that function ends in `env -i`,
+    # and a python wrapper cannot exec a zsh function. So a prefix now appears
+    # between the two words. The literal stopped matching and this guard failed
+    # on a change that did not weaken the boundary at all.
+    #
+    # It is deliberately NOT relaxed to a substring search for the function
+    # name. Only the wall-clock prefix is permitted between carr_routine_exec
+    # and the command, so smuggling anything else — an env assignment, a shell,
+    # a credential — in front of the command still fails here.
+    dispatch = re.search(
+        r'carr_routine_exec(?:\s+"\$\{CARR_STEP_TIMEOUT_ARGV\[@\]\}")?\s+"\$@"',
+        nightly,
+    )
+    check("nightly uses a clean child environment", dispatch is not None)
     # Back to 5: the mirror's refusal branch came out again once #387 made
     # doctrine_mirror.py exit 78 on its own. An exact count rather than a floor,
     # deliberately — the point of this check is that an admin-capability step
