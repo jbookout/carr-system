@@ -384,8 +384,12 @@ def main():
     # doctrine 14 -> 13 on 2026-08-20 when e7a620cc was retired: the broad
     # cross-session Dr. CRE persona was withdrawn while the real Doc app
     # doctrine remained intact.
+    # procedure 77 -> 78 on 2026-08-23, when rule 3fa422b7 entered the map:
+    # planned delivery mechanics — commit, push, PR, merge, clean up — are the
+    # session's own to run and never a question for a partner. It is a session
+    # rail rather than a prohibition, so it compiles as a procedure.
     reviewed_counts = {
-        "constraint": 75, "procedure": 77, "doctrine": 13, "rubric": 37,
+        "constraint": 75, "procedure": 78, "doctrine": 13, "rubric": 37,
         "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -395,8 +399,13 @@ def main():
     print(f"{'PASS' if split_compile_pass else 'FAIL'}  all 14 split clauses retain their declared types")
     cases.append(split_compile_pass)
 
+    # The map is a complete inventory of ACTIVE rules; the registry's corpus is
+    # that inventory minus the one surface it does not compile. Ask the compiler
+    # which ids those are rather than restating the rule here (2026-08-23).
+    reviewed_excluded = registry.excluded_source_ids(reviewed_map)
     active_source_ids = sorted({
-        source_id for scope in reviewed_map["active_rule_ids"].values() for source_id in scope})
+        source_id for scope in reviewed_map["active_rule_ids"].values()
+        for source_id in scope if source_id not in reviewed_excluded})
     source_rule_ids = {
         source_id: f"00000000-0000-0000-0000-{index:012x}"
         for index, source_id in enumerate(active_source_ids, start=1)
@@ -445,7 +454,8 @@ def main():
         # 2026-08-20. One entry per compiled guidance item, so this total
         # follows the same lifecycle changes as the counts above, and the
         # manifest entry_count above moves with the TSV that feeds it.
-        and len(activation_manifest["entries"]) == 217
+        # 217 -> 218 on 2026-08-23 with rule 3fa422b7, one compiled item.
+        and len(activation_manifest["entries"]) == 218
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64
         and registry.activation_manifest_sha256(activation_manifest)

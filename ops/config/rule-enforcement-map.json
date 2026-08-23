@@ -1948,75 +1948,89 @@
     },
     "bd4a6d22": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "No control can judge whether a human chose a state on purpose, nor whether an acceptance was named narrowly enough to keep the check honest. The fixtures in ops/hermes-autonomy-check-selftest.py prove the discipline for the worked example by failing if the acceptance is ever widened into a pattern, and nothing today notices the skip-checks escape becoming a habit."},
     "e6e0b0e7": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Judging whether two vendors are 'the same category' at the relationship level is the rule's whole content.",
       "planned_control": "A draft-time pairing check that reads both parties' Category off the vendor record and refuses a same-category pair in an introduction or guest-list draft; needs vendor Category carried in the record layer first."
     },
     "3b0cd546": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. The rivalry list also grows by teaching — the rule instructs that a new rivalry be taught as it surfaces — so a fixed predicate goes stale the day one does.",
       "planned_control": "A named-rivalry pair list on the vendor record, checked by the same draft-time pairing check as e6e0b0e7."
     },
     "defee176": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Stage is a spreadsheet column, so nothing can be denied on it today.",
       "planned_control": "A Stage check at introduction-draft time, once vendor Stage is carried on the vendor record rather than in vendors.xlsx."
     },
     "ba5730c5": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. The rule is explicitly conditional — 'good sometimes, not by default' — and the conditions (live or likely shared project, complementary territory, no existing loyalty) are situational judgments."
     },
     "83b9a362": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. The binding instruction is to suggest each pairing WITH a caveat until a partner rules on it; whether a caveat was actually carried in the prose is a reading judgment."
     },
     "5f8c661d": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Matching a client's vertical to a vendor's vertical, and weighing that against relationship stage, is the judgment."
     },
     "7e4ca905": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. This one closes a loophole in e6e0b0e7 by interpretation, so it can only bind wherever that rule binds."
     },
     "76a1ae2b": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Territory and Vertical have to be read together against a specific client's location."
     },
     "cf1c13a6": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "A positioning rule about how to open with a counterparty who may do the brokerage work themselves; no predicate can tell whether a draft led with the no-conflict framing."
     },
     "bddb0e7b": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. The rule states its own softness — these overlaps are defaults, not blocks, and it requires confirming the specific pairing before acting."
     },
     "6ec7312d": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Delivery tier is a tiebreaker that sits below hard blocks and vertical/state fit and above relationship stage; ordering three soft factors for one client's need is judgment."
     },
     "893aeec5": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. The override is Joe's to give in conversation, so even a Stage check would gate a step that has no machine representation.",
       "planned_control": "The same vendor-Stage check as defee176, plus an add-deal-note or log-decision receipt whenever Joe overrides a Benched vendor."
     },
     "7b4ba3aa": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. 'Fragile, high-stakes client' and 'a Trusted option fits' are both judgments about a specific deal."
     },
     "1f750181": {
+      "rule_surface": "intro_politics",
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' — the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Guest lists are assembled outside any tool call, and the rule hands the exception to Joe explicitly for a given event.",

@@ -227,6 +227,27 @@ def type_counts(data: dict[str, Any]) -> dict[str, int]:
     return {kind: counts.get(kind, 0) for kind in GUIDANCE_TYPES}
 
 
+# The one rule surface the guidance registry does not compile. Kept as a
+# named constant so the enforcement map, the SQL readers and the reviewed
+# curation package all spell the same thing.
+EXCLUDED_RULE_SURFACE = "intro_politics"
+
+
+def excluded_source_ids(source_map: dict[str, Any]) -> set[str]:
+    """Rule ids the enforcement map lists but this registry does not compile.
+
+    Every caller that needs the exclusion asks here, so the enforcement map, the
+    compiler and the tests can never drift into disagreeing about which rules
+    the registry's corpus contains.
+    """
+    return {
+        source_id
+        for source_id, control in (source_map.get("rule_controls") or {}).items()
+        if isinstance(control, dict)
+        and control.get("rule_surface") == EXCLUDED_RULE_SURFACE
+    }
+
+
 def _actor_by_source(source_map: dict[str, Any]) -> dict[str, str]:
     active = source_map.get("active_rule_ids", {})
     actors: dict[str, str] = {}
@@ -334,6 +355,18 @@ def build_registry(source_map: dict[str, Any], migration_manifest: dict[str, Any
     controls = source_map.get("rule_controls", {})
     catalog = source_map.get("control_catalog", {})
     actors = _actor_by_source(source_map)
+    # THE EXCLUDED SURFACE IS NOW DECLARED, NOT IMPLIED. Five SQL readers already
+    # exclude rules whose scope kind is intro_politics — the vendor-introduction
+    # doctrine that renders on its own surface — and the reviewed curation package
+    # names the same exclusion in words: excluded_rule_surface: "intro_politics".
+    # Until 2026-08-23 the enforcement map enforced it by simply not listing those
+    # rules, which meant the map was NOT a complete inventory of active rules and
+    # Phase 1's admission audit could never pass. The map now lists all of them and
+    # tags this surface, so the exclusion the registry always intended is read from
+    # the tag rather than from an absence.
+    excluded = excluded_source_ids(source_map)
+    controls = {k: v for k, v in controls.items() if k not in excluded}
+    actors = {k: v for k, v in actors.items() if k not in excluded}
     active = set(actors)
     if set(controls) != active:
         missing = sorted(active - set(controls))
