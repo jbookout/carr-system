@@ -833,9 +833,16 @@ fi
 
 for c in $CLASS_ORDER; do
   if [ -n "$ONLY" ] && [ "$ONLY" != "$c" ]; then continue; fi
+  # Snapshot the class name: check functions reuse the global `c` as their own
+  # loop variable (check_migration's psql probe at least), so after "check_$c"
+  # returns, $c may name whatever that inner loop ended on. The very first CI
+  # run of the timing line proved it, printing `psql=32s` where migration
+  # belonged. Restoring `c` also keeps anything after this loop honest.
+  _class_name="$c"
   _class_t0="$(date +%s)"
   "check_$c"
-  CLASS_TIMINGS="$CLASS_TIMINGS $c=$(( $(date +%s) - _class_t0 ))s"
+  CLASS_TIMINGS="$CLASS_TIMINGS $_class_name=$(( $(date +%s) - _class_t0 ))s"
+  c="$_class_name"
 done
 
 # One greppable line each, every run, pass or fail — this is the raw material
