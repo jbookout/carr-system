@@ -635,8 +635,20 @@ step "launchd plist parity (every loaded job reproducible)" ./.venv/bin/python o
 # (a CONFLICT, printed by name) rather than silently overwriting it, and exits 78 — SKIP,
 # not FAIL, same contract as the credential-gated steps above — when the Drive mount isn't
 # up, since that is not a broken night, just an unreachable render target.
-drive_projection "corpus push (git-canonical doctrine -> vault)" \
-  "canonical doctrine document delivery destination" \
+# THE CORPUS PUSH HAD A LIVE HALF AND A DEAD ONE, and the dead half was
+# switching off the live one. Twelve of the fifty-four rows carry a `home:`
+# prefix and address ~/.claude/skills on this Mac; the other forty-two are
+# vault-rooted and retired. The tool gated the whole run on the vault resolving,
+# so nothing moved at all.
+#
+# IT IS SAFE ON THE NORMAL PATH BECAUSE THE TOOL NOW REFUSES THE VAULT ITSELF,
+# on retirement rather than on reachability — the Drive mount still resolves
+# here, so a reachability probe would have said yes and rewritten retired
+# doctrine renders straight back into the vault. Drive-rooted rows move only
+# inside an opened recovery envelope. Measured on the normal path 2026-08-23:
+# 12 rows in sync, 42 held with their reason printed, exit 0; with the envelope
+# open, all 54.
+step "corpus push (skills on this Mac; vault rows held)" \
   ./.venv/bin/python tools/corpus-sync.py --push
 
 # THE CONSUMER BOARDS WERE NEVER BLOCKED ON A DESTINATION. They write inside
