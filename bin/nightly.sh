@@ -682,9 +682,37 @@ step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CA
 # credential is missing, and the shell branch would go stale the moment the
 # exit code changed again. ops/nightly-capability-skip-selftest.py asserts the
 # behaviour against the mirror itself rather than against this line.
-drive_projection "portability mirror (md+csv, 2 locations)" \
-  "canonical portability document destination" \
-  env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
+# THE PORTABILITY MIRROR HAS A DESTINATION AGAIN (Joe's ruling, 2026-08-22):
+# CARR OneDrive, the same home the six business exports were given.
+#
+# It wrote to two places and only one of them died. The second copy, under this
+# repository's out/mirror, never stopped working; the first pointed at the Drive
+# vault the 2026-08-19 cutoff retired, so the step refused and BOTH copies
+# stopped being written. That is worth naming: a step with a live half and a
+# dead half fails whole, and the live half goes quiet without anyone deciding it
+# should.
+#
+# WHAT IT IS FOR, which is why it earns an offsite home rather than a repo path.
+# It renders the doctrine database as plain markdown and csv with a manifest —
+# the copy a person can still read if Postgres is unreachable and the record
+# layer cannot answer. A portability mirror that exists only on the machine that
+# would be lost is not portability.
+#
+# ONE DEFINITION OF WHERE JOE'S FILES LIVE. The root comes from the same
+# variable the exporters read (exporters/common.py), so the destination is
+# stated once and this step follows it. Hard-coding the path again would recreate
+# the two-homes problem in the same week it was removed.
+# The default is a plain assignment rather than an inline ${VAR:-default}: the
+# path contains an apostrophe in "Joe's Folder", and inside a parameter
+# expansion the shell processes quotes, so that apostrophe opens a quoted run
+# and swallows the rest of the file. It parsed as an unmatched brace 200 lines
+# later, which is a long way from the cause.
+portability_root="${CARR_EXPORT_HOME:-}"
+[ -n "$portability_root" ] || portability_root="/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI"
+step "portability mirror (md+csv, 2 locations)" \
+  env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py \
+    --out "$portability_root/Backups/portability-mirror" \
+    --also "$HOME/carr-system/out/mirror"
 BACKUP_RC=$LAST_STEP_RC
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
