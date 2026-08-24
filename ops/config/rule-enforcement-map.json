@@ -719,13 +719,6 @@
       "control": "loop_guard",
       "exceptions": "named external blocker"
     },
-    "6cfb67f5": {
-      "category": "hard_pre_action",
-      "enforcement_class": "deny_gate",
-      "binding_moment": "at dispatch of a delegated task to another seat",
-      "control": "delegation_names_model_and_effort",
-      "exceptions": "claude-session desks - a live person's seat picks its own model"
-    },
     "aa411351": {
       "category": "hard_pre_action",
       "enforcement_class": "deny_gate",
