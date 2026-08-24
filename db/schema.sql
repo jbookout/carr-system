@@ -1908,6 +1908,117 @@ end $$;
 
 
 --
+-- Name: clear_recovered_incident(text, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.clear_recovered_incident(p_ref text, p_required integer) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $_$
+declare
+  v_id           uuid;
+  v_state        text;
+  v_severity     text;
+  v_source_kind  text;
+  v_signature    text;
+  v_environment  text;
+  v_service      text;
+  v_env          text;
+  v_run_key      text;
+  v_required     int;
+  v_total        int;
+  v_green        int;
+  v_latest       uuid;
+begin
+  -- THE FLOOR IS THE FUNCTION'S, NOT THE CALLER'S. A caller that asks for a
+  -- shorter sequence than the system's definition of recovered gets the
+  -- system's definition. Asking for a longer one is allowed: that is a caller
+  -- being more careful, which never needs preventing.
+  v_required := greatest(coalesce(p_required, 3), 3);
+
+  select i.id, i.state, i.severity, i.source_kind, i.signature, i.environment
+    into v_id, v_state, v_severity, v_source_kind, v_signature, v_environment
+    from ops.incident i where i.ref = p_ref for update;
+  if not found then return false; end if;
+
+  -- Everything below is a REFUSAL, and each one is the reason a job role may
+  -- hold EXECUTE on a function that writes resolved_at.
+  if v_state in ('resolved', 'reviewed') then return false; end if;
+
+  -- SEV-1 (and any SEV-0) NEVER CLOSES HERE. The council was explicit that the
+  -- critical incidents are the work, not hygiene, and 0117 made human closure a
+  -- grant rather than a convention. This keeps that true through the one door
+  -- the grant no longer covers.
+  if v_severity !~ '^SEV-[2-4]$' then return false; end if;
+
+  -- Only what the machine opened. A human who writes an incident by hand is
+  -- describing something the run ledger cannot see, so the run ledger has no
+  -- standing to declare it over.
+  if v_source_kind <> 'collector' then return false; end if;
+  if v_signature is null then return false; end if;
+
+  v_service := split_part(v_signature, '|', 1);
+  v_env     := split_part(v_signature, '|', 2);
+  v_run_key := split_part(v_signature, '|', 3);
+  if v_service = '' or v_env = '' or v_run_key = '' then return false; end if;
+  if v_env is distinct from v_environment then return false; end if;
+
+  -- RE-DERIVED, NOT BELIEVED. The caller passes no evidence and no count; the
+  -- sequence is read here, from the same ledger a human would read. skipped and
+  -- cancelled runs are excluded rather than counted either way — a step that was
+  -- gated out is not proof of health and not proof of breakage.
+  with recent as (
+    select r.id, r.state, r.observed_at
+      from ops.run r join ops.service s on s.id = r.service_id
+     where s.key = v_service
+       and r.environment = v_env
+       and r.run_key = v_run_key
+       and r.state in ('succeeded', 'failed', 'timed_out')
+     order by r.observed_at desc, r.id desc
+     limit v_required)
+  select count(*), count(*) filter (where recent.state = 'succeeded'),
+         (select r2.id from recent r2 order by r2.observed_at desc, r2.id desc limit 1)
+    into v_total, v_green, v_latest
+    from recent;
+
+  -- A job with fewer than v_required terminal runs on record has not yet
+  -- demonstrated the sequence, however green the ones it has are.
+  if v_total < v_required or v_green < v_required then return false; end if;
+
+  update ops.incident i
+     set state = 'resolved',
+         resolved_at = now(),
+         monitoring_until = coalesce(i.monitoring_until, now()),
+         recovery_evidence_ref = 'ops.run:' || v_latest::text,
+         root_cause = format(
+           'recovered: %s has run green %s consecutive times in %s, which is the '
+           'success sequence this system calls recovered. Closed automatically by '
+           'ops.clear_recovered_incident with those runs as the evidence.',
+           v_run_key, v_required, v_env),
+         next_action = 'review and record a followup disposition',
+         last_seen_at = i.last_seen_at,
+         observed_at = now()
+   where i.id = v_id;
+
+  insert into ops.incident_fact (incident_id, text, source_ref)
+  values (v_id,
+          format('%s consecutive healthy runs of %s (%s); latest green run %s',
+                 v_required, v_run_key, v_env, v_latest),
+          'ops.clear_recovered_incident');
+
+  return true;
+end;
+$_$;
+
+
+--
+-- Name: FUNCTION clear_recovered_incident(p_ref text, p_required integer); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.clear_recovered_incident(p_ref text, p_required integer) IS 'The only path by which a scheduled job may close an incident. SECURITY DEFINER because 0117 withholds resolved_at from carr_jobs and that grant stands: the role gains one function that re-derives the success sequence from ops.run and refuses SEV-1, refuses hand-opened incidents, and refuses anything whose evidence does not hold. Returns false rather than raising, so a refusal never costs the caller its run row.';
+
+
+--
 -- Name: complete_calendar_prebrief_joe_live_job(uuid, uuid, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -9484,8 +9595,12 @@ CREATE TABLE ops.incident (
     expires_at timestamp with time zone,
     signature text,
     duplicate_of_id uuid,
+    occurrence_count integer DEFAULT 1 NOT NULL,
+    first_seen_at timestamp with time zone,
+    last_seen_at timestamp with time zone,
     CONSTRAINT a_duplicate_points_at_another_incident CHECK (((duplicate_of_id IS NULL) OR (duplicate_of_id <> id))),
     CONSTRAINT incident_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
+    CONSTRAINT incident_occurrence_count_positive CHECK ((occurrence_count >= 1)),
     CONSTRAINT incident_severity_check CHECK ((severity ~ '^SEV-[0-4]$'::text)),
     CONSTRAINT incident_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
     CONSTRAINT incident_state_check CHECK ((state = ANY (ARRAY['detected'::text, 'triaged'::text, 'investigating'::text, 'mitigating'::text, 'monitoring'::text, 'resolved'::text, 'reviewed'::text]))),
@@ -9505,7 +9620,7 @@ COMMENT ON TABLE ops.incident IS 'The operational incident. NOT the same thing a
 -- Name: COLUMN incident.signature; Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON COLUMN ops.incident.signature IS 'service|environment|run_key|failure_class — the identity of a recurring failure. Two OPEN incidents cannot share one (see the partial unique index). Null is allowed for incidents a human opens by hand, which have no automatic recurrence to collapse.';
+COMMENT ON COLUMN ops.incident.signature IS 'service|environment|operation|failure-class — the deterministic fingerprint of one problem. Two OPEN incidents cannot share one (0116''s partial unique index). Since 0294 the failure class is normalized before it lands here: a named diagnosis is never rewritten, and only the bare exit_<n> shape collapses — and even then 69, 78 and the other codes this codebase gives a meaning keep their own class. tools/ops-record.py:normalize_failure_class is the rule.';
 
 
 --
@@ -9513,6 +9628,27 @@ COMMENT ON COLUMN ops.incident.signature IS 'service|environment|run_key|failure
 --
 
 COMMENT ON COLUMN ops.incident.duplicate_of_id IS 'A partner adjudication: this incident is the same operational event as another one, which carries the investigation and the monitoring window. Set by the adjudicate-incident verb (partner authority) and read by close-incident as evidence. NOT a state: a row with this set is still open until close-incident closes it. Null for every incident that stands alone.';
+
+
+--
+-- Name: COLUMN incident.occurrence_count; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.incident.occurrence_count IS 'How many distinct evidence rows have been attached to this fingerprint while it stayed open. Counted off ops.incident_link, whose primary key already refuses a second link to the same run — so a spool replay that lands the same row twice cannot inflate it.';
+
+
+--
+-- Name: COLUMN incident.first_seen_at; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.incident.first_seen_at IS 'When this fingerprint first failed. Equals detected_at for everything the collector opens; kept separate because a hand-opened incident is detected when a human notices it, not when it started.';
+
+
+--
+-- Name: COLUMN incident.last_seen_at; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.incident.last_seen_at IS 'The most recent failure of this fingerprint. With occurrence_count this is the difference between a fire and a blip, which no open row could show before.';
 
 
 --
@@ -14057,7 +14193,8 @@ CREATE TABLE public.lead (
     owner_label text,
     est_lease_event_raw text,
     report_back_due_raw text,
-    drip_added_raw text
+    drip_added_raw text,
+    CONSTRAINT lead_do_not_contact_suppressed CHECK (((stage <> 'do_not_contact'::text) OR suppressed))
 );
 
 
@@ -18389,6 +18526,66 @@ SELECT
     NULL::timestamp with time zone AS closed_at,
     NULL::bigint AS branch_count,
     NULL::bigint AS open_branch_count;
+
+
+--
+-- Name: v_lead_board; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_lead_board AS
+ SELECT l.id,
+    l.registry_ref,
+    p.name,
+    p.specialty,
+    p.city,
+    p.county,
+    p.state,
+    l.lane,
+    l.stage,
+    ls.label AS stage_label,
+    ls.sort AS stage_sort,
+    l.score,
+    l.segment,
+    l.suppressed,
+    l.est_lease_event,
+    l.event_confidence,
+    COALESCE(lt.last_touch, l.last_touch) AS last_touch,
+    l.next_action_date,
+    owner.slug AS owner,
+    COALESCE(l.owner_label, initcap(owner.slug)) AS owner_label,
+    l.version AS base_version,
+    l.created_at,
+    l.updated_at
+   FROM ((((public.lead l
+     JOIN public.party p ON ((p.id = l.party_id)))
+     JOIN public.lead_stage ls ON ((ls.slug = l.stage)))
+     LEFT JOIN public.actor owner ON ((owner.id = l.owner_id)))
+     LEFT JOIN public.v_last_touch lt ON (((lt.subject_type = 'lead'::text) AND (lt.subject_id = l.id))));
+
+
+--
+-- Name: VIEW v_lead_board; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_lead_board IS 'Every worked lead, including suppressed and terminal rows, with safe display fields and the authoritative base_version required by update-lead. No contact data, notes, addresses, or raw source detail.';
+
+
+--
+-- Name: v_lead_board_stage; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_lead_board_stage AS
+ SELECT slug,
+    label,
+    sort
+   FROM public.lead_stage;
+
+
+--
+-- Name: VIEW v_lead_board_stage; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_lead_board_stage IS 'The full ordered lead funnel for the authenticated DoctorCRE Lead Board, including empty stages.';
 
 
 --
@@ -28177,6 +28374,7 @@ revoke all on function ops.claim_calendar_prebrief_joe_live_job(p_worker text, p
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
+revoke all on function ops.clear_recovered_incident(p_ref text, p_required integer) from public;
 revoke all on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) from public;
 revoke all on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) from public;
 revoke all on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) from public;
@@ -28817,6 +29015,8 @@ grant select on table public.v_integrity_digest to carr_reader;
 grant select on table public.v_investigation to carr_reader;
 grant select on table public.v_investigation to carr_writer;
 grant select on table public.v_last_touch to carr_reader;
+grant select on table public.v_lead_board to carr_reader;
+grant select on table public.v_lead_board_stage to carr_reader;
 grant select on table public.v_lead_client_best to carr_exporter;
 grant select on table public.v_lead_client_best to carr_reader;
 grant select on table public.v_lead_client_best to carr_writer;
@@ -28890,7 +29090,8 @@ grant select on table public.vendor_category to carr_writer;
 grant select on table public.vendor_disposition to carr_writer;
 grant select on table public.vendor_relationship_level to carr_writer;
 grant insert, select, update on table public.vendor_stage to carr_writer;
-grant update (state, next_action, monitoring_until, recovery_evidence_ref, observed_at, expires_at) on table ops.incident to carr_jobs;
+grant insert (occurrence_count, first_seen_at, last_seen_at) on table ops.incident to carr_jobs;
+grant update (state, next_action, monitoring_until, recovery_evidence_ref, observed_at, expires_at, occurrence_count, first_seen_at, last_seen_at) on table ops.incident to carr_jobs;
 grant select (id, slug, kind, display_name) on table public.actor to carr_jobs;
 grant select (id, slug) on table public.actor to carr_reader;
 grant select (id, address, city, state, name, sub_type) on table public.building to carr_jobs;
@@ -28917,8 +29118,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
@@ -28927,6 +29128,7 @@ grant execute on function ops.claim_calendar_prebrief_joe_live_job(p_worker text
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
+grant execute on function ops.clear_recovered_incident(p_ref text, p_required integer) to carr_jobs;
 grant execute on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) to carr_jobs;
 grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
 grant execute on function ops.create_calendar_canary_source_snapshot(p_job_id uuid, p_lease uuid) to carr_jobs;
@@ -28975,8 +29177,8 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
@@ -29282,6 +29484,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0290_retire_the_ledger_boundary_control.sql	05d12bd747085e1c26a455d2317bf09339127a6e929401620906c1f5cbab0d3e	2026-08-24 16:04:55.763377+00
 0291_rule_delivery_layers.sql	a8c3b89116d1b38a2964acf95565f305ba0e3e9042908927a97bbe3af309a53f	2026-08-24 16:04:56.010827+00
 0292_pack_delivery_control_catalog.sql	0bb8b301ea0dc5658bda16b7f1105cdd2fea2336ffbbed8bb38ae88917814a47	2026-08-24 16:04:56.295072+00
+0293_lead_board_read_model.sql	4d4ac222c8184868a4b68f3fb6dd3e740d97d477ab3140cf400bd79d594f2afc	2026-08-24 16:51:50.301151+00
+0294_incident_fingerprint_and_success_clears.sql	f17bfb88bb28decfb414edeaa763df38ae7a9cc0f5362edb0443b1acc96a767e	2026-08-24 16:51:50.703935+00
 \.
 
 
@@ -29497,16 +29701,16 @@ associate	Associate lane
 --
 
 COPY public.lead_stage (slug, label, sort) FROM stdin;
-engaged	Engaged	100
-outreach_active	Outreach Active	100
-active_deal	Active Deal	100
-qualified	Qualified	100
-new	New	100
-nurture_drip	Nurture (Drip)	100
-closed_won	Closed-Won	100
-opportunity	Opportunity	100
-closed_lost	Closed-Lost	900
-do_not_contact	Do Not Contact	910
+new	New	10
+qualified	Qualified	20
+outreach_active	Outreach Active	30
+engaged	Engaged	40
+nurture_drip	Nurture (Drip)	50
+opportunity	Opportunity	60
+active_deal	Active Deal	70
+closed_won	Closed-Won	80
+closed_lost	Closed-Lost	90
+do_not_contact	Do Not Contact	100
 \.
 
 
