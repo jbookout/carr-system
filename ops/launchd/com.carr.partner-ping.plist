@@ -8,7 +8,7 @@
     # value, and a wrong one makes the watcher silently watch the wrong partner
 
   NOT `cp` — THIS FILE IS A SOURCE, NOT AN INSTALLABLE. It stores {{REPO}}
-  rather than /Users/booko so the same plist installs on Dell's machine, and
+  rather than your HOME directory so the same plist installs on Dell's machine, and
   config-as-code renders that placeholder on the way out. Copying it by hand
   installs a LaunchAgent whose program path is the literal string {{REPO}}.
   This line used to read `cp ops/com.carr.partner-ping.plist`, naming a stale
