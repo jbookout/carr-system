@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aggregateCardState, summarizeWorkspacePayload, validWorkspacePayload } from "../js/workspace-command-center-model.js";
+import { aggregateCardState, humanSourceLabel, primaryHomeAction, summarizeWorkspacePayload, validWorkspacePayload, viewerWorkspaceLabel } from "../js/workspace-command-center-model.js";
 import { readCommandCenterSummary } from "../../mcp-server/src/workspace-command-center.js";
 
 const payload = (overrides = {}) => ({
@@ -65,4 +65,26 @@ test("actual server response is accepted by the browser model and renders attent
   const serverPayload = await readCommandCenterSummary({ client, actor: { slug: "joe" }, correlationId: "corr-integration", now: () => new Date("2099-08-24T15:00:00.000Z") });
   assert.equal(validWorkspacePayload(serverPayload), true);
   assert.equal(summarizeWorkspacePayload(serverPayload, () => Date.parse("2099-08-24T15:00:30.000Z")).state, "attention");
+});
+
+test("Home identity comes only from the verified viewer", () => {
+  assert.equal(viewerWorkspaceLabel("joe"), "Joe’s workspace");
+  assert.equal(viewerWorkspaceLabel("dell"), "Dell’s workspace");
+  assert.equal(viewerWorkspaceLabel("other"), "Partner workspace");
+});
+
+test("Home primary action resolves from verified deal freshness and count", () => {
+  assert.deepEqual(primaryHomeAction(payload(), { now: () => Date.parse("2099-08-24T15:00:30.000Z") }), { label: "Review flagged deals", href: "/deals?workspace=team&filter=flagged&owner=me", state: "attention" });
+  const zero = payload({ needs_you_now: [{ kind: "owned_flagged_deals", count: 0, destination: "/deals?workspace=team&filter=flagged&owner=me" }], metrics: [{ ...payload().metrics[0], owned_flagged_deals: 0 }] });
+  assert.deepEqual(primaryHomeAction(zero, { now: () => Date.parse("2099-08-24T15:00:30.000Z") }), { label: "Open Lead Board", href: "/leads", state: "empty" });
+  assert.deepEqual(primaryHomeAction(payload(), { now: () => Date.parse("2099-08-24T15:02:00.000Z") }), { label: "Open Deal Room", href: "/deals", state: "stale" });
+  assert.deepEqual(primaryHomeAction({}, {}), { label: "Open Deal Room", href: "/deals", state: "unavailable" });
+  assert.deepEqual(primaryHomeAction(null, { unauthorized: true }), { label: "Sign in", href: "/auth/login?return_to=%2Fworkspace", state: "unauthorized" });
+});
+
+test("Home uses human source labels", () => {
+  assert.equal(humanSourceLabel("command_center"), "Command Center read");
+  assert.equal(humanSourceLabel("v_deal_room_board"), "Deal Room board");
+  assert.equal(humanSourceLabel("ops.work_request"), "System work");
+  assert.equal(humanSourceLabel("unknown_machine_name"), "Source unavailable");
 });

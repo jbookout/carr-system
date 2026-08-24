@@ -70,3 +70,23 @@ export function aggregateCardState(payload, now = () => Date.now()) {
     recent: recent.state === "unavailable" ? "unavailable" : sourceIsFresh(recent.source, now) ? "fresh" : "unavailable",
   };
 }
+
+export function viewerWorkspaceLabel(viewer) {
+  return viewer === "joe" ? "Joe’s workspace" : viewer === "dell" ? "Dell’s workspace" : "Partner workspace";
+}
+
+export function humanSourceLabel(source) {
+  return ({
+    command_center: "Command Center read",
+    v_deal_room_board: "Deal Room board",
+    "ops.work_request": "System work",
+  })[source] || "Source unavailable";
+}
+
+export function primaryHomeAction(payload, { now = () => Date.now(), unauthorized = false } = {}) {
+  if (unauthorized) return { label: "Sign in", href: "/auth/login?return_to=%2Fworkspace", state: "unauthorized" };
+  const summary = summarizeWorkspacePayload(payload, now);
+  if (summary.state === "attention") return { label: "Review flagged deals", href: FALLBACK_DESTINATION, state: "attention" };
+  if (summary.state === "empty") return { label: "Open Lead Board", href: "/leads", state: "empty" };
+  return { label: "Open Deal Room", href: "/deals", state: summary.state === "stale" ? "stale" : "unavailable" };
+}
