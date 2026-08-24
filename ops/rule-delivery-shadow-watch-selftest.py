@@ -116,10 +116,12 @@ check("a miss prints that enforcement stays off",
       rendered(missed))
 check("a clean fresh week prints the turn count and zero misses",
       "0 misses" in rendered(fresh), rendered(fresh))
+check("and it does not claim to have counted turns it never saw",
+      "with a pack signal" in rendered(fresh), rendered(fresh))
 
 if FAILURES:
     print("rule-delivery-shadow-watch-selftest: FAIL", file=sys.stderr)
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-delivery-shadow-watch-selftest: 16 cases passed")
+print("rule-delivery-shadow-watch-selftest: 17 cases passed")

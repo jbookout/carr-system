@@ -166,7 +166,11 @@ def report(summary: dict) -> None:
         # Only say this when the measurement is actually current. "0 misses"
         # under a stale log is the reassuring sentence that hides the finding
         # above it, which is the whole failure this watch exists to prevent.
-        print(f"rule-delivery-shadow-watch: {summary['turns']} turn(s) observed, 0 misses.")
+        # "turns that implied or loaded a pack", NOT "turns". The gate writes no
+        # row for a turn with no pack signal at all, so calling this the turn
+        # count would report a denominator nobody measured.
+        print(f"rule-delivery-shadow-watch: {summary['turns']} turn(s) with a pack "
+              "signal, 0 misses.")
     if summary["packs_seen"]:
         print("  packs the observed work implied: "
               + ", ".join(f"{k}={v}" for k, v in summary["packs_seen"].items()))
