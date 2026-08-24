@@ -16,6 +16,7 @@ sys.path.insert(0, str(HERE))
 import execution_contract as contract  # noqa: E402
 import dispatch  # noqa: E402
 import job_passport_artifact as artifact_renderer  # noqa: E402
+import bridge  # noqa: E402
 
 
 FIXTURES = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric"
@@ -271,6 +272,27 @@ def wire_receipts_validate_projection_and_keep_typed_facts_distinct():
     expect_refusal(lambda: contract.validate_observatory_projection(projection), "does not bind")
 
 
+def synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire():
+    event = {
+        "schema_version": "progress-event.v1", "attempt_id": "attempt-synthetic-codex", "sequence": 1,
+        "occurred_at": "2026-08-24T12:00:01Z", "event_type": "observed_tool", "declared_step_ref": "step:synthetic-read",
+        "observed_resource_ref": "resource:worktree-a", "observed_component_ref": "component:execution-fabric",
+        "tool_class": "tool:codex-event", "state": "active", "correlation_id": "corr:synthetic-1",
+        "causation_id": "cause:dispatch-1", "redaction_class": "metadata_only", "evidence_refs": ["evidence:synthetic-check"], "retention": "ephemeral",
+    }
+    posted = []
+    rehearsal = bridge.rehearse_job_passport(
+        envelope(), receipt(), [event], {"profile_id": "profile:doc", "display_label": "Doc"},
+        add_room_turn=lambda **row: posted.append(row) or {"recorded": True},
+    )
+    assert rehearsal["mode"] == "synthetic_read_only_rehearsal"
+    assert [json.loads(row["body"])["job_passport"]["kind"] for row in posted] == [
+        "execution_envelope", "progress_event", "attempt_receipt", "observatory_projection",
+    ]
+    assert all(row["seat"] == "hermes" and row["kind"] == "receipt" for row in posted)
+    assert rehearsal["projection"]["projection_digest"] == json.loads(posted[-1]["body"])["job_passport"]["payload"]["projection_digest"]
+
+
 def self_contained_job_passport_artifact_binds_content_and_is_stale_visible():
     projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
     behavior = json.loads((FIXTURES / "codex_desktop.job-passport.behavior-verification.v1.json").read_text())
@@ -338,6 +360,7 @@ if __name__ == "__main__":
         ("progress event is ephemeral and observational", progress_event_is_redacted_observational_and_can_stay_ephemeral),
         ("observatory projection preserves profile/staffing distinction", observatory_projection_groups_by_work_request_and_separates_profile_from_staffing),
         ("room wire accepts only validated typed Job Passport facts", wire_receipts_validate_projection_and_keep_typed_facts_distinct),
+        ("synthetic read-only rehearsal publishes typed facts on the existing wire", synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire),
         ("self-contained Job Passport artifact has verified content and stale posture", self_contained_job_passport_artifact_binds_content_and_is_stale_visible),
         ("behavior audit fails closed on dangling or non-live verification", behavior_audit_fails_closed_on_dangling_claim_or_fake_live_verification),
         ("compatibility wrapper uses a fake without persisting raw result", compatibility_wrapper_uses_existing_dispatch_with_a_fake_and_redacts_result),
