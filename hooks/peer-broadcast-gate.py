@@ -56,7 +56,7 @@ import re
 import sys
 import time
 
-STATE = os.path.expanduser("~/.cache/carr/peer-broadcast-gate.json")
+STATE_DIR = os.path.expanduser("~/.cache/carr/peer-broadcast-gate")
 WINDOW_SECONDS = 1800   # 30 minutes: long enough to span one investigation
 MAX_NAMED_PEERS = 2     # the third distinct named peer is a broadcast
 
@@ -120,9 +120,33 @@ def own_subagent(who: str, transcript_path: str) -> bool:
     return False
 
 
-def load(now):
+def state_path(session):
+    """One state file PER SESSION, keyed by the harness session id.
+
+    WHY PER SESSION. The state used to be one shared file, so eleven parallel
+    sessions on this Mac spent ONE combined budget of two named peers: a
+    session's first targeted ask could be refused because three OTHER sessions
+    had messaged someone in the last half hour. The gate's whole rationale is
+    that the asker pays the cost of what it sends — but a shared ledger charges
+    a session for asks it never made, which is the exact inversion the
+    completion-integrity council called authority drift. Fan-out breadth is a
+    property of ONE session's behaviour; the window and budget stay as they
+    were.
+
+    An unknown or missing session id falls back to a single shared "unknown"
+    file rather than guessing: an unattributed caller keeps the old (stricter)
+    behaviour instead of minting a fresh budget per malformed payload.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session or "").strip())[:80]
+    if not safe:
+        safe = "unknown"
+    return os.path.join(STATE_DIR, f"{safe}.json")
+
+
+def load(now, session):
+    path = state_path(session)
     try:
-        with open(STATE) as fh:
+        with open(path) as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
@@ -143,12 +167,12 @@ def load(now):
     return fresh
 
 
-def save(data):
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    tmp = STATE + ".tmp"
+def save(data, session):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = state_path(session) + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(data, fh)
-    os.replace(tmp, STATE)
+    os.replace(tmp, state_path(session))
 
 
 def main():
@@ -174,11 +198,14 @@ def main():
     # Identity is the name; `x` and `x [d7e9b2]` are one peer. See REF_SUFFIX.
     who = peer_identity(to)
 
+    # The budget belongs to THIS session, keyed off the harness payload — see
+    # state_path() for why a shared ledger was the wrong shape.
+    session = (payload.get("session_id") or payload.get("sessionId") or "")
     now = time.time()
-    seen = load(now)
+    seen = load(now, session)
     if who in seen:           # re-messaging the same peer is a thread, not fan-out
         seen[who] = now
-        save(seen)
+        save(seen, session)
         return 0
 
     # MESSAGING YOUR OWN SUBAGENT IS ORCHESTRATION, NOT BROADCAST — the asker
@@ -219,7 +246,7 @@ def main():
         return 2   # deny
 
     seen[who] = now
-    save(seen)
+    save(seen, session)
     return 0
 
 
