@@ -6146,7 +6146,7 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       loop_id: { type: "string" },
-      number: { type: "string", description: "alternative to loop_id; refuses when the number is ambiguous, and several are" },
+      number: { type: "string", description: "alternative to loop_id; refuses when the number is ambiguous, and several are. To RENUMBER the row, pass a different number and renumber_reason: two open rows of the same kind can carry the same number, and every verb that resolves by number then refuses. Refused if the target number is already taken by another OPEN row of this kind." },
       kind: { type: "string", enum: LOOP_KINDS, description: "narrows an ambiguous number" },
       base_version: { type: "integer" },
       title: { type: "string" }, body: { type: "string" }, owner: { type: "string" },
@@ -6165,7 +6165,6 @@ export const TOOLS = {
       blocker: { type: "string", enum: ["human_only","counterparty","ruling","external_event","other_lane","capability"],
         description: "REVISE what the loop is waiting on. add-loop refuses a loop without a blocker, but until 2026-08-09 nothing could change one, so a blocker named on day one was permanent even after the real obstacle turned out to be different — found on loop #295, whose blocker read human_only until building it revealed the actual block was a missing corpus (other_lane). Changing this requires blocker_detail too: a reclassification with the old specifics attached is worse than the original, because it reads as current and is not." },
       blocker_detail: { type: "string", description: "the SPECIFIC thing, restated for the new class: which person, which ruling, which date, which prerequisite. Required whenever blocker changes; may also be passed alone to sharpen the detail without reclassifying." },
-      number: { type: "string", description: "RENUMBER the row. Only reason this exists: two open rows of the same kind can carry the same number, and then every verb that resolves by number refuses — correctly, but a human saying 'close 95' is saying something the system cannot act on, and anyone working around it with loop_id silently picks whichever row they happened to look up. Requires renumber_reason in the same call. Refused if the target number is already taken by another OPEN row of this kind, which is the collision this exists to end." },
       renumber_reason: { type: "string", description: "REQUIRED whenever number changes: why, and where the old number still appears. Rule 7105955b binds here — a renumbered row is not an abandoned one, and the note recording the change has to say so in its first words, because the old number lives on in other rows' prose and in every generated render." },
       last_surfaced: { type: "string", description: "IDEA ROWS ONLY: stamp the idea bank's 'Last surfaced' column, YYYY-MM-DD. This is what the monthly resurface writes when a parked idea is presented and KEPT — the column its own rotation reads to pick the oldest ideas next month. Blank or '—' means never surfaced, so leaving it unwritten is not neutral: it keeps re-presenting the same rows." },
       section: { type: "string", enum: ["hot", "backlog", "open"], description: "move the row to this section of its file" } },

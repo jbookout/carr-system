@@ -1,5 +1,5 @@
 import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
-import { resolveDealroomBoot } from './boot-mode.js';
+import { deploymentIdentity, resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
 import { createPostCallClient } from './post-call-client.js';
 
@@ -8,6 +8,7 @@ const CALL_MODE_URL = 'http://127.0.0.1:4682';
 const CALL_MODE_HEADER = { 'X-CARR-Call-Mode': 'deal-room-v1' };
 const state = {
   client: null, selfActor: null, deals: new Map(), accounts: [], cursor: null,
+  mode: 'fixture',
   workspace: 'team', accountId: null, filter: 'active', query: '',
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
   confirms: [], review: null, pollTimer: null, undoEventId: null,
@@ -92,7 +93,9 @@ function showToast(message, undoEventId = null) {
 function setSync(ok, label = null) {
   const el = $('#syncStatus');
   el.classList.toggle('offline', !ok);
-  el.textContent = label || (ok ? 'Live' : 'Reconnecting');
+  el.textContent = label || (ok
+    ? (state.mode === 'live' ? 'Live sync' : 'Fixture ready')
+    : (state.mode === 'live' ? 'Reconnecting' : 'Fixture unavailable'));
 }
 
 async function loadHome() {
@@ -973,6 +976,13 @@ async function boot() {
     $('#colorAssistButton').setAttribute('aria-label', 'Turn off color-blind-friendly view');
   }
   const bootConfig = resolveDealroomBoot(location);
+  const identity = deploymentIdentity(bootConfig.mode);
+  state.mode = bootConfig.mode;
+  const badge = $('#deploymentBadge');
+  badge.textContent = identity.label;
+  badge.dataset.mode = identity.mode;
+  badge.title = identity.detail;
+  badge.setAttribute('aria-label', identity.detail);
   state.client = await createClient(bootConfig.mode, bootConfig.options);
   state.postCallClient = createPostCallClient({ loopbackUrl:CALL_MODE_URL,
     postHeaders:CALL_MODE_HEADER });

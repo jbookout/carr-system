@@ -58,6 +58,14 @@ class Fake {
 
 const call = (args) => TOOLS["update-loop"].handler(new Fake(), joe, args);
 
+test("update-loop schema documents number as both identifier and renumber input", () => {
+  const number = TOOLS["update-loop"].inputSchema.properties.number;
+  assert.equal(typeof number, "object");
+  assert.match(number.description, /alternative to loop_id/);
+  assert.match(number.description, /RENUMBER/i);
+  assert.match(number.description, /renumber_reason/);
+});
+
 async function errorOf(promise) {
   try { await promise; return null; }
   catch (e) { return e instanceof ToolError ? (e.payload ?? e.detail ?? e) : e; }
