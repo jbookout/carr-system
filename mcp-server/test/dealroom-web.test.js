@@ -171,9 +171,9 @@ test("authenticated Lead Board route serves its own asset and preserves sign-in 
   assert.match(board.headers.get("content-security-policy"), /script-src 'self'/);
 });
 
-test("Deal Room navigation exposes Lead Board through the authenticated front door", async () => {
+test("Deal Room navigation exposes Leads through the authenticated front door", async () => {
   const html = await readFile(DEALROOM_INDEX_PATH, "utf8");
-  assert.match(html, /<a[^>]+href="\/leads"[^>]*>Lead Board<\/a>/);
+  assert.match(html, /<a[^>]+href="\/leads"[^>]*>Leads<\/a>/);
 });
 
 test("machine-token MCP dispatch precedes browser routing on the shared host", async () => {
