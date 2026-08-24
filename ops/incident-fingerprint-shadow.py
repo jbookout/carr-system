@@ -113,21 +113,53 @@ def main():
         created = [dict(zip(("ref", "signature", "detected_at", "state"), r))
                    for r in cur.fetchall()]
 
-        # Which of the open rows the run ledger can even speak about.
-        streaks = {}
+        # Which of the open rows the run ledger can even speak about — and, for
+        # each, TWO numbers rather than one.
+        #
+        # WHY TWO. The first version of this file reported only "what would
+        # clear at this instant", and running it twenty minutes apart gave 18%
+        # and then 9%: partner-ping had failed again in between, so its streak
+        # went from three to zero. A confirm-or-kill test whose answer depends
+        # on the fleet's mood at the moment you typed the command is not a
+        # measurement, and the council asked about a WINDOW (August 15-23) for
+        # exactly this reason.
+        #
+        # So `now` stays — it is the honest answer to "what happens when this
+        # ships today" — and `ever` is the stable one: did this job ever reach
+        # the success sequence at any point after its incident was detected? A
+        # job that did has been recovered-and-forgotten at least once, which is
+        # the condition this change exists to end, whatever it happens to be
+        # doing right this second.
+        streaks, ever = {}, {}
         for inc in openrows:
             job = opsrec.fingerprint_job(inc["signature"])
             if not job:
                 continue
             service, env, run_key = job
             cur.execute(
-                """select count(*) from ops.run r
-                     join ops.service s on s.id = r.service_id
-                    where s.key = %s and r.environment = %s and r.run_key = %s""",
-                (service, env, run_key))
-            if not cur.fetchone()[0]:
-                continue          # no run rows at all: a Worker-sourced incident
+                """select r.state
+                     from ops.run r join ops.service s on s.id = r.service_id
+                    where s.key = %s and r.environment = %s and r.run_key = %s
+                      and r.state in ('succeeded','failed','timed_out')
+                      and r.observed_at >= %s
+                 order by r.observed_at, r.id""",
+                (service, env, run_key, inc["detected_at"]))
+            history = [r[0] for r in cur.fetchall()]
+            if not history:
+                cur.execute(
+                    """select count(*) from ops.run r
+                         join ops.service s on s.id = r.service_id
+                        where s.key = %s and r.environment = %s
+                          and r.run_key = %s""",
+                    (service, env, run_key))
+                if not cur.fetchone()[0]:
+                    continue      # no run rows at all: a Worker-sourced incident
             streaks[inc["ref"]] = opsrec._healthy_streak(cur, service, env, run_key)
+            best = run = 0
+            for state in history:
+                run = run + 1 if state == "succeeded" else 0
+                best = max(best, run)
+            ever[inc["ref"]] = best
 
     run_sourced = [i for i in openrows if i["ref"] in streaks]
     other = [i for i in openrows if i["ref"] not in streaks]
@@ -229,6 +261,16 @@ def main():
     for line in stuck or ["    none"]:
         print(line)
 
+    would_have = [i for i in run_sourced
+                  if ever.get(i["ref"], 0) >= opsrec.HEALTHY_RUNS_TO_CLEAR
+                  and (i["severity"] or "") in opsrec.AUTO_CLEARED_SEVERITIES
+                  and (i["source_kind"] or "") == "collector"]
+    print(f"\n  reached the sequence at SOME point since being detected "
+          f"({len(would_have)}) — the stable number:")
+    for i in would_have or [None]:
+        print(f"    {i['ref']}  {i['signature']}  best run of "
+              f"{ever[i['ref']]} consecutive greens" if i else "    none")
+
     # ── the arithmetic ───────────────────────────────────────────────────────
     merged_away = sum(len(m) - 1 for m in merges.values())
     base_all = len(openrows)
@@ -239,9 +281,15 @@ def main():
                      if any(ref in streaks for ref, _ in m))
     after_run = base_run - merged_run - cleared_run
 
+    after_run_ever = base_run - merged_run - len(would_have)
+
     print("\n── the council's arithmetic " + "─" * 45)
-    print(f"  run-sourced queue      {base_run:>3} → {after_run:<3} "
-          f"({pct(base_run, after_run):.0%} drop)")
+    print(f"  run-sourced queue      {base_run:>3} → {after_run_ever:<3} "
+          f"({pct(base_run, after_run_ever):.0%} drop)  "
+          f"over the window — the number to judge on")
+    print(f"    same, at this instant {base_run:>3} → {after_run:<3} "
+          f"({pct(base_run, after_run):.0%} drop)  "
+          f"moves with whatever the fleet is doing right now")
     print(f"  whole open queue       {base_all:>3} → {after_all:<3} "
           f"({pct(base_all, after_all):.0%} drop)")
     print(f"  of which no run ledger {len(other):>3} — unreachable by either half "
@@ -254,15 +302,16 @@ def main():
         print("  told us not to make.")
         return 1
 
-    if pct(base_run, after_run) >= REQUIRED_DROP:
+    drop = pct(base_run, after_run_ever)
+    if drop >= REQUIRED_DROP:
         print(f"  CONFIRM on the population recommendation 3 addresses: the")
-        print(f"  run-sourced queue drops {pct(base_run, after_run):.0%}, at or above the "
+        print(f"  run-sourced queue drops {drop:.0%} over the window, at or above the "
               f"{REQUIRED_DROP:.0%} bar,")
         print("  and no two named failure classes were merged to get there.")
         return 0
 
     print(f"  PARTIAL. The guard holds — nothing distinct was merged — but the")
-    print(f"  run-sourced queue drops only {pct(base_run, after_run):.0%}, under the "
+    print(f"  run-sourced queue drops only {drop:.0%} over the window, under the "
           f"{REQUIRED_DROP:.0%} bar.")
     print("  Read that as a finding, not a defect in the change: 0116's dedupe")
     print("  already collapsed the repeat-failure churn this was expected to")
