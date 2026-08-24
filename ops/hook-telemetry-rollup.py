@@ -211,6 +211,21 @@ def owned_elsewhere(meta):
     return owner.startswith("pre-commit:") or owner.startswith("ops-ci:")
 
 
+# THE COUNCIL'S CLAUSE SAID "ZERO LIVE DENIES"; THIS ASKS FOR ZERO INTERVENTIONS,
+# and the widening is deliberate and stated rather than quietly applied. On
+# 2026-08-23 five Stop gates were demoted from blocking to announcing: they fire
+# as often as before, they still change what the model sees, and they now cost
+# nothing. Every one of them has zero denies. Read literally, the clause would
+# nominate all five for retirement for exactly the reason they were improved.
+#
+# A rule whose output can end in a deleted control should err toward fewer
+# candidates, so an ask or an announcement counts as a catch here. Anything this
+# refuses to nominate is still visible in the table; nothing is hidden, only
+# un-nominated.
+def intervened(entry):
+    return bool(entry["denies"] or entry["asks"] or entry.get("announces"))
+
+
 def build(days, now=None):
     now = now or datetime.now(timezone.utc)
     rows = read_stream(LIVE_STREAM, days, now)
@@ -219,7 +234,8 @@ def build(days, now=None):
 
     per_hook = defaultdict(lambda: {
         "fires": 0, "ms": [], "denies": 0, "asks": 0, "errors": 0,
-        "reopens": 0, "days": defaultdict(list), "deny_classes": defaultdict(int),
+        "reopens": 0, "announces": 0, "days": defaultdict(list),
+        "deny_classes": defaultdict(int), "registers": defaultdict(int),
     })
     per_event_ms = defaultdict(list)
     # THE BUDGET IS ABOUT AN EVENT, NOT A HOOK, and confusing the two would have
@@ -289,7 +305,12 @@ def build(days, now=None):
             bucket["asks"] += 1
         elif outcome == "error":
             bucket["errors"] += 1
-        if rec.get("reopen"):
+        register = rec.get("register")
+        if register:
+            bucket["registers"][register] += 1
+            if register == "announce":
+                bucket["announces"] += 1
+        if rec.get("reopen") or register == "reopen":
             bucket["reopens"] += 1
             reopen_by_day[day][name] += 1
         if isinstance(rec.get("meter_ms"), (int, float)):
@@ -355,6 +376,8 @@ def build(days, now=None):
             "asks": bucket["asks"],
             "errors": bucket["errors"],
             "reopens": bucket["reopens"],
+            "announces": bucket["announces"],
+            "registers": dict(bucket["registers"]),
             "deny_classes": dict(bucket["deny_classes"]),
             "p95_trend_pct": trend,
             "events": sorted(entry["events"]),
@@ -362,9 +385,9 @@ def build(days, now=None):
             "catch_class": info.get("catch_class"),
             "also_caught_by": info.get("also_caught_by", "unverified"),
             "note": info.get("note"),
-            "retire_candidate": bool(
-                bucket["denies"] == 0 and owned_elsewhere(info) and hot(entry)),
         }
+        hooks[name]["retire_candidate"] = bool(
+            not intervened(hooks[name]) and owned_elsewhere(info) and hot(entry))
 
     unverified = [name for name, entry in hooks.items()
                   if entry["also_caught_by"] == "unverified"]
@@ -482,7 +505,7 @@ def render(report):
     # refused it. A gate that never sentences anything is doing less than its
     # deny column suggests.
     add(f"  {'gate':44} {'fires/d':>8} {'p50':>5} {'p95':>6} {'deny':>5} "
-        f"{'sent':>5} {'reopen':>7} {'err':>4}  {'p95 7d':>7}")
+        f"{'sent':>5} {'annc':>6} {'reopen':>7} {'err':>4}  {'p95 7d':>7}")
     ordered = sorted(report["hooks"].items(),
                      key=lambda kv: (kv[1]["p95_ms"] or 0), reverse=True)
     for name, entry in ordered:
@@ -490,7 +513,8 @@ def render(report):
         trend_text = "—" if trend is None else f"{trend:+.0f}%"
         add(f"  {name[:44]:44} {entry['fires_per_day']:>8} {ms(entry['p50_ms']):>5} "
             f"{ms(entry['p95_ms']):>6} {entry['denies']:>5} {entry.get('sentenced', 0):>5} "
-            f"{entry['reopens']:>7} {entry['errors']:>4}  {trend_text:>7}")
+            f"{entry.get('announces', 0):>6} {entry['reopens']:>7} {entry['errors']:>4}"
+            f"  {trend_text:>7}")
 
     reopens = report["reopens_by_day"]
     add("")
@@ -506,8 +530,11 @@ def render(report):
 
     candidates = [(n, e) for n, e in ordered if e["retire_candidate"]]
     add("")
-    add("  RETIRE CANDIDATES (report only — zero live denies + catch-class owned")
-    add("  elsewhere + on the hot path):")
+    add("  RETIRE CANDIDATES (report only — no live intervention + catch-class owned")
+    add("  elsewhere + on the hot path). The council's clause said zero DENIES; this")
+    add("  also requires zero asks and zero announcements, because a gate demoted from")
+    add("  blocking to announcing still catches things and would otherwise be nominated")
+    add("  for exactly the reason it was improved:")
     if candidates:
         for name, entry in candidates:
             add(f"    {name} — 0 denies in {days}d, class owned by "

@@ -243,6 +243,62 @@ def _payload_facts(raw):
     return facts
 
 
+def _register_from_output(text, event, code, crashed):
+    """WHICH REGISTER THE GATE SPOKE IN — recorded, never re-inferred later.
+
+    Three registers, and the difference between the first two is the only
+    latency number in this whole exercise that is measured in model turns
+    rather than milliseconds:
+
+      "reopen"    the gate BLOCKED. exit 2, or {"decision":"block"}. On Stop
+                  that hands the turn back to the model and costs a whole
+                  extra assistant message.
+      "announce"  the gate spoke without blocking — it returned
+                  hookSpecificOutput.additionalContext, which reaches the model
+                  as context inside the turn it already paid for. Costs nothing
+                  extra.
+      "silent"    the gate fired and emitted nothing.
+
+    WHY THIS IS ITS OWN FIELD rather than something a rollup derives from the
+    exit code. Five Stop gates — map-architecture, context-handoff, stale-claim,
+    loose-work and unread-artifact — were demoted on 2026-08-23 from blocking to
+    announcing. They fire exactly as often as before and now charge nothing. A
+    reader inferring from the exit code sees exit 0 and records "allow", which is
+    true about the DECISION and silent about the INTERVENTION, so five gates
+    doing real work would look like five gates that had gone quiet — and the
+    retire rule keys on denies, so each would drift toward being a candidate for
+    precisely the reason it is working.
+
+    It also settles a misreading already in the record: the council brief counted
+    "eight chat-lint reopens" when chat-lint has not blocked since 2026-08-16 —
+    it parks a note for the next UserPromptSubmit instead. A ledger that cannot
+    tell a block from a line will keep producing that mistake.
+    """
+    try:
+        if crashed or code not in (0, 2):
+            return "error"          # it fell over; it did not speak
+        if code == 2:
+            return "reopen" if event in STOP_EVENTS else "block"
+        stripped = (text or "").strip()
+        if stripped.startswith("{"):
+            import json
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                if data.get("decision") in ("block", "deny"):
+                    return "reopen" if event in STOP_EVENTS else "block"
+                specific = data.get("hookSpecificOutput")
+                if isinstance(specific, dict):
+                    if specific.get("permissionDecision") in ("deny", "ask"):
+                        return "block"
+                    if specific.get("additionalContext"):
+                        return "announce"
+        if stripped:
+            return "announce"
+        return "silent"
+    except Exception:
+        return "silent"
+
+
 def _decision_from_output(text):
     """The gate's own JSON verdict, when it published one. None otherwise.
 
@@ -412,6 +468,7 @@ def main():
             "elapsed_ms": round(elapsed, 2),
             "outcome": outcome,
             "exit": code,
+            "register": _register_from_output(captured_out, event, code, crashed),
             "reopen": bool(event in STOP_EVENTS and outcome == "deny"),
             "deny_class": _deny_class(captured_err) or _deny_class(captured_out),
             "deny_headline": (_clip(_headline(captured_err))

@@ -49,13 +49,16 @@ def stamp(days_ago, hour=12):
 
 
 def record(hook, days_ago, elapsed, outcome="allow", event="PreToolUse",
-           reopen=False, meter=0.8, arg=None, deny_class=None):
+           reopen=False, meter=0.8, arg=None, deny_class=None, register=None):
     ts, _ = stamp(days_ago)
+    if register is None:
+        register = "reopen" if reopen else ("block" if outcome == "deny" else "silent")
     return {
         "ts": ts, "event": event, "hook": hook, "arg": arg, "tool": "Bash",
         "session": "s", "elapsed_ms": elapsed, "outcome": outcome, "exit":
         2 if outcome == "deny" else 0, "reopen": reopen, "deny_class": deny_class,
         "deny_headline": None, "pid": 1, "meter_ms": meter, "source": "live",
+        "register": register,
     }
 
 
@@ -307,6 +310,32 @@ def main():
                   report["hook_p95_ms"]["PreToolUse"] == 300, report["hook_p95_ms"])
         finally:
             shutil.rmtree(events, ignore_errors=True)
+
+        # ── a gate demoted from blocking to announcing is still working ──
+        # Five Stop gates were demoted on 2026-08-23: same firing rate, no more
+        # blocking, no more token cost. Every one of them has zero denies. Read
+        # against the council's literal "zero live denies" clause they would all
+        # be nominated for retirement for exactly the reason they were improved,
+        # so candidacy here asks for zero INTERVENTIONS and says so in the report.
+        demoted = tempfile.mkdtemp(prefix="rollup-demoted-")
+        try:
+            rows = []
+            for day in range(7):
+                rows += [record("hot-with-owner.py", day, 20, event="Stop",
+                                register="announce") for _ in range(4)]
+            build_fixture(demoted, rows)
+            rc, out, _ = run_rollup(demoted, "--json")
+            entry = json.loads(out)["hooks"]["hot-with-owner.py"]
+            check("an announcement is counted, not discarded as an allow",
+                  entry["announces"] == 28, entry.get("announces"))
+            check("announcing costs no reopen", entry["reopens"] == 0, entry)
+            check("a gate that announces is NOT nominated for retirement",
+                  entry["retire_candidate"] is False, entry)
+            rc, text, _ = run_rollup(demoted)
+            check("the report says the clause was tightened and why",
+                  "said zero DENIES" in text, text[-800:])
+        finally:
+            shutil.rmtree(demoted, ignore_errors=True)
 
         # ── the correlation key, and the sentence it makes answerable ──
         # tool_use_id is identical across every hook of one invocation, so the

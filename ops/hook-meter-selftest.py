@@ -189,6 +189,13 @@ GATES = {
     "namegate.py": ("import sys\n"
                     "print('name=' + __name__)\nprint('file=' + __file__)\n"),
     "chatty.py": "print('x' * 200000)\n",
+    # The register a demoted Stop gate now speaks in: it returns context to the
+    # model without blocking, so it costs nothing beyond the turn already paid
+    # for. Five real Stop gates moved to this shape on 2026-08-23.
+    "announcer.py": ("import json\n"
+                     "print(json.dumps({'hookSpecificOutput': "
+                     "{'hookEventName': 'Stop', "
+                     "'additionalContext': 'a note for the model'}}))\n"),
 }
 
 
@@ -314,6 +321,32 @@ def reopen_cases(tmp):
     last = rows()[-1]
     check("a PreToolUse deny is NOT a reopen — it costs no tokens",
           last.get("reopen") is False, last)
+
+    # REGISTER: recorded from what the gate emitted, never re-derived from the
+    # exit code downstream. The whole point is that a gate which announces looks
+    # nothing like a gate which has gone quiet, even though both exit 0.
+    fire([RUNNER, os.path.join(gates, "deny.py")], payload(event="Stop", tool=""), env)
+    check("a blocking Stop gate is recorded in the reopen register",
+          rows()[-1].get("register") == "reopen", rows()[-1])
+
+    fire([RUNNER, os.path.join(gates, "announcer.py")], payload(event="Stop", tool=""), env)
+    last = rows()[-1]
+    check("an announcing Stop gate is recorded as an announcement",
+          last.get("register") == "announce", last)
+    check("and an announcement is NOT a reopen — it costs no extra turn",
+          last.get("reopen") is False and last.get("outcome") == "allow", last)
+
+    fire([RUNNER, os.path.join(gates, "allow.py")], payload(event="Stop", tool=""), env)
+    check("a gate that emits nothing is recorded as silent, not as an announcement",
+          rows()[-1].get("register") == "silent", rows()[-1])
+
+    fire([RUNNER, os.path.join(gates, "crash.py")], payload(event="Stop", tool=""), env)
+    check("a gate that fell over did not speak in any register",
+          rows()[-1].get("register") == "error", rows()[-1])
+
+    fire([RUNNER, os.path.join(gates, "permdeny.py")], payload(event="PreToolUse"), env)
+    check("a PreToolUse refusal is a block, not a reopen",
+          rows()[-1].get("register") == "block", rows()[-1])
 
 
 # ── 4. the split that makes the numbers mean anything ───────────────────────
