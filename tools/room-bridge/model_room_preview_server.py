@@ -42,9 +42,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         posted = []
         portfolio = json.loads((self.fixtures / "carr-evaluation-kernel.synthetic.v1.json").read_text())
         projection = contract.project_observatory_attempt(envelope, receipt, [event], {"profile_id": "profile:doc", "display_label": "Doc"})
+        def record_preview_turn(**row):
+            posted.append(row)
+            return {"preview": True}
+
         rehearsal = bridge.rehearse_job_passport(envelope, receipt, [event], {"profile_id": "profile:doc", "display_label": "Doc"},
                                                   evaluation_kernel=portfolio, spatial_surface=spatial_surface.project_job_passport_surface(projection),
-                                                  add_room_turn=lambda **row: posted.append(row) or {"preview": True})
+                                                  add_room_turn=record_preview_turn)
         turns = [{"seq": str(index), "msg_id": f"preview-job-passport-{index}", "at": "2026-08-24T12:00:06Z",
                   "sponsor": "joe", "seat": row["seat"], "kind": row["kind"], "body": row["body"]}
                  for index, row in enumerate(posted, start=1)]

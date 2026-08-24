@@ -617,7 +617,7 @@ def project_observatory_attempt(envelope: Any, receipt: Any, events: list[Any], 
     current_component = next(
         (row["observed_component_ref"] for row in reversed(timeline) if row["observed_component_ref"]), None
     )
-    dependencies = {ref: [] for ref in declared["component_refs"]}
+    dependencies: dict[str, list[str]] = {ref: [] for ref in declared["component_refs"]}
     for edge in declared["component_dependencies"]:
         dependencies.setdefault(edge["component_ref"], []).append(edge["depends_on_component_ref"])
     evidence_refs = sorted(set(completed["result"]["evidence_refs"] + [
@@ -836,13 +836,16 @@ def receipt_from_dispatch_row(envelope: Any, row: dict[str, Any], *, attempt_id:
     if not isinstance(row, dict):
         raise ContractError("dispatch row must be an object")
     status = row.get("status")
-    mapped = {
+    if not isinstance(status, str):
+        status = None
+    status_map = {
         "completed": ("succeeded", "success", "not_attempted", None),
         "failed": ("failed", "failure", "unknown", "dispatch_failed"),
         "timed_out": ("timed_out", "timeout", "unknown", "dispatch_timeout"),
         "cancelled": ("cancelled", "cancellation", "not_attempted", "dispatch_cancelled"),
         "partial": ("partial", "partial", "partial", "dispatch_partial"),
-    }.get(status, ("unknown", "unknown", "unknown", "dispatch_unknown"))
+    }
+    mapped = status_map.get(status, ("unknown", "unknown", "unknown", "dispatch_unknown")) if status is not None else ("unknown", "unknown", "unknown", "dispatch_unknown")
     stamp = row.get("dispatched_at")
     _timestamp(stamp, "dispatch row dispatched_at")
     native_ref = row.get("thread_id") or row.get("msg_id") or "native-dispatch-unknown"
