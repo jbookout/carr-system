@@ -166,6 +166,26 @@ test("an unsponsored runtime is never handed a partner's personal rules", async 
     "the plan must be asked for with no partner, not with a guessed one");
 });
 
+test("an active guidance registry cannot narrow the boot below Layer 0", async () => {
+  // The registry path returns a NARROWED set of its own — constitution plus
+  // applicable constraints. Two independent narrowings composed would land
+  // below Layer 0, which is the floor of a boot in both designs.
+  const c = client({ mode: "enforced" });
+  const inner = c.query;
+  c.query = async (sql, params = []) => {
+    if (/v_guidance_registry_state/i.test(sql))
+      return { rows: [{ state: "active", manifest_digest: "d".repeat(64) }] };
+    if (/ops\.standing_guidance/i.test(sql))
+      return { rows: [] };            // the registry chose to load nothing at all
+    if (/v_guidance_projection_summary/i.test(sql)) return { rows: [] };
+    return inner(sql, params);
+  };
+  const out = await executeRegisteredTool(c, ACTOR, "standing-context", {});
+  assert.deepEqual(out.shared_rules.map(r => r.id), ["1fddcffb", "347a9ca6"],
+    "Layer 0 must survive an empty registry selection");
+  assert.deepEqual(out.personal_rules.map(r => r.id), ["7e9739f2"]);
+});
+
 test("the verb still advertises both ways to name a pack", () => {
   const props = TOOLS["standing-context"].inputSchema.properties;
   assert.ok(props.packs, "packs must be callable for work that spans two domains");

@@ -981,6 +981,20 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         const deliveryUsable = plan.length > 0 && selectedShortIds.size > 0;
         const enforcing = deliveryMode === "enforced" && deliveryUsable;
 
+        // TWO SCOPINGS MUST NOT MULTIPLY. When the typed guidance registry is
+        // active, `selectedById` above already holds a NARROWED set — constitution
+        // plus applicable constraints — and layering delivery on top of that
+        // would compose two independent narrowings into something smaller than
+        // either, including smaller than Layer 0. So while delivery is
+        // enforcing, every Layer 0 rule is put back from the full set before any
+        // filtering. Layer 0 is the floor of a boot in both designs, and a floor
+        // that two correct mechanisms can quietly sink through is not a floor.
+        if (enforcing) {
+          for (const r of allRules) {
+            const id = String(r.id).slice(0, 8).toLowerCase();
+            if (selectedShortIds.has(id) && !selectedById.has(id)) selectedById.set(id, r);
+          }
+        }
         const rules = [...selectedById.values()];
         const shared = rules.filter(r => !r.personal_to);
         const personal = rules.filter(r => r.personal_to);
