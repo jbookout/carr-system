@@ -35,7 +35,7 @@ handled. Every refusal below is a reason the job role may be trusted with the
 close at all.
 
 WHAT THIS FILE CANNOT SEE, said out loud: the database half. The refusals are
-enforced a second time inside ops.clear_recovered_incident (migration 0287),
+enforced a second time inside ops.clear_recovered_incident (migration 0293),
 whose own proof block runs at apply time — SEV-1, hand-opened incidents, a
 short sequence, and a failure inside the sequence are each refused there too,
 so a wrong answer in this Python still cannot close anything. This file is the
@@ -52,7 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 TOOL = os.path.join(REPO, "tools", "ops-record.py")
 MIGRATION = os.path.join(
-    REPO, "migrations", "0287_incident_fingerprint_and_success_clears.sql")
+    REPO, "migrations", "0293_incident_fingerprint_and_success_clears.sql")
 
 spec = importlib.util.spec_from_file_location("ops_record", TOOL)
 assert spec is not None and spec.loader is not None, f"cannot load {TOOL}"
@@ -181,7 +181,7 @@ def _(assert_):
 
 @case("the migration's backfill table has not drifted from the writer's rule")
 def _(assert_):
-    # Migration 0287 restates the exit-code meanings so a one-time backfill can
+    # Migration 0293 restates the exit-code meanings so a one-time backfill can
     # reach rows the writer will never touch again. Two copies of one rule is
     # safe only while something fails when they disagree. This is that thing.
     if not os.path.exists(MIGRATION):
@@ -191,13 +191,13 @@ def _(assert_):
         sql = fh.read()
     block = re.search(r"values\s*(\(\s*64\b.*?)\)\s*as m\(code, class\)", sql,
                       re.S | re.I)
-    assert_(block is not None, "0287 no longer carries the exit-code backfill table")
+    assert_(block is not None, "0293 no longer carries the exit-code backfill table")
     if block is None:
         return
     pairs = {int(c): n for c, n in
              re.findall(r"\(\s*(\d+)\s*,\s*'([a-z_]+)'\s*\)", block.group(1))}
     assert_(pairs == opsrec.NAMED_EXIT_CLASSES,
-            f"0287 and NAMED_EXIT_CLASSES disagree:\n  sql:    {pairs}\n"
+            f"0293 and NAMED_EXIT_CLASSES disagree:\n  sql:    {pairs}\n"
             f"  python: {opsrec.NAMED_EXIT_CLASSES}")
 
 

@@ -118,7 +118,7 @@ export function actorUnresolvedFailureClass() {
  * role: the path for a generic failure, or `mcp:<verb>` where the verb is
  * known (a more specific signature than the bare route gives).
  *
- * THE FOURTH FIELD IS NOT NORMALIZED HERE, AND DOES NOT NEED TO BE (0287).
+ * THE FOURTH FIELD IS NOT NORMALIZED HERE, AND DOES NOT NEED TO BE (0293).
  * ops-record.py rewrites the bare `exit_<n>` shape before it lands in this
  * column, because bin/nightly.sh passes wrapper exit codes through and exit_1
  * and exit_2 from one step are one problem. Every class this file can produce

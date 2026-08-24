@@ -70,7 +70,7 @@ test("rpcInternalErrorFailureClass: -32603 (the outer catch's only code) is verb
 });
 
 test("every failure class this Worker can produce is a name, not a bare exit code", () => {
-  // 0287 gave the incident fingerprint a normalized fourth field: ops-record.py
+  // 0293 gave the incident fingerprint a normalized fourth field: ops-record.py
   // rewrites `exit_<n>` before it lands, because bin/nightly.sh passes wrapper
   // exit codes through and exit_1 and exit_2 from one step are one problem. The
   // Worker does NOT run that rule — restating it in a third language is how two

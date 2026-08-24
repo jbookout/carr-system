@@ -2,7 +2,7 @@
 """Fingerprint and success-clears, driven end to end as carr_jobs on real Postgres.
 
 WHAT THE OTHER TWO GUARDS CANNOT SEE. ops/incident-fingerprint-selftest.py holds
-the decision rules and touches no database. Migration 0287's own proof block
+the decision rules and touches no database. Migration 0293's own proof block
 holds ops.clear_recovered_incident and touches no Python. Between them sits the
 thing that actually has to work on 2026-08-23: tools/ops-record.py writing a run
 row AS THE JOB ROLE and having the right thing happen to the incident ledger.
@@ -21,7 +21,7 @@ Lowering HEALTHY_RUNS_TO_CLEAR to 2, or adding SEV-1 to AUTO_CLEARED_SEVERITIES,
 leaves every assertion below still passing — because ops.clear_recovered_incident
 clamps the sequence to three and refuses SEV-1 itself, so the OUTCOME stays
 correct while the Python is wrong. That is the layering working as designed and
-not a hole: both mutations are caught by migration 0287's proof block (cases 5
+not a hole: both mutations are caught by migration 0293's proof block (cases 5
 and 7) and by ops/incident-fingerprint-selftest.py, which assert the rule rather
 than the outcome. Recorded here so a later reader does not mistake the silence
 for coverage.
@@ -115,7 +115,7 @@ def main():
     with psycopg.connect(owner, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("select to_regprocedure('ops.clear_recovered_incident(text,int)')")
         if cur.fetchone()[0] is None:
-            refuse("migration 0287 is not applied to this cluster")
+            refuse("migration 0293 is not applied to this cluster")
         cur.execute("select 1 from pg_roles where rolname = 'carr_jobs'")
         if cur.fetchone() is None:
             refuse("this cluster has no carr_jobs role to run as")

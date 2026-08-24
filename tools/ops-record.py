@@ -709,10 +709,10 @@ def cmd_run(args) -> int:
                   "migration 0115 is unapplied here. Nothing recorded.",
                   file=sys.stderr)
             return 78
-        # THE SAME STATE, ONE MIGRATION LATER. 0287 added the occurrence
+        # THE SAME STATE, ONE MIGRATION LATER. 0293 added the occurrence
         # counters this writer now sets on every incident and the
         # clear_recovered_incident function it calls on a recovery, so a
-        # database carrying 0115 but not 0287 fails on a column or a function
+        # database carrying 0115 but not 0293 fails on a column or a function
         # rather than on a relation. That is still "not provisioned here" and
         # still deserves 78 — a deploy that runs ahead of its migration should
         # say which migration, once, not fail every step of the night with a
@@ -722,7 +722,7 @@ def cmd_run(args) -> int:
                     or 'column "last_seen_at"' in str(e)
                     or 'column "first_seen_at"' in str(e))):
             print("ops-record: incident fingerprint columns and the recovery "
-                  "function are missing — migration 0287 is unapplied here. "
+                  "function are missing — migration 0293 is unapplied here. "
                   "Nothing recorded.", file=sys.stderr)
             return 78
         # Otherwise the caller ignores this exit code on purpose. The failure is
@@ -892,7 +892,7 @@ def fingerprint_job(signature: str | None) -> tuple[str, str, str] | None:
 # the all-clear.
 #
 # SEV-1 IS UNTOUCHED, HERE AND IN THE DATABASE. This function refuses it, and
-# ops.clear_recovered_incident (migration 0287) refuses it again in a
+# ops.clear_recovered_incident (migration 0293) refuses it again in a
 # SECURITY DEFINER body the job role cannot edit — so the automatic path cannot
 # close a critical incident even if this Python is wrong. Evidence-required,
 # human-approved SEV-1 closure stays exactly where 0117 put it.
@@ -1174,7 +1174,7 @@ def _record_failure_incident(
                values (%s, %s, %s)""",
             (incident_id, fact, f"ops.{source_kind}:{source_id}"))
 
-    # A RECURRENCE IS A HEARTBEAT ON THE OPEN ROW, NOT A SECOND PAGE (0287).
+    # A RECURRENCE IS A HEARTBEAT ON THE OPEN ROW, NOT A SECOND PAGE (0293).
     # Before this, the append wrote a fact and nothing else, so all 26 open
     # incidents read alike on 2026-08-23: nothing distinguished partner-ping's
     # 89 failures from a verb that threw once. last_seen_at and the count are
@@ -1193,7 +1193,7 @@ def _record_failure_incident(
     # failing. A failure recorded against a monitoring incident means the watch
     # found something: the row returns to detected and drops the recovery
     # evidence it can no longer stand on. carr_jobs holds a column-scoped update
-    # on exactly these fields (0117, widened for the counters in 0287), so this
+    # on exactly these fields (0117, widened for the counters in 0293), so this
     # runs on the collector path without any escalation.
     if linked and not opened:
         cur.execute(
@@ -1349,7 +1349,7 @@ def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
             # RECOVERY IS NOT RESOLUTION — for anything a machine may not close.
             # One green run says the symptom stopped, not that the cause is
             # understood, so a SEV-1 still moves only as far as monitoring and
-            # keeps its human close. What changed in 0287 is that a SEV-2 or
+            # keeps its human close. What changed in 0293 is that a SEV-2 or
             # SEV-3 job incident with a full success SEQUENCE behind it now
             # closes here, because "watch until 24h clear" was a promise this
             # chain could not keep: the sweep that performs it needs the owner
@@ -1584,7 +1584,7 @@ def cmd_assess(args) -> int:
     print(f"assess: {opened} incident(s) opened · {len(live)} live incident(s)")
     for ref, severity, state, title, next_action, count, last_seen in live:
         print(f"  {severity}  {state:<12} {ref}  {title}")
-        # THE TWO NUMBERS THAT SEPARATE A FIRE FROM A BLIP. Before 0287 this
+        # THE TWO NUMBERS THAT SEPARATE A FIRE FROM A BLIP. Before 0293 this
         # list printed 26 lines that all read alike, so partner-ping failing 89
         # times and a verb that threw once were the same single line and a
         # reader had no way to sort the pile by anything but date.
