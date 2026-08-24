@@ -110,7 +110,7 @@ def strip_fences(text): return text
         (root / "lib" / "__init__.py").write_text("")
         (root / "lib" / "record_sources.py").write_text('''
 import os
-if os.environ.get("PYTHONPATH"):
+if "poisoned-pythonpath" in (os.environ.get("PYTHONPATH") or ""):
     raise RuntimeError("launcher failed to scrub PYTHONPATH")
 if os.environ.get("FIXTURE_FIXED_INTERPRETER") != "1":
     raise RuntimeError("launcher did not select the fixed interpreter")
@@ -127,10 +127,17 @@ class Connection:
 def _connect(): return Connection()
 ''')
         interpreter = root / ".venv" / "bin" / "python"
-        interpreter.write_text('''#!/bin/sh
-if [ "${FIXTURE_PSYCOG_TIMEOUT:-0}" = 1 ] && [ "$1" = -c ]; then sleep 4; fi
-if [ "$1" = -c ]; then [ "${FIXTURE_PSYCOG_OK:-1}" = 1 ] && exit 0 || exit 1; fi
+        site = root / "fixture-site"
+        site.mkdir(exist_ok=True)
+        (site / "psycopg.py").write_text("")
+        # The launcher must have scrubbed the caller's poisoned PYTHONPATH before
+        # exec; only then does the fixture put its own stub psycopg on the path,
+        # standing in for a venv that has the dependency installed.
+        interpreter.write_text(f'''#!/bin/sh
+case "$PYTHONPATH" in *poisoned-pythonpath*) exit 9;; esac
+[ "${{FIXTURE_SLOW:-0}}" = 1 ] && sleep 4
 export FIXTURE_FIXED_INTERPRETER=1
+[ "${{FIXTURE_PSYCOG_OK:-1}}" = 1 ] && export PYTHONPATH={site}
 exec /usr/bin/python3 "$@"
 ''')
         interpreter.chmod(0o755)
@@ -161,15 +168,23 @@ exec /usr/bin/python3 "$@"
                                                  text=True, capture_output=True, env=record_env)
         finally:
             missing_path.rename(interpreter)
-        timeout = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
-                                 text=True, capture_output=True,
-                                 env={**record_env, "FIXTURE_PSYCOG_TIMEOUT": "1"})
+        slow = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-assertion-gate.py"],
+                              input=json.dumps({"hook_event_name": "Stop"}),
+                              text=True, capture_output=True,
+                              env={**record_env, "FIXTURE_SLOW": "1",
+                                   "CARR_DRIFT_ASSERTION_STATE": str(root / "state")})
     check("system bootstrap reaches fixed interpreter, scrubs PYTHONPATH, and blocks on canonical context",
           write.returncode == 0 and "quokka-indexer" in write.stdout
           and assertion.returncode == 2 and "quokka-indexer" in assertion.stderr)
-    check("launcher fails closed for unknown/malformed/missing dependency/interpreter/timeout",
-          all(item.returncode != 0 for item in (unknown, malformed, missing_dependency,
-                                                 missing_interpreter, timeout)))
+    closed_paths = (unknown, malformed, missing_dependency, missing_interpreter)
+    check("launcher fails closed for unknown/malformed/missing dependency/interpreter",
+          all(item.returncode == 2 for item in closed_paths))
+    # Regression, 2026-08-23: a 3s probe timeout closed this gate on a healthy
+    # machine that was merely busy, reopening one session's turn six times.
+    check("a slow interpreter runs the gate instead of closing it",
+          slow.returncode == 0 and "cannot import psycopg" not in slow.stderr)
+    check("every closed path says why on stderr",
+          all("run-record-gate: closed." in item.stderr for item in closed_paths))
 
     if failures:
         print(f"FAIL {len(failures)}: {', '.join(failures)}")
