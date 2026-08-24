@@ -129,7 +129,11 @@ def _connect(): return Connection()
         interpreter = root / ".venv" / "bin" / "python"
         interpreter.write_text('''#!/bin/sh
 if [ "${FIXTURE_PSYCOG_TIMEOUT:-0}" = 1 ] && [ "$1" = -c ]; then sleep 4; fi
-if [ "$1" = -c ]; then [ "${FIXTURE_PSYCOG_OK:-1}" = 1 ] && exit 0 || exit 1; fi
+if [ "$1" = -c ]; then
+  [ "${FIXTURE_PSYCOG_OK:-1}" = 1 ] && exit 0
+  echo "ModuleNotFoundError: No module named 'psycopg'" >&2
+  exit 1
+fi
 export FIXTURE_FIXED_INTERPRETER=1
 exec /usr/bin/python3 "$@"
 ''')
@@ -173,6 +177,18 @@ exec /usr/bin/python3 "$@"
                                  text=True, capture_output=True,
                                  env={**record_env, "FIXTURE_PSYCOG_TIMEOUT": "1",
                                       "CARR_RECORD_GATE_PROBE_TIMEOUT": "1"})
+        # AND THE OTHER DIRECTION: driving the budget explicitly above proves the
+        # timeout path survives any default, but it no longer proves the DEFAULT
+        # is survivable. Nothing then stops the constant from being walked back
+        # to 3s -- which is the whole defect -- with the suite still green. So
+        # run the same 4s fixture probe with no override: the shipped default
+        # must absorb it, because a real loaded Mac needs 3.83-6.3s just to
+        # import psycopg and anything under that closes the gate every turn.
+        slow_probe = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
+                                    input=json.dumps({"tool_name": "mcp__x__record-defect",
+                                                      "tool_input": {"body": claim}}),
+                                    text=True, capture_output=True,
+                                    env={**record_env, "FIXTURE_PSYCOG_TIMEOUT": "1"})
     check("system bootstrap reaches fixed interpreter, scrubs PYTHONPATH, and blocks on canonical context",
           write.returncode == 0 and "quokka-indexer" in write.stdout
           and assertion.returncode == 2 and "quokka-indexer" in assertion.stderr)
@@ -187,6 +203,27 @@ exec /usr/bin/python3 "$@"
           "did not finish" in timeout.stderr)
     check("a genuinely absent dependency says something different",
           "cannot import" in missing_dependency.stderr)
+    # The two checks above cover the paths the incident went through. The rest of
+    # this launcher's `return 2`s were mute for the same reason, and a mute
+    # refusal is indistinguishable from a drift ruling no matter which branch
+    # produced it -- so every precondition is asserted by name, and the selftest
+    # reports WHICH one went quiet instead of one opaque boolean.
+    for label, item, needle in (
+            ("unknown gate", unknown, "is not a record-backed gate"),
+            ("malformed argv", malformed, "expected exactly one gate name"),
+            ("missing interpreter", missing_interpreter, "missing or not executable")):
+        check(f"closed gate names its precondition: {label}",
+              item.returncode == 2 and "gate not run:" in item.stderr
+              and needle in item.stderr)
+    check("the default probe budget absorbs a loaded-machine psycopg import",
+          slow_probe.returncode == 0 and "quokka-indexer" in slow_probe.stdout)
+    # "psycopg is absent" and "psycopg is installed and broken" are different
+    # repairs, and the launcher cannot tell them apart on its own -- only the
+    # interpreter's own error can. Discarding the probe's stderr therefore
+    # downgrades a diagnosis to a guess, so the relay is asserted rather than
+    # assumed: with stderr thrown away this fixture's message cannot arrive.
+    check("a failed probe relays the interpreter's own error instead of guessing",
+          "ModuleNotFoundError" in missing_dependency.stderr)
 
     if failures:
         print(f"FAIL {len(failures)}: {', '.join(failures)}")
