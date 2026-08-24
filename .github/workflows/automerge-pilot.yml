@@ -43,6 +43,28 @@ jobs:
         with:
           ref: main
 
+      # LAYER 3 of the 2026-08-23 CI-failures council: no merge onto a red main.
+      #
+      # BEFORE the plan, because this is the cheap half. Without it the pilot
+      # plans against a broken main and finds out in the 20-minute verify job,
+      # having spent a Postgres service, two setup actions and a full strict
+      # suite to learn something one API call already knew.
+      #
+      # IT REFUSES ON UNKNOWN TOO, and that is the council's kill criterion
+      # honoured rather than dodged: Codex's bar was "kill any implementation
+      # under which a skipped or neutral check accidentally satisfies branch
+      # protection". An unattended overnight merge that cannot establish main is
+      # green must not proceed on the strength of not having looked. Declining
+      # costs one night; merging onto an unchecked base costs a morning.
+      #
+      # There is no force-green anywhere in this path. The canary going green is
+      # the unfreeze — nothing to reset, and no flag that can stick.
+      - name: Refuse to plan a merge while main is frozen
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CARR_MAIN_FREEZE: ${{ vars.CARR_MAIN_FREEZE }}
+        run: python3 ops/main-canary-state.py --require-green
+
       - id: plan
         name: Select at most one exact-SHA candidate
         env:

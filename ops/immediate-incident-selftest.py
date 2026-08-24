@@ -74,6 +74,10 @@ class FakeCursor:
                 "id": incident_id,
                 "correlation": params[1],
                 "signature": params[-2],
+                # A new incident opens at one occurrence, which is what the real
+                # insert writes. Anything above one here had to be counted.
+                "occurrences": 1,
+                "state": "detected",
             })
             self._one = (incident_id,)
         elif normalized.startswith("insert into ops.incident_link "):
@@ -93,6 +97,20 @@ class FakeCursor:
             self._one = ("fact-correlation",) if inserted else None
         elif normalized.startswith("insert into ops.incident_fact "):
             self.facts.append((params[0], params[1], params[2]))
+            self._one = None
+        elif normalized.startswith("update ops.incident set occurrence_count"):
+            # The recurrence heartbeat (migration 0293). It runs only when a
+            # NEW piece of evidence attached to an incident that was already
+            # open, so counting it here is what proves the writer does not
+            # inflate the number on a replayed row.
+            incident_id = params[-1]
+            row = next(x for x in self.incidents if x["id"] == incident_id)
+            row["occurrences"] += 1
+            self.events.append("occurrence_bump")
+            # A failure recorded against an incident being watched means the
+            # watch found something, so the row goes back to detected.
+            if row["state"] == "monitoring":
+                row["state"] = "detected"
             self._one = None
         else:
             raise AssertionError(f"unexpected SQL: {normalized[:180]}")
@@ -192,6 +210,35 @@ def main() -> int:
     check("2f. recurrence correlation is traceable and idempotent",
           correlation_facts == [f"correlation:{new_corr}"],
           f"correlation facts={correlation_facts}")
+    # Migration 0293. Before it, all three of these arrivals left the row
+    # reading exactly as it read after the first one, so a reader could not
+    # tell a job failing constantly from one that failed once.
+    check("2g. each recurrence counts on the open row rather than opening a new one",
+          recurring.incidents[0]["occurrences"] == 3,
+          f"occurrences={recurring.incidents[0]['occurrences']}")
+    check("2h. the first arrival opens at one occurrence and counts nothing",
+          recurring.events.count("occurrence_bump") == 2,
+          f"events={recurring.events}")
+
+    # A replayed row is the case the count must survive: tools/ops-spool.py
+    # retries anything it could not land, and ops.incident_link's primary key
+    # already refuses the second link. If the bump were counted off the CALL
+    # instead of off that refusal, a retried flush would inflate the number
+    # while adding no new evidence.
+    replayed = FakeCursor()
+    replay_common = dict(common, cur=replayed)
+    for _ in range(3):
+        helper(**replay_common,
+               correlation_id="77777777-7777-4777-8777-777777777777",
+               source_kind="run", source_id="run-replayed",
+               source_label="launchd.run", state="failed",
+               failure_class="exit_1", detail=None)
+    check("2i. replaying one run row does not inflate the count",
+          len(replayed.incidents) == 1
+          and replayed.incidents[0]["occurrences"] == 1
+          and len(replayed.links) == 1,
+          f"occurrences={replayed.incidents[0]['occurrences']} "
+          f"links={len(replayed.links)}")
 
     before = (len(cur.incidents), len(cur.links), len(cur.facts))
     helper(**common, correlation_id="33333333-3333-4333-8333-333333333333",
