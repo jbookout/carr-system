@@ -104,8 +104,19 @@ def main() -> int:
     if not dsn:
         print("rule-delivery-audit: DATABASE_URL required", file=sys.stderr)
         return 2
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        c = counts(cur)
+    try:
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            c = counts(cur)
+    except psycopg.errors.UndefinedTable:
+        # "NOT INSTALLED" AND "INCOMPLETE" ARE DIFFERENT FINDINGS (rule 88e9b5eb).
+        # Absent tables mean migration 0288 has not been applied here, which has a
+        # different remedy from tags that are missing rows — and letting the
+        # traceback through would report the first as the second.
+        print("rule-delivery-audit: the delivery tables are absent — migration "
+              "0288_rule_delivery_layers.sql has not been applied to this database. "
+              "That is not the same finding as incomplete tags: apply the migration "
+              "first, then re-run.", file=sys.stderr)
+        return 2
     bad = failing(c, allow_empty_store=args.allow_empty_store)
     if args.json:
         print(json.dumps({"ok": not bad, **c}, sort_keys=True))

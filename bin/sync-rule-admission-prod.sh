@@ -121,6 +121,12 @@ if (( ! APPLY )); then
   set -e
   if (( drc == 0 )); then
     stamp "OK read-only: production delivery tags are complete"
+  elif (( drc == 2 )); then
+    # A DIFFERENT FINDING WITH A DIFFERENT REMEDY, and saying so is rule 88e9b5eb.
+    stamp "BLOCKED read-only delivery: the delivery tables are absent"
+    print ""
+    print "the delivery tables are not in this database yet, so there is nothing"
+    print "to audit. Apply migration 0288 (./bin/migrate-prod.sh), then re-run."
   else
     stamp "GAP read-only delivery rc=$drc"
     print ""
@@ -131,7 +137,11 @@ if (( ! APPLY )); then
     print "  emptypack  = a pack no active rule is in — a trigger that loads nothing"
     print "Re-run with --apply once $MAP tags every active rule."
   fi
-  (( rc == 0 )) && rc=$drc
+  # WRITTEN AS AN IF RATHER THAN `(( )) && rc=$drc`. Under `set -e` that form is
+  # the last command of its own && list, so a FALSE test — the ordinary case
+  # where the admission half already failed — exits the script on the spot and
+  # the delivery finding never reaches the operator.
+  if (( rc == 0 )); then rc=$drc; fi
   exit $rc
 fi
 
@@ -194,5 +204,5 @@ else
   print -u2 "THE TAGS LANDED AND THE DELIVERY AUDIT STILL DISAGREES. The counts above"
   print -u2 "name which shape is left."
 fi
-(( rc == 0 )) && rc=$drc
+if (( rc == 0 )); then rc=$drc; fi
 exit $rc
