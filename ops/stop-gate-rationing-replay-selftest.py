@@ -207,13 +207,17 @@ def replay_catches(tmp):
     # gate then correctly reads the turn as somebody else's project and stays
     # silent. Left out, this case would go green as "no fire" for the wrong
     # reason, which is the shape of false pass this whole file exists to avoid.
+    # The LATCH DIR is per-run too (b2a17494's own lesson): a fixed "selftest"
+    # id writes out/stop-latch/selftest.json in the REAL out/, so a second run
+    # of this suite read its own earlier fire as latched and went silent.
     verdict, text = fire("completion-evidence-gate.py", {
         "session_id": "selftest", "stop_hook_active": False, "cwd": REPO,
         "transcript_path": transcript(tmp, "delivery.jsonl",
             "Done — the packet has been delivered and the summary sent.",
             human="get the handoff out",
             tools=[("Write", {"file_path": os.path.join(REPO, "a.py"), "content": "x"}),
-                   ("Write", {"file_path": os.path.join(REPO, "b.py"), "content": "x"})])})
+                   ("Write", {"file_path": os.path.join(REPO, "b.py"), "content": "x"})])},
+        env={"CARR_STOP_LATCH_STATE": os.path.join(tmp, "completion-latch")})
     check("completion-evidence still reopens on a delivery claim with no recipient",
           verdict == "REOPEN" and "recipient" in text.lower(), f"{verdict}: {text[:160]}")
 
