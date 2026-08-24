@@ -63,6 +63,7 @@
 // built against.
 
 import { program6ActionPosture } from "./program6-feature-flag.js";
+import { workspaceCommandCenterPosture } from "./workspace-feature-flag.js";
 
 export async function buildRelease({ env, sql, verbCount, now = () => new Date() }) {
   const sha = (env && env.GIT_SHA) || null;
@@ -166,5 +167,6 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
     // checked-in Wrangler configuration is fingerprinted in each release plan,
     // so changing false→true requires a reviewed immutable version promotion.
     program6_actions: program6ActionPosture(env),
+    workspace_command_center: workspaceCommandCenterPosture(env),
   };
 }
