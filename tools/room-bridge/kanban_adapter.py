@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import List
 
 import queue_grammar
 
@@ -59,6 +60,18 @@ def _subprocess_runner(argv: list[str]) -> dict:
         raise QueueError("queue_unavailable", "Hermes queue returned invalid JSON") from exc
 
 
+def _command_runner(argv: list[str]) -> str:
+    """Run one supported Hermes mutation without interpreting human output."""
+    try:
+        completed = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QueueError("queue_unavailable", f"Hermes queue is unavailable: {exc}") from exc
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()[0:1]
+        raise QueueError("queue_unavailable", f"Hermes queue mutation failed: {' '.join(detail)[:400]}")
+    return completed.stdout
+
+
 def _find_task_id(value) -> str | None:
     if isinstance(value, dict):
         task_id = value.get("task_id") or value.get("id")
@@ -77,8 +90,9 @@ def _find_task_id(value) -> str | None:
 
 
 class KanbanAdapter:
-    def __init__(self, *, runner=_subprocess_runner):
+    def __init__(self, *, runner=_subprocess_runner, command_runner=_command_runner):
         self.runner = runner
+        self.command_runner = command_runner
 
     def create(self, command: dict, turn: dict, target: dict) -> dict:
         meta = {
@@ -114,6 +128,47 @@ class KanbanAdapter:
         if target:
             argv.extend(["--assignee", catalog["targets"][target]["assignee"]])
         return self.runner(argv)
+
+    def ready_for(self, assignee: str) -> List[dict]:
+        payload = self.runner([
+            "hermes", "kanban", "--board", BOARD, "list", "--status", "ready",
+            "--assignee", assignee, "--sort", "created", "--json",
+        ])
+        if not isinstance(payload, list):
+            raise QueueError("queue_unavailable", "Hermes ready list returned an invalid shape")
+        return [row for row in payload if isinstance(row, dict)]
+
+    def claim(self, task_id: str) -> None:
+        self.command_runner([
+            "hermes", "kanban", "--board", BOARD, "claim", task_id, "--ttl", "900",
+        ])
+
+    def comment(self, task_id: str, summary: str) -> None:
+        self.command_runner([
+            "hermes", "kanban", "--board", BOARD, "comment", task_id, summary,
+            "--author", "queue-dispatch",
+        ])
+
+    def complete(self, task_id: str, summary: str, metadata: dict) -> None:
+        self.command_runner([
+            "hermes", "kanban", "--board", BOARD, "complete", task_id,
+            "--result", summary, "--summary", summary,
+            "--metadata", json.dumps(metadata, separators=(",", ":")),
+        ])
+
+    def request_review(self, task_id: str, summary: str, metadata: dict) -> None:
+        self.command_runner([
+            "hermes", "kanban", "--board", BOARD, "request-review", task_id,
+            "--summary", summary,
+            "--metadata", json.dumps(metadata, separators=(",", ":")),
+        ])
+
+    def block(self, task_id: str, reason: str, *, kind: str | None = None) -> None:
+        argv = ["hermes", "kanban", "--board", BOARD, "block", task_id]
+        if kind:
+            argv.extend(["--kind", kind])
+        argv.append(reason)
+        self.command_runner(argv)
 
 
 def public_targets(catalog: dict) -> list[dict]:

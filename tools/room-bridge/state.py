@@ -198,9 +198,15 @@ def pop_next_queued(state: dict, desk_name: str) -> dict | None:
     return slot["queue"].pop(0)
 
 
+def has_queued(state: dict, desk_name: str) -> bool:
+    return bool(_desk_slot(state, desk_name)["queue"])
+
+
 def set_pending(state: dict, desk_name: str, *, dispatch_msg_id: str,
                  log_offset: int, injected_at: str, source_msg_id: str,
-                 source_seq) -> None:
+                 source_seq, origin_kind: str = "room",
+                 kanban_task_id: str | None = None, target: str | None = None,
+                 finish: str | None = None) -> None:
     slot = _desk_slot(state, desk_name)
     slot["pending"] = {
         "dispatch_msg_id": dispatch_msg_id,
@@ -208,7 +214,14 @@ def set_pending(state: dict, desk_name: str, *, dispatch_msg_id: str,
         "injected_at": injected_at,
         "source_msg_id": source_msg_id,
         "source_seq": source_seq,
+        "origin_kind": origin_kind,
     }
+    if origin_kind == "queue":
+        slot["pending"].update({
+            "kanban_task_id": kanban_task_id,
+            "target": target,
+            "finish": finish,
+        })
 
 
 def clear_pending(state: dict, desk_name: str) -> None:
