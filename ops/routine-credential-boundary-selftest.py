@@ -50,10 +50,36 @@ def main() -> int:
     # Back to 5: the mirror's refusal branch came out again once #387 made
     # doctrine_mirror.py exit 78 on its own. An exact count rather than a floor,
     # deliberately — the point of this check is that an admin-capability step
-    # CANNOT be added without going through the helper, and `>=` would let a
-    # sixth slip past unrefused.
-    check("admin nightly steps refuse through evidence-producing step calls",
-          nightly.count("routine-admin-refusal.sh") == 5)
+    # CANNOT be added without being refused, and `>=` would let a sixth slip
+    # past unrefused.
+    #
+    # THE HELPER IS NO LONGER LAUNCHED, AND THE PROPERTY IS UNCHANGED (2026-08-23).
+    # This counted `routine-admin-refusal.sh`, because a step used to be EXECUTED
+    # so that helper could exit 78 and produce the refusal as evidence. Those
+    # steps are tombstoned now: gated out before they run, each naming the
+    # capability it lacks and what would reopen it. That is a stronger form of
+    # the same guarantee — a step that never runs cannot reach for a credential
+    # at all — so what is counted moves and the number does not.
+    #
+    # Counting the `missing` argument rather than the label: the label is prose
+    # somebody will reword, while naming a capability is the thing that makes a
+    # step one of these five. Still exact, still for the same reason.
+    capability_tombstones = re.findall(
+        r'^\s+"(?:admin|authority) capability — ', nightly, re.M)
+    check("admin nightly steps are gated out, not run with credentials they lack",
+          len(capability_tombstones) == 5)
+    # And none of them executes anything on the way to saying so. Comment lines
+    # are blanked first: bin/nightly.sh still DISCUSSES the refusal helper by
+    # name where it explains why the script stayed in the tree, and a prose
+    # mention cannot launch a process. The first cut of this check searched the
+    # raw text and failed on that comment — the same false positive in the
+    # opposite direction from the one that had ops/scheduled-drive-writer-selftest.py
+    # passing on a comment after the chain stopped calling the script.
+    nightly_code = "\n".join(
+        "" if line.lstrip().startswith("#") else line
+        for line in nightly.split("\n"))
+    check("no admin nightly step launches a refusal process any more",
+          "routine-admin-refusal.sh" not in nightly_code)
     check("routine nightly contains no db-tap escalation", "CARR_BREAK_GLASS=1" not in nightly)
     # Scope only: the mirror gets the backup capability and nothing wider. What
     # happens when that capability is ABSENT is not this file's question — the
