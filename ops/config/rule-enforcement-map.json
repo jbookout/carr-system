@@ -3534,7 +3534,7 @@
       "d5dcfe26": {
         "load_layer": "layer0",
         "packs": [],
-        "why": "The dominant defect class, 25 occurrences; fires on any present-tense claim."
+        "why": "The most frequent failure class on record (standing-context returns the live ledger); fires on any present-tense claim."
       },
       "d7c69aa6": {
         "load_layer": "control",

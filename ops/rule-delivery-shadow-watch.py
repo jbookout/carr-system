@@ -67,7 +67,8 @@ def load_audit():
 
 def read_log(path: Path) -> tuple[list[dict], int]:
     """Rows and the count of lines that could not be parsed."""
-    rows, unreadable = [], 0
+    rows: list[dict] = []
+    unreadable = 0
     if not path.exists():
         return rows, unreadable
     with path.open(encoding="utf-8", errors="replace") as handle:
@@ -89,8 +90,11 @@ def read_log(path: Path) -> tuple[list[dict], int]:
 
 def summarize(rows: list[dict], now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
-    misses, packs, modes, errors = [], Counter(), Counter(), 0
-    newest = None
+    misses: list[dict] = []
+    packs: Counter[str] = Counter()
+    modes: Counter[str] = Counter()
+    errors = 0
+    newest: datetime | None = None
     for row in rows:
         if row.get("error"):
             errors += 1
@@ -112,11 +116,11 @@ def summarize(rows: list[dict], now: datetime | None = None) -> dict:
             if newest is None or seen > newest:
                 newest = seen
     age_hours = None if newest is None else (now - newest).total_seconds() / 3600
+    stale = age_hours is None or age_hours > STALE_HOURS
     return {"turns": len(rows), "misses": misses, "miss_count": len(misses),
             "packs_seen": dict(packs.most_common()), "modes": dict(modes),
             "gate_errors": errors, "newest": newest.strftime("%Y-%m-%dT%H:%M:%SZ")
-            if newest else None, "age_hours": age_hours,
-            "stale": newest is None or age_hours > STALE_HOURS}
+            if newest else None, "age_hours": age_hours, "stale": stale}
 
 
 def routine_dsn() -> str | None:

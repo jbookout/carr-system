@@ -39,6 +39,15 @@ def check(label: str, ok: bool, detail: str = "") -> None:
         FAILURES.append(f"{label}{': ' + detail if detail else ''}")
 
 
+def one(cur) -> tuple:
+    """fetchone() that refuses None. A count query that returned no row at all is
+    a broken query, not a zero, and reading [0] off None hides which it was."""
+    row = cur.fetchone()
+    if row is None:
+        raise RuntimeError("a count query returned no row; the acceptance cannot judge that")
+    return row
+
+
 def run(script: str, dsn: str) -> subprocess.CompletedProcess:
     return subprocess.run([str(PY if PY.is_file() else sys.executable), str(REPO / script)],
                           env={**os.environ, "DATABASE_URL": dsn},
@@ -62,7 +71,7 @@ def main() -> int:
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")
         cur.execute("select id from actor where slug='joe'")
-        joe = cur.fetchone()[0]
+        joe = one(cur)[0]
         # THE SEED TURNS OFF THE RULE LIFECYCLE TRIGGERS, ON A THROWAWAY DATABASE,
         # AND SAYS SO. Activating a rule for real requires the whole Joe approval
         # chain migration 0228 built — an admission contract, installed controls,
@@ -90,9 +99,9 @@ def main() -> int:
         check("the backfill runs clean", result.returncode == 0,
               result.stderr.strip()[-400:])
         cur.execute("select count(*) from ops.rule_load_layer")
-        check("every reviewed tag landed", cur.fetchone()[0] == len(layers))
+        check("every reviewed tag landed", one(cur)[0] == len(layers))
         cur.execute("select count(*) from ops.rule_pack")
-        check("every reviewed pack landed", cur.fetchone()[0] == len(data["rule_packs"]))
+        check("every reviewed pack landed", one(cur)[0] == len(data["rule_packs"]))
 
         audit = run("ops/rule-delivery-audit.py", dsn)
         check("the delivery audit passes after the backfill", audit.returncode == 0,
@@ -100,7 +109,7 @@ def main() -> int:
 
         # ── the selector hands back the set the council designed ─────────────
         cur.execute("select count(*) from ops.rule_delivery_plan('joe') where selected")
-        layer0 = cur.fetchone()[0]
+        layer0 = one(cur)[0]
         expected_layer0 = sum(1 for s, e in layers.items()
                               if e["load_layer"] == "layer0"
                               and scope_by_id[s] in ("shared", "joe"))
@@ -110,24 +119,24 @@ def main() -> int:
         cur.execute("select count(*) from ops.rule_delivery_plan('joe')")
         check("the plan still reports every in-scope rule, which is what shadow "
               "mode compares against",
-              cur.fetchone()[0] == len(layers))
+              one(cur)[0] == len(layers))
 
         cur.execute("""select count(*) from ops.rule_delivery_plan('joe', array['engineering-git'])
                         where selected""")
-        with_pack = cur.fetchone()[0]
+        with_pack = one(cur)[0]
         check("declaring a pack adds rules and never removes any", with_pack > layer0)
 
         cur.execute("select count(*) from ops.rule_delivery_plan(null) where scope='joe'")
         check("an unsponsored runtime gets no partner's personal rules",
-              cur.fetchone()[0] == 0)
+              one(cur)[0] == 0)
 
         cur.execute("select count(*) from ops.rule_pack_index() where rule_count = 0")
-        check("no pack in the index is empty", cur.fetchone()[0] == 0)
+        check("no pack in the index is empty", one(cur)[0] == 0)
         cur.execute("select count(*) from ops.rule_pack_index()")
-        check("the pack index names every pack", cur.fetchone()[0] == len(data["rule_packs"]))
+        check("the pack index names every pack", one(cur)[0] == len(data["rule_packs"]))
 
         cur.execute("select mode from ops.rule_delivery_policy")
-        check("delivery starts in shadow mode", cur.fetchone()[0] == "shadow")
+        check("delivery starts in shadow mode", one(cur)[0] == "shadow")
 
         # ── the refusals are real ────────────────────────────────────────────
         for label, packs, expect_fail in (

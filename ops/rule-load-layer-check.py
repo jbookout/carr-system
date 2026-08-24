@@ -152,7 +152,7 @@ def counts(data: dict) -> dict[str, int]:
     scope_by_id = {rid: scope
                    for scope, ids in data.get("active_rule_ids", {}).items()
                    for rid in ids}
-    out = Counter()
+    out: Counter[str] = Counter()
     for rid, entry in layers.items():
         if not isinstance(entry, dict):
             continue
