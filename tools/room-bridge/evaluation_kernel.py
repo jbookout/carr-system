@@ -11,6 +11,7 @@ from typing import Any
 
 import execution_contract as contract
 from evaluation_rubrics import rubric_for
+import design_kernel
 
 
 class EvalPortfolioError(contract.ContractError):
@@ -259,7 +260,8 @@ def cost_curve_gate(portfolio: Any) -> list[dict[str, Any]]:
     return output
 
 
-def admission_decision(kernel: Any, *, as_of: str | None = None) -> dict[str, Any]:
+def admission_decision(kernel: Any, *, as_of: str | None = None, visual_gate_report: Any | None = None,
+                       design_contract: Any | None = None) -> dict[str, Any]:
     """Return a deterministic recommendation with evidence-backed reason codes.
 
     It never promotes canonical state.  `eligible_for_controller_review` means
@@ -301,6 +303,17 @@ def admission_decision(kernel: Any, *, as_of: str | None = None) -> dict[str, An
                 reasons.append(f"critical_dimension_not_equivalent:{dimension}")
     if requirement and requirement["independent_review_required"]:
         reasons.append("independent_review_required")
+    if (visual_gate_report is None) != (design_contract is None):
+        raise EvalPortfolioError("visual gate report and exact design contract must travel together")
+    if visual_gate_report is not None:
+        try:
+            reasons.extend(design_kernel.evaluation_blockers(
+                visual_gate_report, design_contract,
+                expected_work_request_id=value["binding"]["work_request_id"],
+                expected_projection_digest=value["binding"]["projection_digest"],
+            ))
+        except design_kernel.DesignKernelError as exc:
+            raise EvalPortfolioError(str(exc)) from exc
     if value["provenance"]["source_class"] == "synthetic_only":
         reasons.append("synthetic_evidence_not_controller_promotion")
     return {
