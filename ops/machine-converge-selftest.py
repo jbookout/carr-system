@@ -110,6 +110,20 @@ def build_fixture(root, email, actor_slug=None, behind=True, dirty=False,
         dst = os.path.join(repo, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(os.path.join(SELF_REPO, rel), dst)
+
+    # The PR #555 install guard requires this fixture repo to carry the scripts
+    # its hooks block names, just as a real checkout does.
+    hooks_path = os.path.join(SELF_REPO, "ops", "config", "hooks.json")
+    with open(hooks_path, encoding="utf-8") as fh:
+        hooks_text = fh.read()
+    hook_scripts = set(re.findall(r'\{\{REPO\}\}/([^\s"\']+\.py)', hooks_text))
+    for rel in hook_scripts:
+        src = os.path.join(SELF_REPO, rel)
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f"hook script missing from checkout: {src}")
+        dst = os.path.join(repo, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
     write_exec(os.path.join(repo, "bin", "run-scheduled.sh"), "#!/bin/zsh\nexit 0\n")
     write_exec(os.path.join(repo, "tools", "dictation-rig", "bin", "consent-watch.sh"),
                "#!/bin/zsh\nexit 0\n")
