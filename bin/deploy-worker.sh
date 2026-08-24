@@ -22,10 +22,10 @@
 #   ship dirty mcp-server/ or dealroom/ trees (this repo
 #   regularly holds another live session's uncommitted work; see rule 308ef1de).
 #   COUNT CHECK catches the class — compare the verb count about to ship against
-#   the count recorded by the last successful deploy, and refuse on a DROP. A
-#   deliberate retirement is still allowed, it just has to say so out loud with
-#   --allow-shrink, which is the whole point: shrinking becomes a decision
-#   instead of an accident.
+#   the count recorded by the last successful deploy, and refuse on a DROP.
+#   The sole exception is an already-prepared typed `prior` recovery leg: its
+#   completed/read-back Production prior is what authorises the temporary drop,
+#   never a caller flag.
 #
 # The count is EXACT, not parsed: it imports the module and reads
 # Object.keys(TOOLS).length. A regex over the source undercounts (61 vs the real
@@ -35,7 +35,6 @@
 # Usage:
 #   bin/deploy-worker.sh              # preflight, deploy, postflight
 #   bin/deploy-worker.sh --check      # preflight only, ship nothing
-#   bin/deploy-worker.sh --allow-shrink   # deliberate verb retirement
 #   bin/deploy-worker.sh --release-sha <full-40-char-sha>
 #       # an approved immutable release when main moves after approval
 #   bin/deploy-worker.sh --upload-version
@@ -97,7 +96,6 @@ PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY="$(command -v python3 || true)"
 
 CHECK_ONLY=0
-ALLOW_SHRINK=0
 TARGET_ENV="production"
 PINNED_RELEASE=""
 VERSION_MODE="ordinary"
@@ -122,7 +120,6 @@ while [ "$#" -gt 0 ]; do
       TARGET_ENV="$2"
       shift
       ;;
-    --allow-shrink)  ALLOW_SHRINK=1 ;;
     --performance-budget-ref)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --performance-budget-ref needs a reference" >&2; exit 64; }
       PERFORMANCE_BUDGET_REF="$2"; shift ;;
@@ -344,15 +341,33 @@ case "$LEDGER_RC" in
   0)
     if [ -n "$PREVIOUS" ] && [ "$SHIPPING" -lt "$PREVIOUS" ]; then
       LOST=$((PREVIOUS - SHIPPING))
-      if [ "$ALLOW_SHRINK" = "0" ]; then
+      if [ "$RECOVERY_STEP" != "prior" ] || [ "$TARGET_ENV" != "staging" ]; then
         fail "this deploy would REMOVE $LOST verb(s) from $TARGET_ENV.
   last deployed: $PREVIOUS
   about to ship: $SHIPPING
 
-  If verbs were deliberately retired, say so: re-run with --allow-shrink.
-  If not, you are about to reproduce loop #276."
+  Source and standalone deploys cannot waive the verb-loss guard. Only the
+  exact prepared `prior` leg of a typed staging recovery may temporarily shrink."
       fi
-      echo "  !!  shrinking by $LOST verb(s), allowed explicitly via --allow-shrink"
+      [ -n "$STAGING_RECEIPT_KEY" ] \
+        || fail "typed recovery prior shrink needs a staging receipt idempotency key."
+      printf '%s\n' "$STAGING_RECEIPT_KEY" | grep -Eq \
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+        || fail "--staging-receipt-idempotency-key must be a lowercase canonical UUID."
+      # The existing sole writer validates the current candidate, distinct
+      # completed prior, shared service, exact prior SHA and Production
+      # readback BEFORE returning a tag.  This prepare is replayed later in
+      # the staging deploy path; it is not a caller-controlled override.
+      TYPED_PRIOR_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-attempt prepare \
+        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+        --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+        --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --recovery-step prior \
+        --git-sha "$HEAD_SHA" --correlation "$RECOVERY_ATTEMPT_ID" \
+        --field expected_provider_tag)" \
+        || fail "the typed recovery prior was not durably prepared; verb shrink is refused."
+      printf '%s\n' "$TYPED_PRIOR_TAG" | grep -Eq '^carr-staging-[0-9a-f]{32}$' \
+        || fail "the typed recovery prior returned no exact provider tag; verb shrink is refused."
+      echo "  !!  shrinking by $LOST verb(s), allowed only by the exact prepared recovery prior"
     else
       echo "  OK  no verb loss (last deployed to $TARGET_ENV: $PREVIOUS)"
     fi
@@ -747,6 +762,12 @@ else
     [ "$RECOVERY_STEP" != "restore_only" ] || ATTEMPT_CLAIM_FIELD="mutation_claimed"
     ATTEMPT_DEPLOY_CLAIMED="$(staging_attempt prepare --field "$ATTEMPT_CLAIM_FIELD")" \
       || fail "the prepared staging attempt claim state could not be read."
+    if [ "$RECOVERY_STEP" = "restore_only" ]; then
+      # The controller may record an `unknown` repair result only after this
+      # append-only attempt exists.  A preflight refusal has no repair row and
+      # must remain only the failed source-step evidence.
+      echo "  restore-only attempt prepared"
+    fi
 
     verify_staging_receipt_file() {
       receipt_file="$1"

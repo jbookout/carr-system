@@ -74,7 +74,7 @@ curl -s https://api.doctorcre.com/release
 match what that build carried. **A deploy returning success and a registry that
 answers are two different claims.**
 
-### 4. Expect the verb-loss guard, and expect it to be right
+### 4. The typed prior is the only recovery verb-shrink authority
 
 A rollback usually removes verbs the newer build added, so the preflight
 refuses:
@@ -86,14 +86,12 @@ REFUSED: this deploy would REMOVE 1 verb(s) from staging.
 ```
 
 That guard exists because production silently went from 75 verbs to 66 in the
-middle of a working session. A rollback is the legitimate case for overriding
-it, and the override is deliberate rather than automatic:
-
-```sh
-./bin/deploy-worker.sh --env staging --allow-shrink
-```
-
-Say out loud, in the incident record, which verbs are going away.
+middle of a working session. There is no `--allow-shrink` override. For the
+typed `prior` recovery leg only, the wrapper first prepares the exact
+candidate/prior attempt in the database; that writer proves the same service,
+the exact prior SHA, and the prior's completed Production readback before it
+permits the temporary reduction. Every standalone, current, restore-only, or
+mismatched-prior deploy remains refused.
 
 ## The rehearsal, and why it is required before approval
 
@@ -121,17 +119,14 @@ RECOVERY_ATTEMPT_ID=<one-new-uuid>
   --recovery-step current_before \
   --staging-receipt-idempotency-key <current-before-uuid>
 
-# From a clean worktree at <prior-sha>. Run the guard first without an override:
+# From a clean worktree at <prior-sha>. The wrapper can permit a lower count
+# only after it has prepared this exact typed prior against the completed prior:
 ./bin/deploy-worker.sh --env staging --release-sha <prior-sha> \
   --release-key <production-candidate-key> \
   --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
   --recovery-prior-release-key <completed-production-prior-key> \
   --recovery-step prior \
   --staging-receipt-idempotency-key <prior-uuid>
-
-# If and only if the refusal reports the exact verb loss expected from the
-# named prior release, repeat that same prior command with --allow-shrink.
-# An unexpected count is a stop condition, not permission to use the override.
 
 # Back in the clean <current-sha> worktree:
 ./bin/deploy-worker.sh --env staging --release-sha <current-sha> \
@@ -168,9 +163,9 @@ Run against staging while promoting the `export-email-domains` verb:
 | Rolled back to `8e761a0c` | `8e761a0c`, **139 verbs** |
 | Restored forward | `7c7e1bd1`, **140 verbs** |
 
-The verb-loss guard fired on the rollback exactly as documented above and was
-cleared with `--allow-shrink`. Both directions were confirmed from the Worker's
-own `/release` endpoint rather than from the deploy output.
+The typed prior path allowed the expected temporary verb reduction only after
+the database bound it to the completed prior. Both directions were confirmed
+from the Worker's own `/release` endpoint rather than from deploy output.
 
 ## Two things that will bite you
 

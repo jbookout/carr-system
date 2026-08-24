@@ -6,6 +6,7 @@ prove its ordering and recovery semantics without touching a live Worker.
 """
 import importlib.util
 import tempfile
+from typing import Any
 from pathlib import Path
 
 path = Path(__file__).with_name("staging-recovery-rehearsal.py")
@@ -29,7 +30,8 @@ def run_with(outcomes):
     def fake_execute(step, sha, args, attempt, idem):
         calls.append((step, sha, attempt, idem))
         return {"step": step, "sha": sha, "idempotency_key": idem,
-                "exit_code": next(iterator), "command": ["safe", step]}
+                "exit_code": next(iterator), "restore_prepared": step == "restore_only",
+                "command": ["safe", step]}
     def fake_record(args, attempt, idem):
         records.append((attempt, idem))
         return {"status": "unknown", "recorded": True, "record_exit_code": 0}
@@ -63,6 +65,11 @@ assert records[0][1] == calls[-1][3]
 # isolated recovery path; it never becomes a time-window exemption.
 rc, calls, records = run_with([0, 124, 0])
 assert rc == 1 and [row[0] for row in calls] == ["current_before", "prior", "restore_only"]
+
+# current_before is no exception: an invoked wrapper can time out after its
+# provider mutation, so its failure is recovered separately and never a bundle.
+rc, calls, records = run_with([124, 0])
+assert rc == 1 and [row[0] for row in calls] == ["current_before", "restore_only"]
 
 # current_after failure also gets the isolated repair and never appends a fourth
 # approval step; same correlation and a distinct idempotency key are preserved.
@@ -101,6 +108,26 @@ try:
 finally:
     mod.subprocess.run = old_run
 assert outcome["recorded"] and seen[0][0].endswith("tools/ops-record.py") and ";" not in " ".join(seen[0][1:])
+
+# A restore preflight failure has no prepared append-only row.  Do not invent an
+# unknown outcome for it; the failed source receipt remains the durable fact.
+old_execute = getattr(mod, "execute_step")
+old_record = getattr(mod, "record_restore_unknown")
+called: list[tuple[Any, ...]] = []
+def restore_not_prepared(step, sha, args, attempt, idem):
+    return {"step": step, "sha": sha, "idempotency_key": idem,
+            "exit_code": 1, "restore_prepared": False, "command": ["safe", step]}
+def should_not_record(*args):
+    called.append(args)
+    return {"recorded": True}
+setattr(mod, "execute_step", restore_not_prepared)
+setattr(mod, "record_restore_unknown", should_not_record)
+try:
+    assert mod.run(argv()) == 1
+finally:
+    setattr(mod, "execute_step", old_execute)
+    setattr(mod, "record_restore_unknown", old_record)
+assert not called
 
 # Exact-SHA worktrees are bare by design.  The controller may materialize only
 # its own validated ignored runtime dependencies, never edit the controller
