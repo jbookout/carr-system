@@ -456,6 +456,23 @@ def read(path):
         return None
 
 
+def hook_block_script_paths(block):
+    """Every absolute .py path a hooks block's commands invoke, real and sorted.
+
+    The extraction half shared by hook_scripts_untracked (which asks git about
+    the LIVE block) and cmd_install's missing-script refusal (which asks the
+    filesystem about the PLANNED block before writing it)."""
+    paths = set()
+    for groups in (block or {}).values():
+        if not isinstance(groups, list):
+            continue
+        for grp in groups:
+            for hook in (grp or {}).get("hooks", []) or []:
+                for tok in re.findall(r"(/[^\s'\"]+\.py)", hook.get("command", "") or ""):
+                    paths.add(os.path.realpath(concrete(tok)))
+    return sorted(paths)
+
+
 def hook_scripts_untracked():
     """Hook scripts that settings.json points at but git does not track.
 
@@ -482,16 +499,8 @@ def hook_scripts_untracked():
     block = live_hooks_block()
     if not block:
         return []
-    paths = set()
-    for groups in block.values():
-        if not isinstance(groups, list):
-            continue
-        for grp in groups:
-            for hook in (grp or {}).get("hooks", []) or []:
-                for tok in re.findall(r"(/[^\s'\"]+\.py)", hook.get("command", "") or ""):
-                    paths.add(os.path.realpath(concrete(tok)))
     out = []
-    for p in sorted(paths):
+    for p in hook_block_script_paths(block):
         if not os.path.exists(p):
             out.append((p, "settings.json invokes it and IT DOES NOT EXIST"))
             continue
@@ -875,6 +884,25 @@ def cmd_install(apply):
         return 1
 
     planned = json.loads(concrete(src))
+
+    # REFUSE A BLOCK WHOSE SCRIPTS ARE NOT THERE (added after 2026-08-24).
+    # Settings apply on the very next prompt of every session, so a hooks block
+    # invoking a script this machine does not have blocks EVERY session the
+    # moment it lands. That is not hypothetical: on 2026-08-24 install ran from
+    # a worktree that had the freshly merged hook wrapper while {{REPO}} still
+    # expanded to a canonical checkout one commit behind, and every session on
+    # this Mac was dead overnight. cmd_check's hook_scripts_untracked() sees
+    # this class only AFTER the write; install is the moment it is preventable.
+    absent = [p for p in hook_block_script_paths(planned) if not os.path.exists(p)]
+    if absent:
+        print("ERROR: the tracked hooks block invokes script(s) this machine does not have:")
+        for p in absent:
+            print(f"    {p}")
+        print("  Installing anyway would block every session at its next prompt.")
+        print("  Most likely the checkout those paths point into is behind the branch")
+        print("  that shipped them — fast-forward it, then re-run install.")
+        return 1
+
     if cfg.get("hooks") == planned:
         print("  hooks block already matches the repo")
     else:
