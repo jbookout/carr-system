@@ -230,6 +230,13 @@ def main() -> int:
           and "unexpected count is a stop condition" in rollback_runbook,
           "an unconditional --allow-shrink can hide an unrelated verb loss")
 
+    check("9. restore-only is a separate staging writer, not a fourth bundle step",
+          '"restore_only"' in source
+          and "staging-restore-only" in source
+          and "record_staging_restore_only_result" in RECORD.read_text(encoding="utf-8")
+          and "structurally outside the three\nreceipt tables" in rollback_runbook,
+          "a repair could be routed through current_after and forge a bundle leg")
+
     print()
     if FAILURES:
         print(f"deploy-release-wiring-selftest: {len(FAILURES)} FAILED")

@@ -325,6 +325,46 @@ def claim_staging_deployment_attempt(cur, idempotency_key: str) -> dict:
     return row[0]
 
 
+def prepare_staging_restore_only_attempt(cur, args) -> dict:
+    """Persist a recovery repair that is structurally outside bundle evidence."""
+    cur.execute(
+        """select ops.prepare_staging_restore_only_attempt(
+               %s::uuid,%s::uuid,%s,%s,%s::uuid,%s)
+        """,
+        (args.idempotency_key, args.correlation, args.release_key,
+         args.prior_release_key, args.recovery_attempt_id, args.git_sha))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("restore-only attempt writer returned no durable state")
+    return row[0]
+
+
+def claim_staging_restore_only_attempt(cur, idempotency_key: str) -> dict:
+    cur.execute("select ops.claim_staging_restore_only_attempt(%s::uuid)",
+                (idempotency_key,))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("restore-only attempt claim returned no durable state")
+    return row[0]
+
+
+def record_staging_restore_only_result(cur, args, projection: dict | None) -> dict:
+    """Write a bounded repair outcome; it can never create a recovery bundle."""
+    values = (None,) * 7 if projection is None else (
+        projection["provider_version_id"], projection["provider_tag"],
+        projection["verb_count"], projection["schema_highest_migration"],
+        projection["schema_applied_count"], projection["doctrine_generation"],
+        projection["program6_actions_enabled"])
+    cur.execute(
+        """select ops.record_staging_restore_only_result(
+               %s::uuid,%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s)
+        """, (args.idempotency_key, args.status, *values, args.reason))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("restore-only result writer returned no durable state")
+    return row[0]
+
+
 def credential_names() -> tuple[str, ...]:
     """Every environment variable this recorder will read a DSN from, in
     declaration order.
@@ -1652,6 +1692,62 @@ def cmd_staging_attempt(args) -> int:
     return 0
 
 
+def cmd_staging_restore_only(args) -> int:
+    """Operate the staging-only repair lane without exposing a bundle step."""
+    try:
+        args.idempotency_key = str(uuid.UUID(args.idempotency_key))
+        if args.action == "prepare":
+            if not args.release_key or not args.prior_release_key or not args.git_sha:
+                raise ValueError("restore-only prepare is missing exact release inputs")
+            args.recovery_attempt_id = str(uuid.UUID(args.recovery_attempt_id or ""))
+            args.correlation = correlation_of(args.correlation)
+            if args.correlation != args.recovery_attempt_id:
+                raise ValueError("restore-only correlation must equal recovery attempt")
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = prepare_staging_restore_only_attempt(cur, args)
+        elif args.action == "claim":
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = claim_staging_restore_only_attempt(cur, args.idempotency_key)
+        else:
+            projection = None
+            if args.status == "succeeded":
+                if not args.staging_readback_file or not args.expected_provider_tag \
+                        or not args.expected_program6_actions:
+                    raise ValueError("restore-only success requires typed staging readback")
+                projection = staging_readback_projection(
+                    args.staging_readback_file, args.git_sha, args.expected_provider_tag,
+                    args.expected_program6_actions)
+                if args.reason:
+                    raise ValueError("restore-only success cannot carry a reason")
+            elif not args.reason:
+                raise ValueError("restore-only non-success requires a bounded reason")
+            elif args.staging_readback_file or args.expected_provider_tag \
+                    or args.expected_program6_actions:
+                raise ValueError("restore-only non-success cannot carry readback fields")
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = record_staging_restore_only_result(cur, args, projection)
+    except (ValueError, RuntimeError) as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print("ops-record: could not persist restore-only outcome: "
+              f"{str(exc).splitlines()[0][:240]}", file=sys.stderr)
+        return 1
+    if args.field:
+        value = result.get(args.field)
+        if value is None:
+            print("")
+        elif isinstance(value, bool):
+            print("true" if value else "false")
+        else:
+            print(value)
+    else:
+        print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def cmd_staging_readback_verify(args) -> int:
     try:
         projection = staging_readback_projection(args.file, args.git_sha,
@@ -2480,6 +2576,24 @@ def main() -> int:
                                          "deploy_allowed", "expected_provider_tag",
                                          "provider_version_id", "receipt_ref"])
 
+    sro = sub.add_parser("staging-restore-only",
+                         help="record a staging-only safety restore outside approval-bundle evidence")
+    sro.add_argument("action", choices=["prepare", "claim", "result"])
+    sro.add_argument("--idempotency-key", required=True)
+    sro.add_argument("--release-key")
+    sro.add_argument("--prior-release-key")
+    sro.add_argument("--recovery-attempt-id")
+    sro.add_argument("--git-sha")
+    sro.add_argument("--correlation")
+    sro.add_argument("--status", choices=["succeeded", "failed", "unknown"])
+    sro.add_argument("--reason")
+    sro.add_argument("--staging-readback-file")
+    sro.add_argument("--expected-provider-tag")
+    sro.add_argument("--expected-program6-actions", choices=["enabled", "disabled"])
+    sro.add_argument("--field", choices=["restore_attempt_id", "state", "mutation_claimed",
+                                            "mutation_allowed", "expected_provider_tag", "result_ref",
+                                            "status"])
+
     srv = sub.add_parser("staging-readback-verify",
                          help="verify one bounded staging /release file without writing")
     srv.add_argument("--file", required=True)
@@ -2530,6 +2644,7 @@ def main() -> int:
         "health": cmd_health,
         "staging-target": cmd_staging_target,
         "staging-attempt": cmd_staging_attempt,
+        "staging-restore-only": cmd_staging_restore_only,
         "staging-readback-verify": cmd_staging_readback_verify,
         "staging-provider-version": cmd_staging_provider_version,
         "assess": cmd_assess,

@@ -148,6 +148,16 @@ receipt. The final `current_after` step creates the recovery bundle and its
 receipt and do not create or approve separate staging releases for these three
 steps; either would describe a different, unbound procedure.
 
+### If a staging leg fails after it may have changed staging
+
+Do not repeat `current_after`. The recovery controller invokes the wrapper with
+the internal `restore_only` safety step, bound to the same candidate, prior,
+rollback plan, migration set, and recovery attempt. Its result is audited as
+`succeeded`, `failed`, or `unknown`, but it is structurally outside the three
+receipt tables and can never complete, repair, promote, or approve a recovery
+bundle. A repaired partial run remains ineligible; start a new three-step
+rehearsal after diagnosing the original failure.
+
 ## Verified execution, 2026-08-19
 
 Run against staging while promoting the `export-email-domains` verb:

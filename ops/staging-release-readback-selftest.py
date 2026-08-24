@@ -253,6 +253,15 @@ class Cursor:
                           "expected_provider_tag": tag, "replayed": False},)
         elif "ops.claim_staging_deployment_attempt" in compact:
             self._row = ({"deploy_allowed": True, "replayed": False},)
+        elif "ops.prepare_staging_restore_only_attempt" in compact:
+            self._row = ({"restore_attempt_id": str(uuid.uuid4()), "state": "prepared",
+                          "expected_provider_tag": tag, "replayed": False},)
+        elif "ops.claim_staging_restore_only_attempt" in compact:
+            self._row = ({"mutation_allowed": True, "replayed": False},)
+        elif "ops.record_staging_restore_only_result" in compact:
+            self._row = ({"status": "succeeded",
+                          "result_ref": "ops.staging-restore-only:" + "d" * 64,
+                          "replayed": False},)
 
     def fetchone(self):
         return self._row
@@ -283,6 +292,22 @@ assert "ops.prepare_staging_deployment_attempt" in cur.calls[-1][0]
 claimed = mod.claim_staging_deployment_attempt(cur, args.idempotency_key)
 assert claimed["deploy_allowed"] is True
 assert "ops.claim_staging_deployment_attempt" in cur.calls[-1][0]
+
+restore_args = types.SimpleNamespace(
+    release_key="p5-candidate", prior_release_key="p5-prior",
+    recovery_attempt_id=str(uuid.uuid4()), idempotency_key=str(uuid.uuid4()),
+    correlation=None, git_sha=sha, status="succeeded", reason=None,
+)
+restore_args.correlation = restore_args.recovery_attempt_id
+prepared = mod.prepare_staging_restore_only_attempt(cur, restore_args)
+assert prepared["state"] == "prepared"
+assert "ops.prepare_staging_restore_only_attempt" in cur.calls[-1][0]
+claimed = mod.claim_staging_restore_only_attempt(cur, restore_args.idempotency_key)
+assert claimed["mutation_allowed"] is True
+assert "ops.claim_staging_restore_only_attempt" in cur.calls[-1][0]
+result = mod.record_staging_restore_only_result(cur, restore_args, projection)
+assert result["status"] == "succeeded"
+assert "ops.record_staging_restore_only_result" in cur.calls[-1][0]
 
 
 migration = (ROOT / "migrations" / "0202_staging_release_readback_receipt.sql").read_text()
@@ -323,6 +348,23 @@ for forbidden in (
 ):
     assert forbidden not in migration, forbidden
 
+restore_migration = (ROOT / "migrations" / "0295_staging_restore_only_recovery.sql").read_text()
+for marker in (
+    "create table ops.staging_restore_only_attempt",
+    "create table ops.staging_restore_only_claim",
+    "create table ops.staging_restore_only_result",
+    "status in ('succeeded','failed','unknown')",
+    "ops.prepare_staging_restore_only_attempt",
+    "ops.claim_staging_restore_only_attempt",
+    "ops.record_staging_restore_only_result",
+    "target_provider_version_id",
+    "rollback_plan_ref",
+    "declared_migration_set_sha256",
+    "staging_restore_only_result_append_only",
+):
+    assert marker in restore_migration, marker
+assert "staging_recovery_rehearsal_bundle" not in restore_migration
+
 completion_grant = (ROOT / "migrations" / "0215_program5_completion_hash_grant.sql").read_text()
 assert "grant execute on function ops.program5_migration_set_sha256(text[]) to carr_jobs" in completion_grant
 for role in ("public", "carr_reader", "carr_writer", "carr_authority"):
@@ -340,7 +382,8 @@ for marker in (
     "--expected-provider-tag \"$DEPLOY_TAG\"",
     "--release-key \"$RELEASE_KEY\"",
     "--recovery-attempt-id",
-    "current_before|prior|current_after",
+    "current_before|prior|current_after|restore_only",
+    "staging-restore-only",
     "staging_attempt prepare",
     "staging_attempt claim",
     "deployment already claimed but its exact tag is not serving; refusing redeploy",
