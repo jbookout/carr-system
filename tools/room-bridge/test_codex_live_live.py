@@ -75,7 +75,10 @@ def main() -> int:
             return 1
         print(f"  bound (pid {proc.pid})")
 
-        reg.register("cx-live-test", "codex-live", socket=str(sock), cwd=str(RUN_DIR))
+        reg.register(
+            "cx-live-test", "codex-live", socket=str(sock), cwd=str(RUN_DIR),
+            model="gpt-5.1-codex-mini", effort="medium",
+        )
 
         first = dispatch.dispatch(
             "cx-live-test",
