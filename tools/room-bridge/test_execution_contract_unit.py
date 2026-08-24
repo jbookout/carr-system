@@ -20,6 +20,7 @@ import bridge  # noqa: E402
 import evaluation_kernel  # noqa: E402
 import evaluation_rubrics  # noqa: E402
 import spatial_surface  # noqa: E402
+import admission  # noqa: E402
 
 
 FIXTURES = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric"
@@ -82,6 +83,17 @@ def client_identity_and_capability_selection_is_refused():
     ):
         request = {**safe, field: "client-chosen"}
         expect_refusal(lambda request=request: contract.validate_client_job_request(request), field)
+
+
+def server_admission_derives_envelope_from_closed_canonical_records():
+    source = envelope()
+    record = {"envelope_id": source["envelope_id"], "issued_at": source["issued_at"], "expires_at": source["expires_at"],
+              "work_request": {"work_request_id": source["work_request_id"], **source["state_binding"] | {"accepted_resource_revisions": source["state_binding"]["accepted_resource_revisions"]}},
+              "plan_revision": source["plan_revision"], "agent_session": source["agent_session"], "request": source["request"], "server_binding": source["server_binding"], "handoff": source["handoff"], "phase_binding": source["phase_binding"], "evaluation_context": source["evaluation_context"]}
+    record["work_request"].pop("compare_and_swap_required")
+    assert admission.admit_execution_envelope(record) == source
+    record["server_binding"]["authority"]["client_mutable"] = True
+    expect_refusal(lambda: admission.admit_execution_envelope(record), "server-derived")
 
 
 def digest_is_canonical_and_deterministic():
@@ -464,6 +476,7 @@ if __name__ == "__main__":
         ("schemas are versioned and fail closed", schemas_are_versioned_and_fail_closed),
         ("unknown fields fail closed", unknown_fields_fail_closed),
         ("client identity/capability selection is refused", client_identity_and_capability_selection_is_refused),
+        ("server admission derives only from canonical records", server_admission_derives_envelope_from_closed_canonical_records),
         ("canonical digest is deterministic", digest_is_canonical_and_deterministic),
         ("receipt for another envelope is refused", different_envelope_receipt_is_refused),
         ("handoff replacement cannot inherit capability", replacement_cannot_inherit_capability),
