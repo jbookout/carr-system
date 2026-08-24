@@ -461,84 +461,227 @@ check_secret() {
   fi
 }
 
-# THE LOCAL PRE-PUSH FLOOR, added 2026-08-23 by the gates-audit council.
+# THE LOCAL PRE-PUSH FLOOR — gates-audit council 2026-08-23, amended by the
+# ci-failures council 2026-08-24.
 #
-# WHAT CHANGED AND WHY IT IS A COST TRADE, NOT A DEFECT FINDING. Until today
-# ops/githooks/pre-push ran the WHOLE ten-class suite locally on every push:
-# minutes of this Mac's wall-clock, paid by every one of the ~11 implementation
-# sessions running in parallel, and paid again by hosted CI afterwards. That was
-# correct when it was written. Before GitHub Pro (2026-08-14) a red hosted run
-# could not BLOCK anything, so the local hook WAS the merge envelope. Pro closed
-# that gap: `ops/ci.sh --strict` on GitHub is now the required status check on
-# main and nothing merges red. The full local run became leftover
-# defence-in-depth, and the council's second chair was explicit that retiring it
-# is a cost decision after Pro -- not a claim that the old design was broken.
+# WHY IT IS LESS THAN THE WHOLE SUITE. ops/githooks/pre-push used to run all ten
+# classes on every push: minutes on one contended Mac, paid by each of the ~20
+# sessions pushing from it, and paid again by hosted CI. That was correct when
+# written on 2026-08-13, and the reason is in that file — the repo was private on
+# a free plan, a red hosted run could not BLOCK anything, so the hook WAS the
+# merge envelope. GitHub Pro closed that gap on 2026-08-14: `ops/ci.sh --strict`
+# is the required check on main and nothing merges red. The full local run became
+# defence-in-depth paid for in the scarcest resource here.
 #
-# So the full strict suite stays exactly where it is, hosted, and this class is
-# what remains local: the defects whose cheapest moment to catch is BEFORE the
-# push leaves, and which cost seconds rather than minutes to look for.
+# WHY IT IS MORE THAN "OWNER AND SECRETS", which is the amendment and it came
+# from this branch's own failure. The first hosted run of the pull request that
+# REMOVED the local suite went red on types and gates — exactly the two classes
+# the local suite would have caught in seconds. The ci-failures council took that
+# as its exhibit and ruled: ship the fast subset only with a diff-scoped floor
+# that PREDICTS the classes that actually go red. Pure fast-push optimises the
+# 82% of pushes that were green anyway and inflates the 18% that were not.
 #
-# THE FLOOR IS DELIBERATELY SHORT and every member earns its place by the same
-# test -- it is cheap, it reads repository content only (no database, no
-# network, no machine state), and catching it after the push would cost more
-# than catching it here:
+# So this class is a PREDICTOR, not a duplicate suite. It runs what the diff
+# implicates and nothing else:
 #
-#   * gate-integrity --strict: a gate edited without its baseline re-bless.
-#     Catching this hosted means every session that pulls meanwhile boots under
-#     a GATE INTEGRITY FAILURE banner it can do nothing about (2026-08-12, and
-#     again 2026-08-14).
-#   * path shape on the pushed paths: rule 0e22e34a can only be enforced without
-#     rewriting history before the path is published.
-#   * hook-env isolation: this class is invoked BY pre-push, so the statement
-#     that strips GIT_DIR before CI runs is part of the machinery protecting the
-#     tree right now. It destroyed local main on 2026-08-14 when it was absent.
-#   * selftest git isolation, when present: the same argument, for the suite.
+#   typed Python touched      -> mypy, CI's own binary and config, on the
+#                                changed files
+#   a gate surface touched    -> the gate-impact closure: each touched gate's
+#                                paired selftest, the enforcement-coverage
+#                                check, the baseline co-change check, and the
+#                                mechanism-doctrine check when the diff adds a
+#                                mechanism
+#   impact not classifiable   -> fall back to the FULL gates class locally.
+#                                Codex's chair asked for this explicitly and the
+#                                direction is deliberate: an unclassifiable gate
+#                                change is the case where guessing is worst, so
+#                                it buys the 222 seconds rather than assume.
+#   always                    -> baseline integrity, path shape, isolation
 #
-# NOT HERE, on purpose: unit, types, contract, migration, dependency, binding,
-# artifact, freshness, and the 252-suite gates class. Every one of them is a
-# real check and every one of them still runs -- hosted, strict, as the gate on
-# the merge. What they are not is worth minutes of a contended laptop on a push
-# that has not been reviewed yet.
+# NOT HERE, on purpose: unit, contract, dependency, binding, artifact, and the
+# 252-suite gates web. Zero first-try failures between them across the council's
+# classified 30-run window. They all still run hosted, strict, as the gate on
+# the merge. That is the wall-clock win and it is the whole point.
+#
+# EVERY FAILURE NAMES THE MOVE. Also the council's, and it is why each branch
+# below prints a remedy rather than only a verdict: a red that says "gates
+# failed" and stops has handed the reader a search, not an answer.
 check_pushfloor() {
-  local failures=""
+  local failures="" ran=""
+  local _floor_t0; _floor_t0="$(date +%s)"
 
+  # The diff this push actually carries. Without a range there is nothing to
+  # scope to, so the predictors stay silent rather than inventing a whole-repo
+  # verdict — the always-on checks below still run.
+  local changed=""
+  if [ -n "${CARR_CI_RANGE:-}" ]; then
+    changed="$(git diff --name-only --diff-filter=ACMR "$CARR_CI_RANGE" 2>/dev/null || true)"
+  fi
+
+  floor_fail() {  # floor_fail <name> <remedy>
+    failures="$failures $1"
+    printf '        \033[31m%s\033[0m — %s\n' "$1" "$2" >&2
+  }
+
+  # ── always: the checks whose failure is far more expensive to find later ──
   run_quiet "$LOGDIR/pushfloor-gate-integrity.log" \
     "$PY" hooks/gate-integrity.py --strict \
-    || { failures="$failures gate-integrity"
-         tail -12 "$LOGDIR/pushfloor-gate-integrity.log" >&2; }
+    || { tail -12 "$LOGDIR/pushfloor-gate-integrity.log" >&2
+         floor_fail gate-integrity \
+           "a gate moved without its baseline. Re-bless what you changed and stage it in the SAME commit: python3 hooks/gate-integrity.py --bless <gate> && git add ops/config/gate-baseline.json"; }
 
-  # PATH SHAPE, on the paths this push actually adds. The pre-commit hook checks
-  # the index and this checks the range, but both call the SAME script with the
-  # same rule table -- --paths is the seam it already exposed for its selftest.
-  # Without a range there is nothing new to judge, so this is silent rather than
-  # inventing a whole-repo verdict the rule was never written for (it exempts
-  # established and historical paths by design).
-  if [ -n "${CARR_CI_RANGE:-}" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
+  if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
     local added
-    added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null)"
+    added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"
     if [ -n "$added" ]; then
-      # shellcheck disable=SC2086  # word splitting is the argument list
+      # shellcheck disable=SC2086
       run_quiet "$LOGDIR/pushfloor-path-hygiene.log" \
         "$PY" ops/githooks/path-hygiene-check.py --paths $added \
-        || { failures="$failures path-hygiene"
-             tail -12 "$LOGDIR/pushfloor-path-hygiene.log" >&2; }
+        || { tail -12 "$LOGDIR/pushfloor-path-hygiene.log" >&2
+             floor_fail path-hygiene \
+               "rename the path before it is published — depth or draft/final naming (rule 0e22e34a). After the push it needs a history rewrite."; }
     fi
   fi
 
-  # The isolation checks, each skipped rather than failed when absent, so this
-  # class behaves the same on a branch cut before they existed.
-  local iso
-  for iso in ops/hook-env-isolation-selftest.py ops/selftest-git-isolation-check.py; do
-    [ -f "$iso" ] || continue
-    local ibase; ibase="$(basename "$iso")"
-    run_quiet "$LOGDIR/pushfloor-$ibase.log" "$PY" "$iso" \
-      || { failures="$failures $ibase"; tail -12 "$LOGDIR/pushfloor-$ibase.log" >&2; }
-  done
+  # ── predictor: typed Python ──────────────────────────────────────────────
+  # CI's `types` class is `mypy pipelines tools exporters lib generators shared
+  # fill-engine bin hooks ops` under the repo's mypy.ini. This is the SAME binary
+  # and the same config, narrowed to the changed files, so a rule cannot hold in
+  # one place and not the other (rule a8c55a47).
+  #
+  # HONEST LIMIT, and the council said so too (codex: "medium on whether
+  # changed-file mypy alone is sufficient"): a change that breaks a caller it
+  # does not itself touch is invisible here and dies hosted instead. This is a
+  # predictor, not the class.
+  local changed_py=""
+  if [ -n "$changed" ]; then
+    changed_py="$(printf '%s\n' "$changed" | grep -E '\.py$' || true)"
+  fi
+  if [ -n "$changed_py" ]; then
+    local existing_py=""
+    local f
+    for f in $changed_py; do
+      [ -f "$f" ] && existing_py="$existing_py $f"
+    done
+    if [ -n "$existing_py" ]; then
+      local MYPY="$REPO/.venv/bin/mypy"
+      [ -x "$MYPY" ] || MYPY="$(command -v mypy 2>/dev/null || true)"
+      if [ -n "$MYPY" ] && [ -x "$MYPY" ]; then
+        ran="$ran types"
+        # shellcheck disable=SC2086
+        run_quiet "$LOGDIR/pushfloor-types.log" "$MYPY" $existing_py \
+          || { tail -20 "$LOGDIR/pushfloor-types.log" >&2
+               floor_fail types \
+                 "mypy on the files this push changes. Fix them, or iterate with: .venv/bin/mypy$existing_py"; }
+      else
+        printf '        \033[33mnot run\033[0m  types — mypy absent; the hosted types class still covers this\n' >&2
+      fi
+    fi
+  fi
 
+  # ── predictor: the gate-impact closure ───────────────────────────────────
+  local gate_surface=""
+  if [ -n "$changed" ]; then
+    gate_surface="$(printf '%s\n' "$changed" | grep -E '^(hooks/[^/]+\.py|ops/ci\.sh|ops/githooks/|ops/config/(gate-baseline|rule-enforcement-map|delegation-gate-hook|codex-hooks|model-floors)\.json|ops/[^/]+-selftest\.py)' || true)"
+  fi
+  if [ -n "$gate_surface" ]; then
+    ran="$ran gate-closure"
+    local unclassified="" touched_gate base paired
+
+    # Each touched gate's PAIRED selftest. A gate with no pair is the
+    # unclassifiable case: we cannot predict its blast radius, so we stop
+    # guessing and buy the full class below.
+    for touched_gate in $(printf '%s\n' "$gate_surface" | grep -E '^hooks/[^/]+\.py$' | grep -v -- '-selftest\.py$' || true); do
+      base="$(basename "$touched_gate" .py)"
+      paired="ops/$base-selftest.py"
+      if [ -f "$paired" ]; then
+        run_quiet "$LOGDIR/pushfloor-$base-selftest.log" "$PY" "$paired" \
+          || { tail -15 "$LOGDIR/pushfloor-$base-selftest.log" >&2
+               floor_fail "$base-selftest" \
+                 "the gate you changed fails its own acceptance test: .venv/bin/python $paired"; }
+      else
+        unclassified="$unclassified $base"
+      fi
+    done
+
+    # A touched selftest runs itself, whatever it is paired to.
+    for paired in $(printf '%s\n' "$gate_surface" | grep -E '^ops/[^/]+-selftest\.py$' || true); do
+      [ -f "$paired" ] || continue
+      run_quiet "$LOGDIR/pushfloor-$(basename "$paired").log" "$PY" "$paired" \
+        || { tail -15 "$LOGDIR/pushfloor-$(basename "$paired").log" >&2
+             floor_fail "$(basename "$paired")" "run it alone: .venv/bin/python $paired"; }
+    done
+
+    # The isolation checks are part of the CLOSURE, not the always-on set. They
+    # answer "can a selftest reach the real repository" and "does pre-push still
+    # strip the git environment before it runs CI" — both of which can only have
+    # changed if this push touched a hook, a selftest or ci.sh, which is exactly
+    # the condition guarding this block. Running them on a push that edits a
+    # markdown file was 4 seconds of asking a question whose answer could not
+    # have moved.
+    local iso ibase
+    for iso in ops/hook-env-isolation-selftest.py ops/selftest-git-isolation-check.py; do
+      [ -f "$iso" ] || continue
+      ibase="$(basename "$iso")"
+      run_quiet "$LOGDIR/pushfloor-$ibase.log" "$PY" "$iso" \
+        || { tail -12 "$LOGDIR/pushfloor-$ibase.log" >&2
+             floor_fail "$ibase" "run it alone to iterate: .venv/bin/python $iso"; }
+    done
+
+    if [ -f ops/enforcement-coverage-check.py ]; then
+      run_quiet "$LOGDIR/pushfloor-enforcement-coverage.log" \
+        "$PY" ops/enforcement-coverage-check.py \
+        || { tail -15 "$LOGDIR/pushfloor-enforcement-coverage.log" >&2
+             floor_fail enforcement-coverage \
+               "a blessed gate is named by no control. Add it to the enforcement map, or record it in ops/config/enforcement-coverage-backlog.json with a reason."; }
+    fi
+
+    # The mechanism-doctrine check reads the change against origin/main, so it
+    # is a no-op on a branch that adds no gate, hook, launchd job or scheduled
+    # task — which is nearly every branch.
+    if [ -f ops/mechanism-doctrine-gate.py ]; then
+      run_quiet "$LOGDIR/pushfloor-mechanism-doctrine.log" \
+        "$PY" ops/mechanism-doctrine-gate.py \
+        || { tail -15 "$LOGDIR/pushfloor-mechanism-doctrine.log" >&2
+             floor_fail mechanism-doctrine \
+               "a new mechanism must name the doctrine section explaining it (open loop 504 — knowledge ships with the mechanism)."; }
+    fi
+
+    # ...but never when the full gates class is ALREADY going to run in this
+    # invocation. Hosted CI runs every class, so the fallback there would simply
+    # run the 252 suites twice. It is a substitute for the class, not a second
+    # copy of it.
+    if [ -n "$unclassified" ] && [ -n "$ONLY" ] && ! selected gates; then
+      # THE DELIBERATE EXPENSE. Codex's chair asked for this by name: when the
+      # gate impact cannot be classified, fall back to the full gates class
+      # locally rather than assume it is fine. It costs ~222s and it fires only
+      # on a gate with no paired selftest, which is itself worth fixing.
+      printf '        \033[33mfull gates\033[0m — no paired selftest for:%s — running the whole class rather than guessing\n' \
+        "$unclassified" >&2
+      ran="$ran full-gates-fallback"
+      check_gates
+      if [ -n "$FAILED_CLASSES" ]; then
+        case " $FAILED_CLASSES " in
+          *" gates "*) floor_fail gates-fallback \
+            "give each gate a paired ops/<gate>-selftest.py so this push does not have to run all 252 suites." ;;
+        esac
+      fi
+    fi
+  fi
+
+  # THE FLOOR'S OWN WALL-CLOCK, printed every run. The council's kill metric for
+  # this design is not an opinion about speed — it is the rate at which sessions
+  # start passing --no-verify, and that rises when the floor gets slow. A number
+  # nobody can see cannot be the thing a ruling turns on, so it is stated here
+  # and the class summary carries it.
+  local _floor_secs=$(( $(date +%s) - _floor_t0 ))
   if [ -n "$failures" ]; then
-    bad pushfloor "failed:$failures"
+    bad pushfloor "failed:$failures (${_floor_secs}s)"
   else
-    ok pushfloor "baseline blessed, path shape, hook-env isolation"
+    # The summary names what actually RAN, not a fixed list. It said "baseline,
+    # path shape, isolation" even after isolation moved into the diff-scoped
+    # closure, which is a green line describing work that did not happen.
+    ok pushfloor "${_floor_secs}s · baseline, path shape${ran:+ +}${ran}"
   fi
 }
 

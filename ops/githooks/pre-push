@@ -158,7 +158,22 @@ if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
       if [ -n "$r_sha" ] && [ "$r_sha" != "$ZERO" ]; then
         CARR_CI_RANGE="$r_sha..$l_sha"
       elif git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-        CARR_CI_RANGE="origin/main..$l_sha"     # a new branch
+        # A NEW BRANCH, and the base must be the MERGE BASE, not origin/main
+        # itself. `git diff origin/main..HEAD` is a two-dot diff: it reports the
+        # difference between two trees, so every commit main gained while this
+        # branch was in flight shows up as a change this push is making — in
+        # reverse. Measured on this branch: seventeen paths, of which five were
+        # other sessions' work on main (a gate, two mcp-server files, a selftest,
+        # the gate baseline). The floor would then typecheck files this push does
+        # not touch and run another session's selftest as though it were ours.
+        # Pinning the base to the merge base makes two-dot mean what three-dot
+        # means, and keeps every consumer of CARR_CI_RANGE simple.
+        _base="$(git merge-base origin/main "$l_sha" 2>/dev/null)"
+        if [ -n "$_base" ]; then
+          CARR_CI_RANGE="$_base..$l_sha"
+        else
+          CARR_CI_RANGE=""
+        fi
       else
         CARR_CI_RANGE=""
       fi
@@ -171,10 +186,33 @@ EOF
     [ "$RANGE_COUNT" -gt 1 ] && CARR_CI_RANGE=""
     export CARR_CI_RANGE
 
+    # WHICH CLASSES THE FLOOR RUNS, decided from the diff (ci-failures council,
+    # 2026-08-24). pushfloor carries the diff-scoped predictors; the three named
+    # here are whole classes cheap enough to keep local.
+    #
+    #   secret     — NOT a red-predictor, and kept anyway. The council's table
+    #                drops it because it has never failed hosted, which is a
+    #                frequency argument; this control exists so a credential does
+    #                not reach the remote, and "it has not happened yet" is the
+    #                weakest possible reason to remove that. The gates council
+    #                before it ruled the opposite way and in as many words —
+    #                keep owner, no-main and secrets local no matter what. Range-
+    #                scoped it costs about a second. Kept.
+    #   freshness  — the council asked for it by name; it is 0s hosted and it
+    #                catches a generated file being overwritten from a stale base.
+    #   migration  — ONLY when the diff touches migrations/. The class is 33s
+    #                hosted and needs a throwaway Postgres, so it SKIPs on a
+    #                laptop; adding it unconditionally would buy a skip line.
+    FLOOR_CLASSES="pushfloor,secret,freshness"
+    if [ -n "$CARR_CI_RANGE" ] \
+        && git diff --name-only "$CARR_CI_RANGE" 2>/dev/null | grep -q '^migrations/'; then
+      FLOOR_CLASSES="$FLOOR_CLASSES,migration"
+    fi
+
     if [ -n "$CARR_CI_RANGE" ]; then
-      echo "  pre-push: checking $CARR_CI_RANGE (local floor; full strict suite runs hosted)…" >&2
+      echo "  pre-push: checking $CARR_CI_RANGE — $FLOOR_CLASSES (full strict suite runs hosted)…" >&2
     else
-      echo "  pre-push: running the local floor (full strict suite runs hosted)…" >&2
+      echo "  pre-push: running $FLOOR_CLASSES (full strict suite runs hosted)…" >&2
     fi
     # STRIP THE HOOK'S GIT ENVIRONMENT BEFORE RUNNING CI, and this is not hygiene —
     # it is the fix for a bug that destroyed local main on 2026-08-14.
@@ -231,7 +269,7 @@ EOF
           -u GIT_COMMON_DIR -u GIT_NAMESPACE -u GIT_CEILING_DIRECTORIES \
           -u GIT_WORK_TREE_OVERRIDE -u GIT_CONFIG -u GIT_CONFIG_GLOBAL \
           -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_COUNT \
-          sh -c 'exec "$0" --only pushfloor,secret' "$REPO_ROOT/ops/ci.sh"
+          sh -c 'exec "$0" --only "$1"' "$REPO_ROOT/ops/ci.sh" "$FLOOR_CLASSES"
       echo $? > "$CI_RC_FILE"
     } 2>&1 | tee "$CI_LOG" >&2
     CI_RC="$(cat "$CI_RC_FILE" 2>/dev/null || echo 1)"
@@ -247,9 +285,12 @@ EOF
       ops/ci.sh --only <class>
       ops/ci.sh --list
 
-  This is the LOCAL FLOOR only — the full strict suite runs hosted and
-  is the gate on the merge. A failure here is one of the few things
-  cheaper to fix before the push than after it.
+  This is the LOCAL FLOOR — the classes the diff implicates, scoped to
+  what this push changes. The full strict suite runs hosted and is the
+  gate on the merge. The floor exists because the classes that actually
+  go red (types, gates) are the ones cheapest to catch right here.
+
+  Each failing check above names its own remedy.
 
   Fix it, or say out loud that you are pushing anyway:
 

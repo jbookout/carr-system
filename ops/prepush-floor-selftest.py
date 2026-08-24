@@ -162,6 +162,39 @@ def main():
         check("the range ends at the commit being pushed",
               head[:12] in calls, calls)
 
+        # 3b. THE CLASS LIST IS THE FLOOR THE COUNCIL RULED, and `freshness` is
+        #     part of it. Asserted on the recorded argv rather than by reading
+        #     the hook, so a change to the list has to change this line too.
+        check("the floor runs the ruled classes",
+              "args:--only pushfloor,secret,freshness" in calls, calls)
+        check("the floor does NOT run the full suite",
+              "args:--only\n" not in calls and "gates" not in calls, calls)
+
+        # 3c. MIGRATION IS CONDITIONAL. The class needs a throwaway Postgres and
+        #     SKIPs on a laptop, so running it on every push buys a skip line;
+        #     running it when the diff touches migrations/ buys the check.
+        (repo / "migrations").mkdir(exist_ok=True)
+        (repo / "migrations" / "0001_probe.sql").write_text("-- probe\n")
+        git(repo, "add", "migrations/0001_probe.sql", check_rc=True)
+        git(repo, "commit", "-qm", "a migration", check_rc=True)
+        log.write_text("")
+        push(repo, "feature-migration", rc="0", log=log)
+        check("a diff touching migrations/ adds the migration class",
+              "migration" in log.read_text(), log.read_text())
+
+        # The negative case must be an INCREMENTAL push of the same branch. A
+        # fresh branch's range runs back to the merge base, so it still carries
+        # the migration commit above — and adding the class there is correct,
+        # because that push really does ship a migration. Pushing again after a
+        # non-migration commit is the case that must not add it.
+        (repo / "plain.txt").write_text("no migration here\n")
+        git(repo, "add", "plain.txt", check_rc=True)
+        git(repo, "commit", "-qm", "no migration", check_rc=True)
+        log.write_text("")
+        push(repo, "feature-migration", rc="0", log=log)
+        check("a diff with no migration does NOT add the migration class",
+              "migration" not in log.read_text(), log.read_text())
+
         # 4. A SECOND PUSH of the same branch uses remote..local, not the whole
         #    branch: the incremental case is the common one.
         (repo / "c.txt").write_text("c\n")
@@ -184,6 +217,45 @@ def main():
               r.returncode != 0, f"exit {r.returncode}")
         check("the owner refusal is the one that fired",
               "PUSH TO main REFUSED" in (r.stdout + r.stderr))
+
+        # 5b. THE NEW-BRANCH BASE IS THE MERGE BASE, NOT origin/main.
+        #     `git diff origin/main..HEAD` is a TWO-DOT diff: it compares two
+        #     trees, so every commit main gained while the branch was in flight
+        #     reads as a change this push is making, in reverse. Measured on the
+        #     real branch that introduced this floor: seventeen paths, five of
+        #     them other sessions' work on main. The floor would then typecheck
+        #     files the push does not touch and run another session's selftest as
+        #     if it were ours.
+        #
+        #     The assertion is that the range's BASE is an ancestor of the commit
+        #     being pushed. With the bug it is not, because main moved sideways.
+        git(repo, "checkout", "-q", "main", check_rc=True)
+        (repo / "main-moved.txt").write_text("main advanced meanwhile\n")
+        git(repo, "add", "main-moved.txt", check_rc=True)
+        git(repo, "commit", "-qm", "main moves on", check_rc=True)
+        seed_env = dict(fixture_env())
+        seed_env.update(CARR_ALLOW_MAIN_PUSH="1", STUB_CI_RC="0",
+                        CI_CALL_LOG="/dev/null")
+        git(repo, "push", "-q", "origin", "main", env=seed_env, check_rc=True)
+        # The fixture pushes with HEAD:refs/heads/<name>, so no LOCAL branch of
+        # that name exists; branch from the pushed commit itself.
+        git(repo, "checkout", "-q", "-b", "feature-diverged",
+            "origin/feature-b", check_rc=True)
+        (repo / "mine.txt").write_text("only mine\n")
+        git(repo, "add", "mine.txt", check_rc=True)
+        git(repo, "commit", "-qm", "my own work", check_rc=True)
+        log.write_text("")
+        push(repo, "feature-diverged", rc="0", log=log)
+        calls = log.read_text()
+        base = ""
+        for line in calls.splitlines():
+            if line.startswith("range:") and ".." in line:
+                base = line[len("range:"):].split("..")[0]
+        tip = git(repo, "rev-parse", "HEAD").stdout.strip()
+        ancestor = git(repo, "merge-base", "--is-ancestor", base, tip).returncode == 0 \
+            if base else False
+        check("the new-branch range starts at the merge base, not origin/main",
+              ancestor, f"base={base!r} is not an ancestor of {tip[:12]}")
 
         # 6. The escape hatches still work.
         (repo / "d.txt").write_text("d\n")
