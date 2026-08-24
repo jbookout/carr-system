@@ -15,6 +15,7 @@ import { workRequestIntakeTools } from "./work-request-intake.js";
 import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { partnerRoomTools } from "./partner-room.js";
 import { agentProfileTools } from "./agent-profiles.js";
+import { incidentTools } from "./incident.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -8206,3 +8207,13 @@ Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));
 // turns, server-derived attribution, human-watchable. See src/partner-room.js.
 Object.assign(TOOLS, partnerRoomTools({ withEnvelope, ToolError }));
 Object.assign(TOOLS, agentProfileTools({ withEnvelope, writeEvent, ToolError }));
+
+// The operational incident ledger gets a front door (2026-08-23 rules-and-verbs
+// council, item 1 from both chairs). ops.incident has been written by two
+// collectors since 0115 and read by none: seeing it meant tools/ops-record.py on
+// a partner's Mac, and closing one meant the break-glass database tap. Five
+// verbs — board, card, open, close, adjudicate — with the close and the
+// adjudication carrying partner authority, because 0117 already wrote that
+// boundary into the grants and the verb surface should not be laxer than the
+// grants are. See migrations/0286 for the permission half.
+Object.assign(TOOLS, incidentTools({ withEnvelope, writeEvent, ToolError, authorizationClassForActor }));

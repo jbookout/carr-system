@@ -405,8 +405,24 @@ PYEOF
   # threshold, because coverage stands at three of twenty-three and a check that
   # fails every run is one people learn to scroll past. It fails only when a job
   # that HAD a workflow binding loses it.
+  # reachability-check JOINED 2026-08-23, from the completion-integrity council's
+  # fix D, and it is the one question none of the others ask. Every check above
+  # asks whether a declared thing EXISTS and is internally consistent;
+  # gate-integrity --strict hashes all fifty hooks whether or not a settings file
+  # names one. None asks whether anything CALLS it. That is how
+  # hooks/ledger-boundary-sweep.py sat green since 2026-08-06 with its own
+  # documentation reading "WRITTEN BUT REGISTERED NOWHERE", and how a fleet-sync
+  # plist no service declares stayed invisible to every health row.
+  #
+  # IT BELONGS IN THIS LIST AND NOT IN A CLASS OF ITS OWN. The ten classes are
+  # the doctrine seeded-failure taxonomy, one gate each, and an eleventh entry
+  # would claim a seeded-failure class doctrine does not have. This is the same
+  # kind of check as the seven above it: repository content only, no machine
+  # state, no network, no database, so a bare runner and Joe's Mac get the same
+  # answer. Its cost is a fifth of a second of CPU, which the 2026-08-23
+  # actions-minutes council's budget for this class can carry.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             rule-enforcement-map-check \
+             rule-enforcement-map-check reachability-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
     [ -f "ops/$inv.py" ] || continue

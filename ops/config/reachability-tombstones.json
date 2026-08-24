@@ -1,0 +1,55 @@
+{
+  "_note": "Entries ops/reachability-check.py may not fail on. Read that file's header first: a tombstone is an explicit intentional-not-wired MARK, not a mute button. It must carry a reason and a reopen condition, it must name something still in the tree, and it stops applying — and becomes the finding itself — the moment its entry becomes reachable. Adding one is a decision to be made in the pull request that adds it, in words, not a way to get a red check green.",
+  "_seeded": "2026-08-23, from the completion-integrity council's fix D. Every entry below was found by the check's first run against main and is a real gap, not an artefact. None is fixed here on purpose: grok's fix-D procedure is 'mark gaps not-landed, do not remediate mid-sweep', and every one of these remediations is somebody else's call — Joe's for a blocking hook, the fleet's for a service declaration. What the check buys today is the ratchet: no NEW unwired control can enter the tree without an argument for it.",
+  "tombstones": [
+    {
+      "lane": "hook",
+      "entry": "hooks/ledger-boundary-sweep.py",
+      "marked_on": "2026-08-23",
+      "reason": "Written 2026-08-06 and registered nowhere ever since; hooks/SETTINGS-BLOCK.md has said so in those words since the #214 audit, which also recorded zero firings in out/hook-guard.log against 75 for ledger-sweep. It is not an accident and it is not forgotten: registering it puts a SECOND blocking hook on Bash, and that false-stop cost is why the decision was left to Joe rather than taken by a session.",
+      "reopen_when": "Joe rules on the second Bash-blocking hook — register it in ops/config/hooks.json, or delete the file and its enforcement-map entry. Either ruling deletes this mark."
+    },
+    {
+      "lane": "registry",
+      "entry": "ledger_boundary",
+      "marked_on": "2026-08-23",
+      "reason": "The registry half of the same gap. ops/config/rule-enforcement-map.json records a ledger_boundary control whose only implementation is hooks/ledger-boundary-sweep.py, so the map reports coverage no session can trip. Marked separately from the hook itself because the map is a distinct claim about the world and would need its own correction.",
+      "reopen_when": "the hook is registered, or the control is removed from the enforcement map (rule c0b38d80: re-bless ops/config/gate-baseline.json in the same commit)."
+    },
+    {
+      "lane": "hook",
+      "entry": "hooks/session-brief.py",
+      "marked_on": "2026-08-23",
+      "reason": "Unreachable as a hook, but NOT an unbriefed session, and the difference is a settled ruling this check cannot see. On 2026-08-08 Joe settled the zero-file fork (decision 3f634c5a — 'the bootstrap stub dies too'): the session briefing lives on THREE surfaces — the MCP server's `instructions` field, which is universal and carries the standing-context opening act on every client; the Cowork project field; and a SessionStart hook that briefs live from the store. This file is the third leg. hooks/worktree-self-plumb.py records in its own header that it 'is wired ONLY into the two VAULT project settings', and those two files are a mirror bin/sync-settings.sh retired, whose live originals are no longer on this Mac. So the hook leg runs nowhere while the universal leg still briefs every session — which is why ops.enforcement_control_catalog records session_boot as installed=false and nothing broke.",
+      "reopen_when": "the hook leg is either restored on a SessionStart surface that still exists (ops/config/hooks.json is the one the repository manages) or retired deliberately, with the two surviving surfaces named as what replaces it."
+    },
+    {
+      "lane": "launchd",
+      "entry": "ops/launchd/com.carr.fleet-sync.plist",
+      "marked_on": "2026-08-23",
+      "reason": "The council's second named seed. No service in ops/config/services.json declares fleet-sync, so it cannot appear in ops-record health at all: its failure state is not `unknown`, it is unrepresentable. tools/scheduler-truth.py reports the same job from the machine side as INSTALLED, NOT LOADED and SCHEDULED, UNREGISTERED — the plist is in ~/Library/LaunchAgents, launchctl has the label disabled, and nothing has ever fast-forwarded this checkout on a schedule.",
+      "reopen_when": "fleet-sync is declared as a service in ops/config/services.json and bootstrapped, or the plist and bin/fleet-sync.sh are retired together. Declaring it also needs its ops.service row, which is why this is not a one-file edit."
+    },
+    {
+      "lane": "launchd",
+      "entry": "ops/launchd/com.carr.calendar-prebrief-joe.plist",
+      "marked_on": "2026-08-23",
+      "reason": "Found by this check's first run and independently by tools/scheduler-truth.py, which names it SCHEDULED, UNREGISTERED. Unlike fleet-sync this job is LOADED and running on Joe's Mac right now, which makes it the worse of the two: live work whose health no row can express. Not fixed here because ops/config/services.json and ops.service are kept exactly in step (38 declarations, 38 rows) and adding a declaration without its row trades this gap for a drift failure on every other branch.",
+      "reopen_when": "the service is declared in ops/config/services.json and its ops.service row lands in the same change."
+    },
+    {
+      "lane": "installer",
+      "entry": "bin/install-calendar-prebrief-joe.sh",
+      "marked_on": "2026-08-23",
+      "reason": "The PR #529 shape. Nothing outside ops/calendar-prebrief-activation-selftest.py names it, and that selftest reads the script as TEXT to assert on its contents rather than running it — coverage of the file, not of the installation. The job it installs is running, so the installer did run once by hand; there is no door that would run it again on a second machine.",
+      "reopen_when": "a runbook, a bin/ door or a scheduled task names it as the way this job gets installed — the same correction bin/sync-rule-admission-prod.sh was for tools/sync-rule-admission.py."
+    },
+    {
+      "lane": "installer",
+      "entry": "hooks/install-record-home-gate.py",
+      "marked_on": "2026-08-23",
+      "reason": "Superseded rather than unwired, and marked because the supersession was never finished. It merges the record-home gate into ~/.claude/settings.json one hook at a time; ops/config-as-code.py now installs the whole managed block and is the only thing that should write that file. The only references left are records — ops/config/rule-enforcement-map.json, ops/config/gate-baseline.json and the ops.enforcement_control_catalog seed — every one of which still lists it as an installed implementation of the record_home control.",
+      "reopen_when": "it is deleted along with its enforcement-map and catalog references, or it is given a real caller. A completed lifecycle should leave nothing behind pointing at it — rule def3e84e, artifact tombstones: nothing silently rots."
+    }
+  ]
+}
