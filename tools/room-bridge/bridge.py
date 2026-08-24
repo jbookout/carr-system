@@ -461,10 +461,10 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             if pending_outcome:
                 delivered.append(pending_outcome)
             if state_mod.get_pending(state, name) is None:
-                queued = state_mod.pop_next_queued(state, name)
-                if queued is not None:
+                next_queued = state_mod.pop_next_queued(state, name)
+                if next_queued is not None:
                     delivered.append(deliver(
-                        name, entry, seat, queued, state=state, registry=registry,
+                        name, entry, seat, next_queued, state=state, registry=registry,
                         results_path=results_path, add_room_turn=add_room_turn,
                         dispatch_fn=dispatch_fn, desk_state_dir=desk_state_dir,
                     ))
