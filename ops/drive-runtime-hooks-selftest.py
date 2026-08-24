@@ -96,7 +96,14 @@ def main() -> int:
         root = Path(tmp)
         for directory in (root / "hooks", root / "lib", root / ".venv" / "bin"):
             directory.mkdir(parents=True, exist_ok=True)
-        for name in ("run-record-gate.py", "drift-claim-gate.py", "drift-assertion-gate.py"):
+        # stop_latch.py joined this list 2026-08-23, and the reason is worth a
+        # line: this fixture mirrors hooks/ BY HAND, so a gate that gains an
+        # import gains it here too or the launcher crashes and the check reads
+        # as a bootstrap failure. drift-assertion-gate.py now latches on the
+        # RULINGS it matched rather than on a hash of the prose (Joe's
+        # Stop-gate rationing), and that latch lives in the shared module.
+        for name in ("run-record-gate.py", "drift-claim-gate.py",
+                     "drift-assertion-gate.py", "stop_latch.py"):
             shutil.copy2(REPO / "hooks" / name, root / "hooks" / name)
         (root / "hooks" / "chat-lint-gate.py").write_text('''
 import json
