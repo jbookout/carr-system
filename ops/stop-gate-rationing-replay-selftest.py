@@ -54,6 +54,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
 CANONICAL = os.path.expanduser("~/carr-system")
@@ -297,7 +300,7 @@ def replay_demotions(tmp):
     # loose-work: this session edited a tracked file and left it.
     repo = os.path.join(tmp, "loose")
     os.makedirs(repo)
-    env0 = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env0 = fixture_env()   # the scrubber, not a hand-rolled GIT_ filter
     for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@e.invalid"],
                  ["config", "user.name", "t"]):
         subprocess.run(["git", "-C", repo, *args], capture_output=True, env=env0)

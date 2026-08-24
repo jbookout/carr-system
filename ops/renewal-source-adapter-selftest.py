@@ -86,6 +86,20 @@ def refuses(value: object, profile: object) -> bool:
 
 
 def main() -> int:
+    # EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE — the same narrow guard
+    # ops/calendar-prebrief-collector-selftest.py installed (66144bf0). Apple
+    # ships LibreSSL, which has no Ed25519, and a bare CalledProcessError read
+    # as a red gate no local fix could clear. Minting a throwaway key IS the
+    # question: on any machine with OpenSSL 3 every assertion still runs.
+    with tempfile.TemporaryDirectory() as probe_dir:
+        probe = subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "ED25519",
+             "-out", str(Path(probe_dir) / "probe.pem")],
+            capture_output=True, text=True)
+        if probe.returncode != 0:
+            print("NOT CONFIGURED: openssl here cannot mint an Ed25519 key "
+                  "(LibreSSL); this proof needs OpenSSL 3")
+            return 78
     with tempfile.TemporaryDirectory() as raw_tmp:
         tmp = Path(raw_tmp)
         private, public = tmp / "private.pem", tmp / "public.pem"
