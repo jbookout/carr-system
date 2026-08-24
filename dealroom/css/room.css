@@ -265,6 +265,14 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .passport-event { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 7px; padding: 3px 6px; color: var(--muted); background: rgba(14, 19, 31, .5); font-size: 10px; }
 .passport-event[data-state="blocked"], .passport-event[data-state="failed"] { border-color: var(--danger); }
 .passport-event[data-state="active"] { border-color: var(--seat-sol); }
+.passport-eval { border-top: 1px solid var(--line); margin-top: 3px; padding-top: 7px; }
+.passport-eval-title { margin: 0; font-family: var(--display); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--text); }
+.passport-eval-rungs, .passport-eval-frontier, .passport-eval-failures { margin: 4px 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
+.passport-eval-matrix { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 4px; margin: 5px 0; }
+.passport-eval-cell { border: 1px solid var(--line); border-left: 3px solid var(--muted); border-radius: 5px; padding: 3px 5px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.passport-eval-cell[data-state="passed"] { border-left-color: var(--seat-claude); }
+.passport-eval-cell[data-state="failed"] { border-left-color: var(--danger); }
+.passport-eval-cell[data-state="blocked"] { border-left-color: var(--orange); }
 .passport-detail { border-top: 1px solid var(--line); padding-top: 6px; }
 .passport-detail summary { cursor: pointer; color: var(--text); font-size: 11px; }
 .passport-detail-list { margin: 6px 0 0; padding-left: 17px; color: var(--muted); font-size: 10px; }

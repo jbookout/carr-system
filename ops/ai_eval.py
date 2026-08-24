@@ -18,6 +18,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+# Job Passport portfolio results use the same offline evaluator boundary.  The
+# import is deliberately local-path based because room-bridge is a tool folder,
+# not a deployable dependency or a parallel evaluation service.
+ROOM_BRIDGE = Path(__file__).parents[1] / "tools" / "room-bridge"
+if str(ROOM_BRIDGE) not in sys.path:
+    sys.path.insert(0, str(ROOM_BRIDGE))
+from eval_portfolio import cost_curve_gate, validate_eval_portfolio  # noqa: E402
+
 
 RESPONSE_FIELDS = {
     "status",
@@ -195,6 +203,28 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 class SuiteError(ValueError):
     """The versioned suite is malformed or unsafe to execute."""
+
+
+def load_job_passport_eval_portfolio(path: Path, projection: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Load a strict, offline evaluation ladder without turning it into a score.
+
+    Kept additive to the legacy provider scorecard loader: live-program users
+    retain their v1 envelope behavior while Job Passport receives attributable
+    model+harness+adapter, stage, and frontier evidence.
+    """
+    try:
+        raw = json.loads(path.read_text())
+        return validate_eval_portfolio(raw, projection)
+    except (OSError, ValueError) as exc:
+        raise SuiteError(f"invalid Job Passport eval portfolio: {exc}") from exc
+
+
+def job_passport_cost_curve(portfolio: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return per-comparison gates; intentionally never returns an overall score."""
+    try:
+        return cost_curve_gate(portfolio)
+    except ValueError as exc:
+        raise SuiteError(f"invalid Job Passport cost curve: {exc}") from exc
 
 
 def _string_list(value: Any) -> bool:

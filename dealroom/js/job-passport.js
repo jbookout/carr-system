@@ -7,7 +7,7 @@
 // canonical state before it is wrapped for the wire.
 
 const WIRE_VERSION = "job-passport-wire.v1";
-const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection"]);
+const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "eval_portfolio"]);
 const PROGRESS = new Set(["active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"]);
 const LIFECYCLE = new Set(["succeeded", "failed", "timed_out", "cancelled", "partial", "unknown"]);
 const VERIFICATION = new Set(["verified_success", "verified_failure", "partial", "unknown", "not_attempted"]);
@@ -50,6 +50,22 @@ function validProjection(value) {
     && list(event.evidence_refs));
 }
 
+function validEvalPortfolio(value) {
+  if (!object(value) || value.schema_version !== "job-passport-eval-portfolio.v1" || value.data_class !== "synthetic_only"
+    || !object(value.binding) || !string(value.binding.work_request_id) || !number(value.binding.state_version)
+    || !DIGEST.test(value.binding.plan_revision_digest) || !DIGEST.test(value.binding.canonical_record_digest)
+    || !DIGEST.test(value.binding.projection_digest) || !list(value.cases) || !list(value.results)
+    || !list(value.frontier_comparisons) || !list(value.taxonomy?.failure_modes)) return false;
+  const rungs = new Set(["smoke", "regression", "hill_climb", "launch"]);
+  const outcomes = new Set(["passed", "failed", "blocked", "unknown"]);
+  return value.cases.every((row) => object(row) && string(row.case_id) && rungs.has(row.rung) && list(row.job_stages)
+    && object(row.adapter_configuration) && string(row.adapter_configuration.surface))
+    && value.results.every((row) => object(row) && string(row.result_id) && string(row.case_id) && rungs.has(row.rung)
+      && outcomes.has(row.status) && list(row.dimension_results) && list(row.stage_results)
+      && row.dimension_results.every((dimension) => object(dimension) && string(dimension.dimension_id) && outcomes.has(dimension.status)
+        && ["improved", "equivalent", "regressed", "not_compared"].includes(dimension.direction_vs_baseline)));
+}
+
 function compareProjection(a, b) {
   const av = a.source_state.state_version;
   const bv = b.source_state.state_version;
@@ -81,12 +97,19 @@ function statusFor(projection) {
 export function deriveJobPassports(turns, { now = Date.now() } = {}) {
   const rows = new Map();
   const rejected = [];
-  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0 };
+  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0, eval_portfolio: 0 };
+  const portfolios = new Map();
   for (const turn of turns || []) {
     if (turn?.kind !== "receipt") continue;
     const parsed = parseJobPassportReceipt(turn.body);
     if (!parsed.ok) continue;
     typedCounts[parsed.kind] += 1;
+    if (parsed.kind === "eval_portfolio") {
+      if (!validEvalPortfolio(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_eval_portfolio" }); continue; }
+      const prior = portfolios.get(parsed.payload.binding.work_request_id);
+      if (!prior || (Number(turn.seq) || 0) > prior.seq) portfolios.set(parsed.payload.binding.work_request_id, { payload: parsed.payload, seq: Number(turn.seq) || 0 });
+      continue;
+    }
     if (parsed.kind !== "observatory_projection") continue;
     if (!validProjection(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_projection" }); continue; }
     const incoming = parsed.payload;
@@ -105,9 +128,15 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
   const passports = [...rows.values()].map((row) => {
     const projection = row.projection;
     const observedAt = Math.max(at(projection.generated_at), ...projection.timeline.map((event) => at(event.occurred_at)));
+    const portfolio = portfolios.get(projection.work_request_id)?.payload;
+    const portfolioBound = portfolio && portfolio.binding.state_version === projection.source_state.state_version
+      && portfolio.binding.canonical_record_digest === projection.source_state.canonical_record_digest
+      && portfolio.binding.projection_digest === projection.projection_digest;
+    if (portfolio && !portfolioBound) rejected.push({ seq: portfolios.get(projection.work_request_id).seq, reason: "mismatched_eval_portfolio" });
     return {
       ...projection, wire_seq: row.seq, conflict: row.conflict, status: row.conflict ? "unknown_partial" : statusFor(projection),
       observed_at: observedAt || now, freshness: projection.state.progress === "stale" ? "stale" : "current_as_observed",
+      eval_portfolio: portfolioBound ? portfolio : null,
     };
   }).sort((a, b) => b.wire_seq - a.wire_seq);
   return { enabled: passports.length > 0, passports, rejected, typedCounts };

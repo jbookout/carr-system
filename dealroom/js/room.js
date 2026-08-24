@@ -1471,12 +1471,40 @@ function boot() {
         }
         if (!passport.timeline.length) timeline.appendChild(el("span", "passport-event", "No observed progress event"));
         card.appendChild(timeline);
+        if (passport.eval_portfolio) {
+          const portfolio = passport.eval_portfolio;
+          const ladder = el("section", "passport-eval");
+          ladder.setAttribute("aria-label", "Evaluation ladder and stage diagnostics");
+          ladder.appendChild(el("h3", "passport-eval-title", "Evaluation ladder · synthetic/offline"));
+          const rungs = [...new Set(portfolio.cases.map((row) => row.rung))];
+          ladder.appendChild(el("p", "passport-eval-rungs", `Rungs represented: ${rungs.join(", ")} · no aggregate score`));
+          const matrix = el("div", "passport-eval-matrix");
+          const baseline = portfolio.results.find((row) => row.result_id === "result:codex-baseline") || portfolio.results[0];
+          for (const stage of baseline.stage_results || []) {
+            const dimensions = stage.dimension_ids.map(humanRef).join(", ");
+            const cell = el("div", "passport-eval-cell", `${humanRef(stage.stage_id)} — ${stage.status.replace(/_/g, " ")} · ${dimensions}`);
+            cell.dataset.state = stage.status;
+            matrix.appendChild(cell);
+          }
+          ladder.appendChild(matrix);
+          const comparisons = portfolio.frontier_comparisons || [];
+          const candidate = portfolio.results.find((row) => row.result_id === comparisons[0]?.candidate_result_id);
+          const critical = candidate?.dimension_results?.filter((row) => row.direction_vs_baseline === "regressed" || row.status !== "passed") || [];
+          const frontier = el("p", "passport-eval-frontier", candidate
+            ? `Quality frontier vs cheaper candidate: ${comparisons[0]?.promotion_state.replace(/_/g, " ") || "unknown"}; critical: ${critical.map((row) => humanRef(row.dimension_id)).join(", ") || "none"}; latency ${candidate.telemetry.latency_ms} ms; cost ${candidate.telemetry.cost_usd}.`
+            : "Quality frontier comparison unavailable.");
+          ladder.appendChild(frontier);
+          const failures = portfolio.taxonomy.failure_modes || [];
+          ladder.appendChild(el("p", "passport-eval-failures", `Failure taxonomy: ${failures.map((row) => humanRef(row.class_name)).join(", ") || "none"}.`));
+          card.appendChild(ladder);
+        }
         const detail = el("details", "passport-detail");
         detail.open = card.dataset.detailOpen === "true";
         detail.addEventListener("toggle", () => { card.dataset.detailOpen = String(detail.open); });
         detail.appendChild(el("summary", null, "Evidence, checkpoint, and handoff"));
         const list = el("ul", "passport-detail-list");
         for (const ref of passport.evidence_refs) list.appendChild(el("li", null, ref));
+        for (const finding of passport.eval_portfolio?.behavior_findings || []) list.appendChild(el("li", null, `Eval finding ${finding.finding_id}: ${finding.failure_mode_id} · ${finding.evidence_refs.join(", ")}`));
         const checkpoint = passport.state.verification === "verified_success" ? "Independent verification recorded; handoff only at a verified checkpoint." : "Executor claim remains unpromoted; no verified handoff implied.";
         list.appendChild(el("li", null, checkpoint));
         list.appendChild(el("li", null, `Adapter: ${actual.adapter_id} ${actual.adapter_version} · native session retained as ${actual.native_session_ref}`));

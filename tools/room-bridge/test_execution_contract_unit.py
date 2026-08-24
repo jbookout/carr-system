@@ -17,6 +17,7 @@ import execution_contract as contract  # noqa: E402
 import dispatch  # noqa: E402
 import job_passport_artifact as artifact_renderer  # noqa: E402
 import bridge  # noqa: E402
+import eval_portfolio  # noqa: E402
 
 
 FIXTURES = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric"
@@ -52,7 +53,7 @@ def expect_refusal(fn, contains):
 
 
 def schemas_are_versioned_and_fail_closed():
-    for name in ("execution-envelope.v1.schema.json", "attempt-receipt.v1.schema.json"):
+    for name in ("execution-envelope.v1.schema.json", "attempt-receipt.v1.schema.json", "job-passport-eval-portfolio.v1.schema.json"):
         schema = json.loads((ROOT / "control-room" / "contracts" / name).read_text())
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert schema["additionalProperties"] is False
@@ -272,6 +273,29 @@ def wire_receipts_validate_projection_and_keep_typed_facts_distinct():
     expect_refusal(lambda: contract.validate_observatory_projection(projection), "does not bind")
 
 
+def eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression():
+    projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
+    portfolio = json.loads((FIXTURES / "job-passport-eval-portfolio.synthetic.v1.json").read_text())
+    assert eval_portfolio.validate_eval_portfolio(portfolio, projection) == portfolio
+    gates = eval_portfolio.cost_curve_gate(portfolio)
+    assert gates[0]["promotion_state"] == "not_eligible"
+    assert gates[0]["blocked_dimensions"] == ["visual_accessibility"]
+    assert gates[1]["promotion_state"] == "blocked"
+    assert {case["rung"] for case in portfolio["cases"]} == {"smoke", "regression", "hill_climb", "launch"}
+    assert {case["adapter_configuration"]["surface"] for case in portfolio["cases"]} == {
+        "claude_desktop", "codex_desktop", "hermes_desktop", "grok_x_native",
+    }
+    changed = copy.deepcopy(portfolio)
+    changed["results"][0]["score"] = 99
+    expect_refusal(lambda: eval_portfolio.validate_eval_portfolio(changed), "unknown fields")
+    changed = copy.deepcopy(portfolio)
+    changed["taxonomy"]["failure_modes"][0]["class_name"] = "bad_answer"
+    expect_refusal(lambda: eval_portfolio.validate_eval_portfolio(changed), "never generic")
+    changed = copy.deepcopy(portfolio)
+    changed["results"][2]["stage_results"] = [changed["results"][2]["stage_results"][0]]
+    expect_refusal(lambda: eval_portfolio.validate_eval_portfolio(changed), "not diagnosable")
+
+
 def synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire():
     event = {
         "schema_version": "progress-event.v1", "attempt_id": "attempt-synthetic-codex", "sequence": 1,
@@ -297,11 +321,12 @@ def self_contained_job_passport_artifact_binds_content_and_is_stale_visible():
     projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
     behavior = json.loads((FIXTURES / "codex_desktop.job-passport.behavior-verification.v1.json").read_text())
     contract.validate_product_behavior_verification(behavior)
-    document, artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), projection, behavior)
+    portfolio = json.loads((FIXTURES / "job-passport-eval-portfolio.synthetic.v1.json").read_text())
+    document, artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), projection, behavior, portfolio)
     assert artifact_renderer.verify_visual_artifact(document, artifact)
     assert artifact["content_digest"] == contract.canonical_digest(document)
     assert "https://" not in document and "fetch(" not in document
-    assert "prefers-reduced-motion" in document and "<details>" in document and "Behavior audit" in document
+    assert "prefers-reduced-motion" in document and "<details>" in document and "Behavior audit" in document and "Evaluation ladder" in document and "No aggregate score" in document
     stale = copy.deepcopy(projection)
     stale["state"]["progress"] = "stale"
     stale["observed_movement"]["progress_state"] = "stale"
@@ -318,6 +343,8 @@ def behavior_audit_fails_closed_on_dangling_claim_or_fake_live_verification():
     behavior = json.loads((FIXTURES / "codex_desktop.job-passport.behavior-verification.v1.json").read_text())
     behavior["items"][0]["status"] = "passed"
     expect_refusal(lambda: contract.validate_product_behavior_verification(behavior), "live browser evidence")
+    eval_behavior = json.loads((FIXTURES / "codex_desktop.job-passport-eval.behavior-verification.v1.json").read_text())
+    assert contract.validate_product_behavior_verification(eval_behavior) == eval_behavior
 
 
 def compatibility_wrapper_uses_existing_dispatch_with_a_fake_and_redacts_result():
@@ -360,6 +387,7 @@ if __name__ == "__main__":
         ("progress event is ephemeral and observational", progress_event_is_redacted_observational_and_can_stay_ephemeral),
         ("observatory projection preserves profile/staffing distinction", observatory_projection_groups_by_work_request_and_separates_profile_from_staffing),
         ("room wire accepts only validated typed Job Passport facts", wire_receipts_validate_projection_and_keep_typed_facts_distinct),
+        ("evaluation ladder is multidimensional and rejects masked critical regression", eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression),
         ("synthetic read-only rehearsal publishes typed facts on the existing wire", synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire),
         ("self-contained Job Passport artifact has verified content and stale posture", self_contained_job_passport_artifact_binds_content_and_is_stale_visible),
         ("behavior audit fails closed on dangling or non-live verification", behavior_audit_fails_closed_on_dangling_claim_or_fake_live_verification),

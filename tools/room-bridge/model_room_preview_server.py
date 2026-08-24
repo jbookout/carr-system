@@ -41,6 +41,11 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         posted = []
         rehearsal = bridge.rehearse_job_passport(envelope, receipt, [event], {"profile_id": "profile:doc", "display_label": "Doc"},
                                                   add_room_turn=lambda **row: posted.append(row) or {"preview": True})
+        # The portfolio is an additional redacted wire fact; Model Room still
+        # paints only a projection that matches its exact state/digest.
+        portfolio = json.loads((self.fixtures / "job-passport-eval-portfolio.synthetic.v1.json").read_text())
+        bridge.publish_job_passport_fact("eval_portfolio", portfolio,
+                                         add_room_turn=lambda **row: posted.append(row) or {"preview": True})
         turns = [{"seq": str(index), "msg_id": f"preview-job-passport-{index}", "at": "2026-08-24T12:00:06Z",
                   "sponsor": "joe", "seat": row["seat"], "kind": row["kind"], "body": row["body"]}
                  for index, row in enumerate(posted, start=1)]

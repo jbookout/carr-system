@@ -719,6 +719,11 @@ def job_passport_wire_receipt(kind: str, payload: Any) -> dict[str, Any]:
         "attempt_receipt": validate_attempt_receipt,
         "observatory_projection": validate_observatory_projection,
     }
+    # Import lazily: the portfolio reuses the contract's strict primitives,
+    # while the core envelope seam remains usable without an eval consumer.
+    if kind == "eval_portfolio":
+        from eval_portfolio import validate_eval_portfolio
+        validators["eval_portfolio"] = validate_eval_portfolio
     if kind not in validators:
         raise ContractError("job passport wire kind is invalid")
     value = validators[kind](payload)
