@@ -5,6 +5,7 @@ This deliberately replaces the provider runner: a controller unit test must
 prove its ordering and recovery semantics without touching a live Worker.
 """
 import importlib.util
+import tempfile
 from pathlib import Path
 
 path = Path(__file__).with_name("staging-recovery-rehearsal.py")
@@ -100,5 +101,32 @@ try:
 finally:
     mod.subprocess.run = old_run
 assert outcome["recorded"] and seen[0][0].endswith("tools/ops-record.py") and ";" not in " ".join(seen[0][1:])
+
+# Exact-SHA worktrees are bare by design.  The controller may materialize only
+# its own validated ignored runtime dependencies, never edit the controller
+# root or accept a pre-existing target in the disposable tree.
+old_root = getattr(mod, "ROOT")
+with tempfile.TemporaryDirectory() as raw:
+    root = Path(raw) / "controller"; worktree = Path(raw) / "step"
+    (root / ".venv" / "bin").mkdir(parents=True)
+    (root / "mcp-server" / "node_modules" / ".bin").mkdir(parents=True)
+    (root / ".venv" / "bin" / "python").touch()
+    (root / "mcp-server" / "node_modules" / ".bin" / "wrangler").touch()
+    worktree.mkdir()
+    setattr(mod, "ROOT", root)
+    try:
+        mod.materialize_step_runtime(worktree)
+        assert (worktree / ".venv").is_symlink()
+        assert (worktree / "mcp-server/node_modules").is_symlink()
+        try:
+            mod.materialize_step_runtime(worktree)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("pre-existing disposable dependency must refuse")
+        (worktree / ".venv").unlink(); (worktree / "mcp-server/node_modules").unlink()
+        assert not (root / ".venv").is_symlink() and (root / ".venv/bin/python").exists()
+    finally:
+        setattr(mod, "ROOT", old_root)
 
 print("staging-recovery-rehearsal: isolated restore-only recovery cases passed")
