@@ -18,6 +18,7 @@
     "context_rail": "stop_gate",
     "costar_lane": "deny_gate",
     "deal_guard": "transactional_schema",
+    "delegation_names_model_and_effort": "deny_gate",
     "delegation_tripwire": "deny_gate",
     "draft_export_read": "surfacing",
     "drift_claim": "deny_gate",
