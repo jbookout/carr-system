@@ -8,6 +8,19 @@ export const REVIEWED_DEALROOM_HOSTS = Object.freeze([
 const LIVE_HOSTS = new Set(REVIEWED_DEALROOM_HOSTS);
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1"]);
 
+export function deploymentIdentity(mode) {
+  if (mode === "live") return {
+    label: "LIVE · DoctorCRE",
+    detail: "Connected to the live DoctorCRE Deal Room",
+    mode: "live",
+  };
+  return {
+    label: "LOCAL FIXTURE · Demo",
+    detail: "Local fixture data only — changes are not production records",
+    mode: "fixture",
+  };
+}
+
 export function resolveDealroomBoot(locationLike) {
   const hostname = String(locationLike?.hostname || "").toLowerCase();
   const params = new URLSearchParams(locationLike?.search || "");
