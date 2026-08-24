@@ -17,9 +17,9 @@ OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 NOW = datetime.now(timezone.utc)
 CUTOFF = NOW - timedelta(days=7)
 
-invocations = Counter()          # hook command -> count of Stop events where it ran
-blocks = Counter()               # hook command -> count where it produced a block decision
-sessions_with_block = defaultdict(set)  # hook -> session ids
+invocations: Counter[str] = Counter()          # hook command -> count of Stop events where it ran
+blocks: Counter[str] = Counter()               # hook command -> count where it produced a block decision
+sessions_with_block: "defaultdict[str, set[str]]" = defaultdict(set)  # hook -> session ids
 total_stops = 0
 files = glob.glob(os.path.join(HOME, "**", "*.jsonl"), recursive=True)
 
