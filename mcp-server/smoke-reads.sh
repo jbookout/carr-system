@@ -1062,15 +1062,19 @@ if [ "$CAP_INC" -eq 1 ]; then
   # incidents is the row list; a reader-role permission problem on any of the
   # five ops.* relations the board touches surfaces here as a transport error
   # rather than as a quietly empty answer, which is the whole point.
+  # Match the field names, not their surrounding quotes. tools/call returns the
+  # verb payload as JSON text inside the JSON-RPC envelope, so those inner
+  # quotes are escaped (\"by_severity\"). Looking for the unescaped quoted key
+  # makes a correct answer fail even though the field is visibly present.
   check "incident-board (open incidents, reader role, ops.* reachable)" \
-        incident-board '{}' '"by_severity"' '"incidents"'
+        incident-board '{}' 'by_severity' 'incidents'
 
   # A severity filter proves the WHERE arm runs rather than the board returning
   # one canned shape. Deliberately not asserting a COUNT: how many SEV-2s are
   # open is real operational state and changes hourly, so an assertion on it
   # would be a probe that fails when the system is healthy.
   check "incident-board filters by severity" \
-        incident-board '{"severity":"SEV-2"}' '"by_severity"'
+        incident-board '{"severity":"SEV-2"}' 'by_severity'
 
   # THE READINESS SPLIT, which is the board's reason to exist: which rows a
   # partner could close today versus which are waiting on the clock or on a
@@ -1078,7 +1082,7 @@ if [ "$CAP_INC" -eq 1 ]; then
   # (see mcp-server/src/incident.js), so a drift between board and verb shows up
   # as this field disappearing.
   check "incident-board reports ready_to_close" \
-        incident-board '{"ready_to_close":true}' '"ready_to_close"'
+        incident-board '{"ready_to_close":true}' 'ready_to_close'
 
   # get-incident against a ref that cannot exist. The refusal is the probe: the
   # handler runs its full row query — the one carrying the ops.incident self-join
