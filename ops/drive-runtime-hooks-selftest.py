@@ -173,12 +173,22 @@ exec /usr/bin/python3 "$@"
     check("launcher fails closed for unknown/malformed/missing dependency/interpreter/timeout",
           all(item.returncode != 0 for item in bootstrap_faults.values()))
     # A mute exit 2 reads as an objection to the assistant's work rather than as
-    # the launcher never reaching the gate, so each fault must name itself and
-    # the five names must be distinguishable from one another.
+    # the launcher never reaching the gate, so each fault must name itself.  The
+    # anchors below are per-fault on purpose: distinct STRINGS are not enough,
+    # because two paths sharing one wrong template still differ once an argument
+    # count is interpolated into them.
     reasons = {name: item.stderr.strip() for name, item in bootstrap_faults.items()}
-    check("every closed-gate bootstrap fault names a distinct reason on stderr",
+    anchors = {"unknown": "not an allowed record gate", "malformed": "got 2 argument",
+               "missing dependency": "readiness probe failed",
+               "missing interpreter": "is missing or not executable",
+               "timeout": "readiness probe exceeded"}
+    check("every closed-gate bootstrap fault names its own reason on stderr",
           all(reason.startswith("run-record-gate: gate not run: ") for reason in reasons.values())
+          and all(anchors[name] in reasons[name] for name in bootstrap_faults)
           and len(set(reasons.values())) == len(reasons))
+    check("no closed-gate reason claims a fault that did not fire",
+          all(sum(anchor in reason for anchor in anchors.values()) == 1
+              for reason in reasons.values()))
 
     if failures:
         print(f"FAIL {len(failures)}: {', '.join(failures)}")
