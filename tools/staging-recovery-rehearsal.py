@@ -61,8 +61,14 @@ def execute_step(step: str, sha: str, args, attempt: str, idem: str) -> dict:
             # run() takes the isolated restore-only route and records unknown.
             return {"step": step, "sha": sha, "idempotency_key": idem, "exit_code": 124,
                     "output_tail": "deploy_worker_timeout", "command": command}
+        output = result.stdout + result.stderr
         return {"step": step, "sha": sha, "idempotency_key": idem, "exit_code": result.returncode,
-                "output_tail": (result.stdout + result.stderr)[-1000:], "command": command}
+                "output_tail": output[-1000:],
+                # The wrapper emits this only after the isolated restore-only
+                # attempt has been prepared.  A failed preflight has no durable
+                # repair row to receive an `unknown` result.
+                "restore_prepared": step == "restore_only" and "restore-only attempt prepared" in output,
+                "command": command}
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=ROOT, check=False)
         shutil.rmtree(base, ignore_errors=True)
@@ -102,19 +108,19 @@ def run(argv: list[str]) -> int:
     staging_may_have_changed = False
     for step, sha in steps:
         idem = str(uuid.uuid4())
+        # Treat every invoked source deploy as possibly mutating staging.  The
+        # wrapper writes/claims before its provider call, but a timeout or
+        # non-zero exit cannot prove where within that sequence it stopped.
+        staging_may_have_changed |= args.execute
         receipt = execute_step(step, sha, args, attempt, idem) if args.execute else {"step": step, "sha": sha, "idempotency_key": idem, "planned": True}
         receipts.append(receipt)
-        # The wrapper persists intent before its Cloudflare mutation. Any nonzero
-        # result after `prior` or `current_after` is therefore treated as possibly
-        # changed; only a separate exact-current readback can close that doubt.
-        staging_may_have_changed |= args.execute and step != "current_before"
         if receipt.get("exit_code", 0):
             recovery = None
             if staging_may_have_changed:
                 restore_idem = str(uuid.uuid4())
                 recovery = execute_step("restore_only", args.current_sha, args, attempt, restore_idem)
                 recovery["recovery_only"] = True
-                if recovery.get("exit_code"):
+                if recovery.get("exit_code") and recovery.get("restore_prepared"):
                     recovery["durable_outcome"] = record_restore_unknown(args, attempt, restore_idem)
                 receipts.append(recovery)
             state = "restore_failed" if recovery and recovery.get("exit_code") else ("recovered_to_current" if recovery else "partial")

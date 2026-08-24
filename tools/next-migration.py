@@ -39,6 +39,7 @@ Usage:
   ./run.sh next-migration --quiet    # just the number, for scripting
 """
 
+import json
 import os
 import re
 import subprocess

@@ -224,11 +224,14 @@ def main() -> int:
           and "finish all\nthree within one hour" in rollback_runbook
           and "within 24\nhours of the completed bundle" in rollback_runbook,
           "the typed bundle and approval both fail closed when their timing windows expire")
-    check("8d. rollback runbook preserves the verb-loss guard",
-          "Run the guard first without an override" in rollback_runbook
-          and "If and only if the refusal reports the exact verb loss expected" in rollback_runbook
-          and "unexpected count is a stop condition" in rollback_runbook,
-          "an unconditional --allow-shrink can hide an unrelated verb loss")
+    check("8d. only a DB-prepared typed prior can temporarily shrink",
+          "--allow-shrink" not in source
+          and 'if [ "$RECOVERY_STEP" != "prior" ] || [ "$TARGET_ENV" != "staging" ]; then' in source
+          and 'staging-attempt prepare' in source
+          and '--recovery-step prior' in source
+          and "exact prepared recovery prior" in source
+          and "There is no `--allow-shrink` override" in rollback_runbook,
+          "a standalone/source deploy or manual flag can still waive verb loss")
 
     check("9. restore-only is a separate staging writer, not a fourth bundle step",
           '"restore_only"' in source

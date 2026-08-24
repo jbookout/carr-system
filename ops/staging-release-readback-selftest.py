@@ -364,6 +364,13 @@ for marker in (
 ):
     assert marker in restore_migration, marker
 assert "staging_recovery_rehearsal_bundle" not in restore_migration
+repair_migration = (ROOT / "migrations" / "0296_restore_only_recovery_repair.sql").read_text()
+assert "create or replace function ops.prepare_staging_restore_only_attempt" in repair_migration
+# PostgreSQL standard-conforming strings require the single regex escape used
+# by the already-valid Program 5 writer; the double escape in applied 0295 is
+# intentionally preserved only as historical evidence.
+assert "+\\.sql$'" in repair_migration
+assert "+\\\\.sql$'" not in repair_migration
 
 completion_grant = (ROOT / "migrations" / "0215_program5_completion_hash_grant.sql").read_text()
 assert "grant execute on function ops.program5_migration_set_sha256(text[]) to carr_jobs" in completion_grant
