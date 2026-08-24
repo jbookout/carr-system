@@ -1206,9 +1206,17 @@ try:
     # refusal script warned about. It is not a failure either — see the argument
     # at the 69 branch in bin/nightly.sh. So it gets its own count, printed
     # beside the verdict on every line below, and it never sets rc.
-    _done: list[tuple[bool, list[str], list[str]]] = []  # newest-last: (clean?, failed, blocked)
+    # TOMBSTONE is tracked beside BLOCKED for the reason BLOCKED is tracked
+    # beside FAIL, one step further along (2026-08-23). A tombstoned step was
+    # gated out before the chain ran it, so blocked-count going to zero must not
+    # be readable as "the seams got built" — the debt moved from one column to
+    # another and this row has to show both or it reports a fix that did not
+    # happen. Neither count ever sets rc: a known, named, filed debt is not
+    # tonight's alarm. What IS tonight's alarm is a step failing, which still is.
+    _done: list[tuple[bool, list[str], list[str], list[str]]] = []
     _pending: list[str] = []
     _blocked: list[str] = []
+    _tombs: list[str] = []
     _begins = _overlaps = 0
     _open = 0
     for _ln in open(_nightly_log, errors="replace"):
@@ -1221,25 +1229,36 @@ try:
             _pending.append(_ln.split("  FAIL  ", 1)[1].strip())
         elif "  BLOCKED  " in _ln:
             _blocked.append(_ln.split("  BLOCKED  ", 1)[1].strip())
+        elif "  TOMBSTONE  " in _ln:
+            _tombs.append(_ln.split("  TOMBSTONE  ", 1)[1].strip())
         elif "chain OK" in _ln or "FINISHED WITH FAILURES" in _ln:
-            _done.append(("chain OK" in _ln, _pending, _blocked))
+            _done.append(("chain OK" in _ln, _pending, _blocked, _tombs))
             _pending = []
             _blocked = []
+            _tombs = []
             _open = max(0, _open - 1)
     if not _done:
         print(f"  -- {'nightly chain result':<22} no completed run in the log — the chain "
               f"has not finished since the log was last trimmed")
     else:
-        _last_ok, _last_fails, _last_blocked = _done[-1]
+        _last_ok, _last_fails, _last_blocked, _last_tombs = _done[-1]
         _bl_names = sorted({s.split(" (exit")[0] for s in _last_blocked})
         _bl = (f"  · {len(_bl_names)} step(s) BLOCKED on a missing canonical seam, "
                f"not counted as failures: {', '.join(_bl_names)}" if _bl_names else "")
+        # The label is everything before the " — gated out" the chain writes, so
+        # the row names the steps rather than reprinting every reopen condition.
+        # The conditions themselves are one grep of out/nightly.log away and this
+        # row has to stay one line.
+        _tb_names = sorted({s.split(" — gated out")[0] for s in _last_tombs})
+        _bl += (f"  · {len(_tb_names)} step(s) TOMBSTONED, gated out rather than run: "
+                f"{', '.join(_tb_names)} — each names what it is missing in "
+                f"out/nightly.log" if _tb_names else "")
         if _last_ok:
             print(f"  OK {'nightly chain result':<22} last run exited clean, all steps OK{_bl}")
         else:
             # how many consecutive completed runs, newest-first, ended red
             _streak = 0
-            for _ok, _, _ in reversed(_done):
+            for _ok, _, _, _ in reversed(_done):
                 if _ok:
                     break
                 _streak += 1

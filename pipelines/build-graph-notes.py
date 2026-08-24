@@ -166,40 +166,31 @@ party_links = load_party_links(MODE)
 # [loop #133] Every ref the record layer carries, so an edge endpoint with no
 # business ref can still be identified. None in files mode, same as above.
 ref_index = load_ref_index(MODE)
-# THE HAND-WRITTEN DOSSIER NAMES, and where they come from now.
+# THE HAND-WRITTEN DOSSIER NAMES, and why records mode no longer defers to them.
 #
-# A client whose record names a detail file gets its graph node titled after
-# that file rather than a generated slug — "the hand note wins as the node",
-# a few lines below. This needed the exact casing, so it listed
-# DNA/Clients/prospects on disk and mapped lowercased stem -> real stem.
+# A client whose record names a detail file used to have its graph node TITLED
+# after that file and no node FILE generated at all — "the hand note wins as the
+# node", with the skip a few hundred lines below. That was right while the notes
+# existed: a person owned the file and the graph linked to it.
 #
-# THAT DIRECTORY IS GONE. It lived in the Drive vault, the 2026-08-19 cutoff
-# retired it, and in normal mode ROOT is this repository, which never had it.
-# So the listing raised FileNotFoundError and took the whole graph with it —
-# the nightly step had been refusing for a destination it did not need, and
-# behind that refusal sat a crash it did need fixing.
+# THE NOTES ARE GONE. They lived in DNA/Clients/prospects in the Drive vault and
+# the 2026-08-19 cutoff retired them. Deferring to a file that cannot exist on
+# any machine does not preserve a link; it guarantees a broken one. Measured
+# 2026-08-23: 23 of 201 client rows name a detail file, so 23 client nodes were
+# titles pointing at nothing, and the graph generated no page for any of them.
 #
-# THE RECORDS ALREADY CARRY THE ANSWER. Every client row that has a dossier
-# carries its path in "Detail File" (23 of 201, measured 2026-08-23), and the
-# lookup below is by lowercased stem of that same field. Building the map from
-# the rows is therefore exact rather than approximate: it returns the stem the
-# record itself states, which is the value the old disk listing was being
-# consulted to confirm.
+# So in records mode the dossier no longer wins and every client gets a real
+# generated node. This DOES change those 23 node titles, from the dossier stem
+# to the same slug every other client gets. That is a deliberate trade: a
+# generated page a reader can open beats a title that resolves nowhere, and the
+# links it replaces were already dead rather than about to be.
 #
-# Files mode still reads the directory, because that mode means a recovery
-# operator has deliberately pointed ROOT at a real vault — and it no longer dies
-# when the directory is absent, since a missing tree there is a thing to report
-# rather than a traceback.
+# FILES MODE IS UNCHANGED, because it means a recovery operator has deliberately
+# pointed the root at a real vault, where those notes are present and are still
+# the better node. It also no longer dies when the directory is absent: a
+# missing tree there is a reported finding rather than a traceback.
 detail_files: dict[str, str] = {}
-if MODE == "records":
-    for _c in clients:
-        _det = s(_c.get("Detail File"))
-        if not _det:
-            continue
-        _stem = os.path.splitext(os.path.basename(_det))[0]
-        if _stem:
-            detail_files.setdefault(_stem.lower(), _stem)
-else:
+if MODE != "records":
     _prospect_dir = os.path.join(ROOT, "DNA/Clients/prospects")
     if os.path.isdir(_prospect_dir):
         detail_files = {os.path.splitext(f)[0].lower(): os.path.splitext(f)[0]
