@@ -84,6 +84,16 @@
       ],
       "failure_mode": "PreToolUse block"
     },
+    "delegation_names_model_and_effort": {
+      "implementation": [
+        "tools/room-bridge/dispatch.py",
+        "tools/room-bridge/desks.py"
+      ],
+      "test": [
+        "ops/room-bridge-selftest.py"
+      ],
+      "failure_mode": "DeskError unnamed_model_or_effort at dispatch, before anything reaches the desk, when a codex-kind desk lacks a named model or reasoning effort"
+    },
     "artifact_read": {
       "implementation": [
         "hooks/unread-artifact-gate.py"
