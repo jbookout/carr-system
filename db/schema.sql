@@ -1908,6 +1908,28 @@ end $$;
 
 
 --
+-- Name: claim_staging_restore_only_attempt(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare attempt ops.staging_restore_only_attempt%rowtype; inserted_count integer; result_row ops.staging_restore_only_result%rowtype;
+begin
+  if session_user<>'carr_jobs' then raise exception 'restore-only claim requires the carr_jobs session'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  select * into attempt from ops.staging_restore_only_attempt where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'restore-only attempt must be prepared before claim'; end if;
+  select * into result_row from ops.staging_restore_only_result where restore_attempt_id=attempt.id;
+  if found then return jsonb_build_object('restore_attempt_id',attempt.id,'mutation_allowed',false,'state',result_row.status,'replayed',true); end if;
+  insert into ops.staging_restore_only_claim(restore_attempt_id,writer_session_user) values(attempt.id,session_user) on conflict do nothing;
+  get diagnostics inserted_count=row_count;
+  return jsonb_build_object('restore_attempt_id',attempt.id,'mutation_allowed',inserted_count=1,'state',case when inserted_count=1 then 'claimed' else 'claimed_pending_result' end,'replayed',inserted_count=0);
+end $$;
+
+
+--
 -- Name: clear_recovered_incident(text, integer); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3893,6 +3915,95 @@ end $_$;
 
 
 --
+-- Name: prepare_staging_restore_only_attempt(uuid, uuid, text, text, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare
+  existing ops.staging_restore_only_attempt%rowtype;
+  current_release ops.release%rowtype;
+  prior_release ops.release%rowtype;
+  migration_hash text;
+  migration_count integer;
+  attempt_uuid uuid;
+  expected_tag text;
+  existing_result ops.staging_restore_only_result%rowtype;
+begin
+  if session_user<>'carr_jobs' then raise exception 'restore-only writer requires the carr_jobs session'; end if;
+  if p_idempotency_key is null or p_correlation_id is null or p_recovery_attempt_id is null
+     or coalesce(p_release_key,'')='' or coalesce(p_prior_release_key,'')=''
+     or coalesce(p_git_sha,'') !~ '^[0-9a-f]{40}$' or p_correlation_id<>p_recovery_attempt_id then
+    raise exception 'invalid typed restore-only attempt input';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  perform pg_advisory_xact_lock(hashtextextended(p_recovery_attempt_id::text,202));
+  select * into current_release from ops.release where release_key=p_release_key;
+  if not found or current_release.environment<>'production' or current_release.state<>'candidate'
+     or current_release.recovery_strategy<>'rollback' or coalesce(current_release.rollback_plan_ref,'')=''
+     or coalesce(current_release.plan_hash,'')='' or current_release.service_id is null
+     or current_release.provider<>'cloudflare-workers' or current_release.provider_version_id is null then
+    raise exception 'restore-only target is not an exact rollback-ready Production candidate';
+  end if;
+  select * into prior_release from ops.release where release_key=p_prior_release_key;
+  if not found or prior_release.id=current_release.id or prior_release.environment<>'production'
+     or prior_release.state<>'complete' or prior_release.service_id<>current_release.service_id then
+    raise exception 'restore-only prior release is not a distinct completed Production release';
+  end if;
+  if not exists (select 1 from ops.deployment d where d.release_id=prior_release.id
+      and d.service_id=current_release.service_id and d.environment='production'
+      and d.state='complete' and d.read_back_at is not null and d.git_sha=prior_release.git_sha
+      and d.provider=prior_release.provider and d.provider_version_id=prior_release.provider_version_id) then
+    raise exception 'restore-only prior release has no exact completed Production readback';
+  end if;
+  if p_git_sha<>current_release.git_sha then raise exception 'restore-only SHA does not match the current target'; end if;
+  if coalesce(cardinality(current_release.migration_set),0)<=0
+     or coalesce(current_release.schema_highest_migration,'') !~ '^[0-9]{4}_[a-z0-9_.-]+\\.sql$'
+     or coalesce(current_release.schema_applied_count,0)<=0
+     or coalesce(current_release.schema_ledger_sha256,'') !~ '^sha256:[0-9a-f]{64}$' then
+    raise exception 'restore-only target does not declare an exact migration/schema set';
+  end if;
+  migration_hash:=ops.program5_migration_set_sha256(current_release.migration_set);
+  migration_count:=cardinality(current_release.migration_set);
+  expected_tag:='carr-staging-'||replace(p_idempotency_key::text,'-','');
+  select * into existing from ops.staging_restore_only_attempt where idempotency_key=p_idempotency_key;
+  if found then
+    if (existing.correlation_id,existing.recovery_attempt_id,existing.rehearsal_release_id,
+        existing.prior_release_id,existing.service_id,existing.git_sha,existing.target_provider_version_id,
+        existing.recovery_strategy,existing.rollback_plan_ref,existing.plan_hash,existing.expected_provider_tag,
+        existing.declared_migration_set_sha256,existing.declared_migration_count,
+        existing.declared_schema_highest_migration,existing.declared_schema_applied_count,
+        existing.declared_schema_ledger_sha256) is distinct from
+       (p_correlation_id,p_recovery_attempt_id,current_release.id,prior_release.id,current_release.service_id,
+        p_git_sha,current_release.provider_version_id,current_release.recovery_strategy,
+        current_release.rollback_plan_ref,current_release.plan_hash,expected_tag,migration_hash,migration_count,
+        current_release.schema_highest_migration,current_release.schema_applied_count,
+        current_release.schema_ledger_sha256) then
+      raise exception 'restore-only idempotency key was reused with changed input';
+    end if;
+    select * into existing_result from ops.staging_restore_only_result where restore_attempt_id=existing.id;
+    return jsonb_build_object('restore_attempt_id',existing.id,'expected_provider_tag',existing.expected_provider_tag,
+      'state',coalesce(existing_result.status,'prepared'),'mutation_claimed',exists(select 1 from ops.staging_restore_only_claim where restore_attempt_id=existing.id),
+      'result_ref',existing_result.evidence_ref,'replayed',true);
+  end if;
+  insert into ops.staging_restore_only_attempt(idempotency_key,recovery_attempt_id,correlation_id,
+    rehearsal_release_id,prior_release_id,service_id,environment,git_sha,provider,target_provider_version_id,
+    recovery_strategy,rollback_plan_ref,plan_hash,expected_provider_tag,declared_migration_set_sha256,
+    declared_migration_count,declared_schema_highest_migration,declared_schema_applied_count,
+    declared_schema_ledger_sha256,writer_session_user)
+  values(p_idempotency_key,p_recovery_attempt_id,p_correlation_id,current_release.id,prior_release.id,
+    current_release.service_id,'staging',p_git_sha,'cloudflare-workers',current_release.provider_version_id,
+    current_release.recovery_strategy,current_release.rollback_plan_ref,current_release.plan_hash,expected_tag,
+    migration_hash,migration_count,current_release.schema_highest_migration,current_release.schema_applied_count,
+    current_release.schema_ledger_sha256,session_user) returning id into attempt_uuid;
+  return jsonb_build_object('restore_attempt_id',attempt_uuid,'expected_provider_tag',expected_tag,
+    'state','prepared','mutation_claimed',false,'result_ref',null,'replayed',false);
+end $_$;
+
+
+--
 -- Name: program5_migration_set_sha256(text[]); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -5326,6 +5437,65 @@ begin
     values(attempt.correlation_id,'check',service_uuid,'staging','recovery.rehearsal.worker','succeeded',before_receipt.observed_at,after_receipt.observed_at,'wrapper','bin/deploy-worker.sh',after_receipt.observed_at,bundle_ref,current_release.id,'rollback',current_release.rollback_plan_ref,bundle_uuid) returning id into run_uuid;
   end if;
   return jsonb_build_object('receipt_id',receipt_uuid,'receipt_ref',receipt_ref,'replayed',false,'bundle_id',bundle_uuid,'recovery_run_id',run_uuid);
+end $_$;
+
+
+--
+-- Name: record_staging_restore_only_result(uuid, text, uuid, text, integer, text, integer, bigint, boolean, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare attempt ops.staging_restore_only_attempt%rowtype; existing ops.staging_restore_only_result%rowtype;
+  projection jsonb; result_hash text; result_ref text; result_uuid uuid;
+begin
+  if session_user<>'carr_jobs' then raise exception 'restore-only result requires the carr_jobs session'; end if;
+  if p_idempotency_key is null or p_status not in ('succeeded','failed','unknown') then raise exception 'invalid restore-only result input'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
+  select * into attempt from ops.staging_restore_only_attempt where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'restore-only result has no prepared attempt'; end if;
+  if not exists(select 1 from ops.staging_restore_only_claim where restore_attempt_id=attempt.id) then raise exception 'restore-only result was never claimed'; end if;
+  select * into existing from ops.staging_restore_only_result where restore_attempt_id=attempt.id;
+  if found then
+    if (existing.status,existing.provider_version_id,existing.provider_tag,existing.verb_count,
+        existing.schema_highest_migration,existing.schema_applied_count,existing.doctrine_generation,
+        existing.program6_actions_enabled,existing.reason) is distinct from
+       (p_status,p_provider_version_id,p_provider_tag,p_verb_count,p_schema_highest_migration,
+        p_schema_applied_count,p_doctrine_generation,p_program6_actions_enabled,p_reason) then
+      raise exception 'restore-only result idempotency key was reused with changed input';
+    end if;
+    return jsonb_build_object('restore_result_id',existing.id,'result_ref',existing.evidence_ref,'status',existing.status,'replayed',true);
+  end if;
+  if p_status='succeeded' then
+    if p_provider_version_id is null or p_provider_tag<>attempt.expected_provider_tag or coalesce(p_verb_count,0)<=0
+       or coalesce(p_schema_highest_migration,'')<>attempt.declared_schema_highest_migration
+       or p_schema_applied_count<>attempt.declared_schema_applied_count or p_doctrine_generation is null
+       or p_program6_actions_enabled is null or p_reason is not null then
+      raise exception 'restore-only success lacks exact current-target readback';
+    end if;
+  elsif p_provider_version_id is not null or p_provider_tag is not null or p_verb_count is not null
+     or p_schema_highest_migration is not null or p_schema_applied_count is not null
+     or p_doctrine_generation is not null or p_program6_actions_enabled is not null
+     or coalesce(p_reason,'') !~ '^[a-z0-9_.:-]{1,240}$' then
+    raise exception 'restore-only non-success requires only a bounded reason';
+  end if;
+  projection:=jsonb_build_object('restore_attempt_id',attempt.id,'recovery_attempt_id',attempt.recovery_attempt_id,
+    'target_release_id',attempt.rehearsal_release_id,'prior_release_id',attempt.prior_release_id,
+    'target_provider_version_id',attempt.target_provider_version_id,'environment','staging','status',p_status,
+    'provider_version_id',p_provider_version_id,'provider_tag',p_provider_tag,'verb_count',p_verb_count,
+    'schema_highest_migration',p_schema_highest_migration,'schema_applied_count',p_schema_applied_count,
+    'doctrine_generation',p_doctrine_generation,'program6_actions_enabled',p_program6_actions_enabled,'reason',p_reason);
+  result_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
+  result_ref:='ops.staging-restore-only:'||result_hash;
+  insert into ops.staging_restore_only_result(idempotency_key,restore_attempt_id,status,provider_version_id,
+    provider_tag,verb_count,schema_highest_migration,schema_applied_count,doctrine_generation,
+    program6_actions_enabled,reason,result_sha256,evidence_ref,writer_session_user)
+  values(p_idempotency_key,attempt.id,p_status,p_provider_version_id,p_provider_tag,p_verb_count,
+    p_schema_highest_migration,p_schema_applied_count,p_doctrine_generation,p_program6_actions_enabled,
+    p_reason,result_hash,result_ref,session_user) returning id into result_uuid;
+  return jsonb_build_object('restore_result_id',result_uuid,'result_ref',result_ref,'status',p_status,'replayed',false);
 end $_$;
 
 
@@ -10957,6 +11127,90 @@ CREATE TABLE ops.staging_release_readback_receipt (
 --
 
 COMMENT ON COLUMN ops.staging_release_readback_receipt.program6_actions_enabled IS 'Effective Program 6 action boolean read from /release for post-0218 receipts; NULL is legacy immutable evidence.';
+
+
+--
+-- Name: staging_restore_only_attempt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_restore_only_attempt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    recovery_attempt_id uuid NOT NULL,
+    correlation_id uuid NOT NULL,
+    rehearsal_release_id uuid NOT NULL,
+    prior_release_id uuid NOT NULL,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    git_sha text NOT NULL,
+    provider text NOT NULL,
+    target_provider_version_id uuid CONSTRAINT staging_restore_only_attemp_target_provider_version_id_not_null NOT NULL,
+    recovery_strategy text NOT NULL,
+    rollback_plan_ref text NOT NULL,
+    plan_hash text NOT NULL,
+    expected_provider_tag text NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_restore_only_attemp_declared_migration_set_sha_not_null NOT NULL,
+    declared_migration_count integer NOT NULL,
+    declared_schema_highest_migration text CONSTRAINT staging_restore_only_attemp_declared_schema_highest_mi_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_restore_only_attemp_declared_schema_applied_co_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_restore_only_attemp_declared_schema_ledger_sha_not_null NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_restore_only_attempt_check CHECK ((correlation_id = recovery_attempt_id)),
+    CONSTRAINT staging_restore_only_attempt_declared_migration_count_check CHECK ((declared_migration_count > 0)),
+    CONSTRAINT staging_restore_only_attempt_declared_migration_set_sha25_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_restore_only_attempt_declared_schema_applied_coun_check CHECK ((declared_schema_applied_count > 0)),
+    CONSTRAINT staging_restore_only_attempt_declared_schema_highest_migr_check CHECK ((declared_schema_highest_migration ~ '^[0-9]{4}_[a-z0-9_.-]+\\.sql$'::text)),
+    CONSTRAINT staging_restore_only_attempt_declared_schema_ledger_sha25_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_restore_only_attempt_environment_check CHECK ((environment = 'staging'::text)),
+    CONSTRAINT staging_restore_only_attempt_expected_provider_tag_check CHECK ((expected_provider_tag ~ '^carr-staging-[0-9a-f]{32}$'::text)),
+    CONSTRAINT staging_restore_only_attempt_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_restore_only_attempt_plan_hash_check CHECK ((length(plan_hash) > 0)),
+    CONSTRAINT staging_restore_only_attempt_provider_check CHECK ((provider = 'cloudflare-workers'::text)),
+    CONSTRAINT staging_restore_only_attempt_recovery_strategy_check CHECK ((recovery_strategy = 'rollback'::text)),
+    CONSTRAINT staging_restore_only_attempt_rollback_plan_ref_check CHECK ((length(rollback_plan_ref) > 0)),
+    CONSTRAINT staging_restore_only_attempt_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_restore_only_claim; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_restore_only_claim (
+    restore_attempt_id uuid NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER NOT NULL,
+    claimed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_restore_only_claim_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_restore_only_result; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_restore_only_result (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    restore_attempt_id uuid NOT NULL,
+    status text NOT NULL,
+    provider_version_id uuid,
+    provider_tag text,
+    verb_count integer,
+    schema_highest_migration text,
+    schema_applied_count integer,
+    doctrine_generation bigint,
+    program6_actions_enabled boolean,
+    reason text,
+    result_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER NOT NULL,
+    CONSTRAINT staging_restore_only_result_check CHECK ((((status = 'succeeded'::text) AND (provider_version_id IS NOT NULL) AND (provider_tag IS NOT NULL) AND (verb_count IS NOT NULL) AND (schema_highest_migration IS NOT NULL) AND (schema_applied_count IS NOT NULL) AND (doctrine_generation IS NOT NULL) AND (program6_actions_enabled IS NOT NULL) AND (reason IS NULL)) OR ((status = ANY (ARRAY['failed'::text, 'unknown'::text])) AND (provider_version_id IS NULL) AND (provider_tag IS NULL) AND (verb_count IS NULL) AND (schema_highest_migration IS NULL) AND (schema_applied_count IS NULL) AND (doctrine_generation IS NULL) AND (program6_actions_enabled IS NULL) AND (reason IS NOT NULL) AND ((length(reason) >= 1) AND (length(reason) <= 240)) AND (reason ~ '^[a-z0-9_.:-]+$'::text)))),
+    CONSTRAINT staging_restore_only_result_result_sha256_check CHECK ((result_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_restore_only_result_status_check CHECK ((status = ANY (ARRAY['succeeded'::text, 'failed'::text, 'unknown'::text]))),
+    CONSTRAINT staging_restore_only_result_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
 
 
 --
@@ -21539,6 +21793,70 @@ ALTER TABLE ONLY ops.staging_release_readback_receipt
 
 
 --
+-- Name: staging_restore_only_attempt staging_restore_only_attempt_expected_provider_tag_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_attempt
+    ADD CONSTRAINT staging_restore_only_attempt_expected_provider_tag_key UNIQUE (expected_provider_tag);
+
+
+--
+-- Name: staging_restore_only_attempt staging_restore_only_attempt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_attempt
+    ADD CONSTRAINT staging_restore_only_attempt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_restore_only_attempt staging_restore_only_attempt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_attempt
+    ADD CONSTRAINT staging_restore_only_attempt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_restore_only_claim staging_restore_only_claim_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_claim
+    ADD CONSTRAINT staging_restore_only_claim_pkey PRIMARY KEY (restore_attempt_id);
+
+
+--
+-- Name: staging_restore_only_result staging_restore_only_result_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_result
+    ADD CONSTRAINT staging_restore_only_result_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: staging_restore_only_result staging_restore_only_result_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_result
+    ADD CONSTRAINT staging_restore_only_result_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_restore_only_result staging_restore_only_result_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_result
+    ADD CONSTRAINT staging_restore_only_result_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_restore_only_result staging_restore_only_result_restore_attempt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_result
+    ADD CONSTRAINT staging_restore_only_result_restore_attempt_id_key UNIQUE (restore_attempt_id);
+
+
+--
 -- Name: work_request work_request_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -24625,6 +24943,27 @@ CREATE TRIGGER staging_release_readback_append_only BEFORE DELETE OR UPDATE ON o
 
 
 --
+-- Name: staging_restore_only_attempt staging_restore_only_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_restore_only_attempt_append_only BEFORE DELETE OR UPDATE ON ops.staging_restore_only_attempt FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_restore_only_claim staging_restore_only_claim_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_restore_only_claim_append_only BEFORE DELETE OR UPDATE ON ops.staging_restore_only_claim FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_restore_only_result staging_restore_only_result_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_restore_only_result_append_only BEFORE DELETE OR UPDATE ON ops.staging_restore_only_result FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
 -- Name: run validate_recovery_rehearsal_run; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -26243,6 +26582,46 @@ ALTER TABLE ONLY ops.staging_release_readback_receipt
 
 ALTER TABLE ONLY ops.staging_release_readback_receipt
     ADD CONSTRAINT staging_release_readback_receipt_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_restore_only_attempt staging_restore_only_attempt_prior_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_attempt
+    ADD CONSTRAINT staging_restore_only_attempt_prior_release_id_fkey FOREIGN KEY (prior_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_restore_only_attempt staging_restore_only_attempt_rehearsal_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_attempt
+    ADD CONSTRAINT staging_restore_only_attempt_rehearsal_release_id_fkey FOREIGN KEY (rehearsal_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_restore_only_attempt staging_restore_only_attempt_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_attempt
+    ADD CONSTRAINT staging_restore_only_attempt_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_restore_only_claim staging_restore_only_claim_restore_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_claim
+    ADD CONSTRAINT staging_restore_only_claim_restore_attempt_id_fkey FOREIGN KEY (restore_attempt_id) REFERENCES ops.staging_restore_only_attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_restore_only_result staging_restore_only_result_restore_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_restore_only_result
+    ADD CONSTRAINT staging_restore_only_result_restore_attempt_id_fkey FOREIGN KEY (restore_attempt_id) REFERENCES ops.staging_restore_only_attempt(id) ON DELETE RESTRICT;
 
 
 --
@@ -28374,6 +28753,7 @@ revoke all on function ops.claim_calendar_prebrief_joe_live_job(p_worker text, p
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
+revoke all on function ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) from public;
 revoke all on function ops.clear_recovered_incident(p_ref text, p_required integer) from public;
 revoke all on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) from public;
 revoke all on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) from public;
@@ -28402,6 +28782,7 @@ revoke all on function ops.issue_calendar_prebrief_capture_contract(p_job_id uui
 revoke all on function ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) from public;
+revoke all on function ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) from public;
 revoke all on function ops.program5_migration_set_sha256(p_migration_set text[]) from public;
 revoke all on function ops.program6_browser_action_challenge_redemptions_immutable() from public;
 revoke all on function ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) from public;
@@ -28424,6 +28805,7 @@ revoke all on function ops.record_provider_observation(p_route_key text, p_statu
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
 revoke all on function ops.record_staging_release_readback_program6(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
+revoke all on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text, p_actor text) from public;
 revoke all on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) from public;
@@ -28658,6 +29040,18 @@ grant select on table ops.staging_release_readback_receipt to carr_authority;
 grant select on table ops.staging_release_readback_receipt to carr_jobs;
 grant select on table ops.staging_release_readback_receipt to carr_reader;
 grant select on table ops.staging_release_readback_receipt to carr_writer;
+grant select on table ops.staging_restore_only_attempt to carr_authority;
+grant select on table ops.staging_restore_only_attempt to carr_jobs;
+grant select on table ops.staging_restore_only_attempt to carr_reader;
+grant select on table ops.staging_restore_only_attempt to carr_writer;
+grant select on table ops.staging_restore_only_claim to carr_authority;
+grant select on table ops.staging_restore_only_claim to carr_jobs;
+grant select on table ops.staging_restore_only_claim to carr_reader;
+grant select on table ops.staging_restore_only_claim to carr_writer;
+grant select on table ops.staging_restore_only_result to carr_authority;
+grant select on table ops.staging_restore_only_result to carr_jobs;
+grant select on table ops.staging_restore_only_result to carr_reader;
+grant select on table ops.staging_restore_only_result to carr_writer;
 grant select on table ops.v_capability_program_next to carr_jobs;
 grant select on table ops.v_capability_program_next to carr_reader;
 grant select on table ops.v_capability_program_next to carr_writer;
@@ -29128,6 +29522,7 @@ grant execute on function ops.claim_calendar_prebrief_joe_live_job(p_worker text
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
+grant execute on function ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.clear_recovered_incident(p_ref text, p_required integer) to carr_jobs;
 grant execute on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) to carr_jobs;
 grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
@@ -29159,6 +29554,7 @@ grant execute on function ops.issue_calendar_prebrief_capture_contract(p_job_id 
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_reader;
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_writer;
 grant execute on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) to carr_jobs;
+grant execute on function ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) to carr_jobs;
 grant execute on function ops.program5_migration_set_sha256(p_migration_set text[]) to carr_jobs;
 grant execute on function ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) to carr_writer;
 grant execute on function ops.propose_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_plan_hash text, p_criterion_results jsonb, p_evidence_refs jsonb, p_blocker_code text, p_result_summary text, p_observed_minutes integer, p_interaction_surface text, p_heavy_session_used boolean, p_manual_context_transfers integer, p_idempotency_key uuid) to carr_writer;
@@ -29179,6 +29575,7 @@ grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observ
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
+grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
@@ -29486,6 +29883,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0292_pack_delivery_control_catalog.sql	0bb8b301ea0dc5658bda16b7f1105cdd2fea2336ffbbed8bb38ae88917814a47	2026-08-24 16:04:56.295072+00
 0293_lead_board_read_model.sql	4d4ac222c8184868a4b68f3fb6dd3e740d97d477ab3140cf400bd79d594f2afc	2026-08-24 16:51:50.301151+00
 0294_incident_fingerprint_and_success_clears.sql	f17bfb88bb28decfb414edeaa763df38ae7a9cc0f5362edb0443b1acc96a767e	2026-08-24 16:51:50.703935+00
+0295_staging_restore_only_recovery.sql	0d381ef9d2eb3a833b055bf688185489632faf6aeb568d49d03aa3e0f1b72b8b	2026-08-24 17:04:52.004777+00
 \.
 
 
