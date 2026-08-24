@@ -1,4 +1,4 @@
--- 0288_rule_delivery_layers.sql
+-- 0291_rule_delivery_layers.sql
 -- WHERE A RULE IS DELIVERED, WHICH IS A DIFFERENT QUESTION FROM HOW IT IS ENFORCED.
 --
 -- WHY THIS EXISTS (2026-08-23, the rules council's delivery half). The
@@ -145,7 +145,7 @@ comment on table ops.rule_delivery_policy is
   'shadow at zero unexplained misses before this row may say enforced.';
 
 insert into ops.rule_delivery_policy (singleton, mode, changed_by, reason)
-values (true, 'shadow', 'migration:0288',
+values (true, 'shadow', 'migration:0291',
         'Shadow first: the selector runs beside full recitation until a week of '
         'observations shows no consequential rule was omitted.')
 on conflict (singleton) do nothing;
@@ -217,7 +217,7 @@ begin
             'ops.rule_delivery_policy to carr_jobs';
     execute 'grant execute on function ops.rule_pack_index() to carr_jobs';
   else
-    raise notice '0288: carr_jobs is absent (a disposable or sanitized database); '
+    raise notice '0291: carr_jobs is absent (a disposable or sanitized database); '
                  'skipping the routine grants';
   end if;
 end $$;
@@ -229,23 +229,23 @@ declare bad int;
 begin
   if to_regclass('ops.rule_load_layer') is null or to_regclass('ops.rule_pack') is null
      or to_regclass('ops.rule_delivery_policy') is null then
-    raise exception '0288 FAILED: the delivery tables are missing';
+    raise exception '0291 FAILED: the delivery tables are missing';
   end if;
   if to_regprocedure('ops.rule_delivery_plan(text,text[])') is null
      or to_regprocedure('ops.rule_pack_index()') is null then
-    raise exception '0288 FAILED: the delivery selector is missing';
+    raise exception '0291 FAILED: the delivery selector is missing';
   end if;
   if (select mode from ops.rule_delivery_policy) <> 'shadow' then
-    raise exception '0288 FAILED: delivery must start in shadow mode';
+    raise exception '0291 FAILED: delivery must start in shadow mode';
   end if;
   -- Prove the wildcard refusal is real rather than documented, the way rule
   -- e65efc68 asks: the constraint fires before anything depends on it.
   begin
     insert into ops.rule_pack (pack, title, description, triggers, source)
-    values ('0288-probe', 't', 'd', array['*'], 'migration:0288');
-    raise exception '0288 FAILED: a wildcard trigger was accepted';
+    values ('0291-probe', 't', 'd', array['*'], 'migration:0291');
+    raise exception '0291 FAILED: a wildcard trigger was accepted';
   exception when check_violation then null;
   end;
-  select count(*) into bad from ops.rule_pack where pack = '0288-probe';
-  if bad <> 0 then raise exception '0288 FAILED: the probe row survived'; end if;
+  select count(*) into bad from ops.rule_pack where pack = '0291-probe';
+  if bad <> 0 then raise exception '0291 FAILED: the probe row survived'; end if;
 end $$;
