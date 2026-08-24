@@ -180,6 +180,11 @@ def auto_apply(staged: list[str], touched: list[str]) -> list[str]:
     changes = []
     for path in touched:
         blob = staged_blob(path)
+        if blob is None:
+            # Unreachable: the deletion guard above returns before this loop.
+            # Stated rather than assumed, because "unreachable" is how a None
+            # reaches sha256 after somebody edits the guard.
+            return []
         name = path.split("/")[-1]
         table = contracts if name in CONTRACTS else hashes
         got = hashlib.sha256(blob).hexdigest()

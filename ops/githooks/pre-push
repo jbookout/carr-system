@@ -216,8 +216,15 @@ EOF
     # status of its LAST command -- tee's, which is always 0 -- so ci.sh's own
     # status is carried out through a file. Getting this wrong would turn every
     # red push green, which is the one bug this hook must not have.
-    CI_LOG="$(mktemp -t carr-prepush-log)"
-    CI_RC_FILE="$(mktemp -t carr-prepush-rc)"
+    # NOT `mktemp -t <prefix>`. That is BSD spelling: macOS appends a random
+    # suffix to a bare prefix, GNU coreutils REQUIRES the template to contain
+    # XXXXXX and errors out without it. This hook runs on Joe's Mac and its
+    # selftest runs on an ubuntu runner, so the BSD-only form worked locally and
+    # failed hosted -- CI_LOG came back empty, `cat ""` returned 1, and the hook
+    # refused every push including the green ones. An explicit template with
+    # XXXXXX is the one spelling both implementations read the same way.
+    CI_LOG="$(mktemp "${TMPDIR:-/tmp}/carr-prepush-log.XXXXXX")"
+    CI_RC_FILE="$(mktemp "${TMPDIR:-/tmp}/carr-prepush-rc.XXXXXX")"
     {
       env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX \
           -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \

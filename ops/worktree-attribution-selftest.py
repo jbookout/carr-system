@@ -29,12 +29,18 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "ops"))
 from git_env import fixture_env                                # noqa: E402
 
+# The hyphen in the filename means it cannot be imported by name; the asserts
+# are for the type checker, and they are also the honest failure if the file
+# moves -- better than an AttributeError sixty lines later.
 _spec = importlib.util.spec_from_file_location(
     "worktree_attribution", ROOT / "ops" / "worktree-attribution.py")
+assert _spec is not None and _spec.loader is not None, \
+    "ops/worktree-attribution.py is missing or unreadable"
 wa = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wa)
 
-FAILURES = []
+FAILURES: list[str] = []
+BEFORE: tuple = ()
 
 
 def check(name, condition, detail=""):

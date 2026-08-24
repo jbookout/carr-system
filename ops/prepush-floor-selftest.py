@@ -197,6 +197,23 @@ def main():
         check("and the suite was genuinely not invoked",
               log.read_text().strip() == "", log.read_text())
 
+    # 7. PORTABILITY, asserted statically because the runner that catches it is
+    #    not the machine that runs this hook. `mktemp -t <prefix>` is BSD
+    #    spelling: macOS appends a random suffix, GNU coreutils requires XXXXXX
+    #    and errors without it. That form passed every check on Joe's Mac and
+    #    refused every push on the ubuntu runner, green ones included, because
+    #    an empty CI_LOG made `cat ""` return 1. The behavioural cases above
+    #    cannot see it from macOS; this line can.
+    # Comment lines are excluded, and that is not a detail: the prose above the
+    # fix necessarily SPELLS the broken form in order to warn about it, so a
+    # naive scan of the whole file flags the warning as the defect.
+    offenders = [line.strip() for line in HOOK.read_text().splitlines()
+                 if "mktemp" in line
+                 and not line.lstrip().startswith("#")
+                 and "XXXXXX" not in line]
+    check("every mktemp template carries XXXXXX (GNU errors without it)",
+          not offenders, offenders)
+
     print(f"\n{passed} passed, {len(failures)} failed")
     if failures:
         print("FAILED: " + ", ".join(failures))
