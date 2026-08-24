@@ -94,7 +94,12 @@ def write_executable(path: Path, body: str) -> None:
 
 def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subprocess.CompletedProcess[str]:
     """Run the Production promotion path with every external boundary mocked."""
-    with tempfile.TemporaryDirectory(prefix="deploy-ledger-", dir=REPO) as raw:
+    # PRIVATE TMP, NOT THE REPO ROOT (2026-08-23 load-flake sweep). This used
+    # to be dir=REPO, which left a deploy-ledger-* directory sitting in the
+    # checkout for the duration of the run and made every concurrent ci.sh run
+    # share one filesystem namespace with it. tempfile's own default is already
+    # per-process private; nothing here needs the fixture inside the repo.
+    with tempfile.TemporaryDirectory(prefix="deploy-ledger-") as raw:
         root = Path(raw)
         script = root / "bin" / "deploy-worker.sh"
         write_executable(script, SCRIPT.read_text(encoding="utf-8"))

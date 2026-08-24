@@ -188,7 +188,7 @@ def main() -> int:
           (malformed_version.stdout + malformed_version.stderr),
           f"rc={malformed_version.returncode}")
 
-    with tempfile.TemporaryDirectory(prefix="promotion-selftest-", dir=REPO) as td:
+    with tempfile.TemporaryDirectory(prefix="promotion-selftest-") as td:
         manifest_path = Path(td) / "bound.json"
         manifest_path.write_text(json.dumps({
             "service": "carr-mcp",
@@ -206,7 +206,7 @@ def main() -> int:
           (mismatched_manifest.stdout + mismatched_manifest.stderr),
           f"rc={mismatched_manifest.returncode}")
 
-    with tempfile.TemporaryDirectory(prefix="promotion-verify-", dir=REPO) as td:
+    with tempfile.TemporaryDirectory(prefix="promotion-verify-") as td:
         source_path = Path(td) / "source.json"
         bound_path = Path(td) / "bound.json"
         tampered_path = Path(td) / "tampered.json"

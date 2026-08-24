@@ -60,6 +60,22 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "conduct-gate.jsonl")
 DEBUG = os.path.join(REPO, "out", "conduct-gate.log")
 
+
+def repo_root():
+    """The repo root, from CARR_REPO_ROOT env or script-relative.
+
+    Same contract as hooks/close-before-open-gate.py's _repo_root(). The
+    override exists for the SELFTESTS: a selftest that spawns this hook with a
+    fixture repo root gets its own out/ tree, so two concurrent ci.sh runs can
+    never cross-wire each other's carry files or audit rows (the 2026-08-23
+    load-flake class). Production never sets the variable and takes the
+    script-relative path exactly as before.
+    """
+    env = os.environ.get("CARR_REPO_ROOT")
+    if env and os.path.isdir(env):
+        return os.path.realpath(env)
+    return REPO
+
 CHAT_RULE_IDS = {"vocab", "contrast-reframe", "contrast-reframe-split"}
 
 # 8-hex with at least one letter (all-digit is a date or a number, not an id),
@@ -188,7 +204,7 @@ def dlog(msg):
 def carry_path(session):
     """One pending-note file per session, so two sessions never cross wires."""
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session or "unknown"))[:64]
-    return os.path.join(REPO, "out", "chat-lint-carry", f"{safe}.txt")
+    return os.path.join(repo_root(), "out", "chat-lint-carry", f"{safe}.txt")
 
 
 def carry(note, session=None):

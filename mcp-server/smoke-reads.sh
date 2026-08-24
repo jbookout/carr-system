@@ -16,16 +16,17 @@
 # idempotency keys: they wrote once, on the first run in history, and replay for
 # ever after. Those few rows are the price of covering the write path, and a
 # twelve-hour production outage is what not covering it cost.
-# FORTY-FOUR checks as of the 2026-08-02 0066 marketing pass: seventeen plumbing
-# checks (ORDER 36's analysis write path was the seventeenth), SEVENTEEN
-# negative-answer probes, and TEN 0066 marketing probes at the very bottom.
-# Twenty-three of them sit behind SIX capability gates (org visibility, the
+# FORTY-EIGHT checks as of the 2026-08-23 incident-verb pass: seventeen plumbing
+# checks (ORDER 36's analysis write path was the seventeenth), EIGHTEEN
+# negative-answer probes, TEN 0066 marketing probes, and THREE incident-ledger
+# reads at the very bottom.
+# Twenty-seven of them sit behind SEVEN capability gates (org visibility, the
 # merge-split response shape, the unwalkable-edge report, the 0063 contract,
-# 0066's two-stage worker/migration gate, and — added 2026-08-14 — the auto-edge
-# path's 'probe' profile gate) and print SKIP rather than FAIL when the Worker,
-# the schema or the credential's profile predates or excludes the thing they
-# cover, so a healthy run is anywhere from 21 to 44 — the script says which gate
-# is closed and why.
+# 0066's two-stage worker/migration gate, — added 2026-08-14 — the auto-edge
+# path's 'probe' profile gate, and — added 2026-08-23 — the incident verbs'
+# deploy gate) and print SKIP rather than FAIL when the Worker, the schema or the
+# credential's profile predates or excludes the thing they cover, so a healthy
+# run is anywhere from 21 to 48 — the script says which gate is closed and why.
 # The count had been stale at "eleven as of ORDER 19" since ORDER 27 — ORDERS 27,
 # 33, 34 and 36 each added a check without moving it. Recount when you add one.
 #
@@ -1016,6 +1017,76 @@ if [ "$CAP_MKT" -eq 1 ]; then
             '{"idempotency_key":"smoke-0066-score","campaign":"Qwertzuiop Vraxmandel Campaign","base_version":1,"verdict":"worked","evidence":"none — smoke probe"}' \
             'campaign_not_found'
   fi
+fi
+
+# ── THE OPERATIONAL INCIDENT LEDGER (2026-08-23, rules-and-verbs council item 1)
+#
+# WHY THESE TWO BELONG HERE SPECIFICALLY, and not merely "because every read verb
+# does". This file's own opening paragraph names the failure it was built from:
+# `find` and `catch-me-up` "queried base tables that carr_reader cannot see, and
+# the gap survived from build day" until a done-test tripped over it. The
+# incident reads are the same shape of risk, one schema further out — they are
+# the first verbs to read ops.* on the READER connection at all. Every other
+# consumer of ops.incident to date (tools/ops-record.py, mcp-server/src/trace.js)
+# writes on a different credential entirely.
+#
+# migrations/0286 asserts the grants from the catalog, including for app_reader
+# — the login role this token's connection actually uses, not just the
+# carr_reader bundle it is granted. That assertion is stronger than the one 0117
+# and 0122 make, and it is still a claim about a catalog. This is the half that
+# runs the query.
+#
+# ONE GATE, and it is a SKIP rather than a FAIL, on the CAP_MKT pattern above:
+# the verbs live in mcp-server/src/tools.js from the moment that branch merges
+# and are NOT callable until the Worker ships them, which is a separate release.
+# A red here on the day the migration lands would be this script lying about a
+# deploy that has not happened yet.
+echo
+CAP_INC=1
+list_call
+if echo "$RESULT" | grep -q '"error"'; then
+  CAP_INC=0
+  echo "  FAIL  tools/list errored — cannot read the incident verb contract"
+  echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+elif ! echo "$RESULT" | grep -q '"incident-board"'; then
+  CAP_INC=0
+  echo "  SKIP  incident verbs — this Worker publishes no incident-board."
+  echo "        incident-board and get-incident are in mcp-server/src/tools.js and are NOT"
+  echo "        deployed, so the operational ledger still has no read surface and the only"
+  echo "        way to see what is broken is tools/ops-record.py on a partner's own Mac."
+  echo "        Deploy, then re-run. Not a failure."
+fi
+
+if [ "$CAP_INC" -eq 1 ]; then
+  # The board must ANSWER, not merely not-error. by_severity is the tally, and
+  # incidents is the row list; a reader-role permission problem on any of the
+  # five ops.* relations the board touches surfaces here as a transport error
+  # rather than as a quietly empty answer, which is the whole point.
+  check "incident-board (open incidents, reader role, ops.* reachable)" \
+        incident-board '{}' '"by_severity"' '"incidents"'
+
+  # A severity filter proves the WHERE arm runs rather than the board returning
+  # one canned shape. Deliberately not asserting a COUNT: how many SEV-2s are
+  # open is real operational state and changes hourly, so an assertion on it
+  # would be a probe that fails when the system is healthy.
+  check "incident-board filters by severity" \
+        incident-board '{"severity":"SEV-2"}' '"by_severity"'
+
+  # THE READINESS SPLIT, which is the board's reason to exist: which rows a
+  # partner could close today versus which are waiting on the clock or on a
+  # human. It is computed by the close guard itself rather than a second copy
+  # (see mcp-server/src/incident.js), so a drift between board and verb shows up
+  # as this field disappearing.
+  check "incident-board reports ready_to_close" \
+        incident-board '{"ready_to_close":true}' '"ready_to_close"'
+
+  # get-incident against a ref that cannot exist. The refusal is the probe: the
+  # handler runs its full row query — the one carrying the ops.incident self-join
+  # 0286 added — BEFORE it can know there is no such row, so a missing grant or a
+  # missing duplicate_of_id column fails as a transport error here, while a
+  # correctly reachable schema returns exactly this refusal.
+  refuses "get-incident refuses a ref that does not exist (and reaches the schema to find out)" \
+          get-incident '{"ref":"INC-19990101-99"}' 'no_such_incident'
 fi
 
 echo

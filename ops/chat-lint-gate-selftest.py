@@ -35,6 +35,7 @@ reply. CAUGHT = a note was parked; exit 2 is now itself a regression.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -96,6 +97,16 @@ bad: list[str] = []
 
 def run_stop(assistant_text, event="Stop", stop_active=False):
     fd, path = tempfile.mkstemp(suffix=".jsonl")
+    # A PRIVATE REPO ROOT PER RUN, not a per-pid session id. The hook parks its
+    # note at <root>/out/chat-lint-carry/selftest.txt; with the real repo root
+    # that fixed name is shared by every concurrent ci.sh run, and two runs
+    # cross-wire — one deletes the note the other is about to read (the
+    # 2026-08-23 load-flake class, four sessions deep on this one bug). Pointing
+    # CARR_REPO_ROOT at a throwaway tree gives each process its own out/ dir.
+    # hooks/chat-lint-gate.py and chat-lint-carryover.py both honour it, the
+    # same contract close-before-open-gate.py already established.
+    root = tempfile.mkdtemp(prefix="chat-lint-selftest.")
+    os.makedirs(os.path.join(root, "out", "chat-lint-carry"), exist_ok=True)
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(json.dumps({"type": "user", "origin": {"kind": "user"},
@@ -109,22 +120,19 @@ def run_stop(assistant_text, event="Stop", stop_active=False):
         # pays for twice). It parks a note that hooks/chat-lint-carryover.py
         # injects before the next reply. So "caught" now means a note was
         # written, and exit 2 would itself be a regression.
-        carry = os.path.join(REPO, "out", "chat-lint-carry", "selftest.txt")
-        try:
-            os.unlink(carry)
-        except Exception:
-            pass
+        carry = os.path.join(root, "out", "chat-lint-carry", "selftest.txt")
+        env = dict(os.environ, CARR_REPO_ROOT=root)
         p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=30, env=env)
         if p.returncode == 2:
             return False, "REGRESSION: gate blocked instead of carrying"
         note = ""
         if os.path.exists(carry):
             with open(carry) as fh:
                 note = fh.read()
-            os.unlink(carry)
         return bool(note.strip()), note
     finally:
+        shutil.rmtree(root, ignore_errors=True)
         try:
             os.unlink(path)
         except Exception:
