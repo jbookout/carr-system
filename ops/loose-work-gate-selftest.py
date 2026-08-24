@@ -113,6 +113,26 @@ def transcript(tmp, written_paths, name="t.jsonl"):
     return p
 
 
+def spoken(stdout):
+    """The announcement text this gate emitted, or "" if it said nothing.
+
+    DEMOTED 2026-08-23 (gates-audit council, Joe's Stop-gate rationing). This
+    gate used to exit 2, which REOPENS the turn and costs a whole extra
+    assistant message. It now announces: the finding rides into context without
+    forcing another turn. So "caught" means an announcement was emitted, and an
+    exit 2 from here is itself the regression — the same inversion
+    ops/chat-lint-gate-selftest.py made when that gate was demoted on
+    2026-08-16, for the same reason.
+    """
+    try:
+        emitted = json.loads(stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return ""
+    if "decision" in emitted:               # a block wearing an announce's clothes
+        return ""
+    return (emitted.get("hookSpecificOutput") or {}).get("additionalContext") or ""
+
+
 def run(repo, transcript_path, env=None):
     payload = json.dumps({"session_id": "s1", "transcript_path": transcript_path,
                           "cwd": repo})
@@ -121,7 +141,9 @@ def run(repo, transcript_path, env=None):
         e.update(env)
     p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
                        text=True, env=e, timeout=60)
-    return p.returncode, (p.stdout + p.stderr)
+    # `out` is what the gate SAID, in whichever register. rc is how much it
+    # cost: 0 is an announcement, 2 would be a reopened turn.
+    return p.returncode, (spoken(p.stdout) + p.stderr)
 
 
 print("\nloose-work-gate — a session does not end leaving its own work loose")
@@ -137,8 +159,9 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(target, "w") as fh:
         fh.write("modified by this session\n")
     rc, out = run(repo, transcript(tmp, [target]))
-    check("a session that left its own tracked file modified is stopped", rc == 2,
-          f"rc={rc}")
+    check("a session that left its own tracked file modified is told", bool(out),
+          f"rc={rc} said nothing")
+    check("...and it is told WITHOUT the turn being reopened", rc == 0, f"rc={rc}")
     check("the refusal names the file", "tracked.txt" in out, out[:200])
     check("the refusal says how to land it", "worktree" in out or "commit" in out,
           out[:200])
@@ -271,8 +294,9 @@ with tempfile.TemporaryDirectory() as tmp:
     git(repo, "add", "tracked.txt")
     git(repo, "commit", "-q", "-m", "the fix nobody could see")
     rc, out = run(repo, committing_transcript(tmp))
-    check("a session that committed and never pushed is stopped", rc == 2,
-          f"rc={rc}: {out[:200]}")
+    check("a session that committed and never pushed is told", bool(out),
+          f"rc={rc} said nothing")
+    check("...and that one does not reopen the turn either", rc == 0, f"rc={rc}")
     check("...and the refusal says the commit exists on no other machine",
           "unpushed" in out.lower() or "no other machine" in out.lower(), out[:200])
 
