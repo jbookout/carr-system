@@ -45,7 +45,8 @@ TWO CHECKS, both on the turn's final assistant message:
 NEVER LOOPS: stop_hook_active short-circuits, same as every Stop gate here.
 FAILS OPEN on any internal error, and if writing-lint cannot be imported the
 writing half is skipped rather than the session wedged. Audit rows share
-out/conduct-gate.jsonl; fixtures (session 'selftest') do not count.
+out/conduct-gate.jsonl; fixtures (any session id starting 'selftest') do
+not count.
 
 Fixtures: ops/chat-lint-gate-selftest.py.
 """
@@ -185,6 +186,20 @@ def dlog(msg):
         pass
 
 
+def is_fixture(session):
+    """Fixture sessions are 'selftest' plus an optional per-process suffix.
+
+    The suffix exists because carry_path() below keys a real file off this id
+    and out/ is one shared directory across every worktree (worktree-self-plumb
+    symlinks it to canonical). A bare 'selftest' gave concurrent selftest runs
+    one filename to fight over, so they deleted each other's parked notes and
+    each reported a different, wrong set of want=CAUGHT failures. Matching on
+    the prefix keeps fixture rows out of out/conduct-gate.jsonl while letting
+    ops/chat-lint-gate-selftest.py carry a unique id per process.
+    """
+    return str(session or "").startswith("selftest")
+
+
 def carry_path(session):
     """One pending-note file per session, so two sessions never cross wires."""
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session or "unknown"))[:64]
@@ -216,7 +231,7 @@ def carry(note, session=None):
 
 
 def audit(record):
-    if record.get("session") == "selftest":
+    if is_fixture(record.get("session")):
         return
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)

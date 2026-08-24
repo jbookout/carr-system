@@ -42,6 +42,16 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "chat-lint-gate.py")
 
+# The gate parks its note in out/chat-lint-carry/<session>.txt, and every
+# worktree's out/ is a symlink to the one canonical directory. A fixed session
+# id therefore gave concurrent CI runs a single file to fight over: each run
+# deleted the note another had just parked, so want=CAUGHT cases reported clean
+# and the failing set differed every time. One id per process, same fix the
+# vault-drift-watch selftest got. The gate treats any 'selftest' prefix as a
+# fixture, so audit rows still stay out of out/conduct-gate.jsonl.
+SESSION = f"selftest-{os.getpid()}"
+CARRY = os.path.join(REPO, "out", "chat-lint-carry", f"{SESSION}.txt")
+
 # (name, assistant_text, expect_caught)
 CASES = [
     ("vocab-banned", "This will seamlessly unlock a transformative workflow "
@@ -103,13 +113,13 @@ def run_stop(assistant_text, event="Stop", stop_active=False):
             fh.write(json.dumps({"type": "assistant",
                 "message": {"content": [{"type": "text", "text": assistant_text}]}}) + "\n")
         payload = {"hook_event_name": event, "transcript_path": path,
-                   "session_id": "selftest", "stop_hook_active": stop_active}
+                   "session_id": SESSION, "stop_hook_active": stop_active}
         # The gate no longer BLOCKS on a wording fault (rule 1d50a3bb: the bad
         # text has already reached Joe, so a block only buys a restatement he
         # pays for twice). It parks a note that hooks/chat-lint-carryover.py
         # injects before the next reply. So "caught" now means a note was
         # written, and exit 2 would itself be a regression.
-        carry = os.path.join(REPO, "out", "chat-lint-carry", "selftest.txt")
+        carry = CARRY
         try:
             os.unlink(carry)
         except Exception:
@@ -170,4 +180,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    finally:
+        # This process owns exactly one carry file; leave none behind even if a
+        # case raised partway through.
+        try:
+            os.unlink(CARRY)
+        except OSError:
+            pass
