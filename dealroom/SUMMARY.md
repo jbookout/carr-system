@@ -1,7 +1,21 @@
 # Deal Room front-end (WO-2)
 
 Static app under `dealroom/`. Design authority: `design/mockups/dealroom-v2.html`.
-Fixture mode is the default; zero backend required.
+The reviewed production host is `https://dealroom.doctorcre.com`; it boots the
+cookie-authenticated live client automatically. Local and unknown hosts stay in
+explicit fixture mode with zero backend required.
+
+## Production status
+
+- `dealroom.doctorcre.com` is the production front door and requires Google sign-in.
+- `api.doctorcre.com` serves the Worker release and MCP surfaces.
+- Production and the reviewed staging hostname always boot live mode; query input
+  cannot downgrade them to fixtures or override the signed-in actor.
+- The header identifies `LIVE · DoctorCRE` versus `LOCAL FIXTURE · Demo`, and the
+  connection label remains mode-aware.
+- Run `python3 ops/doctorcre-production-smoke.py` from the repository root for a
+  read-only check of release identity, the production verb floor, configured
+  hostnames, and the unauthenticated Deal Room login redirect.
 
 ## Run
 
@@ -11,7 +25,8 @@ python3 -m http.server 8787
 # open http://127.0.0.1:8787/
 ```
 
-Optional: `?mode=live&api=https://…` selects the live client (throws without a base URL; no network is dialed in this work order).
+Optional local integration testing: `?mode=live` selects the same-origin live
+client. Unknown remote preview hosts remain fixtures even when given that query.
 
 ## Layout
 
@@ -22,7 +37,7 @@ Optional: `?mode=live&api=https://…` selects the live client (throws without a
 | `data/board-seed.json` | Mockup board-data as fixture seed (46 deals, threads, history) |
 | `js/client.js` | Shared client interface + phase icon map |
 | `js/fixture-client.js` | In-memory WO-1 contract (event log, presence, writes, confirms) |
-| `js/live-client.js` | Same interface; HTTP verb paths for a later deploy |
+| `js/live-client.js` | Same interface; live same-origin MCP and change-feed transport |
 | `js/app.js` | Board, deal page, composer, poll, presence, Δ, demo |
 | `js/uuid.js` | UUID v4 for write idempotency keys |
 | `manifest.webmanifest` | Installable PWA shell (standalone) |

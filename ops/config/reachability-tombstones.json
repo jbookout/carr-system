@@ -4,20 +4,6 @@
   "tombstones": [
     {
       "lane": "hook",
-      "entry": "hooks/ledger-boundary-sweep.py",
-      "marked_on": "2026-08-23",
-      "reason": "Written 2026-08-06 and registered nowhere ever since; hooks/SETTINGS-BLOCK.md has said so in those words since the #214 audit, which also recorded zero firings in out/hook-guard.log against 75 for ledger-sweep. It is not an accident and it is not forgotten: registering it puts a SECOND blocking hook on Bash, and that false-stop cost is why the decision was left to Joe rather than taken by a session.",
-      "reopen_when": "Joe rules on the second Bash-blocking hook — register it in ops/config/hooks.json, or delete the file and its enforcement-map entry. Either ruling deletes this mark."
-    },
-    {
-      "lane": "registry",
-      "entry": "ledger_boundary",
-      "marked_on": "2026-08-23",
-      "reason": "The registry half of the same gap. ops/config/rule-enforcement-map.json records a ledger_boundary control whose only implementation is hooks/ledger-boundary-sweep.py, so the map reports coverage no session can trip. Marked separately from the hook itself because the map is a distinct claim about the world and would need its own correction.",
-      "reopen_when": "the hook is registered, or the control is removed from the enforcement map (rule c0b38d80: re-bless ops/config/gate-baseline.json in the same commit)."
-    },
-    {
-      "lane": "hook",
       "entry": "hooks/session-brief.py",
       "marked_on": "2026-08-23",
       "reason": "Unreachable as a hook, but NOT an unbriefed session, and the difference is a settled ruling this check cannot see. On 2026-08-08 Joe settled the zero-file fork (decision 3f634c5a — 'the bootstrap stub dies too'): the session briefing lives on THREE surfaces — the MCP server's `instructions` field, which is universal and carries the standing-context opening act on every client; the Cowork project field; and a SessionStart hook that briefs live from the store. This file is the third leg. hooks/worktree-self-plumb.py records in its own header that it 'is wired ONLY into the two VAULT project settings', and those two files are a mirror bin/sync-settings.sh retired, whose live originals are no longer on this Mac. So the hook leg runs nowhere while the universal leg still briefs every session — which is why ops.enforcement_control_catalog records session_boot as installed=false and nothing broke.",
@@ -43,13 +29,6 @@
       "marked_on": "2026-08-23",
       "reason": "The PR #529 shape. Nothing outside ops/calendar-prebrief-activation-selftest.py names it, and that selftest reads the script as TEXT to assert on its contents rather than running it — coverage of the file, not of the installation. The job it installs is running, so the installer did run once by hand; there is no door that would run it again on a second machine.",
       "reopen_when": "a runbook, a bin/ door or a scheduled task names it as the way this job gets installed — the same correction bin/sync-rule-admission-prod.sh was for tools/sync-rule-admission.py."
-    },
-    {
-      "lane": "installer",
-      "entry": "hooks/install-record-home-gate.py",
-      "marked_on": "2026-08-23",
-      "reason": "Superseded rather than unwired, and marked because the supersession was never finished. It merges the record-home gate into ~/.claude/settings.json one hook at a time; ops/config-as-code.py now installs the whole managed block and is the only thing that should write that file. The only references left are records — ops/config/rule-enforcement-map.json, ops/config/gate-baseline.json and the ops.enforcement_control_catalog seed — every one of which still lists it as an installed implementation of the record_home control.",
-      "reopen_when": "it is deleted along with its enforcement-map and catalog references, or it is given a real caller. A completed lifecycle should leave nothing behind pointing at it — rule def3e84e, artifact tombstones: nothing silently rots."
-    }
-  ]
+  }
+]
 }

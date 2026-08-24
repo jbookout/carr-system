@@ -228,7 +228,6 @@
     "record_home": {
       "implementation": [
         "hooks/record-home-gate.py",
-        "hooks/install-record-home-gate.py",
         "hooks/bash-write-gate.py",
         "hooks/guard-unattended.py",
         "hooks/write-effect-check.py"
@@ -387,15 +386,6 @@
         "command:python3 hooks/gate-integrity.py --selftest"
       ],
       "failure_mode": "SessionStart attestation"
-    },
-    "ledger_boundary": {
-      "implementation": [
-        "hooks/ledger-boundary-sweep.py"
-      ],
-      "test": [
-        "external:no dedicated suite yet"
-      ],
-      "failure_mode": "Stop reminder"
     },
     "model_floor": {
       "implementation": [
