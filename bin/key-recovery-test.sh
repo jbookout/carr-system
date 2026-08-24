@@ -42,7 +42,9 @@
 # second line and firing the trap a second time. cleanup() below calls
 # `exit "$rc"` at its own end for exactly that reason, guarded by an idempotency
 # flag so the EXIT trap that call itself triggers cannot shred a second time or
-# write a second ops.run row.
+# write a second ops.run row. INT and TERM get their OWN traps, which pass the
+# exit code in rather than letting cleanup() read it off $? — see cleanup()'s
+# comment for the aborted run that recorded itself as a success because of that.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -113,11 +115,26 @@ shred_file() {
 }
 
 CLEANUP_DONE=0
-cleanup() {
+cleanup() {                                 # cleanup [signal-exit-code]
   # rc MUST be captured as the very first statement — same rule as
   # restore-rehearse.sh's cleanup(), for the same reason: even a bare `[ ]`
   # test overwrites $?, and record_run() below needs the real exit status.
   local rc=$?
+  # ON A SIGNAL, $? IS NOT A SIGNAL-DEATH CODE AND MUST NOT BE TRUSTED.
+  # $? only reads 130 on an interrupt if the shell happened to be WAITING ON A
+  # CHILD when the signal arrived, because 128+SIGINT is that child's status,
+  # not something the signal sets. Land the same Ctrl-C a few microseconds
+  # earlier — between two simple commands, or while zsh is forking the `sleep`
+  # in the selftest pause hook below — and $? is still 0 from the last thing
+  # that succeeded. cleanup() then recorded state=succeeded and exited 0 for a
+  # run the operator ABORTED: a clean success row in ops.run for a key-recovery
+  # drill that never compared anything. Verified 2026-08-23 with a six-line zsh
+  # probe (trap on a pure-builtin spin loop, so nothing is being waited on:
+  # shared-trap form exits 0, the per-signal form below exits 130), and
+  # observed for real in this script's own selftest.
+  # The signal traps below therefore pass the code explicitly and this
+  # override, not $?, decides. The EXIT trap passes nothing and keeps $?.
+  [ $# -ge 1 ] && rc="$1"
 
   # Idempotency guard. The explicit `exit "$rc"` at the bottom of this function
   # re-enters the EXIT trap once more (see the file header) — without this
@@ -146,7 +163,13 @@ cleanup() {
   record_run "$rc"
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
+# SEPARATE TRAPS, one per signal, so the exit code a signal produces is stated
+# rather than inferred from $? — see cleanup()'s own comment for the abort that
+# recorded itself as a success. 130 = 128+SIGINT, 143 = 128+SIGTERM, the codes
+# a shell reports for a process killed by each.
+trap cleanup EXIT
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 # ── record_run: the ONE ops.run row (Program 4). Same shape as
 # bin/restore-rehearse.sh's record_rehearsal(), a DISTINCT run_key

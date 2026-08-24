@@ -479,13 +479,23 @@ def tier1_age(workdir: str) -> None:
     })
     proc2 = subprocess.Popen([SCRIPT], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, env=env, cwd=REPO, start_new_session=True)
+    wait_started = time.monotonic()
     paused_file = wait_for_file(marker + ".paused", PAUSE_READY_TIMEOUT, proc2)
+    waited = time.monotonic() - wait_started
+    # "IT NEVER PAUSED" AND "IT IS STILL GOING" ARE DIFFERENT FINDINGS, and the
+    # detail says which — the first is a script that ran straight past the hook,
+    # the second is a wedge. Reporting a give-up that took 0.1s as "after 90s"
+    # would be the same overstatement this whole file is being fixed for.
+    if proc2.poll() is not None:
+        why = (f"the script exited rc={proc2.poll()} after {waited:.1f}s "
+               f"without ever publishing {marker}.paused")
+    else:
+        why = (f"still running, and no {marker}.paused appeared within the "
+               f"{PAUSE_READY_TIMEOUT}s wedge backstop")
     if not check("interrupted path: the script reached its deliberate pause "
                  "holding a written identity file (the precondition this "
                  "scenario needs, waited for rather than guessed at)",
-                 paused_file is not None,
-                 f"no {marker}.paused after {PAUSE_READY_TIMEOUT}s; "
-                 f"process rc={proc2.poll()}"):
+                 paused_file is not None, why):
         proc2.kill()
         proc2.communicate()
         return
