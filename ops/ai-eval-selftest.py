@@ -162,6 +162,25 @@ class SuiteTests(unittest.TestCase):
         self.assertNotIn("CARR-SECRET-CANARY-7F4A", rendered)
         self.assertEqual(scorecard, ai_eval.evaluate_provider_run(self.suite, observed_run))
 
+    def test_extended_adapter_attribution_is_replayable_without_breaking_legacy_v1(self):
+        raw = json.loads(OBSERVED_RUN_PATH.read_text())
+        raw["attribution"].update({
+            "surface": "codex_desktop",
+            "adapter_id": "adapter:codex-desktop",
+            "adapter_version": "v1",
+            "harness_id": "harness:codex",
+            "harness_version": "v1",
+            "native_session_ref": "native:synthetic-thread",
+            "configuration_fingerprint": "f" * 64,
+        })
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(raw, handle)
+            handle.flush()
+            scorecard = ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(Path(handle.name)))
+        self.assertEqual(scorecard["attribution"]["surface"], "codex_desktop")
+        self.assertEqual(scorecard["attribution"]["harness_id"], "harness:codex")
+        self.assertEqual(scorecard["attribution"]["configuration_fingerprint"], "f" * 64)
+
     def test_provider_run_fails_closed_for_bad_binding_and_unknown_or_malformed_output(self):
         raw = json.loads(OBSERVED_RUN_PATH.read_text())
         changed = copy.deepcopy(raw)

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr-control-room-execution-envelope-v1",
+  "contract": "carr-control-room-execution-envelope",
+  "version": "1.0.0",
+  "status": "phase0_contract_foundation_not_deployed",
+  "$comment": "Job Passport v1 is contract foundation only. A future server admission slice must issue server_binding after existing Work Request, Plan Revision, Agent Session, identity, authority, and audit controls resolve it; it must not create a second work store or routing authority.",
+  "title": "CARR ExecutionEnvelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "envelope_id", "work_request_id", "plan_revision", "agent_session", "issued_at", "expires_at", "request", "server_binding", "handoff"],
+  "properties": {
+    "schema_version": {"const": "execution-envelope.v1"},
+    "envelope_id": {"$ref": "#/$defs/OpaqueId"},
+    "work_request_id": {"$ref": "#/$defs/OpaqueId"},
+    "plan_revision": {"$ref": "#/$defs/PlanRevision"},
+    "agent_session": {"$ref": "#/$defs/AgentSession"},
+    "issued_at": {"$ref": "#/$defs/Timestamp"},
+    "expires_at": {"$ref": "#/$defs/Timestamp"},
+    "request": {"$ref": "#/$defs/Request"},
+    "server_binding": {"$ref": "#/$defs/ServerBinding"},
+    "handoff": {"$ref": "#/$defs/Handoff"}
+  },
+  "$defs": {
+    "OpaqueId": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"},
+    "Timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"},
+    "Digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "PlanRevision": {"type": "object", "additionalProperties": false, "required": ["id", "revision", "digest"], "properties": {"id": {"$ref": "#/$defs/OpaqueId"}, "revision": {"type": "integer", "minimum": 1}, "digest": {"$ref": "#/$defs/Digest"}}},
+    "AgentSession": {"type": "object", "additionalProperties": false, "required": ["id", "lease_expires_at"], "properties": {"id": {"$ref": "#/$defs/OpaqueId"}, "lease_expires_at": {"$ref": "#/$defs/Timestamp"}}},
+    "ComponentDependency": {"type": "object", "additionalProperties": false, "required": ["component_ref", "depends_on_component_ref"], "properties": {"component_ref": {"type": "string", "minLength": 1}, "depends_on_component_ref": {"type": "string", "minLength": 1}}},
+    "DeclaredExpectations": {"description": "References to existing Plan Revision and Work Request resources; this object never makes PLAN.md or a repository the authority source. Repository/worktree values are resources, not job identity.", "type": "object", "additionalProperties": false, "required": ["plan_step_refs", "component_refs", "component_dependencies", "resource_refs"], "properties": {"plan_step_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}, "component_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}, "component_dependencies": {"type": "array", "items": {"$ref": "#/$defs/ComponentDependency"}}, "resource_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}}},
+    "Request": {"type": "object", "additionalProperties": false, "required": ["job_ref", "input_digest", "data_class", "allowed_actions", "declared_expectations"], "properties": {"job_ref": {"$ref": "#/$defs/OpaqueId"}, "input_digest": {"$ref": "#/$defs/Digest"}, "data_class": {"enum": ["synthetic_only", "metadata_only"]}, "allowed_actions": {"const": []}, "declared_expectations": {"$ref": "#/$defs/DeclaredExpectations"}}},
+    "Identity": {"type": "object", "additionalProperties": false, "required": ["organization_tenant_id", "sponsoring_human_id", "agent_principal_id", "runtime_principal", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "derived_by", "client_mutable"], "properties": {"organization_tenant_id": {"$ref": "#/$defs/OpaqueId"}, "sponsoring_human_id": {"$ref": "#/$defs/OpaqueId"}, "agent_principal_id": {"$ref": "#/$defs/OpaqueId"}, "runtime_principal": {"$ref": "#/$defs/OpaqueId"}, "personal_brain_scope": {"$ref": "#/$defs/OpaqueId"}, "personal_brain_version": {"$ref": "#/$defs/OpaqueId"}, "personal_rule_count": {"type": "integer", "minimum": 0}, "derived_by": {"const": "server_identity_resolution"}, "client_mutable": {"const": false}}},
+    "Authority": {"type": "object", "additionalProperties": false, "required": ["environment", "risk_class", "capability_profile", "capability_grant_ref", "read_only", "derived_by", "client_mutable"], "properties": {"environment": {"enum": ["local", "rehearsal", "staging", "production"]}, "risk_class": {"pattern": "^R[0-6]$"}, "capability_profile": {"$ref": "#/$defs/OpaqueId"}, "capability_grant_ref": {"$ref": "#/$defs/OpaqueId"}, "read_only": {"const": true}, "derived_by": {"const": "server_capability_resolution"}, "client_mutable": {"const": false}}},
+    "Adapter": {"type": "object", "additionalProperties": false, "required": ["surface", "adapter_id", "adapter_version", "harness_id", "harness_version", "provider_id", "model_id", "native_session_ref", "configuration_fingerprint"], "properties": {"surface": {"enum": ["claude_desktop", "codex_desktop", "hermes_desktop", "grok_x_native"]}, "adapter_id": {"type": "string", "minLength": 1}, "adapter_version": {"type": "string", "minLength": 1}, "harness_id": {"type": "string", "minLength": 1}, "harness_version": {"type": "string", "minLength": 1}, "provider_id": {"type": "string", "minLength": 1}, "model_id": {"type": "string", "minLength": 1}, "native_session_ref": {"$ref": "#/$defs/OpaqueId"}, "configuration_fingerprint": {"$ref": "#/$defs/Digest"}}},
+    "ServerBinding": {"type": "object", "additionalProperties": false, "required": ["identity", "authority", "adapter"], "properties": {"identity": {"$ref": "#/$defs/Identity"}, "authority": {"$ref": "#/$defs/Authority"}, "adapter": {"$ref": "#/$defs/Adapter"}}},
+    "Handoff": {"type": "object", "additionalProperties": false, "required": ["mode", "replaces_agent_session_id", "capability_inherited"], "properties": {"mode": {"enum": ["original", "replacement"]}, "replaces_agent_session_id": {"oneOf": [{"$ref": "#/$defs/OpaqueId"}, {"type": "null"}]}, "capability_inherited": {"const": false}}}
+  }
+}

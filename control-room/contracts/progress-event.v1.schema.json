@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr-control-room-progress-event-v1",
+  "contract": "carr-control-room-progress-event",
+  "version": "1.0.0",
+  "status": "phase0_contract_foundation_not_deployed",
+  "$comment": "Optional live-attempt seam. Default retention is ephemeral for local SSE-like projection; only material redacted events may be persisted through the existing audit event chain. It observes native hooks when available and filesystem/worktree resources as a lower-fidelity fallback. It never controls execution.",
+  "title": "CARR ProgressEvent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "attempt_id", "sequence", "occurred_at", "event_type", "declared_step_ref", "observed_resource_ref", "observed_component_ref", "tool_class", "state", "correlation_id", "causation_id", "redaction_class", "evidence_refs", "retention"],
+  "properties": {
+    "schema_version": {"const": "progress-event.v1"}, "attempt_id": {"$ref": "#/$defs/OpaqueId"}, "sequence": {"type": "integer", "minimum": 1}, "occurred_at": {"$ref": "#/$defs/Timestamp"}, "event_type": {"enum": ["declared", "observed_tool", "observed_filesystem", "coverage_updated", "blocked", "terminal"]}, "declared_step_ref": {"oneOf": [{"$ref": "#/$defs/OpaqueId"}, {"type": "null"}]}, "observed_resource_ref": {"oneOf": [{"$ref": "#/$defs/OpaqueId"}, {"type": "null"}]}, "observed_component_ref": {"oneOf": [{"$ref": "#/$defs/OpaqueId"}, {"type": "null"}]}, "tool_class": {"oneOf": [{"$ref": "#/$defs/OpaqueId"}, {"type": "null"}]}, "state": {"enum": ["active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"]}, "correlation_id": {"$ref": "#/$defs/OpaqueId"}, "causation_id": {"oneOf": [{"$ref": "#/$defs/OpaqueId"}, {"type": "null"}]}, "redaction_class": {"enum": ["metadata_only", "redacted_evidence"]}, "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}, "retention": {"enum": ["ephemeral", "material_redacted"]}
+  },
+  "$defs": {"OpaqueId": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"}, "Timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"}}
+}

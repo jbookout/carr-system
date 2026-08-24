@@ -49,6 +49,7 @@ import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
+import execution_contract  # noqa: E402 — portable Job Passport v1 seam
 
 DEFAULT_RESULTS = Path(
     os.environ.get(
@@ -268,6 +269,35 @@ def dispatch(
     }
     _record(results_path, row)
     return row
+
+
+def dispatch_envelope(
+    name: str,
+    envelope: dict,
+    task: str,
+    *,
+    dispatch_fn=None,
+    receipt_sink=None,
+    **dispatch_kwargs,
+) -> dict:
+    """Compatibility seam for a server-issued ExecutionEnvelope v1.
+
+    The legacy ``dispatch`` signature and local NDJSON row are deliberately
+    untouched.  This wrapper validates the portable envelope, delegates over
+    the exact same path (or an injected fake in tests), and returns a redacted
+    AttemptReceipt.  It neither derives authority nor persists a transcript;
+    future server admission/audit slices own those responsibilities.
+    """
+    execution_contract.validate_execution_envelope(envelope)
+    if not isinstance(task, str) or not task.strip():
+        raise execution_contract.ContractError("runtime task must be a non-empty string")
+    fn = dispatch_fn or dispatch
+    row = fn(name, task, **dispatch_kwargs)
+    receipt = execution_contract.receipt_from_dispatch_row(envelope, row)
+    execution_contract.validate_attempt_receipt(receipt, envelope)
+    if receipt_sink is not None:
+        receipt_sink(receipt)
+    return {"dispatch": row, "attempt_receipt": receipt}
 
 
 # ---------------------------------------------------------------------------
