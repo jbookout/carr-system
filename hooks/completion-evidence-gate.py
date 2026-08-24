@@ -106,6 +106,11 @@ import sys
 from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from stop_latch import (  # noqa: E402
+    claim_identity, latched, record_fire, record_satisfied)
+
 LOG = os.path.join(REPO, "out", "completion-evidence-gate.jsonl")
 # The FLOOR trigger, kept and widened with the verbs Joe named (finished,
 # landed, phase-complete, ready, live). It is no longer the only trigger: the
@@ -173,6 +178,14 @@ WRITE_ACTION_EXACT = {
     "accept-outcome-feedback",  # Program 6 human-only observational acceptance; never completion
     "review-deal",
 }
+# The three reason classes that carry a latch identity. Named constants rather
+# than repeated literals, because an identity keyed on a string that drifts is
+# an identity that silently stops matching — the latch would then look present
+# and do nothing, which is worse than no latch.
+CLAUSE_REASON = "unaccounted clause"
+FLOOR_REASONS = ("terminal completion claim has no fresh verification",
+                 "delivery claim names no recipient")
+
 NESTED_CARR_CALL = re.compile(r"(?:tools\.)?(mcp__carr(?:_records)?__([A-Za-z0-9_]+))")
 CALL_VERB = re.compile(r"\b(?:verb|name)\s*[:=]\s*['\"]([A-Za-z0-9_-]+)['\"]", re.I)
 SYNTHETIC_CODEX_USER_PREFIXES = (
@@ -888,8 +901,38 @@ def dual_block(recs, final):
     return None
 
 
-def evaluate(recs):
+def write_verb_names(window):
+    """The write verbs this turn actually called, for the floor's identity.
+
+    Paths alone are not the claim-set: a record write touches no file, so two
+    turns calling different verbs against the same repo would otherwise collapse
+    into one identity and the second finding would be swallowed.
+    """
+    names = set()
+    for rec in window:
+        name, value = tool(rec)
+        if not name:
+            continue
+        if write_verb(name, value):
+            names.add(name.split("__")[-1])
+        for action in nested_carr_actions(value):
+            if is_write_action(action):
+                names.add(action)
+    return names
+
+
+def evaluate(recs, ledger=None):
     """Block when an ordered clause has no receipt, or a close denies one it holds.
+
+    THE LEDGER OUT-PARAMETER carries what the latch needs and nothing else, so
+    this keeps its two-value return and every existing fixture keeps working.
+    When a dict is passed, evaluate fills it as it walks:
+
+        ledger["identity"]  = (reason_class, [token, ...])  the finding, if any
+        ledger["satisfied"] = [(reason_class, [token, ...]), ...]  what came
+                              with receipts on this pass
+
+    Nothing here changes what blocks. See main() for why the memory exists.
 
     Three layers, in the order they are reported. The CLAUSE layer is the
     widening and is deliberately first, because "the loading half was never
@@ -899,6 +942,15 @@ def evaluate(recs):
     nothing was mutated, because a rebuild starts from a session that has done
     no work yet.
     """
+    def note(key, reason_class, tokens):
+        if ledger is None:
+            return
+        entry = (reason_class, [str(t) for t in tokens])
+        if key == "identity":
+            ledger["identity"] = entry
+        else:
+            ledger.setdefault("satisfied", []).append(entry)
+
     turns = human_turns(recs)
     start = (turns[-1] + 1) if turns else 0
     window = recs[start:]
@@ -939,18 +991,37 @@ def evaluate(recs):
     receipts = receipt_index(recs) if clauses else []
     for clause in clauses:
         if clause_accounted(clause, recs, bounds[id(clause)], final, verified, receipts):
+            # BANK IT EVEN WHEN A NEIGHBOUR IS ABOUT TO FIRE. A clause receipted
+            # in this turn must stay settled once the session fixes the clause
+            # beside it, or fixing the neighbour re-fires the one that was
+            # already answered — which is the duplicate again, one layer down.
+            note("satisfied", CLAUSE_REASON, [clause.consumer, clause.text])
             continue
+        # IDENTITY IS THE CLAUSE, NOT THE FILES. Two turns can touch identical
+        # paths with a different clause open, and they must not share an id.
+        note("identity", CLAUSE_REASON, [clause.consumer, clause.text])
         return True, (f'unaccounted clause [{clause.consumer}]: "{clause.text}" — '
                       f"no receipt from its {clause.consumer} surface and the close "
                       f"does not say what is left")
 
-    # THE FLOOR, unchanged.
+    # THE FLOOR, unchanged in what it blocks. Its claim-set really is the
+    # artifact set, so that is its identity: the changed paths plus the names of
+    # the write verbs called, which is what "these claims" means here.
+    artifacts = sorted(changed_files) + sorted(write_verb_names(window))
+
     if not final or not CLAIM.search(final) or valid_disclosure(final):
         return False, "no unsupported terminal claim"
     if verified:
+        # THE RECEIPTED CASE. Both floor reason classes are banked, because a
+        # later restatement of these same claims could arrive as either one, and
+        # the evidence just seen answers both.
+        for reason_class in FLOOR_REASONS:
+            note("satisfied", reason_class, artifacts)
         return False, "fresh verification present"
     if DELIVERY.search(final) and not NEGATED_DELIVERY.search(final) and not RECIPIENT.search(final):
+        note("identity", FLOOR_REASONS[1], artifacts)
         return True, "delivery claim names no recipient"
+    note("identity", FLOOR_REASONS[0], artifacts)
     return True, "terminal completion claim has no fresh verification"
 
 
@@ -966,12 +1037,53 @@ def main():
             recs = [json.loads(line) for line in fh if line.strip()]
         if not payload_is_carr(payload, recs):
             return 0
-        blocked, reason = evaluate(recs)
+        session = payload.get("session_id") or payload.get("sessionId")
+        ledger = {}
+        blocked, reason = evaluate(recs, ledger)
+
+        # THE CLAIM-SET LATCH (2026-08-23, Joe's Stop-gate rationing).
+        #
+        # WHAT IT FIXES, measured twice and independently. The gates-audit
+        # council's labeled ledger caught this gate firing a SECOND time on a
+        # summary whose claims already carried receipts one message earlier. A
+        # replay over seven days, 127 transcripts and 916 Stop points found the
+        # rate behind that anecdote: one session hit at FIVE consecutive stops
+        # on the same claim and the same reason class.
+        #
+        # THE PRECEDENT, and it is why this is a memory and not a narrower
+        # matcher. Joe, 2026-08-15: "WHEN A REFUSAL CAN BE ROUTED AROUND,
+        # REMEMBER WHAT WAS REFUSED RATHER THAN WIDENING THE BAN." The first
+        # ruling in that same record is why the duplicate could not simply be
+        # tolerated — a gate that punishes the honest interim state gets
+        # deleted, and a session that verified its work, reported it, and then
+        # summarised it is exactly that state.
+        #
+        # SATISFACTION IS BANKED FIRST, and before the `blocked` check, because
+        # a turn can receipt one clause while firing on its neighbour. Bank the
+        # receipted clause anyway or fixing the neighbour re-fires the settled
+        # one, which is this same defect one layer down.
+        for reason_class, tokens in ledger.get("satisfied", []):
+            record_satisfied(session, claim_identity(
+                "completion-evidence-gate", reason_class, tokens))
+
         if not blocked:
             return 0
+
+        # THE DUAL IS NEVER LATCHED. dual_block() returns before the tracked
+        # check and fires on a session that has mutated nothing; a close that
+        # calls landed work unbuilt is worth refusing every time it is uttered,
+        # and its identity is the artifact rather than a claim-set anyway.
+        identity = None
+        if ledger.get("identity"):
+            reason_class, tokens = ledger["identity"]
+            identity = claim_identity("completion-evidence-gate", reason_class, tokens)
+            if latched(session, identity):
+                return 0
+            record_fire(session, identity)
+
         audit({"ts": now(), "hook": "completion-evidence-gate",
-               "session": payload.get("session_id") or payload.get("sessionId"),
-               "reason": reason})
+               "session": session, "reason": reason,
+               "claim_identity": identity})
         print(json.dumps({"decision": "block", "reason":
             "COMPLETION EVIDENCE GATE — " + reason + ".\n"
             "A close binds to the ORDER, not to the slice you finished. Every ordered "

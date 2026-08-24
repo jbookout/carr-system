@@ -373,6 +373,11 @@ DUAL_CASES = [
 ]
 
 
+# One scratch ledger for every fixture that spawns the real hook. Created at
+# import so all of them share it and none of them touches out/stop-latch.
+latch_state = tempfile.mkdtemp(prefix="completion-latch-state-")
+
+
 def machine_text_boundary():
     """Injected machine text is data, never an order.
 
@@ -578,19 +583,219 @@ def real_hook_case(kind, non_carr=False):
             fh.write(json.dumps(row) + "\n")
         path = fh.name
     try:
-        payload = {"transcript_path": path, "session_id": "selftest", "stop_hook_active": False}
+        # A SESSION ID PER CASE, AND A SCRATCH LEDGER. As of 2026-08-23 this gate
+        # latches one intervention per claim-set per session, so a fixed
+        # "selftest" id makes these two cases silence each other — and makes the
+        # suite pass once and fail on every later run, because the ledger under
+        # out/ survives it. out/ is a symlink back to the canonical checkout from
+        # every worktree on this Mac, so that ledger is shared machine-wide: a
+        # fixture writing it would silence the running gate in a real session.
+        # Caught exactly this way, by both cases going red the second time.
+        session = f"selftest-{kind}-{os.getpid()}"
+        payload = {"transcript_path": path, "session_id": session, "stop_hook_active": False}
         if kind == "codex":
-            payload = {"transcriptPath": path, "sessionId": "selftest", "stop_hook_active": False,
+            payload = {"transcriptPath": path, "sessionId": session, "stop_hook_active": False,
                        "hook_event_name": "Stop"}
         if non_carr:
             payload["cwd"] = "/private/tmp/non-carr-app"
         hook = os.path.join(REPO, "hooks", "completion-evidence-gate.py")
         result = subprocess.run([os.sys.executable, hook], input=json.dumps(payload), text=True,
-                                capture_output=True, timeout=20)
+                                capture_output=True, timeout=20,
+                                env={**os.environ, "CARR_STOP_LATCH_STATE": latch_state})
         body = json.loads(result.stdout or "{}")
         return body.get("decision") == "block"
     finally:
         os.unlink(path)
+
+
+def latch_cases():
+    """One intervention per claim-set per turn, with a stable finding identity.
+
+    THE DEFECT, measured twice by two sessions independently. The 2026-08-23
+    gates-audit council's labeled ledger caught this gate firing a SECOND time
+    on a summary message whose claims already carried receipts one message
+    earlier. Replaying seven days, 127 transcripts and 916 Stop points found the
+    rate behind that anecdote: one session was hit at FIVE consecutive stops on
+    the same claim and the same reason class.
+
+    THE PRECEDENT, and it is why the fix is a memory rather than a narrower
+    matcher. Joe, 2026-08-15, third of four rulings on how to build a gate:
+    "WHEN A REFUSAL CAN BE ROUTED AROUND, REMEMBER WHAT WAS REFUSED RATHER THAN
+    WIDENING THE BAN." The first of those four is why the duplicate had to go at
+    all — a gate that punishes the honest interim state gets deleted, and a
+    session that verified its work, reported it, and then summarised it is in
+    the honest state.
+
+    IDENTITY IS PER LAYER, and getting this wrong would be the whole bug again:
+
+      · CLAUSE layer — the identity is (consumer, clause text). Files are
+        deliberately NOT in it. Two turns can touch identical paths while a
+        different clause goes unaccounted, and those must not share an id.
+      · FLOOR layer — the identity is the changed paths plus the write-verb
+        names, under the reason class, because the floor really is a claim
+        about the artifact set.
+      · THE DUAL IS NOT LATCHED AT ALL. dual_block() fires on a session that has
+        mutated nothing, and a close that calls landed work unbuilt is worth
+        refusing every time it is uttered.
+
+    Spawns the REAL hook, because the latch lives in main() around evaluate()
+    and a direct evaluate() call cannot see it. State is pinned per case: out/
+    is a symlink back to the canonical checkout from every worktree on this
+    Mac, so a fixture writing the live ledger would silence the running gate.
+    """
+    hook = os.path.join(REPO, "hooks", "completion-evidence-gate.py")
+    results = []
+
+    def fires(records, session, state, name):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
+            for row in records:
+                fh.write(json.dumps(row) + "\n")
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [os.sys.executable, hook], text=True, capture_output=True, timeout=30,
+                input=json.dumps({"transcript_path": path, "session_id": session,
+                                  "stop_hook_active": False, "cwd": REPO}),
+                env={**os.environ, "CARR_STOP_LATCH_STATE": state})
+            body = json.loads(proc.stdout or "{}")
+            return body.get("decision") == "block", body.get("reason", "")
+        finally:
+            os.unlink(path)
+
+    def expect(name, got, want):
+        ok = got == want
+        results.append(ok)
+        print(f"{'PASS' if ok else 'FAIL'}  latch: {name}: fired={got} want={want}")
+
+    with tempfile.TemporaryDirectory(prefix="completion-latch-") as state:
+        # ── the floor duplicate, which is the ledger's own case ────────────
+        floor = [user("reconcile the deal"), tool("mcp__carr__update-deal"),
+                 assistant("Done.")]
+        first, _ = fires(floor, "latch-floor", state, "first")
+        expect("an unverified completion claim fires once", first, True)
+        second, _ = fires(floor, "latch-floor", state, "second")
+        expect("...and the same claim-set restated does not fire again", second, False)
+
+        # Rewording is not a new finding. This is the half a message-text hash
+        # gets wrong, and the half that let a council chair be held twice.
+        reworded = [user("reconcile the deal"), tool("mcp__carr__update-deal"),
+                    assistant("That is complete now — the reconciliation is finished.")]
+        expect("...nor does the same claim-set reworded",
+               fires(reworded, "latch-floor", state, "reworded")[0], False)
+
+        # But NEW work is a new claim-set. Narrowing must never become muting.
+        grew = [user("reconcile the deal"), tool("mcp__carr__update-deal"),
+                tool("mcp__carr__update-lead"), assistant("Done.")]
+        expect("a new write in the same session still fires",
+               fires(grew, "latch-floor", state, "grew")[0], True)
+
+        # And another session hears it. A ledger keyed on anything shared would
+        # let one session silence another's gate.
+        expect("a second session is not silenced by the first",
+               fires(floor, "latch-other-session", state, "other")[0], True)
+
+        # ── the clause layer ──────────────────────────────────────────────
+        # Clause A ("recategorize the rules") is receipted by the work itself;
+        # clause B ("load into every session") has no receipt from its live
+        # surface. The gate must fire on B, once.
+        b_open = CASE_STUDY_WORK + [assistant("The enforcement map is complete and reviewed.")]
+        fired, reason = fires(b_open, "latch-clause", state, "clause-first")
+        results.append(fired and "load into every session" in reason)
+        print(f"{'PASS' if fired and 'load into every session' in reason else 'FAIL'}  "
+              f"latch: an unaccounted clause fires, naming that clause")
+        expect("...and the same unaccounted clause does not fire twice",
+               fires(b_open, "latch-clause", state, "clause-second")[0], False)
+
+        # A DIFFERENT clause is a different finding, on identical files. This is
+        # why the clause identity excludes paths: same patch, other clause open.
+        other_order = [user("recategorize the 218 rules into enforcement classes "
+                            "and publish the map to the control room")] + CASE_STUDY_WORK[1:] + [
+            assistant("The enforcement map is complete and reviewed.")]
+        expect("a different clause over the same files still fires",
+               fires(other_order, "latch-clause", state, "clause-other")[0], True)
+
+        # Once B carries its receipt, the close is clean — and A, banked as
+        # satisfied while the gate was firing on B, does not come back.
+        b_receipted = CASE_STUDY_WORK + [
+            tool("mcp__carr__standing-context"),
+            assistant("The map is complete and standing-context now loads all 218.")]
+        expect("a turn restating both, with B receipted, fires on neither",
+               fires(b_receipted, "latch-clause", state, "clause-both")[0], False)
+
+        # ── THE NEIGHBOUR CASE, which is the reason satisfaction is banked
+        # even in a turn that fires. Verified live rather than assumed, because
+        # the first version of this fixture asserted the banking and passed
+        # without it — a test that guards a door that does not exist, which is
+        # the shape Joe deleted a gate over on 2026-08-15.
+        #
+        # The mechanism is in clause_accounted(): a receipt only counts when it
+        # comes AFTER the last mutation inside the clause's bounds, and for the
+        # newest turn those bounds run to the end of the transcript. So the
+        # session receipts a clause, keeps working in the SAME human turn, and
+        # the next mutation moves last_mutation past the receipt — the settled
+        # clause is unaccounted again at the next Stop. Measured: with a fresh
+        # session this second Stop blocks on the clause that was clean one Stop
+        # earlier. Banking it as satisfied is what stops that.
+        settled = CASE_STUDY_WORK + [
+            tool("mcp__carr__standing-context"),
+            assistant("Map complete and standing-context loads all 218.")]
+        expect("a receipted turn does not fire", fires(settled, "latch-neighbour", state,
+                                                       "settled")[0], False)
+        kept_working = settled + [patch("hooks/scoped-loader.py"),
+                                  assistant("Also tidied the loader. Done.")]
+        expect("...and more work after the receipt does not re-fire the settled clause",
+               fires(kept_working, "latch-neighbour", state, "kept-working")[0], False)
+        # The same transcript in a session that never saw the receipt DOES fire,
+        # which is what proves the line above is the latch and not the gate.
+        expect("...while a session with no banked receipt still fires on it",
+               fires(kept_working, "latch-neighbour-fresh", state, "fresh")[0], True)
+
+        # THE FIRING TURN ALSO BANKS. This is why satisfaction is recorded
+        # BEFORE the blocked check rather than inside the not-blocked branch:
+        # a turn can receipt one clause while firing on its neighbour, and the
+        # receipted one must survive the session's next move. Measured: stop 1
+        # fires on the runtime clause while the repo clause is clean; the
+        # session keeps working; at stop 2 the repo clause is unaccounted again
+        # and a session with no banked receipt blocks on it.
+        fires_on_b = CASE_STUDY_WORK + [assistant("The enforcement map is complete and reviewed.")]
+        expect("a turn fires on one clause while the other is clean",
+               fires(fires_on_b, "latch-both", state, "both-first")[0], True)
+        kept_going = fires_on_b + [patch("hooks/scoped-loader.py"),
+                                   assistant("Loader tidied. Done.")]
+        expect("...and the clean one does not come back after more work",
+               fires(kept_going, "latch-both", state, "both-second")[0], False)
+        expect("...while a session that never banked it does block on it",
+               fires(kept_going, "latch-both-fresh", state, "both-fresh")[0], True)
+
+        # BOTH FLOOR CLASSES ARE BANKED on a verified turn, because a later
+        # restatement of the same artifacts can arrive as either one. Turn one
+        # verifies; turn two touches the same claim-set with no fresh check and
+        # would fire as "no fresh verification" — the class that is only banked
+        # if both are.
+        verified_turn = [user("reconcile the deal"), tool("mcp__carr__update-deal"),
+                         tool("Read", {"file_path": "x.py"}),
+                         assistant("Done and verified.")]
+        expect("a verified turn does not fire",
+               fires(verified_turn, "latch-floor-classes", state, "verified")[0], False)
+        restated = verified_turn + [user("summarise that"), tool("mcp__carr__update-deal"),
+                                    assistant("Done.")]
+        expect("...and the same claim-set restated unverified does not fire",
+               fires(restated, "latch-floor-classes", state, "restated")[0], False)
+        expect("...while a session with no banked receipt does",
+               fires(restated, "latch-floor-classes-fresh", state, "fresh")[0], True)
+
+        # ── the dual is never latched ─────────────────────────────────────
+        dual = flat([user("capability-program says 0/51 completed — is the scoped "
+                          "loader built?"),
+                     read("hooks/scoped-loader.py"),
+                     assistant("The scoped loader was never built; nothing is on disk. "
+                               "I'll start building it.")])
+        expect("an unbuilt close contradicting a landed receipt fires",
+               fires(dual, "latch-dual", state, "dual-first")[0], True)
+        expect("...and fires again, because that one is never latched",
+               fires(dual, "latch-dual", state, "dual-second")[0], True)
+
+    return all(results)
 
 
 def main():
@@ -619,6 +824,7 @@ def main():
     outcomes.append(floor_preserved())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
+    outcomes.append(latch_cases())
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
 

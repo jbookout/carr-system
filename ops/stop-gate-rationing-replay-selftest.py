@@ -31,12 +31,15 @@ is:
     that exists so a session can file a block. No repo gate can fix or test
     that; the council's M1 assigns it to the classifier allowlist. It is out of
     scope here and stays at 2 until that lands.
-  · THE DUPLICATE COMPLETION FIRE belongs to the widened completion gate, which
-    another session owns (busy-williamson-41dbc1). The latch primitive is built
-    and proven in ops/stop-latch-selftest.py, and this file asserts the primitive
-    would zero the duplicate; it does NOT claim the live gate is wired to it. If
-    it were asserted here as landed and it is not, that is a false receipt, and
-    the completion gate is the gate that exists to catch false receipts.
+  · THE DUPLICATE COMPLETION FIRE is now wired and is asserted here against the
+    LIVE gate, not against the primitive. It was handed to busy-williamson-41dbc1,
+    who built the widened gate (fix A), then handed the wiring back with the
+    reason: hooks/stop_latch.py exists only on this branch, so an import from
+    theirs would raise at module load — before main()'s try/except, so it would
+    not even fail open — and two branches adding the same file collide in the
+    gate baseline. Their branch is merged here and the latch sits on top of it.
+    ops/completion-evidence-gate-selftest.py owns the detailed cases; this file
+    asserts only that the duplicate is gone end to end.
   · NOISE IS COUNTED AS REOPENS, not as findings. Every demoted gate still makes
     its finding and still writes its audit row. What is being scored is what the
     session was CHARGED, because that is what the rationing changed.
@@ -352,26 +355,34 @@ def replay_demotions(tmp):
 
 def replay_latch(tmp):
     print("\n  ── the duplicate fire, and the card")
-    sys.path.insert(0, os.path.join(REPO, "hooks"))
-    os.environ["CARR_STOP_LATCH_STATE"] = os.path.join(tmp, "latch")
-    import importlib
-    import stop_latch
-    importlib.reload(stop_latch)
+    # THE DUPLICATE, AGAINST THE LIVE GATE. The ledger's own case: a turn
+    # mutates and claims completion (fires), and the next message restates the
+    # same claims in different words (must not fire).
+    latch_state = os.path.join(tmp, "completion-latch")
+    work = [{"type": "user", "message": {"role": "user", "content": "reconcile the deal"}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__carr__update-deal", "input": {}}]}}]
 
-    # The completion gate's second fire, as the primitive sees it: turn one has
-    # receipts, turn two restates the same claims in different words.
-    claims = ["migrations/0286.sql", "mcp-server/src/incident.js"]
-    reason = "terminal completion claim has no fresh verification"
-    first = stop_latch.claim_identity("completion-evidence-gate", reason, claims)
-    stop_latch.record_satisfied("replay-completion", first)
-    restated = stop_latch.claim_identity("completion-evidence-gate", reason,
-                                         list(reversed([c.upper() for c in claims])))
-    check("a receipted claim-set restated in a summary would not re-fire",
-          stop_latch.latched("replay-completion", restated))
-    grew = stop_latch.claim_identity("completion-evidence-gate", reason,
-                                     claims + ["mcp-server/src/tools.js"])
-    check("...while new work in the same session still would",
-          not stop_latch.latched("replay-completion", grew))
+    def completion_stop(final, session):
+        path = os.path.join(tmp, f"completion-{abs(hash(final + session)) % 10 ** 8}.jsonl")
+        with open(path, "w") as fh:
+            for rec in work:
+                fh.write(json.dumps(rec) + "\n")
+            fh.write(json.dumps({"type": "assistant",
+                                 "message": {"role": "assistant", "content": final}}) + "\n")
+        verdict, _ = fire("completion-evidence-gate.py",
+                          {"session_id": session, "stop_hook_active": False,
+                           "cwd": REPO, "transcript_path": path},
+                          env={"CARR_STOP_LATCH_STATE": latch_state})
+        return verdict
+
+    check("the completion gate fires once on an unverified claim",
+          completion_stop("Done.", "replay-completion") == "REOPEN")
+    check("...and the duplicate fire on the same claims is gone",
+          completion_stop("That is complete now — the reconciliation is finished.",
+                          "replay-completion") == "SILENT")
+    check("...while another session still hears the first fire",
+          completion_stop("Done.", "replay-completion-other") == "REOPEN")
 
     # Nothing new can reopen without a card.
     cards = os.path.join(tmp, "gate-admission.json")

@@ -68,9 +68,13 @@ blocks nor announces has not been demoted, it has been deleted, which is exactly
 what the council's safe-removal procedure forbids doing by accident. One
 function, one fixture, five callers.
 
-Used by: hooks/drift-assertion-gate.py (latch), and the five demoted Stop gates
-(announce). Offered to the widened completion-evidence gate, which is where the
-duplicate fire actually happened.
+Used by: hooks/completion-evidence-gate.py and hooks/drift-assertion-gate.py and
+hooks/unread-artifact-gate.py (latch), and the five demoted Stop gates
+(announce). The completion gate is where the duplicate fire actually happened,
+and it latches per LAYER: the clause layer on (consumer, clause text) with files
+deliberately excluded, the floor on the changed paths plus write-verb names, and
+dual_block not at all — a close that calls landed work unbuilt is worth refusing
+every time it is uttered.
 
 Fixtures: ops/stop-latch-selftest.py
 """
@@ -234,6 +238,26 @@ def forget(session):
 
 def announce(message, event="Stop"):
     """Say it without reopening the turn. Returns 0, for `return announce(...)`.
+
+    THE CHANNEL IS VERIFIED, NOT ASSUMED (rule 97326357 — a claim about a
+    surface becomes doctrine only after a live test FROM that surface). This
+    mattered more than usual: five gates were demoted onto this emit, and if it
+    were inert the demotion would have been a DELETION of five gates dressed as
+    a demotion, which the council's own removal procedure forbids. Checked
+    2026-08-23 against real session transcripts under ~/.claude/projects, where
+    hooks/ledger-sweep.py has used this shape since it was built. A Stop hook's
+    additionalContext lands three ways in the record:
+
+        {"type": "attachment", "attachment": {"type": "hook_success",
+         "hookName": "Stop", "stdout": "{\"hookSpecificOutput\": ..."}}
+        {"type": "attachment", "attachment": {"type": "hook_additional_context",
+         "content": ["LEDGER SWEEP — ..."]}}
+        {"type": "system", "subtype": "stop_hook_summary",
+         "hookAdditionalContext": ["LEDGER SWEEP — ..."]}
+
+    The middle one is the delivery: the text is attached to the conversation,
+    not merely logged. Re-run that check against a real transcript before
+    trusting this on any new Claude Code build.
 
     Never raises: a gate that has already decided to speak must not fail while
     speaking. A write that cannot reach stdout leaves the finding in the gate's
