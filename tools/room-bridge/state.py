@@ -68,7 +68,8 @@ DELIVERED_CAP = 4000  # per desk; oldest dropped first — a dedup memory, not a
 
 def default_state() -> dict:
     return {"last_seq": 0, "desks": {}, "last_heartbeat_at": None,
-            "control_logins": {}, "awaiting_login": {}}
+            "control_logins": {}, "awaiting_login": {},
+            "queue_event_cursor": 0, "queue_projection_digest": None}
 
 
 def load_state(path: Path) -> dict:
@@ -84,6 +85,8 @@ def load_state(path: Path) -> dict:
     data.setdefault("last_heartbeat_at", None)
     data.setdefault("control_logins", {})
     data.setdefault("awaiting_login", {})
+    data.setdefault("queue_event_cursor", 0)
+    data.setdefault("queue_projection_digest", None)
     return data
 
 

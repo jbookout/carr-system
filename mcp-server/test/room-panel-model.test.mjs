@@ -210,6 +210,16 @@ test("filters compose, and heartbeat receipts stay out of the conversation by de
   assert.equal(turnPasses(chat, { ...filters, turns: false }), false);
 });
 
+test("Conversation admits only useful Queue milestones, and says the projector summary rather than its bookkeeping", () => {
+  const queue = (event) => ({ kind: "receipt", body: JSON.stringify({ queue_event: {
+    v: 1, event, summary: "Sol returned Attest PR 514 for review.",
+  } }) });
+  assert.equal(isSubstantiveTurn(queue("claimed")), true);
+  assert.equal(isSubstantiveTurn(queue("completed")), true);
+  assert.equal(isSubstantiveTurn(queue("commented")), false);
+  assert.deepEqual(describeReceipt(queue("completed").body, NOW), ["Sol returned Attest PR 514 for review."]);
+});
+
 test("seat colour is fixed per seat and falls back rather than throwing", () => {
   assert.equal(seatColor("human"), "#F08A2D");
   assert.equal(seatColor("CLAUDE"), "#2DD496");

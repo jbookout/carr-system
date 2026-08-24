@@ -59,7 +59,7 @@ const PUBLIC_SHELL = new Map([
 ]);
 const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEALROOM_EXACT_PATHS = new Set([
-  "/", "/index.html", "/leads", "/leads.html", "/system-work.html", "/room.html",
+  "/", "/index.html", "/leads", "/leads.html", "/system-work.html", "/room.html", "/queue.html",
   "/manifest.webmanifest", "/sw.js", "/offline.html",
 ]);
 const DEALROOM_ROUTE_ASSETS = new Map([
@@ -420,6 +420,18 @@ async function roomTurns(request, env, session, dependencies) {
     csrf_token: session.csrfToken });
 }
 
+/** GET /api/room/queue — the read-room-queue verb's exact projection. */
+async function roomQueue(_request, env, _session, dependencies) {
+  if (typeof dependencies.queueReadFn !== "function") return json({ error: "not_found" }, 404);
+  let read;
+  try { read = await dependencies.queueReadFn(env, {}); }
+  catch (error) { return json({ error: "queue_unavailable", detail: String(error?.message || error).slice(0, 200), live: false }, 503); }
+  if (!read || read.ok !== true) return json({ error: read?.error || "queue_unavailable", live: false }, 503);
+  // Deliberately no actor or CSRF token here: this is a small, exact read
+  // contract. The enqueue form obtains its synchronizer token from /turns.
+  return json(read);
+}
+
 /**
  * POST /api/room/turn — Joe speaking into the room from the panel.
  *
@@ -505,6 +517,10 @@ async function roomRequest(request, env, session, dependencies) {
   if (pathname === `${ROOM_PREFIX}/turn`) {
     if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
     return roomTurnPost(request, env, session, dependencies);
+  }
+  if (pathname === `${ROOM_PREFIX}/queue`) {
+    if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    return roomQueue(request, env, session, dependencies);
   }
   return json({ error: "not_found" }, 404);
 }

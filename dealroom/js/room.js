@@ -171,6 +171,7 @@ export const RECEIPT_LABELS = {
   // Forward hook for the named-agent-profiles build (Joe's direction,
   // 2026-08-22): persistent agent names with interchangeable models.
   agent_profile: "Agent profile",
+  queue_event: "Queue milestone",
   receipt: "Receipt",
 };
 
@@ -234,6 +235,10 @@ export function describeReceipt(body, receiptAtMs) {
   const key = receiptKey(body);
   const value = parsed[key];
 
+  if (key === "queue_event" && value && typeof value === "object" && typeof value.summary === "string") {
+    return [value.summary];
+  }
+
   if (key === "heartbeat" && value && typeof value === "object") {
     const lines = [];
     for (const desk of Array.isArray(value.desks) ? value.desks : []) {
@@ -282,6 +287,14 @@ export function bridgeLagLabel(lag) {
  *  panel's default view shows. NOOP and *(silent)* are this wire's literal
  *  keep-alive conventions, and a receipt is machine traffic by definition. */
 export function isSubstantiveTurn(turn) {
+  if (turn?.kind === "receipt") {
+    const parsed = parseReceipt(turn.body)?.queue_event;
+    // Projector bookkeeping, bootstrap creates, and comments stay in
+    // Everything. Conversation gets only the moments a human needs to know:
+    // work started, returned, blocked, or finished.
+    return Boolean(parsed && typeof parsed.summary === "string" &&
+      ["claimed", "completed", "blocked", "gave_up", "unblocked"].includes(parsed.event));
+  }
   if (turn?.kind !== "turn" && turn?.kind !== "system") return false;
   const body = String(turn.body || "").trim();
   return Boolean(body) && body !== "NOOP" && body !== "*(silent)*";

@@ -84,7 +84,7 @@ import { actorFromProps, agentActorForToken, hermesActorForToken } from "./ident
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
-import { appendRoomTurn, DEFAULT_ROOM, readRoomTurns } from "./partner-room.js";
+import { appendRoomTurn, DEFAULT_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
@@ -569,6 +569,11 @@ const dealroomHandler = createDealroomHandler({
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
     return readRoomTurns(client, { room: DEFAULT_ROOM, ...params });
+  },
+  queueReadFn: (env, params) => {
+    const sql = neon(env.DATABASE_URL_READER);
+    const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
+    return readRoomQueue(client, { room: DEFAULT_ROOM, ...params });
   },
   roomWriteFn: async (env, params) => {
     const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
