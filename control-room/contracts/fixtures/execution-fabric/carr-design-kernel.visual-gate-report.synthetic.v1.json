@@ -4,7 +4,7 @@
   "kernel_binding": {
     "contract_id": "contract:carr-design-kernel",
     "version": "v1",
-    "content_digest": "sha256:b90ff17db1c84ebff2fc89607b16f64dfe7d363197bc5b3f508596ea32bec747",
+    "content_digest": "sha256:2a03478ff88ccbaaa889d7d08939f3e1dbf5fc0bb898a0f68109b9a5ef49c0ff",
     "adapter_id": "adapter:job-passport-html"
   },
   "target": {

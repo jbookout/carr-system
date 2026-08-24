@@ -77,7 +77,7 @@ def real_browser_gate_receipt_is_complete_and_bound():
     refuse(lambda: design_kernel.validate_visual_gate_report(changed, kernel), "exact viewport width")
     changed = copy.deepcopy(report)
     changed["evidence"]["runner"] = "css_read"
-    refuse(lambda: design_kernel.validate_visual_gate_report(changed, kernel), "real-browser")
+    refuse(lambda: design_kernel.validate_visual_gate_report(changed, kernel), "browser measurement")
 
 
 def critical_visual_failure_is_an_evaluation_kernel_blocker_not_a_score_tradeoff():

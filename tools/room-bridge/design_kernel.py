@@ -57,7 +57,9 @@ def validate_design_kernel(raw: Any) -> dict[str, Any]:
         _strings(token[field], f"token architecture {field}")
 
     slices: dict[str, dict[str, Any]] = {}
-    for raw_slice in _strings(value["context_slices"], "context slices") if False else value["context_slices"]:
+    if not isinstance(value["context_slices"], list) or not value["context_slices"]:
+        raise DesignKernelError("context slices must be a non-empty list")
+    for raw_slice in value["context_slices"]:
         row = _exact(raw_slice, {"slice_id", "purpose", "required_for"}, "design context slice")
         if not isinstance(row["slice_id"], str) or not row["slice_id"] or row["slice_id"] in slices or not isinstance(row["purpose"], str) or not row["purpose"]:
             raise DesignKernelError("context slice identity/purpose is invalid")
@@ -165,8 +167,8 @@ def validate_visual_gate_report(raw: Any, kernel: Any, *, expected_work_request_
     if expected_projection_digest is not None and target["projection_digest"] != expected_projection_digest:
         raise DesignKernelError("visual gate report does not bind evaluation projection")
     evidence = _exact(value["evidence"], {"runner", "browser", "captured_at", "refs"}, "visual gate evidence")
-    if evidence["runner"] != "real_browser_measurement" or not isinstance(evidence["browser"], str) or not evidence["browser"] or not isinstance(evidence["captured_at"], str) or not evidence["captured_at"]:
-        raise DesignKernelError("visual gates require named real-browser measurement evidence")
+    if evidence["runner"] not in {"real_browser_measurement", "browser_unavailable"} or not isinstance(evidence["browser"], str) or not evidence["browser"] or not isinstance(evidence["captured_at"], str) or not evidence["captured_at"]:
+        raise DesignKernelError("visual gates require named browser measurement or explicit browser-unavailable evidence")
     _strings(evidence["refs"], "visual gate evidence refs")
     required = next(row["required_gates"] for row in source["visual_gate_portfolio"]["profiles"] if row["profile_id"] == intent["evaluation_profile"])
     seen: dict[str, dict[str, Any]] = {}
@@ -177,13 +179,17 @@ def validate_visual_gate_report(raw: Any, kernel: Any, *, expected_work_request_
         _strings(row["evidence_refs"], "visual gate result evidence refs")
         if not isinstance(row["measurement"], dict) or not row["measurement"]:
             raise DesignKernelError("visual gate result must carry a browser measurement")
-        if row["gate_id"] in VIEWPORT_GATES and row["measurement"].get("viewport_width_px") != VIEWPORT_GATES[row["gate_id"]]:
+        if row["gate_id"] in VIEWPORT_GATES and row["status"] in {"passed", "failed"} and row["measurement"].get("viewport_width_px") != VIEWPORT_GATES[row["gate_id"]]:
             raise DesignKernelError("narrow-width gate must record exact viewport width")
-        if row["gate_id"] == "target_size" and row["measurement"].get("minimum_target_px") != 44:
-            raise DesignKernelError("target-size gate must measure CARR 44px minimum")
+        if row["gate_id"] == "target_size" and row["status"] == "passed" and row["measurement"].get("minimum_target_px", 0) < 44:
+            raise DesignKernelError("target-size pass must measure CARR 44px minimum")
+        if row["gate_id"] == "target_size" and row["status"] == "failed" and not isinstance(row["measurement"].get("minimum_target_px"), (int, float)):
+            raise DesignKernelError("target-size failure must retain its observed measurement")
         seen[row["gate_id"]] = row
     if set(seen) != set(required):
         raise DesignKernelError("visual gate report must cover every required gate")
+    if evidence["runner"] == "browser_unavailable" and any(row["status"] not in {"not_verified", "not_applicable"} for row in seen.values()):
+        raise DesignKernelError("browser-unavailable reports may not fabricate passed or failed measurements")
     critique = _exact(value["aesthetic_critique"], {"verdict", "evidence_refs", "authority"}, "aesthetic critique report")
     if critique["verdict"] not in {"not_run", "advisory_pass", "advisory_concerns"} or critique["authority"] != "advisory_never_promotion":
         raise DesignKernelError("aesthetic critique must remain advisory")

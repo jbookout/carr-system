@@ -31,6 +31,7 @@
     {"intent_id": "intent:deal-room", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
     {"intent_id": "intent:model-room", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
     {"intent_id": "intent:control-room", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
+    {"intent_id": "intent:job-passport", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
     {"intent_id": "intent:generated-artifact", "surface_class": "artifact", "required_slices": ["slice:core", "slice:structured", "slice:artifact"], "optional_slices": ["slice:interactive", "slice:review"], "evaluation_profile": "profile:artifact-surface"}
   ],
   "component_state_contract": {

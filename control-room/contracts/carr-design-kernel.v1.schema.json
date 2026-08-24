@@ -13,14 +13,25 @@
     "contract_id": {"type": "string", "minLength": 1},
     "version": {"type": "string", "minLength": 1},
     "status": {"const": "active_contract_not_a_runtime_or_authority"},
-    "priority_hierarchy": {"type": "array", "minItems": 6, "items": {"type": "string"}},
-    "token_architecture": {"type": "object"},
-    "context_slices": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-    "design_intents": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-    "component_state_contract": {"type": "object"},
-    "visual_gate_portfolio": {"type": "object"},
-    "aesthetic_critique": {"type": "object"},
-    "adapter_projection": {"type": "object"},
-    "provenance": {"type": "object"}
+    "priority_hierarchy": {"const": ["user_task", "authority_and_truth", "accessibility", "consistency", "aesthetics", "developer_convenience"]},
+    "token_architecture": {"$ref": "#/$defs/token_architecture"},
+    "context_slices": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/context_slice"}},
+    "design_intents": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/design_intent"}},
+    "component_state_contract": {"$ref": "#/$defs/component_state_contract"},
+    "visual_gate_portfolio": {"$ref": "#/$defs/visual_gate_portfolio"},
+    "aesthetic_critique": {"$ref": "#/$defs/aesthetic_critique"},
+    "adapter_projection": {"$ref": "#/$defs/adapter_projection"},
+    "provenance": {"$ref": "#/$defs/provenance"}
+  },
+  "$defs": {
+    "string_list": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "token_architecture": {"type": "object", "additionalProperties": false, "required": ["canonical_stylesheet", "primitive_layer", "semantic_layer", "component_layer", "theme_policy", "legacy_canon"], "properties": {"canonical_stylesheet": {"const": "design/tokens.css"}, "primitive_layer": {"$ref": "#/$defs/string_list"}, "semantic_layer": {"$ref": "#/$defs/string_list"}, "component_layer": {"$ref": "#/$defs/string_list"}, "theme_policy": {"const": "primitives_stable_semantic_aliases_swap"}, "legacy_canon": {"$ref": "#/$defs/string_list"}}},
+    "context_slice": {"type": "object", "additionalProperties": false, "required": ["slice_id", "purpose", "required_for"], "properties": {"slice_id": {"type": "string", "minLength": 1}, "purpose": {"type": "string", "minLength": 1}, "required_for": {"$ref": "#/$defs/string_list"}}},
+    "design_intent": {"type": "object", "additionalProperties": false, "required": ["intent_id", "surface_class", "required_slices", "optional_slices", "evaluation_profile"], "properties": {"intent_id": {"type": "string", "minLength": 1}, "surface_class": {"type": "string", "minLength": 1}, "required_slices": {"$ref": "#/$defs/string_list"}, "optional_slices": {"type": "array", "items": {"type": "string", "minLength": 1}}, "evaluation_profile": {"type": "string", "minLength": 1}}},
+    "component_state_contract": {"type": "object", "additionalProperties": false, "required": ["required_states", "conditional_states", "applicability", "failure_posture"], "properties": {"required_states": {"const": ["default", "hover", "active", "focus-visible", "disabled", "loading", "error", "empty"]}, "conditional_states": {"const": ["success"]}, "applicability": {"const": "state_must_be_authored_or_explicitly_not_applicable"}, "failure_posture": {"const": "partial_stale_offline_and_refusal_are_visible_not_silent"}}},
+    "visual_gate_portfolio": {"type": "object", "additionalProperties": false, "required": ["profiles", "critical_gate_ids", "evidence_policy", "aggregation_policy"], "properties": {"profiles": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["profile_id", "required_gates"], "properties": {"profile_id": {"type": "string", "minLength": 1}, "required_gates": {"$ref": "#/$defs/string_list"}}}}, "critical_gate_ids": {"$ref": "#/$defs/string_list"}, "evidence_policy": {"const": "render_and_measure_in_a_real_browser_or_record_not_verified"}, "aggregation_policy": {"const": "no_blended_score_critical_failure_blocks_admission"}}},
+    "aesthetic_critique": {"type": "object", "additionalProperties": false, "required": ["requires_evidence_refs", "may_override_correctness", "may_grant_promotion", "role"], "properties": {"requires_evidence_refs": {"const": true}, "may_override_correctness": {"const": false}, "may_grant_promotion": {"const": false}, "role": {"const": "advisory_human_review_input"}}},
+    "adapter_projection": {"type": "object", "additionalProperties": false, "required": ["allowed_surface_families", "projection_rule", "required_provenance"], "properties": {"allowed_surface_families": {"$ref": "#/$defs/string_list"}, "projection_rule": {"const": "adapters_project_semantic_and_component_tokens_without_redefining_canonical_truth"}, "required_provenance": {"$ref": "#/$defs/string_list"}}},
+    "provenance": {"type": "object", "additionalProperties": false, "required": ["derived_from", "external_inspiration", "data_class"], "properties": {"derived_from": {"$ref": "#/$defs/string_list"}, "external_inspiration": {"type": "string", "minLength": 1}, "data_class": {"const": "metadata_only"}}}
   }
 }
