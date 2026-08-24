@@ -29,13 +29,22 @@ COMPARED config rather than something that DESCRIBED it:
   `out/hook-guard.log` showed zero firings against 75 for `ledger-sweep.py`. It
   blocked nothing for seventeen days while this document said it did.
 - **2026-08-23** — the same drift a third time: it described an older, smaller
-  hook set than the fifty gates `gate-baseline.json` tracks.
+  hook set than the one `gate-baseline.json` tracks. No count is written here on
+  purpose: this file quoting a gate total is how the previous two drifts read on
+  the day they were still true (rule b01edd26 — no hardcoded count a later edit
+  can falsify). `hooks/gate-integrity.py` prints the live figure.
 
 Rewriting it would restore the exact mechanism that failed three times. Rule
 14181e60, the database-first write law, is the general form: content lives in
 verbs and config, and prose files drift because nothing can fail when they are
 wrong. `ops/config/hooks.json` cannot silently drift — `hooks/gate-integrity.py`
 compares it against live settings at every SessionStart and names the mismatch.
+
+Since 2026-08-23 `ops/reachability-check.py` closes the other half: it fails CI
+on a control that exists but nothing calls, which is precisely the state this
+file used to describe in prose and call documented. Its
+`ops/config/reachability-tombstones.json` is where an intentional not-wired mark
+now lives, with a reason and a reopen condition that CI re-reads every run.
 
 ## What was retired alongside it
 
@@ -54,3 +63,19 @@ kept, because the premise was wrong: it is wired as a SessionStart hook in both
 copies under `~/My Drive`. It is vault-rooted, never carr-system-rooted, which
 is why a repo-side grep for it reads as unwired — the same trap
 `hooks/worktree-self-plumb.py` documents in its own header.
+
+## The reachability marks this change resolves
+
+`ops/reachability-check.py` landed the same day carrying tombstones for two of
+the files deleted here, and each names this change as its own reopen condition:
+
+- `hooks/ledger-boundary-sweep.py` — "delete the file and its enforcement-map
+  entry. Either ruling deletes this mark."
+- `ledger_boundary`, the registry half — "the control is removed from the
+  enforcement map".
+- `hooks/install-record-home-gate.py` — "deleted along with its enforcement-map
+  and catalog references."
+
+All three marks are removed in this change, because the thing each one marked is
+gone. The `hooks/session-brief.py` mark STAYS: that entry is about a hook the
+repository cannot see, not a hook that does not run, and the file is still live.
