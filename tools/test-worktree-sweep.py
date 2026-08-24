@@ -56,6 +56,15 @@ import time
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORKTREE_SH = os.path.join(REPO, "bin", "worktree.sh")
 
+# The one scrubber (ops/git_env.py) — lives in ops/, not tools/, so ops/ goes
+# on sys.path instead of this file's own directory. GIT_DIR is exported by
+# every git hook and overrides cwd for any child git process; bin/worktree.sh
+# itself shells out to git repeatedly, so an inherited GIT_DIR would retarget
+# its calls exactly as it did the fixture commits that landed on live main on
+# 2026-08-14.
+sys.path.insert(0, os.path.join(REPO, "ops"))
+from git_env import fixture_env  # noqa: E402
+
 results: list[tuple[str, bool, str]] = []
 
 
@@ -65,6 +74,7 @@ def check(label, ok, detail=""):
 
 
 def run(cmd, cwd, **kw):
+    kw.setdefault("env", fixture_env())
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60, **kw)
 
 

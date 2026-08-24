@@ -62,7 +62,12 @@ import sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HOOKS = os.path.dirname(os.path.abspath(__file__))
-LOG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.join(REPO, "out", "hook-guard.log")
 STATE = os.environ.get("CARR_UNREAD_ARTIFACT_STATE") or os.path.join(
     REPO, "out", "unread-artifact")
 

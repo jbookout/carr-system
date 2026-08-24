@@ -32,6 +32,14 @@ import subprocess
 import sys
 import tempfile
 
+# The one scrubber (ops/git_env.py), not a local copy. GIT_DIR is exported by
+# every git hook and overrides cwd for any child git process — the 2026-08-14
+# incident where fixture commits landed on live main happened exactly this
+# way, through a fixture repo built with plain cwd= and no scrub at all,
+# which is what every git() call in this file did before this change.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(REPO, "bin", "whose-work.py")
 
@@ -47,15 +55,18 @@ def check(label: str, cond: bool, detail: str = "") -> None:
 
 
 def git(repo: str, *args: str) -> str:
-    p = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    p = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                       env=fixture_env())
     if p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} in {repo}:\n{p.stderr}")
     return p.stdout.strip()
 
 
 def run(repo: str) -> dict:
+    # bin/whose-work.py shells out to git itself; scrubbing here is what
+    # keeps ITS git calls confined to the fixture too, not just this file's.
     p = subprocess.run([sys.executable, TOOL, "--repo", repo, "--json"],
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, timeout=120, env=fixture_env())
     try:
         return json.loads(p.stdout or "{}")
     except json.JSONDecodeError:
@@ -72,11 +83,12 @@ TMP = tempfile.mkdtemp(prefix="whose-work-selftest-")
 try:
     bare = os.path.join(TMP, "origin.git")
     subprocess.run(["git", "init", "--bare", "-q", "-b", "main", bare],
-                   capture_output=True, check=True)
+                   capture_output=True, check=True, env=fixture_env())
 
     def clone(name: str) -> str:
         path = os.path.join(TMP, name)
-        subprocess.run(["git", "clone", "-q", bare, path], capture_output=True, check=True)
+        subprocess.run(["git", "clone", "-q", bare, path], capture_output=True,
+                       check=True, env=fixture_env())
         git(path, "config", "user.email", "t@example.invalid")
         git(path, "config", "user.name", "t")
         return path

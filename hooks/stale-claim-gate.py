@@ -76,7 +76,12 @@ from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "conduct-gate.jsonl")
-DEBUG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    DEBUG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    DEBUG = os.path.join(REPO, "out", "hook-guard.log")
 
 # How far back a fix could plausibly have landed and still be news to a session
 # reading a dated artifact. The four rows this targets were 0 to 3 days stale;

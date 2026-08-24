@@ -37,6 +37,13 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 BRIEF = os.path.join(os.path.dirname(HERE), "hooks", "session-brief.py")
 
+# The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
+# at the repository that invoked it, and on 2026-08-14 that leaked a fixture
+# commit onto live main — these fixtures commit into throwaway repos (parent
+# AND a nested submodule) and must not be captured by an inherited GIT_DIR.
+sys.path.insert(0, HERE)
+from git_env import fixture_env  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("session_brief", BRIEF)
 assert spec is not None and spec.loader is not None, f"cannot load {BRIEF}"
 sb = importlib.util.module_from_spec(spec)
@@ -122,7 +129,7 @@ def _(assert_):
 
 def _git(cwd, *args):
     return subprocess.run(("git",) + args, cwd=cwd, capture_output=True,
-                          text=True, timeout=30)
+                          text=True, timeout=30, env=fixture_env())
 
 
 def _must(res, what):

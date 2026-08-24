@@ -125,6 +125,13 @@ case "${1:-}" in
   # whichever tree you happen to be standing in, which cannot see a number a
   # concurrent session has already taken. Read-only. See tools/next-migration.py.
   next-migration) shift; python3 "$REPO/tools/next-migration.py" "$@" ;;
+  # `reserve-migration` (2026-08-24, ci-failures council cluster B): atomically
+  # CLAIM the next free migration number at mint time. next-migration only
+  # reports; two sessions asking it in the same minute still collide. The
+  # reservation ledger lives in the CANONICAL checkout's out/ — the one
+  # directory every worktree on this machine shares — and next-migration counts
+  # its rows as claims. See tools/reserve-migration.py.
+  reserve-migration) shift; python3 "$REPO/tools/reserve-migration.py" "$@" ;;
   # The report-card rubric (loop #220, DRAFT). One entry point for both paths:
   # a human runs this, and the monthly audit runs this. Rule a8c55a47 — the
   # manual path and the automated path that do the same job must be the SAME

@@ -88,8 +88,29 @@ from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.join(REPO, "out", "staging-observed")
-DEBUG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    DEBUG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    DEBUG = os.path.join(REPO, "out", "hook-guard.log")
 MAX_PENDING = 200  # defensive cap: a killed session must not leak forever
+
+# WHICH TREE THIS SNAPSHOTS, and it was the wrong one for every worktree session.
+# This hook is wired by its absolute CANONICAL path, so `REPO` above is always
+# ~/carr-system however deep in a worktree the session actually is — and the
+# credit set it builds is consumed by staging-attribution-gate.py, which was
+# reading the same wrong tree, so the two agreed with each other and disagreed
+# with reality. Canonical's porcelain never lists anything under a worktree
+# (`.claude/worktrees/` is gitignored there), so a worktree session's observed
+# set was assembled from CANONICAL's unrelated churn: paths it never touched,
+# and none of the paths it did.
+#
+# Council recommendation 1, 2026-08-23 process audit. The resolver is shared with
+# staging-attribution-gate.py and git-writer-gate.py precisely so the snapshot
+# and the gate that reads it cannot drift apart again (rule a8c55a47).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from worktree_scope import target_tree  # noqa: E402
 
 
 def now():
@@ -204,8 +225,15 @@ def handle(payload, repo=REPO):
     call_id = payload.get("tool_use_id") or payload.get("toolUseId") or ""
     event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
 
+    # The tree this call is about. Pre and Post derive it from the same command
+    # and the same cwd, so the two snapshots are always of the same checkout —
+    # which is the property the whole before/after diff rests on.
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    cmd = ti.get("command", "") if isinstance(ti, dict) else ""
+    tree = target_tree(cmd, payload.get("cwd"), repo=repo) or repo
+
     if event == "PreToolUse":
-        snapshot = porcelain_status(repo)
+        snapshot = porcelain_status(tree)
         with locked_state(session_id) as data:
             if call_id:
                 data["pending"][call_id] = snapshot
@@ -215,7 +243,7 @@ def handle(payload, repo=REPO):
         return
 
     if event == "PostToolUse":
-        after = porcelain_status(repo)
+        after = porcelain_status(tree)
         with locked_state(session_id) as data:
             before = data["pending"].pop(call_id, None) if call_id else None
             if before is None:

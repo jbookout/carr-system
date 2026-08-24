@@ -64,7 +64,12 @@ from datetime import datetime, timezone
 # than mis-enforcing.  Decisions are read from the canonical record view; this
 # hook never discovers a mounted file tree through its environment.
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LOG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.join(REPO, "out", "hook-guard.log")
 NONCANONICAL_DECISIONS_PATH = "CARR_NONCANONICAL_DECISIONS_PATH"
 
 # Fields worth reading across the verbs this watches.

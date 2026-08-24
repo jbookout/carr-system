@@ -342,6 +342,44 @@ def main():
             and "SKIP  scheduled task calendar-prebrief-am (definition only:" in guard_output
             and not (Path(mod.TASKS_SRC) / "calendar-prebrief-am" / "SKILL.md").exists()
         )
+
+        # A hooks block that invokes a script the machine does not have must
+        # refuse to install. Applied anyway, it blocks EVERY session at its
+        # next prompt — the 2026-08-24 overnight outage, where settings were
+        # installed while the checkout they point into was one commit behind
+        # the merged hook wrapper they reference.
+        mod.IS_PRIMARY = True
+        hooks_dir = repo / "hooks"
+        hooks_dir.mkdir(exist_ok=True)
+        present_script = hooks_dir / "present-gate.py"
+        present_script.write_text("# present\n", encoding="utf-8")
+        absent_script = hooks_dir / "meter-run.py"
+        (config / "hooks.json").write_text(json.dumps({
+            "UserPromptSubmit": [{"hooks": [{
+                "type": "command",
+                "command": f"/usr/bin/env python3 {absent_script} {present_script}",
+                "timeout": 10,
+            }]}],
+        }, indent=2) + "\n", encoding="utf-8")
+        settings_before_refusal = Path(mod.SETTINGS).read_text(encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as absent_out:
+            absent_install_rc = mod.cmd_install(True)
+        absent_output = absent_out.getvalue()
+        absent_refused = (
+            absent_install_rc == 1
+            and str(absent_script) in absent_output
+            and str(present_script) not in absent_output
+            and Path(mod.SETTINGS).read_text(encoding="utf-8") == settings_before_refusal
+        )
+        absent_script.write_text("# restored\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            restored_install_rc = mod.cmd_install(True)
+        restored_settings = json.loads(Path(mod.SETTINGS).read_text(encoding="utf-8"))
+        restored_installed = (
+            restored_install_rc == 0
+            and str(absent_script) in json.dumps(restored_settings.get("hooks", {}))
+        )
+        mod.IS_PRIMARY = original_primary
     cases = [
         ("ephemeral marker is honoured inside frontmatter",
          ephemeral_marker_honoured),
@@ -355,6 +393,9 @@ def main():
          definition_only_excluded_from_drift),
         ("the installer skips a definition-only scheduled task",
          definition_only_not_installed),
+        ("install refuses a hooks block whose script is missing, names only the "
+         "missing path, and leaves settings untouched", absent_refused),
+        ("install proceeds once the missing hook script exists", restored_installed),
         ("unrelated top-level key preserved", merged.get("user_setting") == {"keep": True}),
         ("unrelated event preserved", "PostToolUse" in merged["hooks"] and "/Users/booko/other/hooks/post.py" in commands(merged)),
         ("unrelated Stop hook preserved", "/Users/booko/other/hooks/keep.py" in names),

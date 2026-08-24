@@ -45,6 +45,12 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pr_actor as actor  # noqa: E402
 
+# The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
+# at the repository that invoked it, and on 2026-08-14 that leaked a fixture
+# commit onto live main — TIER 2 below drives real bare-remote/clone pairs and
+# must not be captured by an inherited GIT_DIR.
+from git_env import fixture_env  # noqa: E402
+
 FAILED: list[str] = []
 
 
@@ -57,7 +63,8 @@ def check(label: str, cond: bool, detail: str = "") -> None:
 
 
 def git(repo: str, *args: str, check_rc: bool = True) -> str:
-    p = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    p = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                       env=fixture_env())
     if check_rc and p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed in {repo}:\n{p.stderr}")
     return p.stdout.strip()
@@ -143,8 +150,9 @@ def new_repo(name: str) -> tuple[str, str]:
     bare = os.path.join(TMP, f"{name}.git")
     work = os.path.join(TMP, name)
     subprocess.run(["git", "init", "--bare", "-b", "main", bare],
-                   capture_output=True, check=True)
-    subprocess.run(["git", "clone", bare, work], capture_output=True, check=True)
+                   capture_output=True, check=True, env=fixture_env())
+    subprocess.run(["git", "clone", bare, work], capture_output=True, check=True,
+                   env=fixture_env())
     git(work, "config", "user.email", "selftest@example.invalid")
     git(work, "config", "user.name", "selftest")
     with open(os.path.join(work, "README.md"), "w") as f:

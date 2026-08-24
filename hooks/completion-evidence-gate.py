@@ -47,6 +47,11 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "adjudicate-incident",   # partner judgment on an operational incident — severity, owner,
+                              # duplicate-of. Same reasoning as its investigation sibling below:
+                              # "adjudicate" stays an exact entry rather than becoming a prefix,
+                              # because the two verbs it would cover are both judgment writes
+                              # somebody deliberately listed.
     "adjudicate-investigation-branch",  # owner-only branch judgment write, like review-deal:
                                          # a one-off judgment verb whose first word ("adjudicate")
                                          # is not a generic write prefix
@@ -56,6 +61,11 @@ WRITE_ACTION_EXACT = {
                               # a one-off verb whose first word ("edit") is not a generic
                               # write prefix and has no sibling "edit-*" verbs to justify one
     "open-campaign",
+    "open-incident",             # opens or appends to an operational incident. It is additive
+                                  # and it is still a write: a session that files an incident and
+                                  # then reports "handled" without reading the board back has
+                                  # claimed an outcome it never verified, which is the whole of
+                                  # what this gate is for.
     "open-investigation",        # same "open" first-word as open-campaign; the "open" prefix
                                   # is deliberately not generalized, so this sibling gets the
                                   # same exact-entry treatment

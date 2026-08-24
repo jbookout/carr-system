@@ -273,6 +273,14 @@ if [ -n "${CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE:-}" ]; then
   # TEST HOOK ONLY: gives a selftest a reliable window to send SIGINT and
   # prove the identity file is gone afterward, before this script would
   # otherwise have raced ahead into the comparison below.
+  #
+  # READY MARKER (2026-08-23 load-flake sweep). The selftest used to guess the
+  # window with a fixed sleep after spawn; under machine load that guess fired
+  # before this line was even reached and the signal landed on a script still
+  # mid-startup. The marker file is written HERE, at the pause itself, so the
+  # test signals only after the moment it is trying to interrupt actually
+  # exists — wall-clock independent by construction.
+  : > "${CARR_KEY_RECOVERY_TEST_SELFTEST_READY_FILE:-/dev/null}"
   sleep "${CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE}"
 fi
 

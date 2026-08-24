@@ -60,6 +60,14 @@ import subprocess
 import sys
 import tempfile
 
+# The one scrubber (ops/git_env.py), not a local copy. GIT_DIR is exported by
+# every git hook and overrides cwd for any child git process — the
+# 2026-08-14 incident where fixture commits landed on live main is the
+# reason the hand-rolled 3-variable pop in run() and the 7-variable list in
+# git() below are replaced with the single, complete list git_env.py keeps.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATE = os.path.join(REPO, "hooks", "bash-write-gate.py")
 
@@ -91,23 +99,16 @@ def run(command, vault, home_repo, cwd=None):
         "tool_input": {"command": command},
         "cwd": cwd or home_repo,
     })
-    env = {**os.environ,
-           "CARR_VAULT": vault,
-           "CARR_ONE_REPO_ROOT": home_repo}
+    env = dict(fixture_env(), CARR_VAULT=vault, CARR_ONE_REPO_ROOT=home_repo)
     env.pop("CARR_ALLOW_FOREIGN_REPO", None)
-    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
-        env.pop(k, None)
     p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
                        text=True, env=env)
     return p.returncode, p.stderr
 
 
 def git(repo, *args):
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
-                        "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE")}
     p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
-                       env=env)
+                       env=fixture_env())
     if p.returncode != 0 and args and args[0] in ("init", "add", "commit", "config"):
         raise SystemExit(f"fixture setup failed: git {' '.join(args)}\n{p.stderr}")
     return p

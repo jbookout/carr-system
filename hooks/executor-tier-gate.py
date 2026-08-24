@@ -59,7 +59,12 @@ import re
 import sys
 from datetime import datetime, timezone
 
-LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(os.path.expanduser("~/carr-system"))
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Where a subagent definition may live. Project scope first: that is where the

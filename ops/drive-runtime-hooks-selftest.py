@@ -88,11 +88,23 @@ def main() -> int:
     # nonempty canonical v_decision_entry row; no direct-gate monkeypatches are
     # accepted as evidence for this boundary.
     hooks_config = (REPO / "ops" / "config" / "hooks.json").read_text()
+    # Both drift entries now run through hooks/hook-meter-run.py (2026-08-23,
+    # hook telemetry). What this check protects is unchanged and is NOT the
+    # wrapper: it is that the bootstrap is the FIXED, absolute /usr/bin/python3
+    # rather than a PATH-resolved `env python3`, because PATH is attacker-
+    # influenced and this pair of gates is what records drift. The wrapper
+    # inherits that interpreter and runs the gate in it, so the property holds;
+    # only the literal moved. The `env python3` clause is asserted against BOTH
+    # spellings so the wrapper cannot become a way to reintroduce it.
     check("installed drift hooks use fixed system bootstrap and repository interpreter",
-          hooks_config.count("/usr/bin/python3 {{REPO}}/hooks/run-record-gate.py drift-") == 2
-          and "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py" not in hooks_config)
+          hooks_config.count("/usr/bin/python3 {{REPO}}/hooks/hook-meter-run.py "
+                             "{{REPO}}/hooks/run-record-gate.py drift-") == 2
+          and "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py" not in hooks_config
+          and ("/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py "
+               "{{REPO}}/hooks/run-record-gate.py") not in hooks_config)
 
-    with tempfile.TemporaryDirectory(dir=REPO) as tmp:
+    # PRIVATE TMP, NOT THE REPO ROOT (2026-08-23 load-flake sweep): was dir=REPO.
+    with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         for directory in (root / "hooks", root / "lib", root / ".venv" / "bin"):
             directory.mkdir(parents=True, exist_ok=True)
@@ -127,9 +139,12 @@ class Connection:
 def _connect(): return Connection()
 ''')
         interpreter = root / ".venv" / "bin" / "python"
-        interpreter.write_text('''#!/bin/sh
-if [ "${FIXTURE_PSYCOG_TIMEOUT:-0}" = 1 ] && [ "$1" = -c ]; then sleep 4; fi
-if [ "$1" = -c ]; then [ "${FIXTURE_PSYCOG_OK:-1}" = 1 ] && exit 0 || exit 1; fi
+        # Any `-c` invocation is a readiness probe. The launcher must no longer
+        # make one, so the fixture records every probe and the check below
+        # asserts the marker was never written.
+        probe_marker = root / "probe-ran"
+        interpreter.write_text(f'''#!/bin/sh
+if [ "$1" = -c ]; then echo probe >> "{probe_marker}"; exit 0; fi
 export FIXTURE_FIXED_INTERPRETER=1
 exec /usr/bin/python3 "$@"
 ''')
@@ -151,9 +166,6 @@ exec /usr/bin/python3 "$@"
                                  text=True, capture_output=True, env=record_env)
         malformed = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"),
                                     "drift-claim-gate.py", "extra"], text=True, capture_output=True, env=record_env)
-        missing_dependency = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
-                                            text=True, capture_output=True,
-                                            env={**record_env, "FIXTURE_PSYCOG_OK": "0"})
         missing_path = root / ".venv" / "bin" / "python-missing"
         interpreter.rename(missing_path)
         try:
@@ -161,15 +173,27 @@ exec /usr/bin/python3 "$@"
                                                  text=True, capture_output=True, env=record_env)
         finally:
             missing_path.rename(interpreter)
-        timeout = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
-                                 text=True, capture_output=True,
-                                 env={**record_env, "FIXTURE_PSYCOG_TIMEOUT": "1"})
+        probe_ran = probe_marker.exists()
     check("system bootstrap reaches fixed interpreter, scrubs PYTHONPATH, and blocks on canonical context",
           write.returncode == 0 and "quokka-indexer" in write.stdout
           and assertion.returncode == 2 and "quokka-indexer" in assertion.stderr)
-    check("launcher fails closed for unknown/malformed/missing dependency/interpreter/timeout",
-          all(item.returncode != 0 for item in (unknown, malformed, missing_dependency,
-                                                 missing_interpreter, timeout)))
+
+    # WHY THIS CHECK CHANGED SHAPE (2026-08-23). It used to require the launcher
+    # to exit nonzero on a psycopg readiness probe that failed or timed out. The
+    # probe had a 3s budget and cost a second interpreter cold start; measured
+    # 4.5-8.4s on this Mac at load average ~330, so under load it timed out
+    # EVERY time and the launcher returned 2 — a blocking Stop hook with empty
+    # stderr. The drift-assertion check therefore never ran on a busy machine,
+    # and the session could neither comply nor diagnose. The probe was never the
+    # enforcement: both gates already catch a failed record read and log
+    # ALLOW(internal-error). So the probe is gone, and the two cases that only
+    # existed to drive it are replaced by the two properties that actually
+    # matter — no probe is made at all, and no exit is ever silent.
+    check("launcher makes no readiness probe (the 3s cliff cannot come back)",
+          not probe_ran)
+    check("launcher bails loudly, and never blocking, on argv and interpreter faults",
+          all(item.returncode == 1 and "bootstrap-fault" in item.stderr
+              for item in (unknown, malformed, missing_interpreter)))
 
     if failures:
         print(f"FAIL {len(failures)}: {', '.join(failures)}")

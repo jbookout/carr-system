@@ -60,7 +60,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(os.path.expanduser("~/carr-system"))
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 LEDGER_VERBS = ("log-decision", "teach")
 
 # The five triggers from rule bbffc139, in the order that rule lists them.

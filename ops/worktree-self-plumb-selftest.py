@@ -28,6 +28,14 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(os.path.dirname(HERE), "hooks", "worktree-self-plumb.py")
 
+# The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
+# at the repository that invoked it, and on 2026-08-14 that leaked a fixture
+# commit onto live main — the reaper here deletes real directories, so its
+# fixture repo and worktrees must never be reachable through an inherited
+# GIT_DIR.
+sys.path.insert(0, HERE)
+from git_env import fixture_env  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("worktree_self_plumb", HOOK)
 assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
@@ -38,7 +46,7 @@ failures: list[str] = []
 
 def git(*args: str, cwd: str) -> str:
     p = subprocess.run(["git", *args], cwd=cwd, check=True,
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=fixture_env())
     return p.stdout.strip()
 
 

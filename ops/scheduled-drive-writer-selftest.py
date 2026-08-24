@@ -174,10 +174,30 @@ def main() -> int:
         # only unmarked, and four retired outright — cutover readiness, the
         # vault drift watch at both ends, and the settings mirror.
         projections = len(re.findall(r'^drive_projection "', nightly, re.M))
+        # THE NORMAL PATH IS A TOMBSTONE NOW, NOT AN EXECUTED REFUSAL (2026-08-23).
+        # This used to also require the literal string
+        # "routine-canonical-seam-refusal.sh" somewhere in the file, which the
+        # chain no longer launches. That assertion was satisfied by ANY mention of
+        # the filename, including a comment — it went on passing after the chain
+        # stopped calling the script, which is the same prose-mention hazard
+        # ops/nightly-capability-skip-selftest.py strips comments to avoid.
+        #
+        # So this reads the drive_projection function body instead: the recovery
+        # branch must still run the real command, and the normal branch must route
+        # to `tombstone` rather than executing anything at all. The 69 exit
+        # contract of bin/routine-canonical-seam-refusal.sh is still asserted, by
+        # running the script — see the check a few lines above, which is where a
+        # claim about that file's behaviour belongs.
+        body = re.search(r'^drive_projection\(\) \{.*?^\}', nightly, re.M | re.S)
+        body_text = body.group(0) if body else ""
         check("every remaining Drive projection is routed through the recovery envelope",
               projections == 1 and "RECOVERY NONCANONICAL" in nightly
-              and "routine-canonical-seam-refusal.sh" in nightly,
+              and bool(body_text) and 'step "RECOVERY NONCANONICAL $label" "$@"' in body_text,
               f"{projections} drive_projection step(s) in bin/nightly.sh")
+        check("a refused Drive projection is gated out, not executed to produce its refusal",
+              'tombstone "$label"' in body_text
+              and "routine-canonical-seam-refusal.sh" not in body_text,
+              "the normal branch of drive_projection() still launches a refusal process")
         check("nightly recognizes the record-native dashboard replacement",
               "open-items dashboard replaced by record-native Front Door" in nightly
               and 'drive_projection "open-items dashboard' not in nightly)

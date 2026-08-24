@@ -11,6 +11,13 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
+# at the repository that invoked it, and on 2026-08-14 that leaked a fixture
+# commit onto live main — the throwaway repo built below must not be
+# reachable through an inherited GIT_DIR.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 
 def load(name: str, rel: str):
     spec = importlib.util.spec_from_file_location(name, REPO / rel)
@@ -31,7 +38,8 @@ def check(name: str, value: bool, failures: list[str]):
 
 
 def git(root: Path, *args: str):
-    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                   env=fixture_env())
 
 
 def main() -> int:

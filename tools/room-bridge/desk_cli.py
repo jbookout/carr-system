@@ -45,7 +45,7 @@ from desks import DeskError  # noqa: E402
 def cmd_register(reg: desks.Registry, args) -> int:
     entry = reg.register(
         args.name, args.kind, socket=args.socket, model=args.model, cwd=args.cwd,
-        sandbox=args.sandbox, add_dirs=args.add_dirs,
+        effort=getattr(args, "effort", None), sandbox=args.sandbox, add_dirs=args.add_dirs,
     )
     if args.seat:
         entry = registry_ext.set_seat(args.name, args.seat, path=reg.path)
@@ -73,7 +73,8 @@ def cmd_refresh(reg: desks.Registry, args) -> int:
         # dispatch starts a fresh thread in the corrected directory.
         entry = reg.register(
             args.name, entry["kind"], socket=entry.get("socket"), model=entry.get("model"),
-            cwd=args.cwd, sandbox=entry.get("sandbox"), add_dirs=entry.get("add_dirs"),
+            effort=entry.get("effort"), cwd=args.cwd, sandbox=entry.get("sandbox"),
+            add_dirs=entry.get("add_dirs"),
         )
         if entry.get("room_seat") is None:
             seat = entries[args.name].get("room_seat")
@@ -109,7 +110,10 @@ def cmd_list(reg: desks.Registry, args) -> int:
         seat = e.get("room_seat", "(no room seat — bridge will not route to it)")
         last_seen = e.get("last_seen", "never")
         last_live = e.get("last_live")
-        where = e.get("socket") or e.get("model") or "?"
+        if e.get("kind") in ("codex-session", "codex-live") and e.get("model"):
+            where = f"{e.get('model')} (effort={e.get('effort')})"
+        else:
+            where = e.get("socket") or "?"
         print(f"{name:20} {kind:15} seat={seat:10} live={last_live}  "
               f"last_seen={last_seen}  {where}")
     return 0
@@ -140,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--kind", required=True, choices=list(desks.KINDS))
     r.add_argument("--socket", default=None)
     r.add_argument("--model", default=None)
+    r.add_argument("--effort", default=None, choices=list(desks.EFFORT_CHOICES))
     r.add_argument("--cwd", default=None)
     r.add_argument("--seat", default=None, help="the room seat this desk speaks for")
     r.add_argument("--profile", default=None,
