@@ -456,6 +456,18 @@ def read(path):
         return None
 
 
+def launchd_texts_match(live_text, repo_text):
+    """Compare launchd plist bodies with token portability normalized on both sides."""
+    return portable(live_text or "") == portable(repo_text or "")
+
+
+def tracked_text_match(label, live, repo_text):
+    """Config equality that keeps launchd normalization symmetrical."""
+    if label.startswith("launchd "):
+        return launchd_texts_match(live, repo_text)
+    return live == repo_text
+
+
 def hook_block_script_paths(block):
     """Every absolute .py path a hooks block's commands invoke, real and sorted.
 
@@ -775,7 +787,7 @@ def cmd_check():
             missing.append((label, "on disk: MISSING; in repo: present"))
         elif have is None:
             untracked.append((label, "on disk: present; in repo: NOT TRACKED"))
-        elif have != live:
+        elif not tracked_text_match(label, live, have):
             different.append((label, "TRACKED BUT DIFFERENT from the live copy"))
     # A hook script the settings block invokes but git does not track is a
     # separate failure from a settings mismatch, and it used to be invisible
@@ -1012,8 +1024,12 @@ def cmd_install(apply):
             print(f"  SKIP  {f} (the nightly chain already does this here)")
             continue
         dest = os.path.join(LAUNCHD_SRC, f)
-        body = concrete(read(os.path.join(LAUNCHD_REPO, f)))
-        body_matches = read(dest) == body
+        source = read(os.path.join(LAUNCHD_REPO, f))
+        if source is None:
+            print(f"  ERROR  cannot render {f} because its tracked source is missing")
+            return 1
+        body = concrete(source)
+        body_matches = launchd_texts_match(read(dest), source)
         if body_matches and not apply:
             continue
         gone = missing_targets(body)
