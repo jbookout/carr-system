@@ -3960,7 +3960,7 @@ begin
   end if;
   if p_git_sha<>current_release.git_sha then raise exception 'restore-only SHA does not match the current target'; end if;
   if coalesce(cardinality(current_release.migration_set),0)<=0
-     or coalesce(current_release.schema_highest_migration,'') !~ '^[0-9]{4}_[a-z0-9_.-]+\\.sql$'
+     or coalesce(current_release.schema_highest_migration,'') !~ '^[0-9]{4}_[a-z0-9_.-]+\.sql$'
      or coalesce(current_release.schema_applied_count,0)<=0
      or coalesce(current_release.schema_ledger_sha256,'') !~ '^sha256:[0-9a-f]{64}$' then
     raise exception 'restore-only target does not declare an exact migration/schema set';
@@ -29884,6 +29884,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0293_lead_board_read_model.sql	4d4ac222c8184868a4b68f3fb6dd3e740d97d477ab3140cf400bd79d594f2afc	2026-08-24 16:51:50.301151+00
 0294_incident_fingerprint_and_success_clears.sql	f17bfb88bb28decfb414edeaa763df38ae7a9cc0f5362edb0443b1acc96a767e	2026-08-24 16:51:50.703935+00
 0295_staging_restore_only_recovery.sql	0d381ef9d2eb3a833b055bf688185489632faf6aeb568d49d03aa3e0f1b72b8b	2026-08-24 17:04:52.004777+00
+0296_restore_only_recovery_repair.sql	b4e93a9838954dd323487a66ae0ff6a43e33aa9ec811eaf54c7313507e04822d	2026-08-24 17:57:14.358848+00
 \.
 
 
