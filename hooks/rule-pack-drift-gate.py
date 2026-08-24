@@ -140,19 +140,28 @@ def current_turn(records):
 
 
 def delivery_state(records):
-    """The most recent standing-context result in this session.
+    """What this session has loaded, across every standing-context call it made.
 
     Returns (mode, declared_packs, would_omit). A session that never called the
     verb yields (None, [], []) — nothing to compare against and nothing to block.
+
+    PACKS ACCUMULATE; THEY DO NOT REPLACE. The council's word for it is monotonic:
+    entering another domain ADDS its pack and never subtracts an earlier one. That
+    is also what stops a false miss here — a session that loads the engineering
+    pack, then calls standing-context again bare to look a rule up by id, has not
+    unloaded anything, and reading only the latest call would say it had. The mode
+    and the omission list come from the LATEST call, because those describe the
+    policy and the payload as they stand now.
     """
-    mode, declared, omit = None, [], []
+    mode, declared, omit = None, set(), []
     for record in records:
         if "rule_delivery" not in serialized(record):
             continue
         found = _find_delivery(record)
         if found:
-            mode, declared, omit = found
-    return mode, declared, omit
+            mode, packs, omit = found
+            declared.update(packs)
+    return mode, sorted(declared), omit
 
 
 def _find_delivery(value):

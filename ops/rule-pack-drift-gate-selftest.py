@@ -146,6 +146,20 @@ for mode, should_block in (("shadow", False), ("enforced", True), (None, False))
     blocks = result["mode"] == "enforced" and bool(result["missing"])
     check(f"mode {mode!r} blocks = {should_block}", blocks == should_block, str(result))
 
+# ── a later bare call does not unload what an earlier one loaded ────────────
+reloaded = run([
+    user("take a worktree and land the migration"),
+    assistant_tool("mcp__carr__standing-context", {"packs": ["engineering-git"]}),
+    standing_context_result("enforced", ["engineering-git"], ["424ba0cc"]),
+    assistant_tool("Bash", {"command": "git worktree add ../x"}),
+    # the ordinary second call: reading one rule's binding text by id
+    assistant_tool("mcp__carr__standing-context", {"rule_ids": ["4a53ff82"]}),
+    standing_context_result("enforced", [], ["424ba0cc", "4a53ff82"]),
+])
+check("a bare lookup call does not unload the pack already loaded",
+      reloaded["loaded"] == ["engineering-git"], str(reloaded["loaded"]))
+check("and so it reports nothing missing", reloaded["missing"] == [], str(reloaded))
+
 # ── a trigger that ends in punctuation still matches ────────────────────────
 xcom = run([user("pull the metrics from x.com for last week"),
             assistant_tool("Bash", {"command": "grok x search"})])
@@ -157,4 +171,4 @@ if FAILURES:
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-pack-drift-gate-selftest: 17 cases passed")
+print("rule-pack-drift-gate-selftest: 19 cases passed")
