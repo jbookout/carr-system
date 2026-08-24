@@ -25,7 +25,7 @@
       "provider": "openrouter",
       "effective_model": "stealth/ox-alpha",
       "capabilities": ["read"],
-      "unavailable_reason": "Ox Alpha is retired for this queue."
+      "unavailable_reason": "Disabled until an operator confirms provider capacity and explicitly enables it."
     },
     "grok": {
       "enabled": true,

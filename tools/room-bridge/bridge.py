@@ -72,6 +72,7 @@ import dispatch  # noqa: E402
 import execution_contract  # noqa: E402
 import grammar  # noqa: E402
 import kanban_adapter  # noqa: E402
+import queue_dispatch  # noqa: E402
 import queue_projection  # noqa: E402
 import registry_ext  # noqa: E402
 import state as state_mod  # noqa: E402
@@ -213,17 +214,30 @@ def probe_live(entry: dict) -> bool:
 
 def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
                     log_path: Path, pending_timeout_s: float,
-                    scan=scan_for_result, now: str | None = None) -> dict | None:
+                    scan=scan_for_result, now: str | None = None,
+                    queue_executor: queue_dispatch.QueueDeskExecutor | None = None) -> dict | None:
     pending = state_mod.get_pending(state, name)
     if pending is None:
         return None
     result_text = scan(log_path, pending["log_offset"])
     if result_text is not None:
+        if pending.get("origin_kind") == "queue":
+            if queue_executor is None:
+                return {"desk": name, "outcome": "queue_executor_unavailable"}
+            terminal = queue_executor.finish_pending(pending, result_text)
+            state_mod.clear_pending(state, name)
+            return {"desk": name, **terminal}
         add_room_turn(body=result_text.strip() or "(empty reply)", seat=seat, kind="turn",
                       msg_id=str(uuid.uuid4()))
         state_mod.clear_pending(state, name)
         return {"desk": name, "outcome": "replied"}
     if _elapsed_seconds(pending.get("injected_at"), now=now) > pending_timeout_s:
+        if pending.get("origin_kind") == "queue":
+            if queue_executor is None:
+                return {"desk": name, "outcome": "queue_executor_unavailable"}
+            terminal = queue_executor.fail_pending(pending, "desk_result_timeout")
+            state_mod.clear_pending(state, name)
+            return {"desk": name, **terminal}
         add_room_turn(
             body=json.dumps({
                 "desk": name, "timed_out_after_s": pending_timeout_s,
@@ -421,6 +435,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              desk_stop=dispatch.desk_stop, desk_start=dispatch.desk_start,
              read_profiles=verb_io.read_profiles,
              queue_service: kanban_adapter.QueueService | None = None,
+             queue_executor: queue_dispatch.QueueDeskExecutor | None = None,
              queue_projector=queue_projection.project_once,
              log=print) -> dict:
     registry = registry or desks.Registry()
@@ -439,6 +454,19 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             queue_service = kanban_adapter.QueueService()
         except kanban_adapter.QueueError as exc:
             queue_load_error = exc
+
+    if (queue_executor is None and queue_service is not None
+            and hasattr(queue_service, "catalog")
+            and hasattr(getattr(queue_service, "adapter", None), "ready_for")):
+        queue_executor = queue_dispatch.QueueDeskExecutor(
+            catalog=queue_service.catalog, adapter=queue_service.adapter)
+    desk_queue_targets = {}
+    if queue_executor is not None:
+        desk_queue_targets = {
+            target["desk"]: alias
+            for alias, target in queue_executor.catalog["targets"].items()
+            if target.get("enabled") and target.get("adapter") == "desk"
+        }
 
     result = read_room(state["last_seq"], room=room)
     turns = [t for t in result.get("turns", []) if int(t.get("seq", 0)) > state["last_seq"]]
@@ -511,6 +539,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                 name, seat, state, add_room_turn=add_room_turn,
                 log_path=desk_state_dir / f"{name}.log",
                 pending_timeout_s=pending_timeout_s,
+                queue_executor=queue_executor,
             )
             if pending_outcome:
                 delivered.append(pending_outcome)
@@ -522,10 +551,44 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         results_path=results_path, add_room_turn=add_room_turn,
                         dispatch_fn=dispatch_fn, desk_state_dir=desk_state_dir,
                     ))
+                elif queue_executor is not None and name in desk_queue_targets:
+                    log_path = desk_state_dir / f"{name}.log"
+                    offset = log_path.stat().st_size if log_path.exists() else 0
+
+                    def dispatch_queue(prompt: str) -> dict:
+                        return dispatch_fn(
+                            name, prompt, registry=registry, results_path=results_path)
+
+                    queue_outcome = queue_executor.start(
+                        desk_queue_targets[name], dispatch_call=dispatch_queue,
+                        desk_busy=state_mod.has_queued(state, name),
+                    )
+                    pending = queue_outcome.get("pending")
+                    if isinstance(pending, dict):
+                        state_mod.set_pending(
+                            state, name,
+                            dispatch_msg_id=str(pending.get("dispatch_msg_id") or ""),
+                            log_offset=offset,
+                            injected_at=str(pending.get("injected_at") or _now()),
+                            source_msg_id=f"queue:{pending['kanban_task_id']}",
+                            source_seq=None,
+                            origin_kind="queue",
+                            kanban_task_id=pending["kanban_task_id"],
+                            target=pending["target"],
+                            finish=pending["finish"],
+                        )
+                    if queue_outcome.get("outcome") != "idle":
+                        delivered.append({"desk": name, **queue_outcome})
             registry_ext.stamp_heartbeat(name, live=probe_live(entry), path=registry.path)
         except desks.DeskError as e:
-            errors.append({"desk": name, "error": e.code, "detail": str(e)})
+            code = e.code
+            errors.append({"desk": name, "error": code, "detail": str(e)[:500]})
             registry_ext.stamp_heartbeat(name, live=False, path=registry.path)
+        except (kanban_adapter.QueueError, queue_dispatch.QueueDispatchError) as e:
+            code = getattr(e, "code", "queue_dispatch_failed")
+            errors.append({"desk": name, "error": code, "detail": str(e)[:500]})
+            # A queue outage says nothing about whether the named desk is live.
+            registry_ext.stamp_heartbeat(name, live=probe_live(entry), path=registry.path)
 
     restarts = settle_restarts(desk_entries, auth_by_desk, state,
                                 add_room_turn=add_room_turn, registry=registry,
