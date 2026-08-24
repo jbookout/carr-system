@@ -7,6 +7,7 @@ import { createDealroomHandler, isDealroomRequest } from "../src/dealroom-web.js
 const SHELL_ROOT = fileURLToPath(new URL("../../dealroom/public-shell/", import.meta.url));
 const WRANGLER_PATH = fileURLToPath(new URL("../wrangler.toml", import.meta.url));
 const INDEX_PATH = fileURLToPath(new URL("../src/index.js", import.meta.url));
+const DEALROOM_INDEX_PATH = fileURLToPath(new URL("../../dealroom/index.html", import.meta.url));
 const PRODUCTION_HOST = "dealroom.doctorcre.com";
 const STAGING_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev";
 
@@ -113,7 +114,7 @@ test("shared staging origin routes only exact Deal Room surfaces", () => {
   const environment = { DEALROOM_HOST: STAGING_HOST };
   const request = (path, headers = {}) => new Request(`https://${STAGING_HOST}${path}`, { headers });
 
-  for (const path of ["/", "/index.html", "/system-work.html", "/auth/login", "/auth/callback",
+  for (const path of ["/", "/index.html", "/leads", "/leads.html", "/system-work.html", "/auth/login", "/auth/callback",
     "/api/system-work/session", "/css/app.css", "/js/app.js", "/data/board-seed.json",
     "/manifest.webmanifest", "/sw.js", "/offline.html", "/icons/dealroom.svg"]) {
     assert.equal(isDealroomRequest(request(path), environment), true, path);
@@ -133,6 +134,46 @@ test("shared staging origin routes only exact Deal Room surfaces", () => {
       cookie: "__Host-dealroom_session=browser-session", authorization: "Bearer provider-token",
     }), environment), false, `${path} bearer wins over browser cookie`);
   }
+});
+
+test("authenticated Lead Board route serves its own asset and preserves sign-in return", async () => {
+  const environment = env();
+  environment.ASSETS = {
+    async fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/leads.html") {
+        return new Response("<!doctype html><title>Lead Board</title><main>Lead Board</main>", {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return new ShellAssets().fetch(request);
+    },
+  };
+  const handler = identityHandler("joe.bookout.carr.us@gmail.com");
+
+  const signedOut = await handler.fetch(new Request("https://dealroom.doctorcre.com/leads", {
+    headers: { accept: "text/html" },
+  }), environment, {});
+  assert.equal(signedOut.status, 302);
+  const loginUrl = new URL(signedOut.headers.get("location"));
+  assert.equal(loginUrl.pathname, "/auth/login");
+  assert.equal(loginUrl.searchParams.get("return_to"), "/leads");
+
+  const callback = await login(handler, environment, "joe.bookout.carr.us@gmail.com", { returnTo: "/leads" });
+  assert.equal(callback.headers.get("location"), "https://dealroom.doctorcre.com/leads");
+  const session = namedCookie(callback, "__Host-dealroom_session");
+  const board = await handler.fetch(new Request("https://dealroom.doctorcre.com/leads", {
+    headers: { cookie: session, accept: "text/html" },
+  }), environment, {});
+  assert.equal(board.status, 200);
+  assert.match(await board.text(), /<main>Lead Board<\/main>/);
+  assert.equal(board.headers.get("cache-control"), "no-cache");
+  assert.match(board.headers.get("content-security-policy"), /script-src 'self'/);
+});
+
+test("Deal Room navigation exposes Lead Board through the authenticated front door", async () => {
+  const html = await readFile(DEALROOM_INDEX_PATH, "utf8");
+  assert.match(html, /<a[^>]+href="\/leads"[^>]*>Lead Board<\/a>/);
 });
 
 test("machine-token MCP dispatch precedes browser routing on the shared host", async () => {

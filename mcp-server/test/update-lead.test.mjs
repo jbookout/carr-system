@@ -45,11 +45,11 @@ const LEAD_STAGES = ["new", "qualified", "engaged", "outreach_active",
 const LEAD_LANES = ["renewal", "new_entity", "relocation", "upstream", "associate"];
 
 class UpdateLeadFake {
-  constructor({ leadId, ref, stage, lane = null, version, subjectType = "lead" }) {
+  constructor({ leadId, ref, stage, lane = null, suppressed = false, version, subjectType = "lead" }) {
     this.leadId = leadId;
     this.ref = ref;
     this.subjectType = subjectType;
-    this.row = { stage, lane, version };
+    this.row = { stage, lane, suppressed, version };
     this.events = [];
     this.updated = null;
   }
@@ -224,4 +224,59 @@ test("update-lead: multiple business-state fields land together, each with its o
   });
   assert.deepEqual(new Set(result.updated), new Set(["stage", "segment", "notes"]));
   assert.equal(db.events.length, 3);
+});
+
+test("update-lead: do_not_contact is inseparable from suppression", async () => {
+  const db = new UpdateLeadFake({ leadId: ids.lead118, ref: "L-118", stage: "outreach_active", version: 3 });
+  await assert.rejects(
+    () => TOOLS["update-lead"].handler(db, joe, {
+      idempotency_key: "update-lead-118-dnc-without-suppression",
+      lead: "L-118",
+      base_version: 3,
+      fields: { stage: "do_not_contact" },
+    }),
+    (err) => {
+      assert.ok(err instanceof ToolError);
+      assert.equal(err.payload.error, "do_not_contact_requires_suppression");
+      return true;
+    });
+  assert.equal(db.updated, null);
+
+  const accepted = new UpdateLeadFake({ leadId: ids.lead118, ref: "L-118", stage: "outreach_active", version: 3 });
+  const result = await TOOLS["update-lead"].handler(accepted, joe, {
+    idempotency_key: "update-lead-118-dnc-with-suppression",
+    lead: "L-118",
+    base_version: 3,
+    fields: { stage: "do_not_contact", suppressed: true },
+  });
+  assert.deepEqual(new Set(result.updated), new Set(["stage", "suppressed"]));
+});
+
+test("update-lead: clearing a standing suppression instruction is an explicit human correction", async () => {
+  const machine = { ...joe, human: false, slug: "codex", display: "Codex" };
+  const refused = new UpdateLeadFake({ leadId: ids.lead118, ref: "L-118", stage: "do_not_contact",
+    suppressed: true, version: 3 });
+  await assert.rejects(
+    () => TOOLS["update-lead"].handler(refused, machine, {
+      idempotency_key: "update-lead-118-machine-clear-dnc",
+      lead: "L-118",
+      base_version: 3,
+      fields: { stage: "engaged", suppressed: false },
+    }),
+    (err) => {
+      assert.ok(err instanceof ToolError);
+      assert.equal(err.payload.error, "suppression_clear_requires_human");
+      return true;
+    });
+  assert.equal(refused.updated, null);
+
+  const human = new UpdateLeadFake({ leadId: ids.lead118, ref: "L-118", stage: "do_not_contact",
+    suppressed: true, version: 3 });
+  const result = await TOOLS["update-lead"].handler(human, joe, {
+    idempotency_key: "update-lead-118-human-clear-dnc",
+    lead: "L-118",
+    base_version: 3,
+    fields: { stage: "engaged", suppressed: false },
+  });
+  assert.deepEqual(new Set(result.updated), new Set(["stage", "suppressed"]));
 });

@@ -59,8 +59,11 @@ const PUBLIC_SHELL = new Map([
 ]);
 const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEALROOM_EXACT_PATHS = new Set([
-  "/", "/index.html", "/system-work.html", "/room.html", "/queue.html",
+  "/", "/index.html", "/leads", "/leads.html", "/system-work.html", "/room.html", "/queue.html",
   "/manifest.webmanifest", "/sw.js", "/offline.html",
+]);
+const DEALROOM_ROUTE_ASSETS = new Map([
+  ["/leads", "/leads.html"],
 ]);
 const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", "/css/", "/js/", "/data/", "/icons/"];
 
@@ -626,7 +629,7 @@ async function startReauth(request, env, dependencies) {
 
 async function bundleAsset(env, request) {
   const url = new URL(request.url);
-  const requested = url.pathname === "/" ? "/index.html" : url.pathname;
+  const requested = url.pathname === "/" ? "/index.html" : (DEALROOM_ROUTE_ASSETS.get(url.pathname) || url.pathname);
   for (const pathname of [requested, `/dist${requested}`]) {
     const response = await asset(env, request, pathname);
     if (response) return withHeaders(response, { "cache-control": "no-cache" });
