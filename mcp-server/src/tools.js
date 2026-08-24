@@ -15,6 +15,7 @@ import { workRequestIntakeTools } from "./work-request-intake.js";
 import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { partnerRoomTools } from "./partner-room.js";
 import { agentProfileTools } from "./agent-profiles.js";
+import { botBriefTools } from "./bot-brief.js";
 import { incidentTools } from "./incident.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
@@ -8241,6 +8242,7 @@ Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));
 // turns, server-derived attribution, human-watchable. See src/partner-room.js.
 Object.assign(TOOLS, partnerRoomTools({ withEnvelope, ToolError }));
 Object.assign(TOOLS, agentProfileTools({ withEnvelope, writeEvent, ToolError }));
+Object.assign(TOOLS, botBriefTools({ ToolError, assertNoCallerAuthorityFields }));
 
 // The operational incident ledger gets a front door (2026-08-23 rules-and-verbs
 // council, item 1 from both chairs). ops.incident has been written by two
