@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -19,21 +18,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-
-def materialize_step_runtime(worktree: Path) -> None:
-    """Link only validated ignored dependencies into one disposable worktree."""
-    required = (
-        (ROOT / ".venv", ".venv", "bin/python"),
-        (ROOT / "mcp-server" / "node_modules", "mcp-server/node_modules", ".bin/wrangler"),
-    )
-    for source, relative_target, required_binary in required:
-        if not source.is_dir() or not (source / required_binary).is_file():
-            raise RuntimeError(f"controller runtime dependency is unavailable: {relative_target}")
-        target = worktree / relative_target
-        if target.exists() or target.is_symlink():
-            raise RuntimeError(f"disposable worktree unexpectedly contains runtime dependency: {relative_target}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.symlink(source, target, target_is_directory=True)
 
 def checked(cmd: list[str], *, cwd: Path = ROOT) -> str:
     return subprocess.check_output(cmd, cwd=cwd, text=True).strip()
@@ -49,12 +33,15 @@ def execute_step(step: str, sha: str, args, attempt: str, idem: str) -> dict:
         subprocess.run(["git", "worktree", "add", "--detach", str(worktree), sha], cwd=ROOT, check=True)
         if checked(["git", "rev-parse", "HEAD"], cwd=worktree) != sha:
             raise RuntimeError("worktree HEAD differs from typed step binding")
-        materialize_step_runtime(worktree)
-        command = [str(worktree / "bin/deploy-worker.sh"), "--env", "staging", "--release-key", args.release_key,
+        # Policy and evidence writers always come from the merged controller
+        # root.  The detached worktree is untrusted historical *input* only;
+        # it never supplies a wrapper, tools, or runtime dependencies.
+        command = [str(ROOT / "bin/deploy-worker.sh"), "--env", "staging", "--release-key", args.release_key,
                    "--release-sha", sha, "--recovery-attempt-id", attempt, "--recovery-step", step,
-                   "--recovery-prior-release-key", args.prior_release_key, "--staging-receipt-idempotency-key", idem]
+                   "--recovery-prior-release-key", args.prior_release_key, "--staging-receipt-idempotency-key", idem,
+                   "--internal-exact-source-root", str(worktree)]
         try:
-            result = subprocess.run(command, cwd=worktree, text=True, capture_output=True, timeout=300)
+            result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=300)
         except subprocess.TimeoutExpired:
             # A timeout after the wrapper may have prepared or mutated staging
             # is ambiguous by definition.  Return a normal failed receipt so

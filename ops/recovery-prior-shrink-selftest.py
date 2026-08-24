@@ -17,6 +17,22 @@ unknown = subprocess.run(["sh", str(WRAPPER), "--allow-shrink"],
 assert unknown.returncode == 64, unknown.stderr
 assert "unknown argument '--allow-shrink'" in unknown.stderr
 
+# The internal source-root knob is not a second deploy API: production and an
+# arbitrary filesystem root are refused before any fetch, database, or provider
+# operation.  A controller can pass only a detached source root later verified
+# against the DB-bound SHA.
+recovery_args = ["--release-key", "candidate", "--release-sha", "a" * 40,
+                 "--recovery-attempt-id", "11111111-2222-4333-8444-555555555555",
+                 "--recovery-step", "prior", "--recovery-prior-release-key", "prior",
+                 "--staging-receipt-idempotency-key", "22222222-2222-4333-8444-555555555555",
+                 "--internal-exact-source-root", "/"]
+production_root = subprocess.run(["sh", str(WRAPPER), "--env", "production", *recovery_args],
+                                 cwd=ROOT, capture_output=True, text=True)
+assert production_root.returncode != 0 and "recovery deploy requires staging" in production_root.stderr
+arbitrary_root = subprocess.run(["sh", str(WRAPPER), "--env", "staging", *recovery_args],
+                                cwd=ROOT, capture_output=True, text=True)
+assert arbitrary_root.returncode != 0 and "exact source root" in arbitrary_root.stderr
+
 # The only lower-count route is syntactically closed around a typed `prior`
 # prepare.  That writer is the existing DB function that refuses a mismatched
 # candidate/prior/SHA/service or a prior without a complete Production readback.
@@ -32,4 +48,8 @@ assert '"$RECOVERY_STEP" = "restore_only"' in source
 # The provider command remains after the gate; a generic source/standalone or
 # mismatched prior never reaches Wrangler with a lower registry count.
 assert source.index(prepare) < source.index('"$WRANGLER" deploy --env "$TARGET_ENV"')
+assert '"$REPO/tools/validate-exact-recovery-source.py"' in source
+assert 'an exact source root is internal to a typed staging recovery step.' in source
+assert 'WRANGLER="$REPO/mcp-server/node_modules/.bin/wrangler"' in source
+assert 'WORKER_DIR="$SOURCE_ROOT/mcp-server"' in source
 print("recovery-prior-shrink: standalone/manual/mismatched routes remain closed")

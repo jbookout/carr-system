@@ -5,7 +5,6 @@ This deliberately replaces the provider runner: a controller unit test must
 prove its ordering and recovery semantics without touching a live Worker.
 """
 import importlib.util
-import tempfile
 from typing import Any
 from pathlib import Path
 
@@ -46,6 +45,7 @@ def run_with(outcomes):
 # The legitimate chain remains exactly three typed bundle steps.
 rc, calls, records = run_with([0, 0, 0])
 assert rc == 0 and [row[0] for row in calls] == ["current_before", "prior", "current_after"]
+assert [row[1] for row in calls] == ["a" * 40, "b" * 40, "a" * 40]
 assert not records
 assert len({row[2] for row in calls}) == 1
 assert len({row[3] for row in calls}) == 3
@@ -54,6 +54,7 @@ assert len({row[3] for row in calls}) == 3
 # never a second current_after observation; no bundle can be claimed by output.
 rc, calls, records = run_with([0, 1, 0])
 assert rc == 1 and [row[0] for row in calls] == ["current_before", "prior", "restore_only"]
+assert [row[1] for row in calls] == ["a" * 40, "b" * 40, "a" * 40]
 assert not records
 
 # Failed repair remains ineligible and is auditable as unknown, not success.
@@ -70,6 +71,7 @@ assert rc == 1 and [row[0] for row in calls] == ["current_before", "prior", "res
 # provider mutation, so its failure is recovered separately and never a bundle.
 rc, calls, records = run_with([124, 0])
 assert rc == 1 and [row[0] for row in calls] == ["current_before", "restore_only"]
+assert [row[1] for row in calls] == ["a" * 40, "a" * 40]
 
 # current_after failure also gets the isolated repair and never appends a fourth
 # approval step; same correlation and a distinct idempotency key are preserved.
@@ -129,31 +131,13 @@ finally:
     setattr(mod, "record_restore_unknown", old_record)
 assert not called
 
-# Exact-SHA worktrees are bare by design.  The controller may materialize only
-# its own validated ignored runtime dependencies, never edit the controller
-# root or accept a pre-existing target in the disposable tree.
-old_root = getattr(mod, "ROOT")
-with tempfile.TemporaryDirectory() as raw:
-    root = Path(raw) / "controller"; worktree = Path(raw) / "step"
-    (root / ".venv" / "bin").mkdir(parents=True)
-    (root / "mcp-server" / "node_modules" / ".bin").mkdir(parents=True)
-    (root / ".venv" / "bin" / "python").touch()
-    (root / "mcp-server" / "node_modules" / ".bin" / "wrangler").touch()
-    worktree.mkdir()
-    setattr(mod, "ROOT", root)
-    try:
-        mod.materialize_step_runtime(worktree)
-        assert (worktree / ".venv").is_symlink()
-        assert (worktree / "mcp-server/node_modules").is_symlink()
-        try:
-            mod.materialize_step_runtime(worktree)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("pre-existing disposable dependency must refuse")
-        (worktree / ".venv").unlink(); (worktree / "mcp-server/node_modules").unlink()
-        assert not (root / ".venv").is_symlink() and (root / ".venv/bin/python").exists()
-    finally:
-        setattr(mod, "ROOT", old_root)
+# Historical worktrees provide source only.  The command must invoke the
+# current controller wrapper from ROOT and bind the disposable source path as
+# its narrow internal input; old wrappers can never become policy authority.
+controller_source = path.read_text(encoding="utf-8")
+assert 'str(ROOT / "bin/deploy-worker.sh")' in controller_source
+assert 'str(worktree / "bin/deploy-worker.sh")' not in controller_source
+assert '"--internal-exact-source-root", str(worktree)' in controller_source
+assert "cwd=ROOT" in controller_source
 
 print("staging-recovery-rehearsal: isolated restore-only recovery cases passed")
