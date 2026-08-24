@@ -144,6 +144,105 @@ run_quiet() {  # run_quiet <logfile> <cmd...>  — capture output, return status
 LOGDIR="$(mktemp -d)"
 trap 'rm -rf "$LOGDIR"' EXIT
 
+# ------------------------------------------- inherited-from-main short-circuit
+# 2026-08-22, 01:38-02:17 UTC: six unrelated branches failed the SAME gates-class
+# selftest, none of them had touched it, and something merged to main was the
+# reason. Because the required check builds refs/pull/N/merge -- the PR head
+# merged into CURRENT main -- main's break is inside every open PR's run. Six
+# sessions each spent a six-minute run and a session's worth of diagnostic
+# tokens reading a trace for a defect none of them wrote.
+#
+# This is the 2026-08-23 CI-failures council's layer 1, which both chairs marked
+# safe and told us to ship regardless of the other two.
+#
+# THE RUN STAYS RED. It exits 1 below, deliberately and on both chairs' explicit
+# instruction: a victim of a broken main must not merge onto that broken main.
+# Codex put the kill criterion on exactly this point -- kill any implementation
+# under which a skipped or neutral check accidentally satisfies branch
+# protection. What changes is the TIME, the billed minutes, and the tokens.
+#
+# IT ABORTS THE WHOLE RUN, hiding classes that had not run yet. That is
+# deliberate too: no verdict computed on a poisoned base is worth having, and
+# the branch's own defects surface on the next run once main is green.
+#
+# AT MOST ONCE PER RUN, on the FIRST failure only. If the first thing to go red
+# is the branch's own, the branch owns the run and there is nothing to attribute;
+# if it is inherited, we stop there. That bounds the cost at one merge-base
+# materialisation, which is what keeps this cheap enough to leave switched on.
+#
+# The verdict itself is NOT computed here -- ops/inherited-from-main.py re-runs
+# the failing check at the merge base, and ops/inherited-from-main-selftest.py
+# seeds both directions against a real repository, including the case that must
+# never misfire: a branch that broke a check without touching it.
+# ------------------------------------------------------------ name the move
+# THE RETRY-LOOP FINDING, 2026-08-23 council: the same defect went red two and
+# three times in a row because the message said WHAT failed and never what to
+# do about it. A session reads "failed: gate-integrity", re-runs it, gets the
+# same line, and pushes again. Cluster C -- gate work failing the gate web --
+# is near-structurally a first-try red, so this is the class where the cost of
+# not naming the move is paid most often.
+#
+# Only the four co-change moves are named here, because those are the ones the
+# failing check CANNOT name itself: each is a demand to edit a DIFFERENT file
+# from the one that went red. Everything else already names its own remedy in
+# its own output, and repeating it here would only teach people to scroll past.
+gates_name_the_move() {  # gates_name_the_move <failed check names...>
+  local named=0 f
+  for f in "$@"; do
+    case "$f" in
+      gate-integrity)
+        printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+          "re-bless IN THE SAME COMMIT (rule c0b38d80): hooks/gate-integrity.py --bless, then commit ops/config/gate-baseline.json together with the gate you edited" >&2
+        named=1 ;;
+      enforcement-coverage-check|rule-enforcement-map-check)
+        printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+          "register the control you added: run ops/$f.py directly — it prints the exact row it wants and where it goes" >&2
+        named=1 ;;
+      mechanism-doctrine-gate)
+        printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+          "add '# doctrine: <slug>' to the mechanism you ADDED, naming its section in the doctrine store (a slug, never a file path — the markdown renders were retired 2026-08-19)" >&2
+        named=1 ;;
+      *-selftest.py)
+        printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+          "$f is the PAIRED suite for the gate of the same name: a gate and its selftest change in the same commit, or the pair has stopped meaning anything" >&2
+        named=1 ;;
+    esac
+  done
+  [ "$named" = "1" ] || printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+    "each check above names its own remedy in its output — read the 12-line tail, not just this summary line" >&2
+}
+
+INHERIT_ASKED=0
+inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if inherited
+  [ "$INHERIT_ASKED" = "0" ] || return 0
+  INHERIT_ASKED=1
+  [ -f ops/inherited-from-main.py ] || return 0
+  local name="$1"; shift
+  local verdict rc
+  # SPLIT ASSIGNMENT, not `local verdict="$(...)"`. local is itself a command and
+  # its own exit status would overwrite the substitution's, so the one-line form
+  # reads 0 from every verdict and short-circuits on all three of them.
+  verdict="$("$PY" ops/inherited-from-main.py --check "$name" -- "$@" 2>&1)"; rc=$?
+  if [ "$rc" -eq 1 ]; then
+    # Worth saying out loud: the merge base is clean, so this red is the
+    # branch's own. That is half of naming the move.
+    printf '        \033[33mattribution\033[0m  %s\n' "$verdict" >&2
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || return 0         # 2 = cannot tell; behave exactly as before
+  bad gates "INHERITED FROM MAIN: $name"
+  echo "$verdict" >&2
+  echo
+  echo "ci-timing:${CLASS_TIMINGS}"
+  echo "ci-failed-classes:${FAILED_CLASSES}"
+  echo "ci-inherited-from-main:$name"
+  echo
+  echo "CI FAILED — a break this branch did not cause. Still red, still unmergeable:"
+  echo "main is broken, and merging onto a broken main is what this refuses to do."
+  echo "Classes after gates were not run; they are not worth computing on this base."
+  exit 1
+}
+
 # ---------------------------------------------------------------- unit
 check_unit() {
   local failed_pkgs=""
@@ -324,6 +423,7 @@ PYEOF
       printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
         "$base" "$(tail -1 "$LOGDIR/gate-$base.log" 2>/dev/null)" >&2
     elif [ "$grc" -ne 0 ]; then
+      inherited_abort "$base" "$PY" "$t"
       failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2
     fi
   done
@@ -347,7 +447,8 @@ PYEOF
     fi
     count=$((count+1))
     run_quiet "$LOGDIR/gate-$sbase.log" "$t" \
-      || { failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2; }
+      || { inherited_abort "$sbase" "$t"
+           failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2; }
   done
   # gate-integrity is the baseline check itself: a gate edited without a
   # re-bless in the same commit (rule c0b38d80) fails here.
@@ -366,7 +467,8 @@ PYEOF
   # co-change check cannot: the clobber happens inside GitHub's merge, where no
   # local hook runs.
   run_quiet "$LOGDIR/gate-integrity.log" "$PY" hooks/gate-integrity.py --strict \
-    || { failures="$failures gate-integrity"; tail -12 "$LOGDIR/gate-integrity.log" >&2; }
+    || { inherited_abort gate-integrity "$PY" hooks/gate-integrity.py --strict
+         failures="$failures gate-integrity"; tail -12 "$LOGDIR/gate-integrity.log" >&2; }
 
   # THE THREE INVENTORY CHECKS, run against THIS REPO rather than a synthetic
   # tree. The selftest loop above runs their *-selftest.py, and every one of
@@ -411,10 +513,12 @@ PYEOF
              mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
-      || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
+      || { inherited_abort "$inv" "$PY" "ops/$inv.py"
+           failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
   if [ -n "$failures" ]; then
     bad gates "failed:$failures"
+    gates_name_the_move $failures
   elif [ -n "$skiplist" ]; then
     # Deliberately NOT a plain OK. The class ran with reduced coverage, and the
     # summary line says so — an exception that reads as a clean pass is how a
