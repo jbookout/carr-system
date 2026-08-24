@@ -14,11 +14,35 @@ deliberately does NOT do generic entropy scoring. An entropy scanner in a repo
 holding 947 markdown files, migration SQL and doctrine prose produces noise, and
 a noisy gate is one people learn to bypass, which is worse than no gate.
 
-WHAT IT DOES NOT PROTECT AGAINST. It reads the working tree, not git history. A
-credential already committed and later removed is still in the history and this
-will not find it. That is a separate, one-time job (history rewrite), not a
-per-push check, and saying so here is the point: a gate that quietly implies
-coverage it does not have is how loop #276 happened in another form.
+THREE BIND-MOMENTS, ONE IMPLEMENTATION. Rule a8c55a47 again: the scan that runs
+at commit, at push and in hosted CI must be the same code, so the scope is a
+FLAG rather than a second scanner.
+
+  * --staged      the blobs entering the index, INCLUDING newly added files.
+                  This is the cheap moment, and it is the one that was missing.
+                  The default scope reads files git already TRACKS, so a brand-new
+                  file carrying a key passed every local check until `git add`
+                  made it tracked -- and then failed at pre-push, the most
+                  expensive boundary a session can hit. Sessions hit it often
+                  enough to be written down as a standing gotcha. Reading the
+                  INDEX rather than the working tree also means a partially
+                  staged file is judged by the bytes actually being committed.
+  * --range A..B  the blobs introduced by a range of commits. This is the push
+                  scope: it costs O(what is being pushed) rather than O(repo),
+                  and it still catches content that reached the branch without
+                  passing this file at commit time -- a rebase, a cherry-pick,
+                  an amend, or a plain `git commit --no-verify`.
+  * (no flag)     every tracked file in the working tree. Unchanged, and this is
+                  what hosted CI runs: the depth that does not depend on which
+                  commits happen to be in front of it.
+
+WHAT IT DOES NOT PROTECT AGAINST. The default scope reads the working tree, not
+git history. A credential already committed and later removed is still in the
+history and this will not find it. That is a separate, one-time job (history
+rewrite), not a per-push check, and saying so here is the point: a gate that
+quietly implies coverage it does not have is how loop #276 happened in another
+form. --range narrows that gap for the commits actually leaving the machine; it
+does not close it for history already on the remote.
 
 ALLOWLISTING, because a repo about credentials must be able to write about them.
 Two mechanisms, both deliberately narrow:
@@ -31,6 +55,8 @@ because there is no legitimate reason for one to be in this tree at all.
 
 Usage:
     ops/ci-secret-scan.py                 # scan tracked files, exit 1 on a hit
+    ops/ci-secret-scan.py --staged        # scan the index, new files included
+    ops/ci-secret-scan.py --range A..B    # scan blobs introduced by a range
     ops/ci-secret-scan.py --list-patterns # what it looks for, and why
 """
 
@@ -95,21 +121,85 @@ SKIP_SUFFIXES = {
 SKIP_PATH_PARTS = {"node_modules", ".venv", "vendor", ".git"}
 
 
+def _interesting(name):
+    """The skip rules, applied to a path NAME so every scope shares them."""
+    if pathlib.PurePath(name).suffix.lower() in SKIP_SUFFIXES:
+        return False
+    if SKIP_PATH_PARTS & set(pathlib.PurePath(name).parts):
+        return False
+    return True
+
+
+def _git(*args):
+    return subprocess.run(["git", *args], cwd=REPO,
+                          capture_output=True, check=True)
+
+
+def _names(*args):
+    """NUL-separated path names from a git plumbing command."""
+    out = _git(*args).stdout.decode("utf-8", errors="surrogateescape")
+    return [n for n in out.split("\0") if n and _interesting(n)]
+
+
+def _decode(raw):
+    """Text of a blob, or None when it is not text a regex can match."""
+    try:
+        return raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+
+
 def tracked_files():
     """Only files git tracks. An untracked scratch file is not shipping."""
-    out = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=REPO,
-        capture_output=True, text=True, check=True,
-    ).stdout
-    for name in out.split("\0"):
-        if not name:
-            continue
+    for name in _names("ls-files", "-z"):
         path = REPO / name
-        if path.suffix.lower() in SKIP_SUFFIXES:
+        try:
+            yield name, path.read_text(encoding="utf-8", errors="strict")
+        except (UnicodeDecodeError, OSError):
             continue
-        if SKIP_PATH_PARTS & set(pathlib.PurePath(name).parts):
-            continue
-        yield name, path
+
+
+def staged_files():
+    """The blobs entering the index, read FROM the index.
+
+    --diff-filter=ACMR keeps added, copied, modified and renamed paths and drops
+    deletions: a path being removed cannot carry a credential into the commit.
+    The A is the whole point -- a brand-new file is exactly what the tracked-file
+    default cannot see.
+
+    Content comes from `git show :path`, the staged blob, NOT from the working
+    tree. `git add` then edit is a real sequence, and the bytes being committed
+    are the ones this must judge.
+    """
+    for name in _names("diff", "--cached", "--name-only", "--diff-filter=ACMR",
+                       "-z"):
+        try:
+            raw = _git("show", f":{name}").stdout
+        except subprocess.CalledProcessError:
+            continue  # racing stage; the next moment catches it
+        text = _decode(raw)
+        if text is not None:
+            yield name, text
+
+
+def range_files(rev_range):
+    """The blobs a range of commits introduces, read at its tip.
+
+    Reading at the tip rather than per-commit is deliberate. A key added in one
+    commit and removed in the next is not shipping in the tree being pushed, and
+    failing the push for it would teach --no-verify. What IS still true is that
+    the key is in the history now; the pre-push refusal text says so.
+    """
+    tip = rev_range.split("..")[-1] or "HEAD"
+    for name in _names("diff", "--name-only", "--diff-filter=ACMR", "-z",
+                       rev_range):
+        try:
+            raw = _git("show", f"{tip}:{name}").stdout
+        except subprocess.CalledProcessError:
+            continue  # deleted again by the tip; nothing is shipping
+        text = _decode(raw)
+        if text is not None:
+            yield name, text
 
 
 def load_allowed_paths():
@@ -123,17 +213,15 @@ def load_allowed_paths():
     return set(data.get("paths", []))
 
 
-def scan():
+def scan(source=None):
+    """Findings from a (name, text) source. Every scope shares this body, so a
+    pattern or allowlist rule cannot hold at one bind-moment and not another."""
     allowed_paths = load_allowed_paths()
     findings = []
 
-    for name, path in tracked_files():
+    for name, text in (source if source is not None else tracked_files()):
         if name in allowed_paths:
             continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="strict")
-        except (UnicodeDecodeError, OSError):
-            continue  # not text; nothing a shaped-credential regex can match
 
         for lineno, line in enumerate(text.splitlines(), 1):
             for pname, rx, _why, allowlistable in PATTERNS:
@@ -160,12 +248,35 @@ def main():
         print(f"Path allowlist:      {ALLOW_FILE.relative_to(REPO)}")
         return 0
 
-    findings = scan()
+    argv = sys.argv[1:]
+    scope, source = "tracked files", None
+    if "--staged" in argv:
+        scope, source = "staged blobs (new files included)", staged_files()
+    elif "--range" in argv:
+        i = argv.index("--range")
+        if i + 1 >= len(argv):
+            print("ci-secret-scan: --range needs a revision range, e.g. "
+                  "origin/main..HEAD", file=sys.stderr)
+            return 64
+        rev_range = argv[i + 1]
+        scope, source = f"blobs introduced by {rev_range}", range_files(rev_range)
+
+    try:
+        findings = scan(source)
+    except subprocess.CalledProcessError as exc:
+        # A scope that cannot be READ is not a scope that is clean. Rule
+        # 88e9b5eb: "not possible" and "not authorized" are not "no findings".
+        cmd = " ".join(exc.cmd) if isinstance(exc.cmd, list) else str(exc.cmd)
+        print(f"ci-secret-scan: could not read {scope} -- `{cmd}` failed. "
+              "Reporting failure rather than a clean scan.", file=sys.stderr)
+        return 2
+
     if not findings:
-        print("secret scan: clean")
+        print(f"secret scan: clean ({scope})")
         return 0
 
-    print(f"secret scan: {len(findings)} finding(s)\n", file=sys.stderr)
+    print(f"secret scan: {len(findings)} finding(s) in {scope}\n",
+          file=sys.stderr)
     for name, lineno, pname, length in findings:
         print(f"  {name}:{lineno}  {pname}  ({length} chars, value not printed)",
               file=sys.stderr)
@@ -173,10 +284,23 @@ def main():
         "\nIf a finding is documentation or a fixture, mark it at the site with"
         f"\n  {INLINE_ALLOW}"
         f"\non the same line, or add the path to {ALLOW_FILE.relative_to(REPO)}."
+        "\nThe marker must be on the SAME LINE as the match."
         "\nIf it is a real credential: rotate it first, then remove it. Removing"
         "\nit from the working tree does NOT remove it from git history.",
         file=sys.stderr,
     )
+    if source is not None and scope.startswith("blobs introduced"):
+        # Reached only at push time, and the distinction is the whole reason the
+        # remedy differs: the credential is already in a COMMIT. Removing it from
+        # the tree and committing again leaves it reachable in the history this
+        # push would publish.
+        print(
+            "\nThis scope reads commits, not the working tree. Deleting the line"
+            "\nand committing again does NOT unpublish it -- the earlier commit"
+            "\nstill carries it. Rotate the credential, then rewrite the branch"
+            "\n(git rebase -i / git commit --amend) before pushing.",
+            file=sys.stderr,
+        )
     return 1
 
 

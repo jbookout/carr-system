@@ -62,6 +62,15 @@ import tempfile
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATE = os.path.join(REPO, "hooks", "one-repo-gate.py")
 
+# The one scrubber (ops/git_env.py), not a local copy of the removed-not-
+# blanked list this file used to hand-roll: git hands every hook a GIT_DIR
+# pointing at the repository that invoked it, and on 2026-08-14 that leaked a
+# fixture commit onto live main. A partial hand-rolled list (this one was
+# missing GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_CEILING_DIRECTORIES and
+# GIT_WORK_TREE_OVERRIDE) is exactly the drift rule a8c55a47 warns about.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 failures: list[str] = []
 
 
@@ -74,18 +83,16 @@ def check(name, cond, detail=""):
 
 
 def git(repo, *args):
-    """git in a fixture, with inherited GIT_* location vars REMOVED, not blanked.
+    """git in a fixture, scrubbed via fixture_env() — REMOVED, not blanked.
 
     Same lesson loose-work-gate-selftest.py paid for: GIT_DIR="" is not an unset
     GIT_DIR, it is a path that does not exist, and every call dies with `fatal:
     not a git repository: ''`. The fixture then never exists, and the cases that
-    assert ALLOW all pass against nothing.
+    assert ALLOW all pass against nothing. fixture_env() pops the location vars
+    rather than setting them empty, so this stays correct.
     """
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
-                        "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE")}
     p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
-                       env=env)
+                       env=fixture_env())
     if p.returncode != 0 and args and args[0] in ("init", "add", "commit", "config",
                                                   "worktree"):
         raise SystemExit(f"fixture setup failed: git {' '.join(args)}\n{p.stderr}")
@@ -116,12 +123,14 @@ def run(file_path, home_repo, tool="Write", cwd=None, raw_payload=None, escape=F
         "tool_input": {"file_path": file_path, "content": "x = 1\n"},
         "cwd": cwd or os.path.dirname(file_path),
     })
-    env = {**os.environ, "CARR_ONE_REPO_ROOT": home_repo}
+    # The gate itself shells out to git to resolve the write target's repo, so
+    # this invocation needs the same scrub as the fixture git() calls above —
+    # an inherited GIT_DIR must not redirect what the gate thinks it is
+    # judging either.
+    env = dict(fixture_env(), CARR_ONE_REPO_ROOT=home_repo)
     env.pop("CARR_ALLOW_FOREIGN_REPO", None)
     if escape:
         env["CARR_ALLOW_FOREIGN_REPO"] = "1"
-    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
-        env.pop(k, None)
     p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
                        text=True, env=env)
     return p.returncode, p.stderr

@@ -15,6 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import health_submodule as health  # noqa: E402
 
+# The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
+# at the repository that invoked it, and on 2026-08-14 that leaked a fixture
+# commit onto live main — the throwaway repo and worktrees built below must
+# not be reachable through an inherited GIT_DIR.
+sys.path.insert(0, str(ROOT / "ops"))
+from git_env import fixture_env  # noqa: E402
+
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -24,15 +31,21 @@ def require(condition: bool, message: str) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory() as raw:
         repo = Path(raw)
-        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "test"], check=True)
+        fixture_git_env = fixture_env()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True,
+                        env=fixture_git_env)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+                        check=True, env=fixture_git_env)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "test"], check=True,
+                        env=fixture_git_env)
         (repo / "seed").write_text("seed\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(repo), "add", "seed"], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "seed"], check=True, env=fixture_git_env)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True,
+                        env=fixture_git_env)
         worktree = repo / ".codex-worktrees" / "known"
         worktree.parent.mkdir(parents=True)
-        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "known", str(worktree)], check=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "known", str(worktree)],
+                        check=True, env=fixture_git_env)
         daemon = repo / "tools" / "doc-convo" / "assets"
         daemon.mkdir(parents=True)
         (daemon / "render-daemon.log").write_text("generated\n", encoding="utf-8")
@@ -58,7 +71,8 @@ def main() -> None:
         root_worktrees = repo / ".worktrees"
         root_child = root_worktrees / "known"
         root_worktrees.mkdir()
-        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "root-known", str(root_child)], check=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "root-known", str(root_child)],
+                        check=True, env=fixture_git_env)
         root_status = health.classify_loose_status(repo, ["?? .worktrees/"])
         require(root_status["managed_artifacts"] == [".worktrees/"],
                 f"a nonempty all-worktree root is managed: {root_status}")

@@ -118,6 +118,9 @@ from datetime import datetime, timezone
 # copies would drift silently, since each would still pass its own tests.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cmd_text import strip_inert_text  # noqa: E402
+# WHICH TREE this command is about, shared with git-writer-gate.py and
+# staging-observation-tracker.py for the same reason — see worktree_scope.py.
+from worktree_scope import target_tree  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "staging-attribution-gate.jsonl")
@@ -192,11 +195,27 @@ def _db_tap():
     return mod
 
 
-def porcelain_status():
-    """{repo-relative-posix-path: 2-char XY status} for the whole tree."""
+# WHICH TREE, AND WHY IT IS NOT ALWAYS REPO. This hook is wired into settings by
+# its absolute CANONICAL path, so `REPO` above is always ~/carr-system no matter
+# which worktree the session issuing the command is standing in. Reading tree
+# state from REPO therefore judged the wrong checkout for every worktree session,
+# and the failure was SILENT rather than loud: `.claude/worktrees/` is gitignored
+# in canonical, so canonical's porcelain never lists anything inside a worktree,
+# every `rel` computed against REPO missed, and this gate simply stopped firing
+# for the sessions that most needed it — dead protection reporting green. Where
+# it was not silent it was worse: a command naming canonical from a worktree
+# session could match a PEER's dirty canonical file and refuse on it.
+#
+# Council recommendation 1, 2026-08-23 process audit: every git gate evaluates
+# the INVOKING worktree. Resolution lives in hooks/worktree_scope.py, shared with
+# git-writer-gate.py and staging-observation-tracker.py so the three cannot
+# disagree about the subject of the sentence (rule a8c55a47).
+def porcelain_status(tree=None):
+    """{tree-relative-posix-path: 2-char XY status} for the whole tree."""
     try:
         out = subprocess.run(
-            ["git", "-C", REPO, "status", "--porcelain", "--untracked-files=all"],
+            ["git", "-C", tree or REPO, "status", "--porcelain",
+             "--untracked-files=all"],
             capture_output=True, text=True, timeout=20,
         ).stdout
     except Exception:
@@ -215,24 +234,31 @@ def porcelain_status():
     return status
 
 
-def repo_relative(path, cwd):
-    """Best-effort repo-relative POSIX path for an argument as typed."""
+def repo_relative(path, cwd, tree=None):
+    """Best-effort tree-relative POSIX path for an argument as typed.
+
+    `tree` is the checkout this call is being judged against, so the keys this
+    produces line up with porcelain_status(tree)'s keys. Relativising a worktree
+    file against canonical instead produced `.claude/worktrees/<name>/foo.py`,
+    which matches nothing in any status output and is why this gate went quiet.
+    """
     if not path:
         return None
+    root = tree or REPO
     p = path
     if not os.path.isabs(p):
-        base = cwd if cwd and os.path.isabs(cwd) else REPO
+        base = cwd if cwd and os.path.isabs(cwd) else root
         p = os.path.join(base, p)
     try:
-        rel = os.path.relpath(p, REPO)
+        rel = os.path.relpath(p, root)
     except ValueError:
         return None  # different drive/mount root; cannot be a repo path
     if rel.startswith(".."):
-        return None  # outside the repo entirely
+        return None  # outside the tree entirely
     return rel.replace(os.sep, "/")
 
 
-def own_written_paths(transcript_path):
+def own_written_paths(transcript_path, tree=None):
     """Repo-relative paths this session itself wrote, per its OWN transcript.
 
     Ground truth, not inference: every Write/Edit/MultiEdit tool_use record in
@@ -267,7 +293,7 @@ def own_written_paths(transcript_path):
                     inp = block.get("input") or {}
                     fp = inp.get("file_path") if isinstance(inp, dict) else None
                     if isinstance(fp, str) and fp:
-                        rel = repo_relative(fp, None)
+                        rel = repo_relative(fp, None, tree)
                         if rel:
                             written.add(rel)
                         written.add(fp)  # keep the absolute form too
@@ -305,7 +331,7 @@ def observed_dirty_paths(session_id):
     return set()
 
 
-def extract_add_paths(command, cwd):
+def extract_add_paths(command, cwd, tree=None):
     """[(as-typed, repo-relative-or-None), ...] for every `git add` invocation
     in the command that is NOT one of the wholesale forms (already filtered by
     the caller)."""
@@ -321,7 +347,7 @@ def extract_add_paths(command, cwd):
         for tok in tokens:
             if tok.startswith("-"):
                 continue
-            out.append((tok, repo_relative(tok, cwd)))
+            out.append((tok, repo_relative(tok, cwd, tree)))
     return out
 
 
@@ -405,11 +431,14 @@ def main():
         # --- 2. Named-path staging: check each named path for foreign,
         #        uncommitted, tracked modifications this session did not
         #        itself make. ---
-        add_paths = extract_add_paths(cmd, cwd)
+        # The tree this command is about — a worktree it names, else the
+        # worktree the session is standing in, else canonical.
+        tree = target_tree(cmd, cwd)
+        add_paths = extract_add_paths(cmd, cwd, tree)
         if not add_paths:
             sys.exit(0)
 
-        status = porcelain_status()
+        status = porcelain_status(tree)
         if not status:
             sys.exit(0)  # clean tree (or git unreachable) — nothing to catch
 
@@ -417,7 +446,7 @@ def main():
         # own Write/Edit/MultiEdit record of this session's tool calls, AND
         # staging-observation-tracker.py's Pre/Post `git status` diff of
         # this session's own Bash-run scripts. See both docstrings.
-        written = own_written_paths(payload.get("transcript_path"))
+        written = own_written_paths(payload.get("transcript_path"), tree)
         written |= observed_dirty_paths(session_id)
 
         foreign = []

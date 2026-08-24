@@ -365,15 +365,45 @@ def tier1_age(workdir: str) -> None:
     #    deliberately paused right after writing the identity file ──────────
     tmp_glob = os.path.join(os.environ.get("TMPDIR", "/tmp"), "carr-key-recovery.*")
     before = set(glob.glob(tmp_glob))
+    ready_file = os.path.join(workdir, "pause-ready")
     env = unreachable_env({
         "CARR_KEY_RECOVERY_TEST_SELFTEST": "1",
         "CARR_KEY_RECOVERY_TEST_SELFTEST_TYPED_KEY": secret,
         "CARR_KEY_RECOVERY_TEST_SELFTEST_PUBKEY_FILE": match_pubkey_file,
         "CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE": str(PAUSE_SECONDS),
+        # The script touches this file the moment it reaches its pause, so the
+        # signal below lands on the state under test no matter how loaded the
+        # machine is. A fixed post-spawn sleep was the old guess and it flaked
+        # under load: it could fire before the script reached the pause.
+        "CARR_KEY_RECOVERY_TEST_SELFTEST_READY_FILE": ready_file,
     })
     proc2 = subprocess.Popen([SCRIPT], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, env=env, cwd=REPO, start_new_session=True)
-    time.sleep(1.5)
+    # WAIT FOR THE READY MARKER, NOT FOR THE CLOCK. Poll up to 90s for the
+    # script to arrive at its pause; under heavy load startup can take far
+    # longer than any fixed sleep, and signalling early makes THIS suite red
+    # for a scheduling reason that has nothing to do with the behaviour under
+    # test. If the marker never appears, the script died on the way — fail
+    # loudly with what it printed rather than signalling a corpse.
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        if proc2.poll() is not None:
+            out, err = proc2.communicate()
+            check("interrupted path: script reached its pause", False,
+                  f"script exited rc={proc2.returncode} before reaching the "
+                  f"pause; stdout={out[-400:]!r} stderr={err[-400:]!r}")
+            assert_no_leak((out, err), secret, "interrupted path (early exit)")
+            return
+        if os.path.exists(ready_file):
+            break
+        time.sleep(0.05)
+    else:
+        proc2.kill()
+        out, err = proc2.communicate()
+        check("interrupted path: script reached its pause", False,
+              f"ready marker never appeared within 90s; stdout={out[-400:]!r}")
+        assert_no_leak((out, err), secret, "interrupted path (timeout)")
+        return
     # THE CLOCK STARTS AT THE SIGNAL, NOT AT THE SPAWN, and the pause is wide.
     #
     # This was `t0 = time.time()` before the Popen, a pause of 8 and a bound of

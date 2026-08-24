@@ -136,6 +136,15 @@ def main():
         check("notebookedit-tracked-deny", "NotebookEdit", tracked_abs, True)
 
     finally:
+        # NO TEMP FILES LEFT IN THE REPO ROOT (2026-08-23 load-flake sweep).
+        # The untracked-root probe file was created here and never removed —
+        # every ci.sh run dropped _selftest_untracked_probe_*.txt into the
+        # checkout and left it there.
+        for leftover in (untracked_root, untracked_out):
+            try:
+                os.unlink(leftover)
+            except OSError:
+                pass
         if fake_wt_created:
             shutil.rmtree(fake_wt, ignore_errors=True)
 

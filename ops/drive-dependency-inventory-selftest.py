@@ -17,6 +17,13 @@ inventory = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = inventory
 SPEC.loader.exec_module(inventory)
 
+# The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
+# at the repository that invoked it, and on 2026-08-14 that leaked a fixture
+# commit onto live main — the throwaway repo built below must not be
+# reachable through an inherited GIT_DIR.
+sys.path.insert(0, str(ROOT / "ops"))
+from git_env import fixture_env  # noqa: E402
+
 
 def registry(*entries: dict[str, object]) -> dict[str, object]:
     return {"schema_version": 1, "contract": "drive-dependencies",
@@ -31,7 +38,12 @@ def entry(identifier: str, source: str, *, kind: str = "normal_runtime") -> dict
 
 
 passed = 0
-with tempfile.TemporaryDirectory(dir=ROOT) as temp:
+# A plain system temp dir, no longer rooted under this checkout's own ROOT
+# constant: a fixture built INSIDE the live checkout is a fixture a stray
+# `git add` in the real repo can reach — the same class of hazard
+# ops/selftest-git-isolation-check.py flags as "build their fixture INSIDE
+# the checkout".
+with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     (root / "ops/config").mkdir(parents=True)
     (root / "bin").mkdir()
@@ -52,8 +64,8 @@ with tempfile.TemporaryDirectory(dir=ROOT) as temp:
         (ROOT / "ops/config/drive-dependencies.schema.v1.json").read_text())
     # Exercise the production git-ls-files path, rather than only the
     # non-repository fallback used by earlier fixture tests.
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
-    subprocess.run(["git", "-C", str(root), "add", "--all"], check=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True, env=fixture_env())
+    subprocess.run(["git", "-C", str(root), "add", "--all"], check=True, env=fixture_env())
     all_entries = registry(
         entry("task", "ops/config/task.json"), entry("plist", "ops/launchd/task.plist"), entry("shell", "bin/run.sh"),
         entry("python", "pipelines/read.py"), entry("prose", "README.md", kind="prose_only"),
@@ -115,7 +127,7 @@ with tempfile.TemporaryDirectory(dir=ROOT) as temp:
 
     (root / "bin/routes.sh").write_text(
         'good="${CARR_VAULT}/allowed/item"\nbad="${CARR_VAULT}/forbidden/item"\n')
-    subprocess.run(["git", "-C", str(root), "add", "bin/routes.sh"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "bin/routes.sh"], check=True, env=fixture_env())
     allowed = entry("allowed-only", "bin/routes.sh")
     allowed["path_pattern"] = "{{VAULT}}/allowed/**"
     allowed["reference_selectors"] = [{"source": "bin/routes.sh", "alias": "{{VAULT}}"}]
@@ -135,7 +147,7 @@ with tempfile.TemporaryDirectory(dir=ROOT) as temp:
 
     try:
         (root / "mystery.dat").write_bytes(b"CARR_VAULT\0not-declared-binary")
-        subprocess.run(["git", "-C", str(root), "add", "mystery.dat"], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "mystery.dat"], check=True, env=fixture_env())
         inventory.audit(root, all_entries)
     except inventory.InventoryError as exc:
         assert "ambiguous NUL-bearing" in str(exc)

@@ -28,6 +28,15 @@ import tempfile
 
 SELF_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+# Every git hook exports GIT_DIR, and GIT_DIR outranks cwd/-C when git picks
+# a repository. sh() and git() below build throwaway repos and origins under
+# tempfile.TemporaryDirectory(); without this, an inherited GIT_DIR would
+# retarget those "fixture" git calls at whatever checkout invoked this
+# selftest — the 2026-08-13 incident ops/git_env.py documents. __file__'s
+# directory is ops/, so this reaches the one scrub definition directly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 # The checkout under test supplies the real hook, the real installer and the
 # real tracked template — a hand-copied template here would let the template
 # and the test drift apart, which is the two-homes disease.
@@ -61,7 +70,13 @@ DRIFTED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 def sh(args, cwd=None, env=None):
-    return subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True)
+    # Callers that don't need a special environment (every raw `git` call in
+    # this file) get fixture_env() by default, so a stray fixture git call
+    # can never fall through to the ambient environment. Callers that do need
+    # something specific (run_hook(), below) build on top of fixture_env()
+    # rather than passing os.environ straight through.
+    return subprocess.run(args, cwd=cwd, env=fixture_env() if env is None else env,
+                          capture_output=True, text=True)
 
 
 def git(repo, *args, env=None):
@@ -145,13 +160,16 @@ def build_fixture(root, email, actor_slug=None, behind=True, dirty=False,
 
 
 def run_hook(repo, home, stubs, root):
-    env = dict(os.environ)
-    env["HOME"] = home
-    env["PATH"] = stubs + os.pathsep + env.get("PATH", "")
-    env["LAUNCHCTL_LOG"] = os.path.join(root, "launchctl.log")
-    for var in list(env):
-        if var.startswith("GIT_") or var == "CLAUDE_PROJECT_DIR":
-            env.pop(var)
+    # fixture_env() is the base rather than a hand-rolled `for var in
+    # list(env): if var.startswith("GIT_") ...` loop, so this can't drift
+    # from ops/git_env.py's list the way the sync-enforcement-map copies did
+    # (see the git_env.py docstring). CLAUDE_PROJECT_DIR still has to go by
+    # hand — it isn't a git variable, but it's another pointer back at the
+    # real checkout that the hook must not be able to discover.
+    env = dict(fixture_env(), HOME=home,
+               PATH=stubs + os.pathsep + os.environ.get("PATH", ""),
+               LAUNCHCTL_LOG=os.path.join(root, "launchctl.log"))
+    env.pop("CLAUDE_PROJECT_DIR", None)
     return sh([sys.executable, os.path.join(repo, "hooks", "machine-converge.py")],
               cwd=root, env=env)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +17,13 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from lib import guidance_registry as registry  # noqa: E402
 from lib.reviewed_artifact import ReviewedArtifactError, assert_head_committed  # noqa: E402
+
+# The one scrubber (ops/git_env.py), not an ad hoc env dict here: git hands
+# every hook a GIT_DIR pointing at the repository that invoked it, and on
+# 2026-08-14 that leaked a fixture commit onto live main. Without this, the
+# fixture git calls below would inherit whatever GIT_DIR the caller exports.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
 
 MAP = REPO / "ops/config/rule-enforcement-map.json"
 MANIFEST = REPO / "audits/guidance-migration-manifest.v1.tsv"
@@ -35,14 +43,17 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="reviewed-artifact-") as temp:
         fixture_repo = Path(temp)
         fixture = fixture_repo / "review.json"
-        subprocess.run(["git", "init", "-q"], cwd=fixture_repo, check=True)
+        fixture_git_env = fixture_env()
+        subprocess.run(["git", "init", "-q"], cwd=fixture_repo, check=True,
+                        env=fixture_git_env)
         fixture.write_text("reviewed\n", encoding="utf-8")
-        subprocess.run(["git", "add", "review.json"], cwd=fixture_repo, check=True)
+        subprocess.run(["git", "add", "review.json"], cwd=fixture_repo, check=True,
+                        env=fixture_git_env)
         subprocess.run(
             ["git", "-c", "user.name=CARR selftest",
              "-c", "user.email=selftest@example.invalid",
              "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture"],
-            cwd=fixture_repo, check=True,
+            cwd=fixture_repo, check=True, env=fixture_git_env,
         )
         assert_head_committed(fixture_repo, fixture, "review.json")
         fixture.write_text("changed\n", encoding="utf-8")
@@ -52,7 +63,8 @@ def main() -> int:
             pass
         else:
             errors.append("reviewed artifact guard accepted uncommitted bytes")
-        subprocess.run(["git", "add", "review.json"], cwd=fixture_repo, check=True)
+        subprocess.run(["git", "add", "review.json"], cwd=fixture_repo, check=True,
+                        env=fixture_git_env)
         try:
             assert_head_committed(fixture_repo, fixture, "review.json")
         except ReviewedArtifactError:
