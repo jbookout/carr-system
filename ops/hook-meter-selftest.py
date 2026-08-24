@@ -49,12 +49,19 @@ def check(name, cond, detail=""):
 
 
 def payload(event="PreToolUse", tool="Bash", tool_input=None, **extra):
+    # tool_use_id and prompt_id are the harness's own correlation keys — see
+    # hooks/staging-observation-tracker.py, which has depended on tool_use_id
+    # being identical across the Pre and Post call of one invocation since it
+    # was written. They are in the default fixture rather than bolted onto one
+    # case, so every check below runs against a realistic payload.
     body = {
         "session_id": "hook-meter-selftest",
         "transcript_path": "/tmp/hook-meter-selftest.jsonl",
         "cwd": REPO,
         "hook_event_name": event,
         "tool_name": tool,
+        "tool_use_id": "toolu_selftest_01",
+        "prompt_id": "prompt_selftest_01",
         "tool_input": tool_input if tool_input is not None else {"command": "echo hi"},
     }
     body.update(extra)
@@ -272,6 +279,13 @@ def synthetic_cases(tmp):
         check(f"{name} record names the event and session",
               rec.get("event") == "PreToolUse" and rec.get("session") == "hook-meter-selftest",
               rec)
+        # The correlation keys. Without tool_use_id the rollup can only guess
+        # which firings belonged to one tool call, and a per-event budget built
+        # on a guess is the false green this report exists to avoid.
+        check(f"{name} record carries the harness's tool_use_id",
+              rec.get("tool_use_id") == "toolu_selftest_01", rec.get("tool_use_id"))
+        check(f"{name} record carries the prompt_id that identifies the turn",
+              rec.get("prompt_id") == "prompt_selftest_01", rec.get("prompt_id"))
 
 
 # ── 3. Stop reopens, which are the expensive firings ────────────────────────

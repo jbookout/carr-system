@@ -167,6 +167,41 @@ def pct(values, q):
     return ordered[max(0, min(n - 1, rank - 1))]
 
 
+def group_key(rec):
+    """The tool call or turn a firing belongs to, and whether that is exact.
+
+    Returns (key, exact). The harness supplies `tool_use_id` on tool events and
+    `prompt_id` on the rest; either is a true identity. The timestamp fallback
+    exists only for a firing carrying neither, and is reported as approximate
+    rather than quietly counted as fact.
+    """
+    call = rec.get("tool_use_id")
+    if call:
+        return (("call", call), True)
+    prompt = rec.get("prompt_id")
+    if prompt:
+        return (("prompt", prompt, rec.get("event")), True)
+    return (("stamp", rec.get("session"), rec.get("event"), rec.get("ts")), False)
+
+
+# The outer decision is what the HARNESS did with the tool call once every gate
+# had spoken, and no single gate can know it: a gate returns before the others
+# are collected. It is derivable from the group, though, and the derivation is
+# the harness's own precedence — any deny denies, otherwise any ask asks,
+# otherwise the call was allowed. Recording it per call is what makes gate
+# SENTENCING answerable: not "how often did this gate deny" but "how often was
+# this gate the one that decided the outcome", which is the question behind
+# every retire argument.
+OUTER_PRECEDENCE = ("deny", "ask", "error", "allow")
+
+
+def outer_decision(outcomes):
+    for verdict in OUTER_PRECEDENCE:
+        if verdict in outcomes:
+            return verdict
+    return "allow"
+
+
 def hot(entry):
     return bool(entry["events"] & set(HOT_EVENTS))
 
@@ -191,18 +226,23 @@ def build(days, now=None):
     # made this report a false green. The council's ~150ms is what a Bash tool
     # call pays for its hooks — and a Bash call fires THIRTEEN of them. A table
     # of per-hook p95s all reading 80ms says "OK" while the event they belong to
-    # costs an order of magnitude more. So firings are also grouped back into
-    # the event that caused them.
+    # costs an order of magnitude more. So firings are grouped back into the
+    # event that caused them.
     #
-    # THE GROUPING IS APPROXIMATE AND MUST BE READ AS SUCH: the harness gives a
-    # hook no per-event correlation id, so the key is session + event + the
-    # second the firing was stamped with. Two tool calls inside one second in
-    # one session merge into one apparent event, which overstates that event.
-    # Both aggregates are reported because they bound the truth from either
-    # side: SUM is the CPU the event cost, and MAX is the floor on its wall time
-    # if the harness runs the hooks concurrently. The real wall cost sits
-    # between them.
-    per_event_group = defaultdict(list)
+    # THE GROUPING IS EXACT WHEREVER THE HARNESS GIVES AN ID. `tool_use_id` is
+    # identical across every hook of one invocation, and `prompt_id` identifies
+    # the turn a Stop belongs to, so those are the keys. Only a firing carrying
+    # neither falls back to session + event + timestamp-second, which CAN merge
+    # two calls made inside one second in one session; `approximate_groups`
+    # below counts how many groups were formed that way, so a reader is never
+    # left guessing whether the number is exact.
+    #
+    # Both aggregates are reported either way, because they bound the wall cost
+    # from both sides: SUM is the CPU the event spent, MAX is the floor on its
+    # wall time if the harness runs the hooks concurrently.
+    per_event_group = defaultdict(lambda: {"ms": [], "event": None, "day": None,
+                                           "outcomes": [], "sentencers": []})
+    approximate_groups = set()
     reopen_by_day = defaultdict(lambda: defaultdict(int))
     meter_ms = []
     total_ms = 0.0
@@ -218,14 +258,28 @@ def build(days, now=None):
         bucket["fires"] += 1
         elapsed = rec.get("elapsed_ms")
         day = (rec.get("ts") or "")[:10]
+        event = rec.get("event")
+        outcome = rec.get("outcome")
+
+        if event:
+            key, exact = group_key(rec)
+            group = per_event_group[key]
+            group["event"] = event
+            group["day"] = day
+            if outcome:
+                group["outcomes"].append(outcome)
+                if outcome in ("deny", "ask"):
+                    group["sentencers"].append((outcome, name))
+            if not exact:
+                approximate_groups.add(key)
+
         if isinstance(elapsed, (int, float)):
             bucket["ms"].append(elapsed)
             bucket["days"][day].append(elapsed)
             total_ms += elapsed
-            event = rec.get("event")
             if event:
                 per_event_ms[event].append(elapsed)
-                per_event_group[(rec.get("session"), event, rec.get("ts"))].append(elapsed)
+                per_event_group[group_key(rec)[0]]["ms"].append(elapsed)
         outcome = rec.get("outcome")
         if outcome == "deny":
             bucket["denies"] += 1
@@ -242,17 +296,36 @@ def build(days, now=None):
             meter_ms.append(rec["meter_ms"])
 
     events = {}
-    for (_, event, _), group in per_event_group.items():
-        slot = events.setdefault(event, {"sum": [], "max": [], "hooks": []})
-        slot["sum"].append(sum(group))
-        slot["max"].append(max(group))
-        slot["hooks"].append(len(group))
+    sentenced_by = defaultdict(lambda: defaultdict(int))
+    for group in per_event_group.values():
+        event = group["event"]
+        if not event:
+            continue
+        slot = events.setdefault(event, {"sum": [], "max": [], "hooks": [],
+                                         "outer": defaultdict(int)})
+        if group["ms"]:
+            slot["sum"].append(sum(group["ms"]))
+            slot["max"].append(max(group["ms"]))
+            slot["hooks"].append(len(group["ms"]))
+        verdict = outer_decision(set(group["outcomes"]))
+        slot["outer"][verdict] += 1
+        # WHICH GATE SENTENCED THE CALL. When several gates refuse the same
+        # invocation only one of them needed to; crediting all of them would
+        # make every gate look load-bearing. The first refusal in the group is
+        # credited, and ties are counted once, so "denies" and "sentenced" can
+        # legitimately differ — that difference is the interesting part.
+        if verdict in ("deny", "ask"):
+            for outcome, hook_name in group["sentencers"]:
+                if outcome == verdict:
+                    sentenced_by[event][hook_name] += 1
+                    break
     event_cost = {
         event: {
-            "events_seen": len(slot["sum"]),
+            "events_seen": sum(slot["outer"].values()),
             "hooks_per_event": round(sum(slot["hooks"]) / max(1, len(slot["hooks"])), 1),
             "sum_p95_ms": pct(slot["sum"], 0.95),
             "max_p95_ms": pct(slot["max"], 0.95),
+            "outer_decisions": dict(slot["outer"]),
         }
         for event, slot in sorted(events.items())
     }
@@ -278,6 +351,7 @@ def build(days, now=None):
             "p50_ms": pct(bucket["ms"], 0.50),
             "p95_ms": pct(bucket["ms"], 0.95),
             "denies": bucket["denies"],
+            "sentenced": sum(counts.get(name, 0) for counts in sentenced_by.values()),
             "asks": bucket["asks"],
             "errors": bucket["errors"],
             "reopens": bucket["reopens"],
@@ -324,6 +398,8 @@ def build(days, now=None):
         },
         "hook_p95_ms": {ev: pct(v, 0.95) for ev, v in sorted(per_event_ms.items())},
         "event_cost": event_cost,
+        "sentenced_by": {ev: dict(v) for ev, v in sorted(sentenced_by.items())},
+        "approximate_groups": len(approximate_groups),
         "window_truncated_by_rotation": truncation,
         "budgets": BUDGET_MS,
         "meter_share_pct": meter_share,
@@ -382,6 +458,16 @@ def render(report):
             f"{cost['hooks_per_event']} hooks vs {budget:.0f}ms  {verdict}")
         add(f"            slowest single hook in one event, p95 "
             f"{ms(cost['max_p95_ms'])}ms — wall cost sits between the two")
+        outer = cost.get("outer_decisions") or {}
+        refused = outer.get("deny", 0) + outer.get("ask", 0)
+        add(f"            {cost['events_seen']:,} events, of which {refused} were "
+            f"refused by the stack as a whole")
+
+    if report.get("approximate_groups"):
+        add(f"  GROUPING  {report['approximate_groups']} event group(s) had no "
+            "tool_use_id or prompt_id and were grouped by timestamp instead —")
+        add("            those, and only those, may merge two calls made in the "
+            "same second.")
 
     if report["meter_share_pct"] is not None:
         share = report["meter_share_pct"]
@@ -391,16 +477,20 @@ def render(report):
             f"vs {METER_SHARE_BUDGET:.0f}%  {verdict}")
 
     add("")
+    # "sentenced" is deny-count's more honest sibling: how often this gate was
+    # the one whose refusal decided the call, rather than one of several that
+    # refused it. A gate that never sentences anything is doing less than its
+    # deny column suggests.
     add(f"  {'gate':44} {'fires/d':>8} {'p50':>5} {'p95':>6} {'deny':>5} "
-        f"{'reopen':>7} {'err':>4}  {'p95 7d':>7}")
+        f"{'sent':>5} {'reopen':>7} {'err':>4}  {'p95 7d':>7}")
     ordered = sorted(report["hooks"].items(),
                      key=lambda kv: (kv[1]["p95_ms"] or 0), reverse=True)
     for name, entry in ordered:
         trend = entry["p95_trend_pct"]
         trend_text = "—" if trend is None else f"{trend:+.0f}%"
         add(f"  {name[:44]:44} {entry['fires_per_day']:>8} {ms(entry['p50_ms']):>5} "
-            f"{ms(entry['p95_ms']):>6} {entry['denies']:>5} {entry['reopens']:>7} "
-            f"{entry['errors']:>4}  {trend_text:>7}")
+            f"{ms(entry['p95_ms']):>6} {entry['denies']:>5} {entry.get('sentenced', 0):>5} "
+            f"{entry['reopens']:>7} {entry['errors']:>4}  {trend_text:>7}")
 
     reopens = report["reopens_by_day"]
     add("")

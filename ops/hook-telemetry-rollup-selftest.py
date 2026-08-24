@@ -308,6 +308,64 @@ def main():
         finally:
             shutil.rmtree(events, ignore_errors=True)
 
+        # ── the correlation key, and the sentence it makes answerable ──
+        # tool_use_id is identical across every hook of one invocation, so the
+        # grouping stops being an inference. What that buys is the OUTER
+        # decision: what the harness did with the call once every gate had
+        # spoken, which no single gate can know because it returns before the
+        # others are collected. Derived here by the harness's own precedence.
+        sent = tempfile.mkdtemp(prefix="rollup-sentence-")
+        try:
+            rows = []
+            # call 1: three gates allow, one denies -> the stack denied, and
+            # exactly one gate is credited with the sentence
+            for gate, outcome in (("gate0.py", "allow"), ("gate1.py", "deny"),
+                                  ("gate2.py", "allow"), ("gate3.py", "allow")):
+                rec = record(gate, 1, 20, outcome)
+                rec["tool_use_id"] = "toolu_A"
+                rows.append(rec)
+            # call 2: TWO gates refuse the same call. Only one sentence was
+            # needed, so crediting both would make every gate look load-bearing.
+            for gate, outcome in (("gate0.py", "deny"), ("gate1.py", "deny"),
+                                  ("gate2.py", "allow")):
+                rec = record(gate, 1, 20, outcome)
+                rec["tool_use_id"] = "toolu_B"
+                rows.append(rec)
+            # call 3: everyone allows
+            for gate in ("gate0.py", "gate1.py", "gate2.py"):
+                rec = record(gate, 1, 20)
+                rec["tool_use_id"] = "toolu_C"
+                rows.append(rec)
+            build_fixture(sent, rows)
+            rc, out, _ = run_rollup(sent, "--json")
+            report = json.loads(out)
+            cost = report["event_cost"]["PreToolUse"]
+            check("three tool calls are seen as three, not ten firings",
+                  cost["events_seen"] == 3, cost)
+            check("grouping by tool_use_id needs no timestamp guessing",
+                  report["approximate_groups"] == 0, report["approximate_groups"])
+            check("the outer decision is the harness's precedence, not a per-gate view",
+                  cost["outer_decisions"].get("deny") == 2
+                  and cost["outer_decisions"].get("allow") == 1,
+                  cost["outer_decisions"])
+            sentences = report["sentenced_by"]["PreToolUse"]
+            check("one refusal per call is credited, however many gates refused",
+                  sum(sentences.values()) == 2, sentences)
+            hooks = report["hooks"]
+            check("a gate's deny count and its sentence count can differ, and do",
+                  hooks["gate1.py"]["denies"] == 2
+                  and hooks["gate1.py"]["sentenced"] < hooks["gate1.py"]["denies"],
+                  {k: (v["denies"], v["sentenced"]) for k, v in hooks.items()})
+            check("a gate that never refuses anything sentences nothing",
+                  hooks["gate2.py"]["sentenced"] == 0, hooks["gate2.py"])
+            rc, text, _ = run_rollup(sent)
+            check("the printed report names how many calls the stack refused",
+                  "were refused by the stack as a whole" in text, text[:600])
+            check("a fully-correlated window does not warn about grouping",
+                  "grouped by timestamp instead" not in text, text[:600])
+        finally:
+            shutil.rmtree(sent, ignore_errors=True)
+
         # ── a window shortened by rotation must not pass as a full one ──
         rotated = tempfile.mkdtemp(prefix="rollup-rotated-")
         try:

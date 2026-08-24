@@ -57,6 +57,13 @@ Stop gate reopened the turn, and a deny class where the gate exposes one — plu
 the first line of its refusal, which is the class every gate here already has in
 practice even though none of them declares one yet.
 
+AND THE CORRELATION KEYS, which are what let a reader ask about the tool CALL
+rather than about one gate: `tool_use_id` is identical across every hook that
+fires for one invocation, so the rollup can total exactly what that Bash call
+paid and name the gate that actually sentenced it. `prompt_id` does the same for
+Stop, which has no tool call, so a turn reopened three times reads as one turn
+reopened three times.
+
 REOPENS ARE THE EXPENSIVE EVENT, and that is grok's flag from the 2026-08-23
 council: a Stop gate that blocks does not merely cost 15ms of Python, it hands
 the turn back to the model and spends LLM tokens. The standing constraint is
@@ -191,18 +198,36 @@ def _scan_field(raw, key):
 
 
 def _payload_facts(raw):
-    """Event name, tool and session id from the harness payload. Never raises.
+    """The identifying fields from the harness payload. Never raises.
+
+    tool_use_id IS THE CORRELATION KEY, and recording it is what makes the
+    per-event cost exact instead of inferred. An earlier version of this file
+    said the harness gives a hook no per-event id and grouped firings by
+    session + event + timestamp-second to compensate. That was wrong:
+    hooks/staging-observation-tracker.py has depended on `tool_use_id` since it
+    was written, and its docstring records the finding that the field is present
+    on both the Pre and Post call of one invocation and identical across them.
+    Every gate that fires for one tool call now carries that id, so the rollup
+    can add up exactly the hooks that one Bash call paid for — and can say which
+    gate actually sentenced it — rather than guessing from a shared timestamp.
+
+    prompt_id does the same job for Stop, which has no tool call: it identifies
+    the TURN, so a turn reopened three times is visibly three reopens of one
+    turn rather than three separate events on the same day.
 
     Called AFTER the gate has run: nothing above needs these, and by then the
     gate has usually imported json itself, so the fallback costs little.
     """
-    facts = {"event": None, "tool": None, "session": None}
+    facts = {"event": None, "tool": None, "session": None,
+             "tool_use_id": None, "prompt_id": None}
     if not raw:
         return facts
     try:
         facts["event"] = _scan_field(raw, b"hook_event_name")
         facts["tool"] = _scan_field(raw, b"tool_name")
         facts["session"] = _scan_field(raw, b"session_id")
+        facts["tool_use_id"] = _scan_field(raw, b"tool_use_id")
+        facts["prompt_id"] = _scan_field(raw, b"prompt_id")
         if facts["event"]:
             return facts
         import json
@@ -211,6 +236,8 @@ def _payload_facts(raw):
             facts["event"] = data.get("hook_event_name") or data.get("hookEventName")
             facts["tool"] = data.get("tool_name") or data.get("toolName")
             facts["session"] = data.get("session_id") or data.get("sessionId")
+            facts["tool_use_id"] = data.get("tool_use_id") or data.get("toolUseId")
+            facts["prompt_id"] = data.get("prompt_id") or data.get("promptId")
     except Exception:
         pass
     return facts
@@ -380,6 +407,8 @@ def main():
             "arg": (os.path.basename(argv[1]) if len(argv) > 1 else None),
             "tool": facts["tool"],
             "session": facts["session"],
+            "tool_use_id": facts["tool_use_id"],
+            "prompt_id": facts["prompt_id"],
             "elapsed_ms": round(elapsed, 2),
             "outcome": outcome,
             "exit": code,
