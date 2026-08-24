@@ -29078,6 +29078,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0285_the_admission_watch_reads_rule_status.sql	4c52e59b91a9c1e4b07b1cf2306d9a066848b560282916f7dcfa918009c4e6f1	2026-08-23 14:12:08.250619+00
 0286_the_incident_ledger_gets_a_front_door.sql	197c530999579556254c5b43cef0d10d0193ad10292687a384f45c6ccf9dcf0e	2026-08-24 02:53:35.145353+00
 0288_control_catalog_delegation_model_effort.sql	7d0c275d19d71740b8b251b891a5b920ffc891a6b47a426d757306134a8a591a	2026-08-24 12:22:03.480037+00
+0289_bind_delegation_model_effort_rule.sql	a8b295d878b2fe9c138d1ee64aa38ebae3602cfde43aeeda1f5af63cdb788a37	2026-08-24 12:41:17.650535+00
 \.
 
 
