@@ -36,8 +36,23 @@ on conflict (rule_id, control_key) do nothing;
 
 -- Verification: the approval path's own join must now see the control bound
 -- to the rule with a matching current-statement hash.
+--
+-- GUARDED ON THE RULE ROW EXISTING, because this runs in two different
+-- databases: production, where the rule was taught and the check is real, and
+-- CI's snapshot-seeded database, which carries structure and ledger but no
+-- rule rows — there the insert above correctly inserts nothing, and raising
+-- would fail every push on a row that cannot exist (found live on PR #558's
+-- first CI round). Same escape ops.sync_system_rule_control_bindings uses
+-- ("if not found then continue"). Production cannot dodge the check this way:
+-- the rule row demonstrably exists there — approve-rule already found it
+-- twice on 2026-08-24, refusing both times for want of this exact binding.
 do $$
 begin
+  if not exists (select 1 from rule
+                  where id = '6cfb67f5-6e85-48ad-9008-b0a82e2b71cc') then
+    raise notice '0289: rule row absent (snapshot-seeded database); binding check skipped';
+    return;
+  end if;
   if not exists (
     select 1
       from ops.enforcement_control_catalog c
