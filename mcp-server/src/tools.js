@@ -2811,6 +2811,26 @@ export const TOOLS = {
     handler: async (c, _a, args) => ({ leads: (await c.query("select * from v_lead_hot order by score desc nulls last limit $1", [args.limit || 30])).rows }),
   },
 
+  "lead-board": {
+    write: false,
+    description: "The complete, safe worked-lead board. All leads surface, including weak, suppressed, and terminal rows: qualification is the human's job and this read is never pre-qualified or silently truncated. Returns the authoritative base_version needed by update-lead, ordered stage vocabulary including empty stages, score/confidence/freshness signals, and no phone, email, address, notes, or raw source detail.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (c) => {
+      const stages = (await c.query(
+        `select slug,label,sort
+           from v_lead_board_stage
+          order by sort,slug`)).rows;
+      const leads = (await c.query(
+        `select id,registry_ref,name,specialty,city,county,state,lane,stage,
+                stage_label,stage_sort,score,segment,suppressed,est_lease_event,
+                event_confidence,last_touch,next_action_date,owner,owner_label,
+                base_version,created_at,updated_at
+           from v_lead_board
+          order by stage_sort,suppressed,score desc nulls last,name,registry_ref`)).rows;
+      return { generated_at: new Date().toISOString(), stages, leads };
+    },
+  },
+
   "claim-card": {
     write: false,
     description: "The claimable candidate reservoir: who Joe or Dell could turn into a lead today, nearest lease window first. THE GAP THIS CLOSES, and it is the same one read-loop closed for loops: promote-pool and decline-candidate both refuse without base_version and both tell the caller to 'read the row from v_pool / v_claim_card first' — and nothing in the verb layer could perform that read. The only reader was a generated markdown card in the vault, which the doctrine cutoff retired on 2026-08-19; without this verb the two claim verbs would name a surface that no longer exists. Returns pool_id and base_version on every row, so a promote or decline follows directly with no guess and no version_conflict. SAFE COLUMNS ONLY — the view carries no email, phone or address by construction (has_channel says a channel exists; the human reads the number off the lead record after claiming). Ranked, never filtered: rows whose window has already PASSED are shown with a negative days_to_window rather than dropped, because a passed window is still a live conversation and three of them expired unread the last time this list had no reader. `needs_contact_count` is the tail with no channel at all — research, not calls, counted rather than hidden.",
@@ -4135,7 +4155,7 @@ export const TOOLS = {
   // behind. update-lead is that writer.
   "update-lead": {
     write: true,
-    description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
+    description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. do_not_contact is inseparable from suppressed=true, and only a human may clear an existing suppression instruction. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, lead: { type: "string" },
       base_version: { type: "integer" },
@@ -4163,6 +4183,21 @@ export const TOOLS = {
             valid: all.rows.map(x => x.slug),
             hint: `${field} is a foreign key into ${table}; pass one of the listed slugs, never the label.` });
         }
+      }
+      const current = (await c.query("select stage,suppressed from lead where id=$1", [s.id])).rows[0];
+      const nextStage = keys.includes("stage") ? args.fields.stage : current.stage;
+      const nextSuppressed = keys.includes("suppressed") ? args.fields.suppressed : current.suppressed;
+      if (nextStage === "do_not_contact" && nextSuppressed !== true) {
+        throw new ToolError({ error: "do_not_contact_requires_suppression",
+          hint: "do_not_contact is a standing instruction, not only a funnel label; pass stage='do_not_contact' and suppressed=true together" });
+      }
+      if (current.stage === "do_not_contact" && nextStage !== "do_not_contact" && nextSuppressed !== false) {
+        throw new ToolError({ error: "suppression_clear_required",
+          hint: "moving a do_not_contact lead requires the same explicit human correction to set suppressed=false" });
+      }
+      if (current.suppressed && nextSuppressed === false && !actor.human) {
+        throw new ToolError({ error: "suppression_clear_requires_human",
+          hint: "a standing suppression instruction may be cleared only by an authenticated human" });
       }
       const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [s.id])).rows[0];
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
