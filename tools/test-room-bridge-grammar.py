@@ -177,7 +177,7 @@ check("a ref that cannot start with a digit is rejected as malformed",
 # apply_assignment / reject — the seam, and the receipts it posts
 # ---------------------------------------------------------------------------
 
-def apply_assignment_posts_a_machine_readable_receipt_and_records_locally():
+def apply_assignment_posts_a_deprecation_receipt_and_writes_no_log():
     with tempfile.TemporaryDirectory() as td:
         log_path = Path(td) / "assignments.json"
         room = RecordingRoom()
@@ -185,45 +185,34 @@ def apply_assignment_posts_a_machine_readable_receipt_and_records_locally():
                  sponsor="dell", msg_id="src-1")
         outcome, parsed, reason = grammar.classify(t)
         assert outcome == "ok", (outcome, reason)
-        result = grammar.apply_assignment(t, parsed, add_room_turn=room.add_room_turn,
-                                          log_path=log_path)
+        result = grammar.apply_assignment(t, parsed, add_room_turn=room.add_room_turn)
 
         assert len(room.calls) == 1, room.calls
         call = room.calls[0]
         assert call["kind"] == "receipt", call
         assert call["seat"] == "hermes", call
         body = json.loads(call["body"])
-        assert body["assignment"]["ref"] == "WR-42", body
-        assert body["assignment"]["seat"] == "codex", body
-        assert body["assignment"]["by"] == "dell", body
-        assert body["status"] == "recorded_no_queue_verb_yet", body
-
-        on_disk = json.loads(log_path.read_text())
-        assert len(on_disk) == 1, on_disk
-        assert on_disk[0]["assignment"]["ref"] == "WR-42", on_disk
+        assert body["assignment_deprecated"]["ref"] == "WR-42", body
+        assert body["assignment_deprecated"]["seat"] == "codex", body
+        assert body["assignment_deprecated"]["by"] == "dell", body
+        assert body["status"] == "deprecated_use_queue", body
+        assert not log_path.exists(), log_path
+        assert result["record"]["status"] == "deprecated_use_queue"
 
 
-check("apply_assignment records locally and posts one machine-readable receipt",
-      apply_assignment_posts_a_machine_readable_receipt_and_records_locally)
+check("apply_assignment posts a deprecation receipt and writes no local log",
+      apply_assignment_posts_a_deprecation_receipt_and_writes_no_log)
 
 
 def apply_assignment_never_touches_a_real_queue_verb():
-    # Version 1 has no queue verb bound at all (loop #508) — the only I/O this
-    # function performs is the local JSON log and add_room_turn. Proven here
-    # by giving it an add_room_turn fake that is the ONLY external call
-    # allowed to happen; anything else would have to come through a function
-    # this test does not provide, so a second I/O path would raise NameError/
-    # AttributeError rather than silently succeed.
-    with tempfile.TemporaryDirectory() as td:
-        log_path = Path(td) / "assignments.json"
-        room = RecordingRoom()
-        t = turn("@codex claim WR-9", seat="human")
-        outcome, parsed, _ = grammar.classify(t)
-        grammar.apply_assignment(t, parsed, add_room_turn=room.add_room_turn, log_path=log_path)
-        assert len(room.calls) == 1
+    room = RecordingRoom()
+    t = turn("@codex claim WR-9", seat="human")
+    outcome, parsed, _ = grammar.classify(t)
+    grammar.apply_assignment(t, parsed, add_room_turn=room.add_room_turn)
+    assert len(room.calls) == 1
 
 
-check("apply_assignment's only side effects are the local log and one receipt",
+check("apply_assignment's only side effect is one receipt",
       apply_assignment_never_touches_a_real_queue_verb)
 
 

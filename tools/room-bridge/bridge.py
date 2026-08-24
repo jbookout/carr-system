@@ -71,6 +71,7 @@ import desks  # noqa: E402
 import dispatch  # noqa: E402
 import execution_contract  # noqa: E402
 import grammar  # noqa: E402
+import kanban_adapter  # noqa: E402
 import registry_ext  # noqa: E402
 import state as state_mod  # noqa: E402
 import verb_io  # noqa: E402
@@ -418,6 +419,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              probe_auth=auth_control.probe_auth, launch_login=auth_control.launch_login,
              desk_stop=dispatch.desk_stop, desk_start=dispatch.desk_start,
              read_profiles=verb_io.read_profiles,
+             queue_service: kanban_adapter.QueueService | None = None,
              log=print) -> dict:
     registry = registry or desks.Registry()
     results_path = Path(results_path or dispatch.DEFAULT_RESULTS)
@@ -426,13 +428,48 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
     desk_entries = registry.entries()
     desk_seats = {n: e["room_seat"] for n, e in desk_entries.items() if e.get("room_seat")}
 
+    # The target catalog is configuration for command ingress, not a reason to
+    # stop the conversational bridge.  When it cannot be loaded, only an
+    # attempted @queue command is refused; ordinary turns still route.
+    queue_load_error = None
+    if queue_service is None:
+        try:
+            queue_service = kanban_adapter.QueueService()
+        except kanban_adapter.QueueError as exc:
+            queue_load_error = exc
+
     result = read_room(state["last_seq"], room=room)
     turns = [t for t in result.get("turns", []) if int(t.get("seq", 0)) > state["last_seq"]]
 
     routed: dict[str, list[str]] = {}
     assignments: list[dict] = []
     controls: list[dict] = []
+    queue_events: list[dict] = []
     for t in turns:
+        # Queue commands are a control plane, never conversational work.  This
+        # check deliberately precedes route_turn: every @queue attempt is
+        # consumed, including malformed and unauthorized requests.
+        if queue_service is not None:
+            queued = queue_service.handle(t, room=room)
+        elif str(t.get("body") or "").strip().startswith("@queue"):
+            queued = {
+                "handled": True, "kind": "rejected", "receipt": {"queue_rejected": {
+                    "source_seq": t.get("seq"), "source_msg_id": t.get("msg_id"),
+                    "code": queue_load_error.code if queue_load_error else "queue_unavailable",
+                    "reason": queue_load_error.reason if queue_load_error else "queue is unavailable",
+                    "hint": "Try again after Hermes is available",
+                }},
+            }
+        else:
+            queued = {"handled": False}
+        if queued.get("handled"):
+            receipt = queued.get("receipt")
+            if receipt:
+                add_room_turn(body=json.dumps(receipt, separators=(",", ":")), seat="hermes",
+                              kind="receipt", msg_id=str(uuid.uuid4()))
+            routed[str(t.get("msg_id"))] = []
+            queue_events.append({"seq": t.get("seq"), "kind": queued.get("kind")})
+            continue
         routed[str(t.get("msg_id"))] = state_mod.route_turn(state, t, desk_seats)
         control = auth_control.parse_control(t)
         if control is not None:
@@ -476,10 +513,10 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             if pending_outcome:
                 delivered.append(pending_outcome)
             if state_mod.get_pending(state, name) is None:
-                queued = state_mod.pop_next_queued(state, name)
-                if queued is not None:
+                next_queued = state_mod.pop_next_queued(state, name)
+                if next_queued is not None:
                     delivered.append(deliver(
-                        name, entry, seat, queued, state=state, registry=registry,
+                        name, entry, seat, next_queued, state=state, registry=registry,
                         results_path=results_path, add_room_turn=add_room_turn,
                         dispatch_fn=dispatch_fn, desk_state_dir=desk_state_dir,
                     ))
@@ -524,10 +561,10 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         "turns_read": len(turns), "last_seq": state["last_seq"], "routed": routed,
         "assignments": assignments, "delivered": delivered, "errors": errors,
         "heartbeat": heartbeat, "controls": controls, "restarts": restarts,
-        "auth": auth_by_desk,
+        "auth": auth_by_desk, "queue": queue_events,
     }
     log(f"room-bridge: {len(turns)} turn(s), {len(delivered)} desk action(s), "
-        f"{len(assignments)} assignment event(s), {len(controls)} control(s), "
+        f"{len(assignments)} assignment event(s), {len(queue_events)} queue event(s), {len(controls)} control(s), "
         f"{len(restarts)} restart(s), {len(errors)} error(s), "
         f"heartbeat {'posted' if heartbeat else 'throttled'}; "
         f"cursor now {state['last_seq']}")
