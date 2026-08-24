@@ -1,0 +1,165 @@
+# main-canary.yml — the run that discovers a broken main and NAMES it.
+#
+# WHAT THIS IS NOT. It is not the post-merge full-suite job that ran here until
+# 2026-08-20, and the reasoning that removed that job stands: over the six days
+# after CI stabilised it produced 131 successes, 52 CANCELLED and 1 failure
+# across 184 runs, caught one real break in six days, was silently reporting
+# nothing 28% of the time, and cost roughly 20 of the ~45 daily runs. A net with
+# a 28% hole that fires once a week is not a safety net. Restoring THAT object
+# would be relitigating a decision that was correct on its numbers.
+#
+# WHAT CHANGED. Those numbers described a ~1/week break rate. On 2026-08-22 one
+# broken main produced SEVEN red runs across SIX unrelated branches in 40
+# minutes, and each victim session diagnosed a defect it did not cause. The
+# 2026-08-23 CI-failures council measured the cluster and ruled: restore a CHEAP
+# canary, not the full-suite-per-merge object -- one that runs only the classes
+# that actually fail, debounces to one run per merge burst, and whose failure
+# NAMES main instead of appearing as a red on somebody's innocent pull request.
+#
+# THE FOUR CLASSES ARE THE MEASURED ONES, not a guess. Across the 30 most recent
+# failed runs the failing classes were gates 24, migration 8, types 5, freshness
+# 4. Six classes never failed at all in that window -- unit, contract, secret,
+# dependency, binding, artifact -- and running them here would buy nothing and
+# cost the majority of the wall clock. If a class starts failing on main and is
+# not in this list, add it here and say why in the same change.
+#
+# THE DEBOUNCE, and its arithmetic. GitHub bills each JOB rounded UP to the whole
+# minute. The sleep is the FIRST step, before the checkout, so a run cancelled
+# during it has done nothing but exist and costs about one billed minute. During
+# a merge burst every run but the last dies there, and one full canary runs after
+# the burst goes quiet. Without the sleep the cancelled runs would each have paid
+# for a checkout, two setup actions, a pip install and an npm ci first.
+#
+# THIS IS NOT AN ALWAYS-ON JOB and must not become one. It is event-driven on
+# push to main. There is no schedule here on purpose: ci.yml already carries the
+# 06:20 UTC backstop for quiet periods.
+#
+# IT IS NOT A REQUIRED CHECK and must never be made one. Required contexts are
+# evaluated on pull requests; this runs on main, after the merge. Its authority
+# is ops/main-canary-state.py, which derives the freeze state from these runs.
+#
+# CONFIRM-OR-KILL, seven days from 2026-08-24 (the council set the bar, not this
+# file): KEEP if PR reds whose failing check is absent from their own diff drop.
+# KILL -- deleting this file and keeping the inherited-from-main short-circuit,
+# which is independently useful -- if this workflow's billed minutes exceed the
+# victim minutes it saves. The two numbers to compare are in the run lists: this
+# workflow's total minutes, against six-minute victim runs avoided.
+
+name: main canary
+
+on:
+  push:
+    branches: [main]
+    # Content that cannot break gates, migration, types or freshness. A merge
+    # touching only these skips the canary entirely, which is the cheapest
+    # possible run. Deliberately a DENY list rather than an allow list: a path
+    # nobody thought of should cause a canary run, not silently skip one.
+    paths-ignore:
+      - "corpus/**"
+      - "audits/**"
+      - "video/**"
+      - "out/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+# One canary per merge burst. cancel-in-progress is what collapses 44 merges a
+# day into a handful of completed runs; the sleep below is what makes the
+# cancelled ones cheap.
+concurrency:
+  group: main-canary
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: main canary (gates, migration, types, freshness)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: carr_ci
+          POSTGRES_PASSWORD: carr_ci
+          POSTGRES_DB: carr_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # FIRST, BEFORE ANYTHING THAT COSTS. See the debounce note in the header.
+      - name: Debounce the merge burst
+        run: sleep 90
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The freshness class needs a merge base, exactly as in ci.yml.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Install Python dependencies from the lock
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+
+      - name: Install Node dependencies
+        run: npm --prefix mcp-server ci
+
+      - name: Install zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+
+      - name: Create the Neon admin role the migrations expect
+        env:
+          PGPASSWORD: carr_ci
+        run: |
+          psql -h localhost -U carr_ci -d carr_ci -v ON_ERROR_STOP=1 -c \
+            "do \$\$ begin
+               if not exists (select 1 from pg_roles where rolname = 'neondb_owner') then
+                 create role neondb_owner;
+               end if;
+             end \$\$;"
+
+      # NO CHECK LOGIC HERE, rule a8c55a47 — every class is ops/ci.sh's, called
+      # one at a time so a red class does not hide the ones after it. The class
+      # names are the only thing this file contributes, and
+      # ops/main-canary-selftest.py binds them to the council's measured four.
+      - name: Run the four classes that actually fail on main
+        env:
+          CARR_CI_DATABASE_URL: postgres://carr_ci:carr_ci@localhost:5432/carr_ci # ci-secret-scan: allow — throwaway container credential, loopback only, dies with the runner
+          CARR_CI_PORTABLE_ONLY: "1"
+        run: |
+          set -uo pipefail
+          red=""
+          for class in gates migration types freshness; do
+            ops/ci.sh --strict --only "$class" || red="$red $class"
+          done
+          if [ -n "$red" ]; then
+            {
+              echo "## MAIN IS RED"
+              echo
+              echo "Failing classes on main:\`$red\`"
+              echo
+              echo "Commit \`$GITHUB_SHA\` — **this is main's break, not any pull request's.**"
+              echo
+              echo "THE MOVE: fix it on main, in its own change. Open PRs failing a check"
+              echo "they never touched are victims of this same break; ops/ci.sh names it"
+              echo "for them as INHERITED FROM MAIN and stops rather than diagnosing."
+              echo "Merges are frozen until this canary concludes green — nothing to reset."
+            } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"   # set -u: never fail on the messenger
+            echo "main-canary-red:$red"
+            exit 1
+          fi
+          echo "main-canary-green: gates, migration, types and freshness all pass on main"
