@@ -43,10 +43,21 @@ def main() -> int:
     schema_types = tuple(schema.get("$defs", {}).get("guidanceType", {}).get("enum", []))
     if schema_types != registry.GUIDANCE_TYPES:
         errors.append("JSON schema and runtime guidance-type vocabularies differ")
+    # THE EXCLUDED SURFACE IS SUBTRACTED HERE TOO, AND UNTIL 2026-08-23 IT WAS NOT.
+    # registry.build_registry() drops rules tagged rule_surface intro_politics —
+    # the vendor-introduction doctrine that renders on its own surface and is not
+    # part of the registry's corpus. This check computed its own ambient set and
+    # forgot to, so it demanded the reviewed migration manifest cover fourteen
+    # rules the compiler will never compile. It failed on main's own tree for
+    # exactly that reason, naming all fourteen, and the failure sat in front of
+    # the Guidance Registry as if the manifest were incomplete. Both halves now
+    # ask registry.excluded_source_ids(), which is the function whose docstring
+    # already says every caller must (rule 0f38532e: one home, and the second
+    # copy is a future contradiction).
     ambient = {
         source_id for source_id, control in source_map.get("rule_controls", {}).items()
         if control.get("enforcement_class") == "judgment_ambient"
-    }
+    } - registry.excluded_source_ids(source_map)
     manifest_ids = [entry.get("source_id") for entry in manifest.get("entries", [])]
     if set(manifest_ids) != ambient or len(manifest_ids) != len(set(manifest_ids)):
         missing = sorted(ambient - set(manifest_ids))
@@ -73,11 +84,16 @@ def main() -> int:
     compiled, compile_errors = registry.build_registry(source_map, manifest)
     errors.extend(compile_errors)
     errors.extend(registry.validate_registry(compiled))
+    # Same subtraction, one layer up and for the same reason: the registry's
+    # corpus is the active rules MINUS the excluded surface, which is also
+    # exactly what production's ops.assert_guidance_registry_coverage() counts —
+    # 204 of 218 on 2026-08-23. Without this the coverage proof demanded the
+    # compiler produce records for rules it is designed never to compile.
     active = {
         source_id
         for scope_ids in source_map.get("active_rule_ids", {}).values()
         for source_id in scope_ids
-    }
+    } - registry.excluded_source_ids(source_map)
     errors.extend(registry.coverage_errors(compiled, active))
     if errors:
         return fail(errors)
