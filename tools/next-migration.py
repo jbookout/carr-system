@@ -155,6 +155,26 @@ def main():
                   file=sys.stderr)
         merge(claims, numbers_from_names(tree_names), label)
 
+    # 4. THE RESERVATION LEDGER (2026-08-24, council cluster B). A number
+    # another session has RESERVED at mint time is claimed whether or not any
+    # file exists yet — the whole point of reserving. The ledger lives in the
+    # canonical checkout's out/, which every worktree on this machine shares.
+    # A torn or missing ledger line is skipped by read_reservations(), and a
+    # ledger this tool cannot read degrades to today's behaviour (warn, don't
+    # refuse) rather than blocking allocation.
+    ledger = os.path.join(REPO, "out", "migration-reservations.jsonl")
+    try:
+        with open(ledger, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("number"), int):
+                    merge(claims, {row["number"]: {"reserved"}}, "reservation")
+    except OSError:
+        pass  # no ledger yet — nothing reserved on this machine
+
     if not claims:
         print("0001", flush=True)
         return 0

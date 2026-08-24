@@ -28,6 +28,16 @@ WHAT THE CHECK MUST DO:
      the staged gate content — a bless of the wrong bytes is the 2026-08-13
      false re-bless, not a bless.
   3. ALLOW the same commit once the baseline is re-blessed and staged.
+  3b. AUTO-APPLY that re-bless (2026-08-23 gates council): the baseline update
+     is fully determined by the staged bytes, so the check computes it and
+     stages it into the SAME commit rather than refusing and making the author
+     retype it. The invariant is untouched — gate and bless still land together,
+     and a wrong-bytes bless is still impossible, because the auto-applied
+     result is re-verified by the same code that would have refused it. What the
+     auto-apply must NOT do is bless a gate DELETION (that is a retirement, not
+     a content update) or touch an entry for a gate this commit does not stage.
+     CARR_NO_AUTO_BLESS=1 restores refuse-and-explain, and the refusal text is
+     still asserted here so the manual path cannot rot.
   4. IGNORE commits that touch no gate file and no wiring contract; ignore
      hooks/*-selftest.py, which gate-integrity deliberately does not protect.
   5. COVER the wiring contracts (rule-enforcement-map.json and friends) the
@@ -94,6 +104,22 @@ def git(repo, *args, env=None, check_rc=False):
     return p
 
 
+NO_AUTO = {"CARR_NO_AUTO_BLESS": "1"}
+
+
+def committed_baseline(repo) -> dict:
+    """The baseline as it exists in HEAD — what the commit actually carries."""
+    raw = git(repo, "show", "HEAD:ops/config/gate-baseline.json").stdout
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+
+
+def blessed_hash(repo, name, table="hashes"):
+    return (committed_baseline(repo).get(table) or {}).get(name)
+
+
 def sha256_of(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -148,10 +174,12 @@ with tempfile.TemporaryDirectory() as tmp:
     repo = make_repo(tmp)
     head0 = git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    # ── 1. a gate edit without the baseline is refused ──────────────────────
+    # ── 1. THE MANUAL PATH, under CARR_NO_AUTO_BLESS=1. It is asserted first
+    #      and in full: auto-apply is the convenience, this is the invariant,
+    #      and a remedy nobody exercises is a remedy that rots.
     (repo / "hooks" / "demo-gate.py").write_text("print('v2')\n")
     git(repo, "add", "hooks/demo-gate.py")
-    r = git(repo, "commit", "-m", "edit gate without bless")
+    r = git(repo, "commit", "-m", "edit gate without bless", env=NO_AUTO)
     check("a gate edit without the baseline is refused", r.returncode != 0,
           f"exit {r.returncode}")
     check("and nothing was committed",
@@ -163,50 +191,97 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the refused work is still staged",
           "hooks/demo-gate.py" in git(repo, "diff", "--cached", "--name-only").stdout)
 
-    # ── 2. a stale bless is not a bless ─────────────────────────────────────
-    write_baseline(repo, {"demo-gate.py": sha256_of("print('WRONG')\n")})
-    git(repo, "add", "ops/config/gate-baseline.json")
-    r = git(repo, "commit", "-m", "edit gate with mismatched bless")
+    # ── 1b. THE SAME COMMIT, auto-apply on. It is allowed, and the baseline it
+    #       carries records the bytes that were STAGED.
+    r = git(repo, "commit", "-m", "edit gate, bless applied for me")
+    check("auto-apply lets the unblessed gate edit commit", r.returncode == 0,
+          r.stderr)
+    check("auto-apply staged the baseline into that same commit",
+          "ops/config/gate-baseline.json"
+          in git(repo, "show", "--name-only", "--format=", "HEAD").stdout)
+    check("the auto-applied hash is the STAGED bytes, not something else",
+          blessed_hash(repo, "demo-gate.py") == sha256_of("print('v2')\n"),
+          blessed_hash(repo, "demo-gate.py"))
+    check("auto-apply announced what it changed",
+          "demo-gate.py" in (r.stdout + r.stderr))
+    head1 = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # ── 1c. AUTO-APPLY MUST NOT ADOPT A GATE THIS COMMIT DOES NOT STAGE.
+    #       Defect 320f5531: one session's bless absorbing another's in-flight
+    #       edit. peer-gate.py is blessed at v1 and dirty at v2 in the working
+    #       tree, and only demo-gate.py is staged.
+    (repo / "hooks" / "peer-gate.py").write_text("print('peer-v1')\n")
+    write_baseline(repo, {"demo-gate.py": sha256_of("print('v2')\n"),
+                          "peer-gate.py": sha256_of("print('peer-v1')\n")})
+    git(repo, "add", "hooks/peer-gate.py", "ops/config/gate-baseline.json")
+    git(repo, "commit", "-q", "-m", "seed a peer gate")
+    (repo / "hooks" / "peer-gate.py").write_text("print('peer-v2-IN-FLIGHT')\n")
+    (repo / "hooks" / "demo-gate.py").write_text("print('v3')\n")
+    git(repo, "add", "hooks/demo-gate.py")
+    r = git(repo, "commit", "-m", "edit only demo-gate")
+    check("auto-apply allows the scoped edit", r.returncode == 0, r.stderr)
+    check("auto-apply updated the gate it staged",
+          blessed_hash(repo, "demo-gate.py") == sha256_of("print('v3')\n"))
+    check("auto-apply did NOT adopt the peer session's unstaged gate",
+          blessed_hash(repo, "peer-gate.py") == sha256_of("print('peer-v1')\n"),
+          blessed_hash(repo, "peer-gate.py"))
+
+    # ── 2. A STALE BLESS IS NOT A BLESS. With auto-apply off the mismatch is
+    #      refused; with it on the mismatch is CORRECTED rather than accepted —
+    #      what must never happen is the wrong hash landing (2026-08-13).
+    (repo / "hooks" / "demo-gate.py").write_text("print('v4')\n")
+    write_baseline(repo, {"demo-gate.py": sha256_of("print('WRONG')\n"),
+                          "peer-gate.py": sha256_of("print('peer-v1')\n")})
+    git(repo, "add", "hooks/demo-gate.py", "ops/config/gate-baseline.json")
+    r = git(repo, "commit", "-m", "mismatched bless", env=NO_AUTO)
     check("a baseline whose hash does not match the staged gate is refused",
           r.returncode != 0, f"exit {r.returncode}")
     check("the mismatch refusal names the file",
           "demo-gate.py" in (r.stdout + r.stderr).lower())
+    r = git(repo, "commit", "-m", "mismatched bless, corrected")
+    check("auto-apply corrects a wrong-bytes bless rather than accepting it",
+          r.returncode == 0 and
+          blessed_hash(repo, "demo-gate.py") == sha256_of("print('v4')\n"),
+          blessed_hash(repo, "demo-gate.py"))
 
     # ── 3. the matching bless lets the same commit through ──────────────────
-    write_baseline(repo, {"demo-gate.py": sha256_of("print('v2')\n")})
-    git(repo, "add", "ops/config/gate-baseline.json")
+    (repo / "hooks" / "demo-gate.py").write_text("print('v5')\n")
+    write_baseline(repo, {"demo-gate.py": sha256_of("print('v5')\n"),
+                          "peer-gate.py": sha256_of("print('peer-v1')\n")})
+    git(repo, "add", "hooks/demo-gate.py", "ops/config/gate-baseline.json")
     r = git(repo, "commit", "-m", "edit gate with real bless")
     check("gate edit plus matching baseline is allowed", r.returncode == 0,
           r.stderr)
-    check("and it landed", git(repo, "rev-parse", "HEAD").stdout.strip() != head0)
+    check("and it landed", git(repo, "rev-parse", "HEAD").stdout.strip() != head1)
 
     # ── 4. a NEW gate file needs a bless too ────────────────────────────────
     (repo / "hooks" / "new-gate.py").write_text("print('new')\n")
     git(repo, "add", "hooks/new-gate.py")
-    r = git(repo, "commit", "-m", "new gate without bless")
+    r = git(repo, "commit", "-m", "new gate without bless", env=NO_AUTO)
     check("a new gate file without a baseline entry is refused",
           r.returncode != 0, f"exit {r.returncode}")
-    write_baseline(repo, {"demo-gate.py": sha256_of("print('v2')\n"),
-                          "new-gate.py": sha256_of("print('new')\n")})
-    git(repo, "add", "ops/config/gate-baseline.json")
-    r = git(repo, "commit", "-m", "new gate with bless")
-    check("a new gate file with its baseline entry is allowed",
+    r = git(repo, "commit", "-m", "new gate, bless applied for me")
+    check("a new gate file is auto-blessed into its own commit",
           r.returncode == 0, r.stderr)
+    check("the new gate's auto-applied entry is correct",
+          blessed_hash(repo, "new-gate.py") == sha256_of("print('new')\n"),
+          blessed_hash(repo, "new-gate.py"))
+    check("auto-blessing a new gate carried the existing entries forward",
+          blessed_hash(repo, "demo-gate.py") == sha256_of("print('v5')\n"))
 
     # ── 5. contracts are gates by another name ──────────────────────────────
     contract = repo / "ops" / "config" / "rule-enforcement-map.json"
     contract.write_text('{"rules": 1}\n')
     git(repo, "add", "ops/config/rule-enforcement-map.json")
-    r = git(repo, "commit", "-m", "contract without bless")
+    r = git(repo, "commit", "-m", "contract without bless", env=NO_AUTO)
     check("a wiring-contract edit without the baseline is refused",
           r.returncode != 0, f"exit {r.returncode}")
-    write_baseline(repo, {"demo-gate.py": sha256_of("print('v2')\n"),
-                          "new-gate.py": sha256_of("print('new')\n")},
-                   {"rule-enforcement-map.json": sha256_of('{"rules": 1}\n')})
-    git(repo, "add", "ops/config/gate-baseline.json")
-    r = git(repo, "commit", "-m", "contract with bless")
-    check("a wiring-contract edit with its bless is allowed",
-          r.returncode == 0, r.stderr)
+    r = git(repo, "commit", "-m", "contract, bless applied for me")
+    check("a wiring-contract edit is auto-blessed", r.returncode == 0, r.stderr)
+    check("the contract's auto-applied entry lands in the contracts table",
+          blessed_hash(repo, "rule-enforcement-map.json", "contracts")
+          == sha256_of('{"rules": 1}\n'),
+          blessed_hash(repo, "rule-enforcement-map.json", "contracts"))
 
     # ── 6. what the check must leave alone ──────────────────────────────────
     (repo / "unrelated.txt").write_text("hello\n")
@@ -231,9 +306,16 @@ with tempfile.TemporaryDirectory() as tmp:
     # ── 8. a gate DELETION still requires the baseline to move ──────────────
     git(repo, "rm", "-q", "hooks/new-gate.py")
     r = git(repo, "commit", "-m", "delete gate without bless")
+    # AUTO-APPLY ON, and still refused. Removing a gate is a retirement: the
+    # baseline entry is the only record the gate existed, so a mechanism that
+    # dropped it automatically would turn `git rm` into a silent, green
+    # de-protection. This is the one case that must stay a human decision.
     check("deleting a gate without touching the baseline is refused",
           r.returncode != 0, f"exit {r.returncode}")
-    write_baseline(repo, {"demo-gate.py": sha256_of("print('v3')\n")},
+    check("a deletion is never auto-blessed away",
+          blessed_hash(repo, "new-gate.py") == sha256_of("print('new')\n"),
+          blessed_hash(repo, "new-gate.py"))
+    write_baseline(repo, {"demo-gate.py": sha256_of("print('v5')\n")},
                    {"rule-enforcement-map.json": sha256_of('{"rules": 1}\n')})
     git(repo, "add", "ops/config/gate-baseline.json")
     r = git(repo, "commit", "-m", "delete gate with bless")
