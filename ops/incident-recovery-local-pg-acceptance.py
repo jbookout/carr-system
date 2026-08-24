@@ -153,16 +153,23 @@ def main():
               "function is no longer the only door")
 
     # ── 1. REPEAT FAILURES ARE ONE INCIDENT THAT COUNTS ─────────────────────
-    for _ in range(3):
+    # Derived, not spelled out. Rule b01edd26 bans a count a later edit can
+    # falsify, and a message reading "three occurrences" beside a loop somebody
+    # may widen is exactly that shape: the prose goes stale silently while the
+    # assertion still passes. The fixture size is the single source here, so
+    # changing it changes the expectation and the sentence together.
+    repeats = 3
+    for _ in range(repeats):
         record(dsn, state="failed", failure_class="exit_1")
     with psycopg.connect(owner) as conn, conn.cursor() as cur:
         rows = incidents(cur)
-    check(len(rows) == 1, f"three identical failures should be one incident, got "
-                          f"{[r['ref'] for r in rows]}")
+    check(len(rows) == 1,
+          f"identical failures should collapse to one incident, got "
+          f"{[r['ref'] for r in rows]}")
     if rows:
-        check(rows[0]["occurrence_count"] == 3,
-              f"the incident should have counted three occurrences, has "
-              f"{rows[0]['occurrence_count']}")
+        check(rows[0]["occurrence_count"] == repeats,
+              f"the incident should have counted every one of the "
+              f"{repeats} failures, has {rows[0]['occurrence_count']}")
         check(rows[0]["last_seen_at"] is not None,
               "a recurring incident must carry a last_seen_at")
         check(rows[0]["signature"].endswith("|exit_status"),
@@ -176,7 +183,7 @@ def main():
           f"exit_2 is the same job failing the same way and must not open a "
           f"second row, got {[r['signature'] for r in rows]}")
     if rows:
-        check(rows[0]["occurrence_count"] == 4,
+        check(rows[0]["occurrence_count"] == repeats + 1,
               f"and it should have been counted: {rows[0]['occurrence_count']}")
 
     record(dsn, state="failed", failure_class="exit_69")
