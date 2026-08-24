@@ -161,15 +161,32 @@ exec /usr/bin/python3 "$@"
                                                  text=True, capture_output=True, env=record_env)
         finally:
             missing_path.rename(interpreter)
+        # THE BUDGET IS DRIVEN, NOT ASSUMED. This case used to rely on the
+        # launcher's hardcoded three seconds being shorter than the fixture's
+        # `sleep 4`. That coupled the test to a constant it does not own, so
+        # raising the budget (PR #547, after a 3.83s psycopg import on a loaded
+        # Mac was misread as a missing dependency) silently turned this case
+        # from "times out" into "succeeds slowly" -- the assertion still ran and
+        # still meant something, just not this. Setting the budget explicitly
+        # tests the timeout path at any default AND exercises the override.
         timeout = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
                                  text=True, capture_output=True,
-                                 env={**record_env, "FIXTURE_PSYCOG_TIMEOUT": "1"})
+                                 env={**record_env, "FIXTURE_PSYCOG_TIMEOUT": "1",
+                                      "CARR_RECORD_GATE_PROBE_TIMEOUT": "1"})
     check("system bootstrap reaches fixed interpreter, scrubs PYTHONPATH, and blocks on canonical context",
           write.returncode == 0 and "quokka-indexer" in write.stdout
           and assertion.returncode == 2 and "quokka-indexer" in assertion.stderr)
     check("launcher fails closed for unknown/malformed/missing dependency/interpreter/timeout",
           all(item.returncode != 0 for item in (unknown, malformed, missing_dependency,
                                                  missing_interpreter, timeout)))
+    # A CLOSED GATE MUST SAY WHICH KIND IT WAS. The refusal that cost an
+    # afternoon on 2026-08-23 was silent: stderr went to DEVNULL and the caller
+    # saw "No stderr output", so a machine that was merely SLOW was
+    # indistinguishable from one missing psycopg (rule 88e9b5eb).
+    check("a timed-out probe says so, rather than refusing in silence",
+          "did not finish" in timeout.stderr)
+    check("a genuinely absent dependency says something different",
+          "cannot import" in missing_dependency.stderr)
 
     if failures:
         print(f"FAIL {len(failures)}: {', '.join(failures)}")
