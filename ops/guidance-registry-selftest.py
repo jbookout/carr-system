@@ -388,8 +388,14 @@ def main():
     # planned delivery mechanics — commit, push, PR, merge, clean up — are the
     # session's own to run and never a question for a partner. It is a session
     # rail rather than a prohibition, so it compiles as a procedure.
+    # constraint 75 -> 76 on 2026-08-24, when rule 6cfb67f5 was activated: a
+    # delegation names its specific model and reasoning effort, cheapest
+    # qualified, capability as the floor. It binds at the dispatch moment and
+    # prohibits a nameless handoff — a constraint by construction, like
+    # 937252fb before it, so no manifest row, only this total following the
+    # store.
     reviewed_counts = {
-        "constraint": 75, "procedure": 78, "doctrine": 13, "rubric": 37,
+        "constraint": 76, "procedure": 78, "doctrine": 13, "rubric": 37,
         "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -455,7 +461,8 @@ def main():
         # follows the same lifecycle changes as the counts above, and the
         # manifest entry_count above moves with the TSV that feeds it.
         # 217 -> 218 on 2026-08-23 with rule 3fa422b7, one compiled item.
-        and len(activation_manifest["entries"]) == 218
+        # 218 -> 219 on 2026-08-24 with rule 6cfb67f5, one compiled item.
+        and len(activation_manifest["entries"]) == 219
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64
         and registry.activation_manifest_sha256(activation_manifest)

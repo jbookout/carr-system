@@ -7,8 +7,8 @@
   },
   "reviewed_base_inventory": {
     "path": "ops/config/rule-enforcement-map.json",
-    "sha256": "2d3a38e6c67bfd247d108338e0ed09571da6a5166eb671563c45531353c195c3",
-    "standing_source_count": 204,
+    "sha256": "7b9f13870b7e4ff13817ee4ae43e7ffff446bd94fa061543be7d12d2657a38f8",
+    "standing_source_count": 205,
     "excluded_rule_surface": "intro_politics"
   },
   "proposed_constitution_guidance_ids": [
