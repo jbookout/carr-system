@@ -11,9 +11,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATE = os.path.join(REPO, "hooks", "peer-broadcast-gate.py")
+WINDOW = 1800
 
 failures: list[str] = []
 
@@ -26,15 +28,40 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
-def run(to, state_dir, tool="SendMessage", transcript=None, transcript_key="transcript_path"):
-    """Invoke the gate with an isolated HOME so the real state file is untouched."""
+def run(to, state_dir, tool="SendMessage", transcript=None,
+        transcript_key="transcript_path", session=None):
+    """Invoke the gate with an isolated HOME so the real state file is untouched.
+
+    `session` is the payload's session_id. Left out on purpose in most cases
+    below, which exercises the "unknown" fallback bucket: a payload with no
+    session id must still be CHARGED, never handed a free budget.
+    """
     env = {**os.environ, "HOME": state_dir}
     body = {"tool_name": tool, "tool_input": {"to": to}}
     if transcript is not None:
         body[transcript_key] = transcript
+    if session is not None:
+        body["session_id"] = session
     p = subprocess.run([sys.executable, GATE], input=json.dumps(body),
                        capture_output=True, text=True, env=env, timeout=60)
     return p.returncode, (p.stdout + p.stderr)
+
+
+def budget_home(state_dir):
+    return os.path.join(state_dir, ".cache", "carr", "peer-broadcast-gate")
+
+
+def budgets(state_dir):
+    try:
+        return sorted(os.listdir(budget_home(state_dir)))
+    except OSError:
+        return []
+
+
+def age(path, seconds):
+    """Backdate a file's mtime, which is the clock sweep() reads."""
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
 
 
 def spawn_record(agent_id):
@@ -261,6 +288,119 @@ check("a malformed payload fails open, never blocks", p.returncode == 0,
 with tempfile.TemporaryDirectory() as d:
     rc, _ = run("", d)
     check("an empty recipient is ignored", rc == 0, f"rc={rc}")
+
+# 8. THE BUDGET BELONGS TO THE ASKER, NOT TO THE MACHINE.
+#
+# The incident, 2026-08-23, observed live from worktree session
+# magical-vaughan-5dc83f: that session had sent ZERO peer messages, and its
+# FIRST SendMessage was refused — "You have already messaged 2 different
+# sessions in the last 30 minutes (confident-dewdney-db5a60-b6,
+# hopeful-colden-822136-71)". Both of those were another session's messages.
+# State lived in one machine-wide file and MAX_NAMED_PEERS was counted across
+# all of it, so with ~34 concurrent sessions on this Mac two messages from any
+# one session exhausted the allowance for every other one. The gate refused the
+# single targeted message it exists to encourage — the REF_SUFFIX deadlock
+# again, by a different road.
+#
+# Asserted with the FIRST session's budget already full, which is the only form
+# that proves anything: with spare allowance the second session passes whether
+# or not the gate scopes anything.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01 [aaa]", d, session="s-one")
+    run("carr-ai-02 [bbb]", d, session="s-one")      # s-one's budget is now full
+    rc1, out1 = run("carr-ai-11", d, session="s-two")
+    rc2, out2 = run("carr-ai-12", d, session="s-two")
+    check("a second session's first peer is allowed while another session's budget is full",
+          rc1 == 0, f"rc={rc1}: {out1[:200]}")
+    check("and its second peer too — the budget is its own, not the machine's",
+          rc2 == 0, f"rc={rc2}: {out2[:200]}")
+
+    # The protection is unchanged in the direction that matters.
+    rc3, out3 = run("carr-ai-13", d, session="s-two")
+    check("a SINGLE session's third distinct peer is still refused",
+          rc3 == 2, f"rc={rc3}")
+    check("and that refusal names only that session's own peers",
+          rc3 == 2 and "carr-ai-11" in out3 and "carr-ai-01" not in out3,
+          f"out={out3[:300]}")
+
+    rc4, out4 = run("carr-ai-03", d, session="s-one")
+    check("the first session is still held to its own full budget",
+          rc4 == 2, f"rc={rc4}")
+    check("and IS told about its own peers, not the other session's",
+          rc4 == 2 and "carr-ai-01" in out4 and "carr-ai-11" not in out4,
+          f"out={out4[:300]}")
+
+    check("each session's budget is a separate file",
+          budgets(d) == ["s-one.json", "s-two.json"], f"got {budgets(d)}")
+
+# One session's own messages still accumulate across calls — per-session scoping
+# must not become per-CALL scoping, which would disable the gate entirely.
+with tempfile.TemporaryDirectory() as d:
+    codes = [run(f"carr-ai-{n}", d, session="s-one")[0] for n in range(1, 5)]
+    check("one session's peers accumulate across calls: allow, allow, deny, deny",
+          codes == [0, 0, 2, 2], f"got {codes}")
+
+# A session id becomes a PATH. It must not be able to leave its directory.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01", d, session="../../../escape")
+    check("a traversal-shaped session id is confined to the budget directory",
+          budgets(d) == ["escape.json"], f"got {budgets(d)}")
+    check("and nothing was written outside it",
+          not os.path.exists(os.path.join(d, "escape.json"))
+          and not os.path.exists(os.path.join(d, ".cache", "escape.json")))
+
+# A payload with NO session id is charged to one shared bucket. The conservative
+# end of the trade, stated: an unidentifiable caller must not collect a fresh
+# budget by simply omitting the field.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01", d)
+    run("carr-ai-02", d)
+    rc, _ = run("carr-ai-03", d)
+    check("a payload with no session_id is charged, not handed a free budget",
+          rc == 2, f"rc={rc}")
+    check("and its state is the shared unknown bucket",
+          budgets(d) == ["unknown.json"], f"got {budgets(d)}")
+
+# 9. ABANDONED BUDGETS ARE SWEPT — one file per session, forever, is litter.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01", d, session="live")
+    home = budget_home(d)
+    # makedirs, not an assumption that the run above created it: a gate that
+    # writes its state somewhere else should report a clean FAIL here, not a
+    # FileNotFoundError traceback that buries every check after this one.
+    os.makedirs(home, exist_ok=True)
+    abandoned = os.path.join(home, "abandoned.json")
+    with open(abandoned, "w") as fh:
+        json.dump({"carr-ai-99": time.time()}, fh)
+    age(abandoned, WINDOW * 3)
+    run("carr-ai-02", d, session="live")
+    check("a budget nothing has touched for two windows is swept",
+          not os.path.exists(abandoned), f"still there: {budgets(d)}")
+    check("and the running session's own budget survives its own sweep",
+          os.path.exists(os.path.join(home, "live.json")), f"got {budgets(d)}")
+
+# The sweep must NEVER touch a live session's file, or it becomes a way to clear
+# another session's budget — the collision this whole change removes, rebuilt.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-11", d, session="other")
+    run("carr-ai-12", d, session="other")           # other's budget is full
+    run("carr-ai-01", d, session="live")            # live sweeps on the way past
+    check("a freshly-written budget belonging to another session is left alone",
+          sorted(budgets(d)) == ["live.json", "other.json"], f"got {budgets(d)}")
+    rc, _ = run("carr-ai-13", d, session="other")
+    check("so that session is still correctly refused its third peer",
+          rc == 2, f"rc={rc}")
+
+# The retired machine-wide file is litter too, and is swept on the same terms.
+with tempfile.TemporaryDirectory() as d:
+    legacy = os.path.join(d, ".cache", "carr", "peer-broadcast-gate.json")
+    os.makedirs(os.path.dirname(legacy), exist_ok=True)
+    with open(legacy, "w") as fh:
+        json.dump({"carr-ai-99": time.time()}, fh)
+    age(legacy, WINDOW * 3)
+    run("carr-ai-01", d, session="live")
+    check("the retired machine-wide state file is swept as well",
+          not os.path.exists(legacy))
 
 print()
 if failures:

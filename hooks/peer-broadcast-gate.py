@@ -49,6 +49,30 @@ would let a session spend an unlimited budget on anything named like a hex
 token, and #70 already showed what keying identity on spelling does. No
 transcript, or an unreadable one, means no exemption — the gate keeps its
 protection rather than guessing.
+
+THE BUDGET IS PER-ASKER, AND WAS MACHINE-WIDE UNTIL 2026-08-23. The state lived
+in ONE file — ~/.cache/carr/peer-broadcast-gate.json — and MAX_NAMED_PEERS was
+counted across everything in it. Observed live from worktree session
+magical-vaughan-5dc83f: that session had sent ZERO peer messages, and its FIRST
+SendMessage was refused with "You have already messaged 2 different sessions in
+the last 30 minutes (confident-dewdney-db5a60-b6, hopeful-colden-822136-71)".
+Both were another session's messages. With ~34 concurrent sessions on this Mac,
+two messages from any ONE of them exhausted the allowance for ALL of them — and
+the refusal told each session it had done something it had not done.
+
+That is the REF_SUFFIX deadlock arriving by a different road: the single
+targeted message this gate exists to ENCOURAGE was the one thing that could not
+be sent. Nothing in the rationale ever supported it. The externalised cost is
+per-ASKER — one session working through a roster — so a per-session budget
+preserves the protection exactly and gives up nothing: the third distinct peer
+of any one session is still refused, at the same count, in the same window.
+
+State is now keyed by the payload's own session_id, one file per session under
+~/.cache/carr/peer-broadcast-gate/. A payload carrying no session id shares a
+single "unknown" bucket rather than being handed a fresh budget — an
+unidentifiable caller is CHARGED, never waved through, the same stance the
+subagent exemption takes toward an unproven recipient. Abandoned session files
+are swept (see sweep) so the cache does not accumulate one per session forever.
 """
 import json
 import os
@@ -56,9 +80,13 @@ import re
 import sys
 import time
 
-STATE = os.path.expanduser("~/.cache/carr/peer-broadcast-gate.json")
+STATE_HOME = os.path.expanduser("~/.cache/carr/peer-broadcast-gate")
+# The machine-wide file this gate used until 2026-08-23. Nothing writes it now;
+# sweep() removes it on the same terms as any other stale budget.
+LEGACY_STATE = os.path.expanduser("~/.cache/carr/peer-broadcast-gate.json")
 WINDOW_SECONDS = 1800   # 30 minutes: long enough to span one investigation
 MAX_NAMED_PEERS = 2     # the third distinct named peer is a broadcast
+STALE_SECONDS = WINDOW_SECONDS * 2   # a budget nobody has touched holds nothing live
 
 # A PEER IS ITS NAME. The ref is a disambiguator, not part of who it is.
 #
@@ -120,9 +148,62 @@ def own_subagent(who: str, transcript_path: str) -> bool:
     return False
 
 
-def load(now):
+def session_key(payload) -> str:
+    """The filename this session's budget lives under, from its own session id.
+
+    Sanitised down to alphanumerics, dash and underscore. A session id is
+    machine-generated, but it becomes a PATH here, and nothing that becomes a
+    path is trusted to stay inside its directory — `../../x` collapses to `x`.
+
+    An absent or empty id falls back to ONE shared "unknown" bucket, which is
+    deliberately the conservative end of the trade: unidentifiable callers share
+    a budget instead of each being handed a fresh one. Keying on something a
+    caller could vary at will would turn the fix into a way to spend an
+    unlimited budget, which is the same mistake shape-matching an agentId would
+    have been.
+    """
+    raw = str(payload.get("session_id") or payload.get("sessionId") or "")
+    return "".join(c for c in raw if c.isalnum() or c in "-_") or "unknown"
+
+
+def state_path(key: str) -> str:
+    return os.path.join(STATE_HOME, f"{key}.json")
+
+
+def sweep(now, keep=None):
+    """Delete budgets nothing has touched for STALE_SECONDS.
+
+    Sessions end without telling anyone, and one file per session would
+    otherwise sit in the cache forever. mtime is the honest clock: save()
+    rewrites the file on every recorded message, so every entry in a file is
+    older than that file's mtime — past STALE_SECONDS it cannot hold a single
+    live one, and deleting it does exactly what load() already does entry by
+    entry. A file with a FRESH mtime is never touched, so this can never become
+    a way to clear a running session's budget.
+
+    NEVER raises. Housekeeping that can break the gate is worse than litter.
+    Losing a race with a concurrent writer is harmless both ways: a deleted file
+    is rebuilt from scratch by the next save, and a file created after the
+    listing is simply swept next time.
+    """
     try:
-        with open(STATE) as fh:
+        names = os.listdir(STATE_HOME)
+    except OSError:
+        names = []
+    for name in [*names, LEGACY_STATE]:
+        if name == keep:
+            continue
+        path = name if os.path.isabs(name) else os.path.join(STATE_HOME, name)
+        try:
+            if now - os.path.getmtime(path) >= STALE_SECONDS:
+                os.remove(path)
+        except OSError:
+            continue
+
+
+def load(path, now):
+    try:
+        with open(path) as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
@@ -143,12 +224,12 @@ def load(now):
     return fresh
 
 
-def save(data):
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    tmp = STATE + ".tmp"
+def save(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(data, fh)
-    os.replace(tmp, STATE)
+    os.replace(tmp, path)
 
 
 def main():
@@ -174,11 +255,18 @@ def main():
     # Identity is the name; `x` and `x [d7e9b2]` are one peer. See REF_SUFFIX.
     who = peer_identity(to)
 
+    # THE BUDGET IS THIS SESSION'S, not the machine's. One shared file meant two
+    # messages from any session on this Mac exhausted every other session's
+    # allowance — including sessions that had sent nothing at all. See the
+    # module docstring.
+    state = state_path(session_key(payload))
+
     now = time.time()
-    seen = load(now)
+    sweep(now, keep=os.path.basename(state))
+    seen = load(state, now)
     if who in seen:           # re-messaging the same peer is a thread, not fan-out
         seen[who] = now
-        save(seen)
+        save(state, seen)
         return 0
 
     # MESSAGING YOUR OWN SUBAGENT IS ORCHESTRATION, NOT BROADCAST — the asker
@@ -219,7 +307,7 @@ def main():
         return 2   # deny
 
     seen[who] = now
-    save(seen)
+    save(state, seen)
     return 0
 
 
