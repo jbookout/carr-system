@@ -72,6 +72,7 @@ import dispatch  # noqa: E402
 import execution_contract  # noqa: E402
 import grammar  # noqa: E402
 import kanban_adapter  # noqa: E402
+import queue_projection  # noqa: E402
 import registry_ext  # noqa: E402
 import state as state_mod  # noqa: E402
 import verb_io  # noqa: E402
@@ -420,6 +421,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              desk_stop=dispatch.desk_stop, desk_start=dispatch.desk_start,
              read_profiles=verb_io.read_profiles,
              queue_service: kanban_adapter.QueueService | None = None,
+             queue_projector=queue_projection.project_once,
              log=print) -> dict:
     registry = registry or desks.Registry()
     results_path = Path(results_path or dispatch.DEFAULT_RESULTS)
@@ -529,6 +531,16 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                                 add_room_turn=add_room_turn, registry=registry,
                                 stop=desk_stop, start=desk_start)
 
+    projection_events: list[dict] = []
+    if queue_service is not None:
+        try:
+            projection_events = queue_projector(
+                state=state, add_room_turn=add_room_turn,
+                target_catalog=queue_service.catalog.get("targets", {}),
+            )
+        except Exception as exc:  # projection failure must be visible, never a live-looking board
+            errors.append({"desk": "(queue-projector)", "error": "queue_projection_failed", "detail": str(exc)[:500]})
+
     # Read the registry back AFTER the heartbeat stamps above, so the roster the
     # observatory sees carries this cycle's own liveness rather than the values
     # this cycle started with.
@@ -562,6 +574,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         "assignments": assignments, "delivered": delivered, "errors": errors,
         "heartbeat": heartbeat, "controls": controls, "restarts": restarts,
         "auth": auth_by_desk, "queue": queue_events,
+        "queue_projection": projection_events,
     }
     log(f"room-bridge: {len(turns)} turn(s), {len(delivered)} desk action(s), "
         f"{len(assignments)} assignment event(s), {len(queue_events)} queue event(s), {len(controls)} control(s), "

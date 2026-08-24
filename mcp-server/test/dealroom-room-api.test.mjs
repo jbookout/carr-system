@@ -79,6 +79,7 @@ function handlerWith(overrides = {}) {
       return { ok: true, room: "partner-line", seq: 99, at: "2026-08-22T15:00:00+00:00",
         sponsor: params.sponsor, seat: params.seat, kind: params.kind, msg_id: params.msgId };
     },
+    queueReadFn: async () => ({ ok: true, room: "partner-line", events: [], projected_at: null, live: false }),
     ...overrides,
   });
   return { handler, calls };
@@ -141,6 +142,23 @@ test("reading the wire pages by after_seq and carries the viewer's own identity"
   const page = await next.json();
   assert.deepEqual(page.turns.map((t) => t.seq), ["71"]);
   assert.deepEqual(calls.reads[1], { after_seq: 70, limit: 1 });
+});
+
+test("Queue API is authenticated, no-store, and preserves its exact projection contract", async () => {
+  const { handler } = handlerWith({ queueReadFn: async () => ({ ok: true, room: "partner-line", events: [{
+    v: 1, board: "carr-build", event_id: 9, event: "started", task_id: "t_one",
+    card: { title: "<unsafe>", target: "sol", effective_model: "gpt-5.6-sol", status: "running", priority: "P2", cap: "read", updated_at: "2026-08-24T18:00:00Z", source_seq: null },
+    summary: "<unsafe summary>", projected_at: "2026-08-24T18:00:00Z",
+  }], projected_at: "2026-08-24T18:00:00Z", live: true }) });
+  const environment = env();
+  const anonymous = await handler.fetch(new Request(`${ORIGIN}/api/room/queue`), environment, {});
+  assert.equal(anonymous.status, 401);
+  const cookie = await signedIn(handler, environment);
+  const response = await handler.fetch(new Request(`${ORIGIN}/api/room/queue`, { headers: { cookie } }), environment, {});
+  assert.equal(response.status, 200); assert.equal(response.headers.get("cache-control"), "no-store");
+  const body = await response.json();
+  assert.deepEqual(Object.keys(body), ["ok", "room", "events", "projected_at", "live"]);
+  assert.equal(body.events[0].card.title, "<unsafe>");
 });
 
 test("paging arguments are clamped by the room's own normalizer, never by a second copy of the rule", async () => {

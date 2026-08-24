@@ -13,6 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { TOOLS } from "../src/tools.js";
+import { readRoomQueue } from "../src/partner-room.js";
 
 // ── actors ──────────────────────────────────────────────────────────────────
 // Shapes mirror identity.js: a direct human partner, the two sponsored local
@@ -61,6 +62,9 @@ class RoomFake {
     }
     if (sql.includes("from v_partner_room_turn")) {
       this.reads.push(params);
+      if (sql.includes("partner-room:queue")) {
+        return { rows: this.rows.filter((r) => r.room_id === params[0] && r.kind === "receipt").sort((a, b) => b.seq - a.seq) };
+      }
       const [room, after, limit] = params;
       const match = this.rows
         .filter((r) => r.room_id === room && r.seq > after)
@@ -209,4 +213,25 @@ test("read-room: defaults — the partner line from the start, quiet room answer
   assert.deepEqual(out.turns, []);
   assert.equal(out.latest_seq, 0);
   assert.equal(out.more, false);
+});
+
+test("read-room-queue: accepts only the exact state-complete projector receipt and latest event per task", async () => {
+  const event = (event_id, task_id, status, projected_at) => ({
+    seq: event_id, room_id: "partner-line", at: projected_at, sponsor: "joe", seat: "hermes", kind: "receipt", msg_id: `q${event_id}`,
+    body: JSON.stringify({ queue_event: { v: 1, board: "carr-build", event_id, event: "changed", task_id,
+      card: { title: `<${task_id}>`, target: "sol", effective_model: "gpt-5.6-sol", status, priority: "P2", cap: "read", updated_at: projected_at, source_seq: null },
+      summary: `<${task_id} summary>`, projected_at } }),
+  });
+  const db = new RoomFake({ rows: [
+    event(3, "t_one", "running", "2026-08-24T17:59:00Z"),
+    event(2, "t_one", "todo", "2026-08-24T17:58:00Z"),
+    event(1, "t_archived", "archived", "2026-08-24T17:57:00Z"),
+    { ...event(4, "t_spoof", "todo", "2026-08-24T17:59:00Z"), body: '{"queue_event":{"v":2}}' },
+  ] });
+  const out = await readRoomQueue(db, {}, { now: Date.parse("2026-08-24T18:00:00Z") });
+  assert.deepEqual(Object.keys(out), ["ok", "room", "events", "projected_at", "live"]);
+  assert.equal(out.events.length, 1);
+  assert.equal(out.events[0].task_id, "t_one"); assert.equal(out.events[0].card.status, "running");
+  assert.equal(out.live, true);
+  assert.match(db.reads.at(-1)[0], /partner-line/);
 });

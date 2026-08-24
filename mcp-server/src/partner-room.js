@@ -31,6 +31,9 @@ export const ROOM_BODY_MAX = 20000;
 export const ROOM_READ_DEFAULT = 50;
 export const ROOM_READ_MAX = 200;
 export const ROOM_KINDS = ["turn", "system", "receipt"];
+export const QUEUE_STALE_MS = 120_000;
+const QUEUE_EVENT_KEYS = ["v", "board", "event_id", "event", "task_id", "card", "summary", "projected_at"];
+const QUEUE_CARD_KEYS = ["title", "target", "effective_model", "status", "priority", "cap", "updated_at", "source_seq"];
 
 /** null when the name is not a room slug; the normalized name otherwise. */
 export function normalizeRoomName(value) {
@@ -66,6 +69,55 @@ export async function readRoomTurns(c, args = {}) {
   return { ok: true, room, turns,
     latest_seq: turns.length ? turns[turns.length - 1].seq : after,
     more: turns.length === limit };
+}
+
+function exactKeys(value, keys) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+/** Only fully-validated, projector-shaped receipts become Queue data.  A room
+ * turn is untrusted prose even when it claims to be JSON. */
+export function queueEventFromTurn(turn) {
+  if (turn?.kind !== "receipt" || typeof turn.body !== "string") return null;
+  try {
+    const outer = JSON.parse(turn.body);
+    const event = outer?.queue_event;
+    if (!exactKeys(outer, ["queue_event"]) || !exactKeys(event, QUEUE_EVENT_KEYS) ||
+        event.v !== 1 || event.board !== "carr-build" || !Number.isInteger(event.event_id) ||
+        typeof event.event !== "string" || !/^t_[a-z0-9]+$/i.test(event.task_id) ||
+        !exactKeys(event.card, QUEUE_CARD_KEYS) || typeof event.summary !== "string" ||
+        !Number.isFinite(Date.parse(event.projected_at))) return null;
+    const card = event.card;
+    if (!(["string", "object"].includes(typeof card.effective_model)) ||
+        !["title", "target", "status", "priority", "cap", "updated_at"].every((key) => typeof card[key] === "string") ||
+        !(card.source_seq === null || (Number.isInteger(card.source_seq) && card.source_seq >= 0)) ||
+        !Number.isFinite(Date.parse(card.updated_at))) return null;
+    return event;
+  } catch { return null; }
+}
+
+/** Shared queue read: latest state-complete event per canonical task. */
+export async function readRoomQueue(c, args = {}, { now = Date.now() } = {}) {
+  const room = normalizeRoomName(args.room);
+  if (room === null) return { ok: false, error: "room_invalid" };
+  const r = await c.query(
+    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id
+       from v_partner_room_turn where room_id=$1 and kind='receipt'
+      order by id desc limit 800 /* partner-room:queue */`, [room],
+  );
+  const latest = new Map();
+  for (const turn of r.rows) {
+    const event = queueEventFromTurn(turn);
+    if (!event || latest.has(event.task_id)) continue;
+    latest.set(event.task_id, event);
+  }
+  const events = [...latest.values()].filter((event) => event.card.status !== "archived")
+    .sort((a, b) => Date.parse(b.card.updated_at) - Date.parse(a.card.updated_at));
+  const projectedAt = events.reduce((latestAt, event) =>
+    !latestAt || Date.parse(event.projected_at) > Date.parse(latestAt) ? event.projected_at : latestAt, null);
+  return { ok: true, room, events, projected_at: projectedAt,
+    live: Boolean(projectedAt) && now - Date.parse(projectedAt) <= QUEUE_STALE_MS };
 }
 
 // THE ONE ROOM APPEND, for the same reason. Sponsor is always resolved by the
@@ -143,6 +195,15 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
       } },
       handler: async (c, _actor, args) => {
         const read = await readRoomTurns(c, args);
+        if (read.ok !== true) { const { ok: _ok, ...failure } = read; throw new ToolError(failure); }
+        return read;
+      },
+    },
+    "read-room-queue": {
+      description: "Read the current non-archived carr-build Queue projection. Hermes task state is authoritative; this returns only the latest validated, state-complete projection receipt per task and declares live:false when its projection is stale.",
+      inputSchema: { type: "object", properties: { room: { type: "string", description: "room name; default partner-line" } } },
+      handler: async (c, _actor, args) => {
+        const read = await readRoomQueue(c, args);
         if (read.ok !== true) { const { ok: _ok, ...failure } = read; throw new ToolError(failure); }
         return read;
       },
