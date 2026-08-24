@@ -59,7 +59,7 @@ EVALUATION_CONTEXT_FIELDS = {"experiment_arm", "auditor_mode"}
 RECEIPT_FIELDS = {
     "schema_version", "attempt_id", "envelope_digest", "attempt_ordinal", "adapter", "lifecycle",
     "result", "attestation", "negative_knowledge", "telemetry", "tool_event_summaries", "observation",
-    "interventions", "handoff_proposal",
+    "interventions", "handoff_proposal", "visual_artifacts",
 }
 LIFECYCLE_FIELDS = {"started_at", "ended_at", "state", "retry_count", "recovery_count", "failure_class"}
 RESULT_FIELDS = {"job_ref", "outcome", "verification_state", "artifact_refs", "evidence_refs", "validation_results"}
@@ -72,6 +72,18 @@ HANDOFF_PROPOSAL_FIELDS = {"proposed", "reason", "replacement_session_ref", "che
 VALIDATION_RESULT_FIELDS = {"check_id", "state", "evidence_refs"}
 ATTESTATION_FIELDS = {"claim_state", "canonical_promotion_state", "independent_evidence_required"}
 NEGATIVE_KNOWLEDGE_FIELDS = {"approach_ref", "evidence_refs", "applicability", "revalidate_after", "expires_at"}
+VISUAL_ARTIFACT_FIELDS = {
+    "artifact_ref", "media_type", "self_contained", "external_service_dependency", "visual_form",
+    "source_binding", "generation", "generated_at", "freshness", "redaction_class", "content_digest",
+    "evidence_refs", "accessibility",
+}
+VISUAL_SOURCE_BINDING_FIELDS = {
+    "work_request_id", "plan_revision_digest", "state_version", "canonical_record_digest",
+    "projection_schema_version", "projection_digest",
+}
+VISUAL_GENERATION_FIELDS = {"generating_attempt_id", "adapter_configuration_fingerprint", "skill_id", "skill_version"}
+VISUAL_FRESHNESS_FIELDS = {"state", "valid_through"}
+VISUAL_ACCESSIBILITY_FIELDS = {"color_independent_meaning", "reduced_motion_supported", "responsive_verified", "keyboard_accessible"}
 OBSERVATION_FIELDS = {
     "progress_state", "coverage_state", "activity_fidelity", "declared_refs_observed",
     "unmapped_activity_refs", "deviation_candidates", "uncertainty",
@@ -392,6 +404,44 @@ def _validate_negative_knowledge(value: Any) -> list[dict[str, Any]]:
     return value
 
 
+def _validate_visual_artifacts(value: Any, envelope: dict[str, Any], attempt_id: str) -> list[dict[str, Any]]:
+    """Validate optional visual projections as derived, stale-visible artifacts."""
+    if not isinstance(value, list):
+        raise ContractError("receipt visual_artifacts must be a list")
+    for row in value:
+        artifact = _expect_exact(row, VISUAL_ARTIFACT_FIELDS, "visual artifact")
+        _string(artifact["artifact_ref"], "visual artifact artifact_ref", identifier=True)
+        if artifact["media_type"] != "text/html" or artifact["self_contained"] is not True or artifact["external_service_dependency"] is not False:
+            raise ContractError("visual artifact must be self-contained HTML with no external service dependency")
+        if artifact["visual_form"] not in {"topology", "sequence", "process", "state", "hierarchy", "timeline", "matrix", "quantitative"}:
+            raise ContractError("visual artifact visual_form is invalid")
+        source = _expect_exact(artifact["source_binding"], VISUAL_SOURCE_BINDING_FIELDS, "visual artifact source_binding")
+        if source["work_request_id"] != envelope["work_request_id"] or source["plan_revision_digest"] != envelope["plan_revision"]["digest"] or source["state_version"] != envelope["state_binding"]["state_version"] or source["canonical_record_digest"] != envelope["state_binding"]["canonical_record_digest"]:
+            raise ContractError("visual artifact source binding does not match the exact envelope state")
+        _string(source["projection_schema_version"], "visual artifact projection_schema_version")
+        _digest(source["projection_digest"], "visual artifact projection_digest")
+        generation = _expect_exact(artifact["generation"], VISUAL_GENERATION_FIELDS, "visual artifact generation")
+        if generation["generating_attempt_id"] != attempt_id:
+            raise ContractError("visual artifact generating_attempt_id does not match its receipt")
+        if generation["adapter_configuration_fingerprint"] != envelope["server_binding"]["adapter"]["configuration_fingerprint"]:
+            raise ContractError("visual artifact adapter configuration does not match its receipt")
+        _string(generation["skill_id"], "visual artifact skill_id", identifier=True)
+        _string(generation["skill_version"], "visual artifact skill_version")
+        _timestamp(artifact["generated_at"], "visual artifact generated_at")
+        freshness = _expect_exact(artifact["freshness"], VISUAL_FRESHNESS_FIELDS, "visual artifact freshness")
+        if freshness["state"] not in {"fresh", "stale", "unknown"}:
+            raise ContractError("visual artifact freshness state is invalid")
+        _timestamp(freshness["valid_through"], "visual artifact freshness valid_through")
+        if artifact["redaction_class"] not in {"metadata_only", "redacted_evidence"}:
+            raise ContractError("visual artifact redaction_class is invalid")
+        _digest(artifact["content_digest"], "visual artifact content_digest")
+        _list_of_strings(artifact["evidence_refs"], "visual artifact evidence_refs")
+        access = _expect_exact(artifact["accessibility"], VISUAL_ACCESSIBILITY_FIELDS, "visual artifact accessibility")
+        if any(access[field] is not True for field in VISUAL_ACCESSIBILITY_FIELDS):
+            raise ContractError("visual artifact meaning must survive color, motion, and narrow screens")
+    return value
+
+
 def _validate_observation(value: Any) -> dict[str, Any]:
     """Validate redacted declared-versus-observed evidence without overclaiming."""
     observation = _expect_exact(value, OBSERVATION_FIELDS, "receipt observation")
@@ -437,6 +487,8 @@ def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[
     result = _validate_receipt_result(value["result"])
     _validate_attestation(value["attestation"])
     _validate_negative_knowledge(value["negative_knowledge"])
+    if value["visual_artifacts"] and envelope is None:
+        raise ContractError("visual artifacts require the exact source execution envelope")
     telemetry = _expect_exact(value["telemetry"], TELEMETRY_FIELDS, "receipt telemetry")
     _nonnegative_int(telemetry["latency_ms"], "receipt telemetry latency_ms")
     _finite_nonnegative(telemetry["cost_usd"], "receipt telemetry cost_usd")
@@ -476,6 +528,7 @@ def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[
         raise ContractError("non-proposed handoff cannot name a reason, checkpoint, or replacement")
     if envelope is not None:
         bound = validate_execution_envelope(envelope)
+        _validate_visual_artifacts(value["visual_artifacts"], bound, value["attempt_id"])
         if value["envelope_digest"] != execution_envelope_digest(bound):
             raise ContractError("attempt receipt does not bind the exact execution envelope")
         if value["adapter"] != bound["server_binding"]["adapter"]:
@@ -623,4 +676,5 @@ def receipt_from_dispatch_row(envelope: Any, row: dict[str, Any], *, attempt_id:
         "interventions": [],
         "handoff_proposal": {"proposed": False, "reason": None, "replacement_session_ref": None,
                               "checkpoint_ref": None, "requires_independent_verification": False},
+        "visual_artifacts": [],
     }

@@ -152,6 +152,35 @@ def phase_binding_preserves_native_sessions_and_reserves_evaluation_arms():
     expect_refusal(lambda: contract.validate_execution_envelope(value), "verified_checkpoint")
 
 
+def self_contained_visual_artifact_is_bound_to_projection_and_staleness():
+    bound = envelope()
+    value = receipt()
+    value["visual_artifacts"] = [{
+        "artifact_ref": "artifact:observatory-map", "media_type": "text/html", "self_contained": True,
+        "external_service_dependency": False, "visual_form": "topology",
+        "source_binding": {
+            "work_request_id": bound["work_request_id"], "plan_revision_digest": bound["plan_revision"]["digest"],
+            "state_version": bound["state_binding"]["state_version"],
+            "canonical_record_digest": bound["state_binding"]["canonical_record_digest"],
+            "projection_schema_version": "observatory-attempt-projection.v1",
+            "projection_digest": "sha256:" + "e" * 64,
+        },
+        "generation": {
+            "generating_attempt_id": value["attempt_id"],
+            "adapter_configuration_fingerprint": bound["server_binding"]["adapter"]["configuration_fingerprint"],
+            "skill_id": "skill:html-diagram", "skill_version": "candidate-v1",
+        },
+        "generated_at": "2026-08-24T12:00:05Z", "freshness": {"state": "stale", "valid_through": "2026-08-24T12:00:05Z"},
+        "redaction_class": "metadata_only", "content_digest": "sha256:" + "f" * 64,
+        "evidence_refs": ["evidence:synthetic-check"],
+        "accessibility": {"color_independent_meaning": True, "reduced_motion_supported": True, "responsive_verified": True, "keyboard_accessible": True},
+    }]
+    contract.validate_attempt_receipt(value, bound)
+    assert value["visual_artifacts"][0]["freshness"]["state"] == "stale"
+    value["visual_artifacts"][0]["external_service_dependency"] = True
+    expect_refusal(lambda: contract.validate_attempt_receipt(value, bound), "no external service dependency")
+
+
 def native_transports_have_comparable_receipt_shapes():
     rows = [receipt(surface) for surface in (
         "claude_desktop", "codex_desktop", "hermes_desktop", "grok_x_native",
@@ -263,6 +292,7 @@ if __name__ == "__main__":
         ("state binding requires CAS and verified handoff checkpoint", state_binding_requires_compare_and_swap_and_handoff_checkpoint),
         ("receipts are claims and carry reset-tax metrics", receipts_are_claims_not_canonical_promotion_and_measure_reset_tax),
         ("phase binding preserves native sessions", phase_binding_preserves_native_sessions_and_reserves_evaluation_arms),
+        ("visual artifacts bind exact source state and remain stale-visible", self_contained_visual_artifact_is_bound_to_projection_and_staleness),
         ("native transports produce comparable receipt shapes", native_transports_have_comparable_receipt_shapes),
         ("lifecycle and verification states stay distinct", terminal_and_verification_states_remain_distinct),
         ("declared versus observed remains uncertain", declared_vs_observed_is_uncertain_and_filesystem_alone_is_not_a_deviation),
