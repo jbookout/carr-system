@@ -50,10 +50,16 @@ fi
 # clean report that was clean because nothing was looking.
 #
 # Usage:
-#   ops/ci.sh                  # every class, local tolerances
-#   ops/ci.sh --strict         # a SKIP is a failure (what CI runs)
-#   ops/ci.sh --only secret    # one class, by name
-#   ops/ci.sh --list           # the classes and what each one is the gate for
+#   ops/ci.sh                       # every class, local tolerances
+#   ops/ci.sh --strict              # a SKIP is a failure (what CI runs)
+#   ops/ci.sh --only secret         # one class, by name
+#   ops/ci.sh --only secret,pushfloor   # several, comma- or space-separated
+#   ops/ci.sh --list                # the classes and what each one is the gate for
+#
+# CARR_CI_RANGE=<A>..<B> narrows the scopeable classes to the commits in that
+# range instead of the whole repository. ops/githooks/pre-push sets it to the
+# refs actually being pushed. Unset -- which is what hosted CI does -- means
+# full depth, and that is the only mode any merge is judged in.
 
 set -uo pipefail
 
@@ -68,7 +74,12 @@ ONLY=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --strict) STRICT=1 ;;
-    --only)   ONLY="${2:-}"; shift ;;
+    # A LIST, not a single name. ops/githooks/pre-push selects the fast local
+    # floor by naming its classes, which is what keeps rule a8c55a47 intact:
+    # the hook chooses from THIS file's classes rather than reimplementing a
+    # cheaper suite of its own that could then drift from the one CI runs.
+    # Commas are translated to spaces so both spellings work.
+    --only)   ONLY="$ONLY $(echo "${2:-}" | tr ',' ' ')"; shift ;;
     --list)   LIST=1 ;;
     -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
     *) echo "ci.sh: unknown argument: $1" >&2; exit 64 ;;
@@ -87,10 +98,14 @@ done
 # mean this script behaved differently in its two callers — which is the exact
 # failure this one-script design exists to prevent. Plain arrays and a case
 # statement run identically on both.
-CLASS_ORDER="unit types contract gates secret dependency migration binding artifact freshness"
+# pushfloor is FIRST deliberately. It is the cheapest class and the one the
+# local pre-push hook runs, so when a push is going to be refused it is refused
+# in the first seconds rather than after the expensive classes have run.
+CLASS_ORDER="pushfloor unit types contract gates secret dependency migration binding artifact freshness"
 
 class_desc() {
   case "$1" in
+    pushfloor)  echo "seeded defect that must not leave the machine (local pre-push floor)" ;;
     unit)       echo "seeded failing unit test" ;;
     freshness)  echo "seeded stale rewrite of a generated config file" ;;
     types)      echo "seeded shape mistake in a data hand-off" ;;
@@ -427,11 +442,103 @@ PYEOF
 
 # ---------------------------------------------------------------- secret
 check_secret() {
-  if run_quiet "$LOGDIR/secret.log" "$PY" ops/ci-secret-scan.py; then
-    ok secret "no shaped credential in tracked files"
+  # SCOPE IS A FLAG ON ONE SCANNER, never a second scanner (rule a8c55a47).
+  # Unset CARR_CI_RANGE -- hosted CI -- reads every tracked file, which is the
+  # depth a merge is judged at. Set, it reads only the blobs the range
+  # introduces, which is O(what is being pushed) rather than O(repo): 1,514
+  # files read on this tree today versus the handful in a normal branch.
+  local scope_args="" scope_words="tracked files"
+  if [ -n "${CARR_CI_RANGE:-}" ]; then
+    scope_args="--range $CARR_CI_RANGE"
+    scope_words="blobs pushed in $CARR_CI_RANGE"
+  fi
+  # shellcheck disable=SC2086  # scope_args is a deliberate two-word argument
+  if run_quiet "$LOGDIR/secret.log" "$PY" ops/ci-secret-scan.py $scope_args; then
+    ok secret "no shaped credential in $scope_words"
   else
     cat "$LOGDIR/secret.log" >&2
-    bad secret "credential-shaped content found"
+    bad secret "credential-shaped content found in $scope_words"
+  fi
+}
+
+# THE LOCAL PRE-PUSH FLOOR, added 2026-08-23 by the gates-audit council.
+#
+# WHAT CHANGED AND WHY IT IS A COST TRADE, NOT A DEFECT FINDING. Until today
+# ops/githooks/pre-push ran the WHOLE ten-class suite locally on every push:
+# minutes of this Mac's wall-clock, paid by every one of the ~11 implementation
+# sessions running in parallel, and paid again by hosted CI afterwards. That was
+# correct when it was written. Before GitHub Pro (2026-08-14) a red hosted run
+# could not BLOCK anything, so the local hook WAS the merge envelope. Pro closed
+# that gap: `ops/ci.sh --strict` on GitHub is now the required status check on
+# main and nothing merges red. The full local run became leftover
+# defence-in-depth, and the council's second chair was explicit that retiring it
+# is a cost decision after Pro -- not a claim that the old design was broken.
+#
+# So the full strict suite stays exactly where it is, hosted, and this class is
+# what remains local: the defects whose cheapest moment to catch is BEFORE the
+# push leaves, and which cost seconds rather than minutes to look for.
+#
+# THE FLOOR IS DELIBERATELY SHORT and every member earns its place by the same
+# test -- it is cheap, it reads repository content only (no database, no
+# network, no machine state), and catching it after the push would cost more
+# than catching it here:
+#
+#   * gate-integrity --strict: a gate edited without its baseline re-bless.
+#     Catching this hosted means every session that pulls meanwhile boots under
+#     a GATE INTEGRITY FAILURE banner it can do nothing about (2026-08-12, and
+#     again 2026-08-14).
+#   * path shape on the pushed paths: rule 0e22e34a can only be enforced without
+#     rewriting history before the path is published.
+#   * hook-env isolation: this class is invoked BY pre-push, so the statement
+#     that strips GIT_DIR before CI runs is part of the machinery protecting the
+#     tree right now. It destroyed local main on 2026-08-14 when it was absent.
+#   * selftest git isolation, when present: the same argument, for the suite.
+#
+# NOT HERE, on purpose: unit, types, contract, migration, dependency, binding,
+# artifact, freshness, and the 252-suite gates class. Every one of them is a
+# real check and every one of them still runs -- hosted, strict, as the gate on
+# the merge. What they are not is worth minutes of a contended laptop on a push
+# that has not been reviewed yet.
+check_pushfloor() {
+  local failures=""
+
+  run_quiet "$LOGDIR/pushfloor-gate-integrity.log" \
+    "$PY" hooks/gate-integrity.py --strict \
+    || { failures="$failures gate-integrity"
+         tail -12 "$LOGDIR/pushfloor-gate-integrity.log" >&2; }
+
+  # PATH SHAPE, on the paths this push actually adds. The pre-commit hook checks
+  # the index and this checks the range, but both call the SAME script with the
+  # same rule table -- --paths is the seam it already exposed for its selftest.
+  # Without a range there is nothing new to judge, so this is silent rather than
+  # inventing a whole-repo verdict the rule was never written for (it exempts
+  # established and historical paths by design).
+  if [ -n "${CARR_CI_RANGE:-}" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
+    local added
+    added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null)"
+    if [ -n "$added" ]; then
+      # shellcheck disable=SC2086  # word splitting is the argument list
+      run_quiet "$LOGDIR/pushfloor-path-hygiene.log" \
+        "$PY" ops/githooks/path-hygiene-check.py --paths $added \
+        || { failures="$failures path-hygiene"
+             tail -12 "$LOGDIR/pushfloor-path-hygiene.log" >&2; }
+    fi
+  fi
+
+  # The isolation checks, each skipped rather than failed when absent, so this
+  # class behaves the same on a branch cut before they existed.
+  local iso
+  for iso in ops/hook-env-isolation-selftest.py ops/selftest-git-isolation-check.py; do
+    [ -f "$iso" ] || continue
+    local ibase; ibase="$(basename "$iso")"
+    run_quiet "$LOGDIR/pushfloor-$ibase.log" "$PY" "$iso" \
+      || { failures="$failures $ibase"; tail -12 "$LOGDIR/pushfloor-$ibase.log" >&2; }
+  done
+
+  if [ -n "$failures" ]; then
+    bad pushfloor "failed:$failures"
+  else
+    ok pushfloor "baseline blessed, path shape, hook-env isolation"
   fi
 }
 
@@ -826,13 +933,25 @@ echo "carr-system CI — $(git rev-parse --short HEAD) on $(git rev-parse --abbr
 [ "$STRICT" = "1" ] && echo "  strict: a SKIP counts as a failure"
 echo
 
-if [ -n "$ONLY" ] && [ -z "$(class_desc "$ONLY")" ]; then
-  echo "ci.sh: no such class: $ONLY (try --list)" >&2
-  exit 64
-fi
+# EVERY name is validated, not just the first. A typo inside a list would
+# otherwise select the classes it spelled right and silently drop the rest --
+# a suite reporting green because nothing was looking, which is the exact shape
+# of the 2026-08-13 runaway-job finding this file already guards elsewhere.
+for _want in $ONLY; do
+  if [ -z "$(class_desc "$_want")" ]; then
+    echo "ci.sh: no such class: $_want (try --list)" >&2
+    exit 64
+  fi
+done
+
+# Does $1 appear in the (space-separated) $ONLY list? Padded on both sides so
+# "secret" cannot match a class named "secrets".
+selected() {
+  case " $ONLY " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
 
 for c in $CLASS_ORDER; do
-  if [ -n "$ONLY" ] && [ "$ONLY" != "$c" ]; then continue; fi
+  if [ -n "$ONLY" ] && ! selected "$c"; then continue; fi
   # Snapshot the class name: check functions reuse the global `c` as their own
   # loop variable (check_migration's psql probe at least), so after "check_$c"
   # returns, $c may name whatever that inner loop ended on. The very first CI
@@ -856,6 +975,34 @@ echo
 echo "ci-timing:${CLASS_TIMINGS}"
 [ -n "$FAILED_CLASSES" ]  && echo "ci-failed-classes:${FAILED_CLASSES}"
 [ -n "$SKIPPED_CLASSES" ] && echo "ci-skipped-classes:${SKIPPED_CLASSES}"
+
+# THE CONFIRM-OR-KILL LINE for the 2026-08-23 push-path change, and the reason
+# it is emitted here rather than measured by hand later.
+#
+# That change moved eight of the ten classes off the local push path and left
+# them hosted-only. The council attached one acceptance test to it: count, over
+# the first week, the hosted failures that the OLD local-full run would have
+# caught before the push. A small count means the relocation was free and the
+# minutes were sediment. A large one means local-full was doing real work and
+# the change should be reverted -- and that decision is worthless if the number
+# has to be reconstructed from memory or from forty job logs.
+#
+# So every red run states its own verdict, in one greppable line, at the moment
+# it has the facts. `relocated` names classes that used to be caught locally and
+# now are not; `floor` names classes the local hook still runs, whose failure
+# means the floor let something past rather than that the relocation cost
+# anything. ops/push-floor-telemetry.py adds these up across runs.
+if [ -n "$FAILED_CLASSES" ]; then
+  FLOOR_CLASSES="pushfloor secret"
+  _floor=""; _relocated=""
+  for f in $FAILED_CLASSES; do
+    case " $FLOOR_CLASSES " in
+      *" $f "*) _floor="$_floor $f" ;;
+      *)        _relocated="$_relocated $f" ;;
+    esac
+  done
+  echo "ci-floor-verdict: floor:${_floor:- none} relocated:${_relocated:- none}"
+fi
 
 # KNOWN GAPS. A class that is red because a DESIGN RULING is outstanding, not
 # because of a bug someone could fix. It still runs, it still prints its failure

@@ -35,7 +35,14 @@ if [ "$CARR_ALLOW_MAIN_PUSH" = "1" ]; then
   exit 0
 fi
 
-while read -r local_ref local_sha remote_ref remote_sha; do
+# STDIN IS READ ONCE, HERE. Git streams the pushed refs on stdin and a hook gets
+# exactly one pass over them; the owner check below used to consume the stream,
+# which was fine when nothing after it needed the refs. The quality gate now
+# derives the pushed COMMIT RANGE from them, so both readers replay this
+# variable instead of the pipe.
+REFS="$(cat)"
+
+printf '%s\n' "$REFS" | while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$remote_ref" = "$PROTECTED" ] || continue
 
   ME="$(git config user.email 2>/dev/null)"
@@ -79,7 +86,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 
 EOF
   exit 1
-done
+done || exit 1
 
 # ---------------------------------------------------------------------------
 # PROGRAM 2 QUALITY GATE, added 2026-08-13.
@@ -91,9 +98,33 @@ done
 # the only place a failing check actually stops something, so a red tree does not
 # leave the machine.
 #
-# IT CALLS ops/ci.sh AND DEFINES NO CHECKS OF ITS OWN. Same script GitHub runs
-# (rule a8c55a47). A check added there appears here for free and cannot exist in
-# one path and not the other.
+# WHAT IT RUNS NOW, AND WHY IT IS LESS THAN IT WAS (2026-08-23 gates council).
+# The paragraph above was written on 2026-08-13, when it was true that "a red CI
+# run cannot BLOCK anything" because the repo was private on a free plan. GitHub
+# Pro was enabled 2026-08-14 and `ops/ci.sh --strict` is now the REQUIRED status
+# check on main: nothing merges red, server-side, whatever this file does. The
+# full ten-class local run stopped being the merge envelope that day and became
+# defence-in-depth paid for in the scarcest resource this shop has -- wall-clock
+# on one contended Mac, times the eleven implementation sessions pushing from it.
+#
+# The council's second chair was explicit that this is a COST TRADE and not a
+# defect finding: the old design was right for its date. What it costs today is
+# minutes per push (the gates class alone is 204 seconds, 252 selftest suites)
+# and what it buys, post-Pro, is catching hosted-CI failures slightly earlier.
+#
+# So the split is now:
+#   * HOSTED keeps the full strict ten-class suite, unchanged, as the gate on
+#     the merge. Nothing was deleted and nothing stopped being checked.
+#   * LOCAL keeps the floor -- the classes that are cheap AND whose failure is
+#     dramatically more expensive to discover later. See check_pushfloor() in
+#     ops/ci.sh for why each member is in it.
+#
+# IT STILL CALLS ops/ci.sh AND DEFINES NO CHECKS OF ITS OWN (rule a8c55a47).
+# That is why the subset is expressed as `--only <classes>` rather than as a
+# list of scripts here: a hand-rolled fast suite in this file would be a second
+# implementation, and it would drift from the one CI runs the first time someone
+# added a check to only one of them. The hook chooses classes; it does not
+# define checks.
 #
 # NOT --strict, deliberately. On a laptop there is no throwaway Postgres, so the
 # migration class SKIPs, and under --strict a skip is a failure. Failing every
@@ -112,7 +143,39 @@ if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
   if [ "$CARR_SKIP_CI" = "1" ] 2>/dev/null; then
     echo "  pre-push: CARR_SKIP_CI=1 — quality checks skipped for this command" >&2
   else
-    echo "  pre-push: running ops/ci.sh before this push leaves the machine…" >&2
+    # THE PUSHED RANGE, which is what makes the secret scan cost O(this push)
+    # instead of O(repository): 1,514 files were read on every push before this.
+    # Deliberately conservative -- anything it cannot work out exactly leaves
+    # CARR_CI_RANGE unset, and an unset range means the FULL scan, so the
+    # failure direction is "slower", never "unchecked".
+    ZERO="0000000000000000000000000000000000000000"
+    CARR_CI_RANGE=""
+    RANGE_COUNT=0
+    while read -r l_ref l_sha r_ref r_sha; do
+      [ -n "$l_ref" ] || continue
+      [ "$l_sha" = "$ZERO" ] && continue        # a deletion ships no content
+      RANGE_COUNT=$((RANGE_COUNT+1))
+      if [ -n "$r_sha" ] && [ "$r_sha" != "$ZERO" ]; then
+        CARR_CI_RANGE="$r_sha..$l_sha"
+      elif git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+        CARR_CI_RANGE="origin/main..$l_sha"     # a new branch
+      else
+        CARR_CI_RANGE=""
+      fi
+    done <<EOF
+$REFS
+EOF
+    # More than one ref in one push: the ranges do not compose into a single
+    # expression, so take the whole-tree scan rather than silently checking one
+    # branch and calling it all of them.
+    [ "$RANGE_COUNT" -gt 1 ] && CARR_CI_RANGE=""
+    export CARR_CI_RANGE
+
+    if [ -n "$CARR_CI_RANGE" ]; then
+      echo "  pre-push: checking $CARR_CI_RANGE (local floor; full strict suite runs hosted)…" >&2
+    else
+      echo "  pre-push: running the local floor (full strict suite runs hosted)…" >&2
+    fi
     # STRIP THE HOOK'S GIT ENVIRONMENT BEFORE RUNNING CI, and this is not hygiene —
     # it is the fix for a bug that destroyed local main on 2026-08-14.
     #
@@ -148,13 +211,25 @@ if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
     # ops/git-env-selftest.py fails if this list stops covering
     # git_env.GIT_LOCATION_VARS, so the two cannot drift even though the words
     # appear twice.
-    env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX \
-        -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
-        -u GIT_COMMON_DIR -u GIT_NAMESPACE -u GIT_CEILING_DIRECTORIES \
-        -u GIT_WORK_TREE_OVERRIDE -u GIT_CONFIG -u GIT_CONFIG_GLOBAL \
-        -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_COUNT \
-        sh -c 'exec "$0"' "$REPO_ROOT/ops/ci.sh"
-    if [ $? -ne 0 ]; then
+    # The run is TEE'd so the session still watches it live while the text is
+    # also kept for the attribution pass below. A pipeline reports the exit
+    # status of its LAST command -- tee's, which is always 0 -- so ci.sh's own
+    # status is carried out through a file. Getting this wrong would turn every
+    # red push green, which is the one bug this hook must not have.
+    CI_LOG="$(mktemp -t carr-prepush-log)"
+    CI_RC_FILE="$(mktemp -t carr-prepush-rc)"
+    {
+      env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX \
+          -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+          -u GIT_COMMON_DIR -u GIT_NAMESPACE -u GIT_CEILING_DIRECTORIES \
+          -u GIT_WORK_TREE_OVERRIDE -u GIT_CONFIG -u GIT_CONFIG_GLOBAL \
+          -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_COUNT \
+          sh -c 'exec "$0" --only pushfloor,secret' "$REPO_ROOT/ops/ci.sh"
+      echo $? > "$CI_RC_FILE"
+    } 2>&1 | tee "$CI_LOG" >&2
+    CI_RC="$(cat "$CI_RC_FILE" 2>/dev/null || echo 1)"
+    rm -f "$CI_RC_FILE"
+    if [ "$CI_RC" -ne 0 ]; then
       cat >&2 <<'EOF'
 
   ────────────────────────────────────────────────────────────────
@@ -165,15 +240,48 @@ if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
       ops/ci.sh --only <class>
       ops/ci.sh --list
 
+  This is the LOCAL FLOOR only — the full strict suite runs hosted and
+  is the gate on the merge. A failure here is one of the few things
+  cheaper to fix before the push than after it.
+
   Fix it, or say out loud that you are pushing anyway:
 
       CARR_SKIP_CI=1 git push
 
-  ────────────────────────────────────────────────────────────────
-
 EOF
+      # WHOSE FILE IS IT? A refusal that names a path and stops there is one a
+      # session on this machine cannot act on: thirty-five worktrees share one
+      # canonical checkout, and on 2026-08-09 the cost of guessing wrong was
+      # another session's work deleted. So any path this failure named that
+      # belongs to somebody ELSE is attributed here by name.
+      #
+      # A REPORTER, NOT A GATE. It runs only on a failure that already happened,
+      # it cannot change the outcome, and if it breaks the refusal above still
+      # stands on its own -- which is why its output is best-effort and its own
+      # exit status is discarded.
+      if [ -x "$REPO_ROOT/ops/worktree-attribution.py" ] \
+          && command -v python3 >/dev/null 2>&1; then
+        MINE="$(basename "$REPO_ROOT")"
+        FOREIGN="$(grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+' "$CI_LOG" 2>/dev/null \
+                   | sort -u | head -40 \
+                   | xargs -r python3 "$REPO_ROOT/ops/worktree-attribution.py" \
+                     --porcelain 2>/dev/null \
+                   | awk -F'\t' -v me="$MINE" '$2 != "unknown" && $3 != me && $3 != "-"')"
+        if [ -n "$FOREIGN" ]; then
+          echo "  Some of those paths are not this worktree's:" >&2
+          printf '%s\n' "$FOREIGN" \
+            | awk -F'\t' '{printf "      %s\n          belongs to session %s (%s)\n", $1, $3, $4}' >&2
+          echo >&2
+          echo "  Do not delete or revert those — ask that session, or read its branch." >&2
+          echo >&2
+        fi
+      fi
+      echo "  ────────────────────────────────────────────────────────────────" >&2
+      echo >&2
+      rm -f "$CI_LOG"
       exit 1
     fi
+    rm -f "$CI_LOG"
   fi
 fi
 
