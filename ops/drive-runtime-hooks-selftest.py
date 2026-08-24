@@ -92,7 +92,11 @@ def main() -> int:
           hooks_config.count("/usr/bin/python3 {{REPO}}/hooks/run-record-gate.py drift-") == 2
           and "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py" not in hooks_config)
 
-    with tempfile.TemporaryDirectory(dir=REPO) as tmp:
+    # Scratch outside the working tree: TemporaryDirectory cleans up only on a
+    # normal unwind, so rooting it at REPO left untracked debris in the
+    # repository root whenever a run was killed or timed out. The fixture copies
+    # everything it needs into the tree it builds, so REPO bought it nothing.
+    with tempfile.TemporaryDirectory(prefix="drive-runtime-hooks-") as tmp:
         root = Path(tmp)
         for directory in (root / "hooks", root / "lib", root / ".venv" / "bin"):
             directory.mkdir(parents=True, exist_ok=True)

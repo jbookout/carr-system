@@ -43,6 +43,7 @@ Run: .venv/bin/python ops/deploy-ledger-selftest.py
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -94,7 +95,23 @@ def write_executable(path: Path, body: str) -> None:
 
 def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subprocess.CompletedProcess[str]:
     """Run the Production promotion path with every external boundary mocked."""
-    with tempfile.TemporaryDirectory(prefix="deploy-ledger-", dir=REPO) as raw:
+    # SCRATCH LIVES OUTSIDE THE WORKING TREE, and that is not a style
+    # preference. TemporaryDirectory only cleans up on a normal unwind, so a
+    # killed CI run, a timeout, or a SIGINT left `deploy-ledger-<random>/`
+    # sitting in the repository root as untracked debris — observed 2026-08-23
+    # in worktree vigorous-thompson-47a176 after a pkill of `ops/ci.sh --only
+    # gates`. In a checkout that regularly holds ANOTHER live session's work
+    # (rule 308ef1de) that debris reads as someone else's in-flight edit and
+    # rides along in the next blanket staging sweep.
+    #
+    # Nothing here wanted the repository. The fixture writes a whole fake repo
+    # (bin/, tools/, .venv/, mcp-server/) and runs the script with cwd=root, so
+    # the only thing REPO contributed was ambient git: `git status --porcelain
+    # -- mcp-server/ dealroom/` at deploy-worker.sh:282 is reached even on the
+    # --promote-version path, and inside the tree it answered from the REAL
+    # repository. Outside it, git exits nonzero, the `|| true` yields an empty
+    # list, and the check sees the clean fixture it always meant to see.
+    with tempfile.TemporaryDirectory(prefix="deploy-ledger-") as raw:
         root = Path(raw)
         script = root / "bin" / "deploy-worker.sh"
         write_executable(script, SCRIPT.read_text(encoding="utf-8"))
@@ -169,6 +186,43 @@ def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subp
              "--recovery-strategy", "rollback",
              "--rollback-plan-ref", "runbook:rollback-v1"],
             cwd=root, env=env, capture_output=True, text=True, check=False)
+
+
+# ------------------------------------------------------------- debris fixtures
+# WHY A KILL TEST AND NOT A CODE READING. The defect this guards against is not
+# "the fixture writes to the wrong place" — it is "the fixture's cleanup never
+# runs". TemporaryDirectory removes its tree on a normal unwind, and even on
+# SIGINT, because the finaliser runs while the exception unwinds. It does NOT
+# run on SIGKILL: a pkill, an OOM kill, or a CI step timeout leaves whatever was
+# created exactly where it was created. That is how a `deploy-ledger-<random>/`
+# tree came to sit in the repository root on 2026-08-23, looking to `git status`
+# like another session's in-flight work. So this kills a real process holding a
+# real fixture tree, and then looks at the repository.
+KILLED_FIXTURE_CHILD = textwrap.dedent('''
+    import sys
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="deploy-ledger-") as raw:
+        print(raw, flush=True)
+        sys.stdin.read()
+''')
+
+
+def survey_after_kill() -> tuple[Path | None, list[str]]:
+    """Build a scratch tree the way exercise_program5_failure() does, SIGKILL the
+    process holding it, and report that tree plus anything new in the repository
+    root. Deterministic by construction: the parent blocks until the child has
+    announced its path, so there is no sleep and nothing to race."""
+    before = {entry.name for entry in REPO.iterdir()}
+    child = subprocess.Popen([sys.executable, "-c", KILLED_FIXTURE_CHILD],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    announced = (child.stdout.readline() if child.stdout else "").strip()
+    child.kill()
+    child.wait()
+    leaked = sorted({entry.name for entry in REPO.iterdir()} - before)
+    # An empty announcement means the child never got as far as creating the
+    # tree. Report None rather than Path(""), which is Path(".") — that resolves
+    # to the repository and would make every check below pass vacuously.
+    return (Path(announced) if announced else None), leaked
 
 
 def main() -> int:
@@ -273,6 +327,25 @@ def main() -> int:
     check("promotion temp files are portable across macOS and GNU mktemp",
           "mktemp -t" not in text and text.count(".XXXXXX") >= 4,
           "use an explicit TMPDIR template ending in six Xs")
+
+    # ---- an interrupted run must leave the working tree exactly as it found it
+    survivor, leaked = survey_after_kill()
+    # THE ANTI-VACUITY CHECK, and it has to come first. If the killed child had
+    # somehow cleaned up, the two checks after this one would pass while proving
+    # nothing at all. They are only evidence once the leak is real.
+    check("a SIGKILLed fixture really does skip its own cleanup",
+          survivor is not None and survivor.exists(),
+          "the child left nothing behind, so the debris checks below are vacuous "
+          f"(announced {survivor})")
+    check("an interrupted run drops no debris in the repository root",
+          leaked == [],
+          f"a killed run added {leaked} to the working tree; untracked debris in a "
+          "shared checkout reads as another session's in-flight work")
+    check("the scratch tree is not created anywhere under the repository",
+          survivor is not None and REPO not in survivor.resolve().parents,
+          f"scratch resolved to {survivor}, which is inside {REPO}")
+    if survivor is not None and survivor.exists():
+        shutil.rmtree(survivor, ignore_errors=True)
 
     print(f"\ndeploy-ledger-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
     if FAILED:

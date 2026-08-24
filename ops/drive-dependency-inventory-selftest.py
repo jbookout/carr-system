@@ -31,7 +31,12 @@ def entry(identifier: str, source: str, *, kind: str = "normal_runtime") -> dict
 
 
 passed = 0
-with tempfile.TemporaryDirectory(dir=ROOT) as temp:
+# Scratch outside the working tree: a killed run must not leave untracked
+# debris in the repository root. This fixture git-inits its own tree below, so
+# `git rev-parse --show-toplevel` resolves to the fixture rather than to the
+# enclosing checkout -- the git-ls-files path stays exercised, and nesting a
+# throwaway repository inside the real one stops being necessary.
+with tempfile.TemporaryDirectory(prefix="drive-dependency-inventory-") as temp:
     root = Path(temp)
     (root / "ops/config").mkdir(parents=True)
     (root / "bin").mkdir()

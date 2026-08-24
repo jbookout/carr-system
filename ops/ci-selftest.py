@@ -698,6 +698,50 @@ def test_gates_treats_only_78_as_not_configured():
         check(f"the gates loop does not weaken with {bad!r}", bad not in body, bad)
 
 
+# ------------------------------------------- no fixture roots scratch in REPO
+# THE SHAPE, not the one file. Five suites independently reached for
+# a TemporaryDirectory whose dir= names the repository root, because it is the
+# shortest way to get
+# a scratch tree, and every one of them was wrong for the same reason:
+# TemporaryDirectory cleans up on a normal unwind but NOT on SIGKILL, so a
+# killed CI run, an OOM kill, or a step timeout leaves `<prefix>-<random>/`
+# sitting in the repository root. On 2026-08-23 a pkill of `ops/ci.sh --only
+# gates` did exactly that in worktree vigorous-thompson-47a176.
+#
+# That debris is not cosmetic in THIS repo. The working tree regularly holds
+# another live session's work (rule 308ef1de), so untracked directories read as
+# someone else's in-flight edits, and the repo-root globs other checks use can
+# match them. deploy-ledger-selftest.py proves the behaviour by killing a real
+# process; this check keeps the shape from coming back anywhere else.
+#
+# Deliberately narrow: it flags only a dir= argument naming a repository-root
+# constant. The legitimate uses of dir= in this repo all name a DESTINATION
+# directory (tools/rotate-credential.py, hooks/delegation-gate.py,
+# pipelines/doctrine_mirror.py) so that mkstemp + rename stays atomic on one
+# filesystem, and those must keep working.
+ROOTED_SCRATCH = re.compile(
+    r"(?:mkdtemp|mkstemp|TemporaryDirectory|NamedTemporaryFile)"
+    r"\s*\([^)]*\bdir\s*=\s*(?:REPO|ROOT|REPO_ROOT)\b")
+
+
+def test_no_fixture_roots_its_scratch_tree_in_the_repo():
+    scanned, offenders = 0, []
+    for pattern in ("ops/*.py", "tools/*.py", "hooks/*.py", "pipelines/*.py"):
+        for path in sorted(REPO.glob(pattern)):
+            scanned += 1
+            source = path.read_text(encoding="utf-8", errors="replace")
+            for found in ROOTED_SCRATCH.finditer(source):
+                line = source.count("\n", 0, found.start()) + 1
+                offenders.append(f"{path.relative_to(REPO)}:{line}")
+    # A scan that silently matched nothing would pass forever. Prove it looked.
+    check("the rooted-scratch scan actually reads the tree", scanned > 100,
+          f"only {scanned} files scanned; the globs have gone stale")
+    check("no fixture roots its scratch tree inside the repository",
+          not offenders,
+          "; ".join(offenders) + " — use the system temp dir (drop dir=) so a "
+          "killed run cannot leave untracked debris in a shared checkout")
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -714,7 +758,8 @@ def main():
                test_known_gaps_all_expire,
                test_no_env_claims_a_production_hostname,
                test_mypy_pin_acceptance_is_narrow,
-               test_gates_treats_only_78_as_not_configured):
+               test_gates_treats_only_78_as_not_configured,
+               test_no_fixture_roots_its_scratch_tree_in_the_repo):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip

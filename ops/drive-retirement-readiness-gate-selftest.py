@@ -14,7 +14,11 @@ GATE = ROOT / "ops" / "drive-retirement-readiness-gate.py"
 PYTHON = sys.executable
 
 passed = 0
-with tempfile.TemporaryDirectory(dir=ROOT) as temp:
+# Scratch outside the working tree: a killed run must not leave untracked
+# debris in the repository root. The gate is invoked with an explicit --root,
+# and _tracked_paths() takes its non-repository fallback either way, so the
+# location of this fixture was never load-bearing.
+with tempfile.TemporaryDirectory(prefix="drive-retirement-readiness-") as temp:
     root = Path(temp)
     (root / "ops/config").mkdir(parents=True)
     (root / "ops/config/drive-dependencies.schema.v1.json").write_text(
