@@ -38,6 +38,8 @@ class Context:
 class Cursor:
     def __init__(self):
         self.one = None
+        self.all: list = []
+        self.recovery_lookups: list[str] = []
         self.run_sql = ""
         self.run_params = ()
         self.release = ("release-1", "service-1", 1000,
@@ -59,8 +61,24 @@ class Cursor:
             self.run_sql = sql
             self.run_params = params
             self.one = ("run-1",)
+        elif ("from ops.incident" in normalized
+              and "starts_with(signature, %s)" in normalized):
+            # Since migration 0286 a SUCCEEDED run asks whether this job has any
+            # open incident to clear. These receipts are all successes, so they
+            # all ask. The answer here is "none", which is the shape that
+            # matters for this file: with no open incident the recovery path
+            # reads once and stops, so it can never disturb the receipt these
+            # checks are about. ops/incident-fingerprint-selftest.py and
+            # ops/incident-recovery-local-pg-acceptance.py own the case where
+            # the answer is not empty.
+            self.recovery_lookups.append(params[0])
+            self.all = []
+            self.one = None
         else:
             raise AssertionError(f"unexpected SQL: {normalized[:180]}")
+
+    def fetchall(self):
+        return self.all
 
     def fetchone(self):
         return self.one
@@ -145,6 +163,13 @@ def main() -> int:
           ended - started == timedelta(milliseconds=999))
     check("1c. run is bound to the exact release and approved budget",
           cursor.run_params[3] == "release-1" and cursor.run_params[12] == 1000)
+    # Migration 0286 made a green run ask whether this job has an open incident
+    # to clear. It must ask about THIS job and no other: the lookup is a prefix
+    # over the fingerprint, so a service or run key that leaked into it would
+    # quietly clear a different service's incidents on somebody else's success.
+    check("1d. a green run asks about its own job's open incidents, and only its own",
+          cursor.recovery_lookups == ["carr-mcp|production|performance.release|"],
+          f"lookups={cursor.recovery_lookups}")
 
     check("2. an over-budget run cannot claim succeeded",
           module.cmd_run(run_args(duration_ms=1001)) == 2)
