@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -98,6 +99,37 @@ def main() -> int:
             directory.mkdir(parents=True, exist_ok=True)
         for name in ("run-record-gate.py", "drift-claim-gate.py", "drift-assertion-gate.py"):
             shutil.copy2(REPO / "hooks" / name, root / "hooks" / name)
+        # THE TIMEOUT CASE IS CALIBRATED, NOT HARD-CODED, and this is the second
+        # time that distinction has cost something.  The fixture interpreter
+        # below fakes a hang by sleeping, and the launcher only fails closed if
+        # that sleep OUTLASTS its probe ceiling.  Those two numbers were written
+        # independently — `sleep 4` against a ceiling of 3 — so raising the
+        # ceiling to 30s on 2026-08-23 left the sleep finishing comfortably
+        # inside it.  No timeout fired, the launcher returned 0, and this check
+        # reported a lost safety property that was never lost: the TimeoutExpired
+        # branch was intact the whole time.  A stale stimulus reads exactly like
+        # a real regression, and that misread cost a push and an hour.
+        #
+        # So the ceiling is now driven FROM HERE.  The copy in the fixture tree
+        # gets a deliberately tiny ceiling and the sleep is derived from it, one
+        # second longer.  The production constant can be tuned to any value
+        # without touching this test, the timeout still genuinely fires, and the
+        # case costs two seconds instead of the thirty-one a matching sleep
+        # would now demand.
+        probe_ceiling = 1
+        launcher = root / "hooks" / "run-record-gate.py"
+        patched, substitutions = re.subn(r"(?m)^PROBE_TIMEOUT_SECONDS = \d+$",
+                                         f"PROBE_TIMEOUT_SECONDS = {probe_ceiling}",
+                                         launcher.read_text(), count=1)
+        # A rename of that constant would make the substitution a silent no-op,
+        # leaving the fixture sleeping under the real 30s ceiling and this case
+        # passing for the wrong reason.  Refuse instead of testing nothing.
+        if substitutions != 1:
+            raise RuntimeError(
+                "could not set PROBE_TIMEOUT_SECONDS in the fixture copy of "
+                "run-record-gate.py — the constant was renamed or removed, and "
+                "the timeout case below would silently stop exercising a timeout")
+        launcher.write_text(patched)
         (root / "hooks" / "chat-lint-gate.py").write_text('''
 import json
 def read_tail(path):
@@ -127,9 +159,9 @@ class Connection:
 def _connect(): return Connection()
 ''')
         interpreter = root / ".venv" / "bin" / "python"
-        interpreter.write_text('''#!/bin/sh
-if [ "${FIXTURE_PSYCOG_TIMEOUT:-0}" = 1 ] && [ "$1" = -c ]; then sleep 4; fi
-if [ "$1" = -c ]; then [ "${FIXTURE_PSYCOG_OK:-1}" = 1 ] && exit 0 || exit 1; fi
+        interpreter.write_text(f'''#!/bin/sh
+if [ "${{FIXTURE_PSYCOG_TIMEOUT:-0}}" = 1 ] && [ "$1" = -c ]; then sleep {probe_ceiling + 1}; fi
+if [ "$1" = -c ]; then [ "${{FIXTURE_PSYCOG_OK:-1}}" = 1 ] && exit 0 || exit 1; fi
 export FIXTURE_FIXED_INTERPRETER=1
 exec /usr/bin/python3 "$@"
 ''')
