@@ -43,9 +43,10 @@ FOUR ALLOW CLASSES, all narrow, none self-granted by the session:
      vocabulary about the world rather than about the system.
   2. PROTECTED CLASS — client-facing, public-facing, money, irreversible. His by
      rule; must still reach him.
-  3. HE ASKED — his own last turn requested a choice or options (/options,
-     "what are my options", "which would you recommend", "ask me"). Read off
-     his keystrokes, never assertable by the session.
+  3. HE ASKED — one of his own turns, inside a still-open window, requested a
+     choice or options (/options, "what are my options", "which would you
+     recommend", "ask me", "walk him through"). Read off his keystrokes, never
+     assertable by the session. See THE CONSENT WINDOW below.
   4. BOUNDARY CHANGE — anything that weakens a gate, widens permissions, edits
      hooks, or expands what the system may do unattended. See below; this is
      the one place the council overruled Joe's own framing, on purpose.
@@ -72,6 +73,70 @@ touch record-defect or any other loop kind: drift-claim-gate's rule that a
 defect must always be filable stands, and a backlog/bell/dated loop is work,
 not a parked question. Only the two spellings that literally ask Joe to decide
 are classified.
+
+═══════════════════════════════════════════════════════════════════════════════
+THE CONSENT WINDOW (allow-class 3), widened 2026-08-23 on Joe's approval
+═══════════════════════════════════════════════════════════════════════════════
+THE DEFECT IT FIXES, measured by firing this hook against built transcripts
+rather than inferred from refusal text. Class 3 used to test HUMAN_WANTS_CHOICE
+against Joe's SINGLE most recent turn. In a multi-item interview HE
+COMMISSIONED, his commissioning turn is the most recent one only for item 1:
+
+    commission only (item 1)                -> allow
+    commission + TAP answers (tool_result)  -> allow, any number of them
+    commission + ONE TYPED answer           -> DENY        <- the break
+
+Taps survive because a tap arrives as a `tool_result` block inside a record
+whose type is "user", and human_text() keeps only `type == "text"` blocks, so a
+tap flattens to "" and is skipped. Joe TYPING is what killed it: one answer, one
+aside, one correction became the last turn, matched nothing, and class 3 was
+gone for the rest of the run.
+
+That is why network-debrief was genuinely exposed even though its taps worked —
+the skill deliberately MIXES the two ("reserve free-text for the open
+questions"), so every typed story closed the window on every tap after it.
+Measured separately and worth saying plainly: that skill's own verdicts
+(PURSUE/TABLE, stage change, A/B/C/F delivery) all classify as FACT CAPTURE on
+their own and never needed class 3. The exposure was for taps whose SUBJECT is
+internal.
+
+WHAT CHANGED, AND WHAT DID NOT. HUMAN_WANTS_CHOICE gained third-person phrasing
+(a separate widening, approved separately — see conduct_patterns.py). The window
+changes only the TIME DIMENSION: the grant is read from a bounded window of his
+turns instead of the last turn alone.
+
+STRICTLY ADDITIVE BY CONSTRUCTION. At distance 0 the window returns exactly what
+the old code returned, with no TTL applied, so no call that was allowed before
+is denied now. Every difference is a call that was denied and is now allowed.
+That direction is the whole reason this needed Joe rather than a session.
+
+NO STATE FILE, ON PURPOSE, and this is a security argument rather than a
+convenience one. A consent token under out/ is one Bash redirect away from the
+session minting its own consent. The transcript is written by the harness and is
+the only record here a session cannot forge, so the window is re-read from it
+every time.
+
+FOUR INDEPENDENT CLOSES, so no single bound has to be trusted alone:
+  1. A NON-ANSWER HUMAN TURN. Every intervening turn must be answer-shaped —
+     one line, at most ANSWER_MAX_WORDS words. Joe typing a new paragraph of
+     instruction ends the interview and the consent with it. Deliberately crude
+     and deliberately biased toward closing: a false close costs one
+     re-commission, a false open is laundering.
+  2. TURN BUDGET — MAX_TURNS of his turns back, not a whole session.
+  3. WALL CLOCK — TTL_MINUTES between the grant and now.
+  4. READ BUDGET — only the last TAIL_BYTES of transcript is read. Past that the
+     window is simply not found, which denies. Failing toward refusal is the
+     safe direction for a bound whose only job is to cap PreToolUse latency.
+
+THE RESIDUAL GAP, RECORDED RATHER THAN PAPERED OVER. Inside an open window this
+does NOT check that the current ask belongs to the commissioned interview, so a
+session running a legitimate 17-item walkthrough could slip one unrelated
+internal question in among the items and have it allowed. The four bounds cap
+the blast radius; they do not close that. Closing it means fingerprinting the
+first licensed ask (its option labels, read from the assistant's own tool_use
+records in the same transcript) and requiring later asks to match. Joe was shown
+that alternative on 2026-08-23 and chose the window without it; it is buildable
+later, statelessly, for the same reason this is.
 
 AUDIT SIGNAL: every fire appends to out/conduct-gate.jsonl, the same ledger the
 Stop gate writes, so one count covers both moments.
@@ -137,6 +202,126 @@ INTERNAL = re.compile(
     r"|configs?|settings?|flags?|env|variables?|caches?|logs?|formats?|layouts?"
     r"|sort order|sort by|ordering|sorting)\b",
     re.I)
+
+
+# ── THE CONSENT WINDOW'S FOUR DIALS. Named so they can be moved without
+# touching logic, and so a later reader sees what was chosen instead of guessing.
+MAX_TURNS = 30          # 17 items plus asides — nothing like a whole session
+TTL_MINUTES = 90        # a 17-item walkthrough runs ~35 min; this is headroom
+ANSWER_MAX_WORDS = 12   # "retire it" · "yes, decline that one" · "option B"
+TAIL_BYTES = 4_000_000  # latency cap on a PreToolUse read
+
+SKIP_PREFIXES = (
+    "<system-reminder>", "<task-notification>", "[SYSTEM NOTIFICATION",
+    "<local-command", "<command-name>", "Caveat:",
+)
+
+
+def human_text(rec):
+    """The human's own typed words in one record, or "" for anything else.
+
+    THE tool_result CASE IS THE SECURITY-RELEVANT ONE. A tool_result block lives
+    inside a record whose type is "user", and its content is whatever a tool
+    printed — which a session controls completely. `echo "walk me through the
+    options"` must never read as Joe granting anything, and neither must a file
+    the session wrote. Keeping ONLY `type == "text"` blocks is what makes that
+    impossible.
+
+    Do not "helpfully" flatten nested content here. A tool_result's content is
+    frequently itself a list of text blocks; reaching into it is exactly the
+    refactor that would turn tool output into consent. There is a fixture
+    pinning this (abuse-grant-via-nested-tool-output).
+    """
+    if rec.get("type") not in ("user", "human"):
+        return ""
+    if rec.get("isMeta") or rec.get("isCompactSummary"):
+        return ""
+    msg = rec.get("message") or rec
+    c = msg.get("content")
+    if isinstance(c, str):
+        t = c
+    elif isinstance(c, list):
+        t = "\n".join(b.get("text", "") for b in c
+                      if isinstance(b, dict) and b.get("type") == "text")
+    else:
+        return ""
+    if not t or t.lstrip().startswith(SKIP_PREFIXES):
+        return ""
+    return t
+
+
+def is_answer_shaped(text):
+    """An ANSWER to the interview, not a new instruction. One line, few words."""
+    t = text.strip()
+    return bool(t) and "\n" not in t and len(t.split()) <= ANSWER_MAX_WORDS
+
+
+def parse_ts(rec):
+    raw = rec.get("timestamp")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def tail_records(path, tail_bytes=TAIL_BYTES):
+    """Parsed transcript records, oldest→newest, from the last tail_bytes.
+
+    The first line of the slice is dropped: a byte offset lands mid-record, and
+    a half-parsed record is worse than a missing one.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > tail_bytes:
+                fh.seek(size - tail_bytes)
+                fh.readline()
+            raw = fh.read()
+    except Exception:
+        return []
+    out = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+def consent_window(records, at=None,
+                   max_turns=MAX_TURNS, ttl_minutes=TTL_MINUTES):
+    """Did Joe grant a choice inside a still-open window? -> (granted, why).
+
+    `records` is oldest→newest. Walk HIS turns newest→oldest: the first turn
+    that grants stops the walk, and anything not answer-shaped stops it first.
+    `why` comes back on both paths because a gate that cannot say which bound
+    closed the window is a gate nobody can debug at 11pm.
+    """
+    at = at or datetime.now(timezone.utc)
+    turns = [(human_text(r), parse_ts(r)) for r in records]
+    turns = [(t, ts) for t, ts in turns if t]
+
+    for distance, (text, ts) in enumerate(reversed(turns)):
+        if distance >= max_turns:
+            return False, "window_turn_budget"
+        if HUMAN_WANTS_CHOICE.search(text):
+            # Distance 0 is the OLD behaviour exactly — no TTL — which is what
+            # makes this change strictly additive.
+            if distance == 0:
+                return True, "human_asked_for_choice"
+            if ts is None:
+                return False, "window_no_timestamp"
+            if (at - ts).total_seconds() / 60.0 > ttl_minutes:
+                return False, "window_expired"
+            return True, "human_asked_for_choice_window"
+        if not is_answer_shaped(text):
+            return False, "window_closed_by_new_instruction"
+    return False, "no_consent_in_window"
 
 
 def now():
@@ -205,12 +390,24 @@ def parks_a_decision(tool_input):
             or tool_input.get("blocker") == "ruling")
 
 
-def classify(blob, human_last):
-    """Return (allow: bool, why: str)."""
+def classify(blob, consent):
+    """Return (allow: bool, why: str).
+
+    `consent` is the (granted, why) pair from consent_window(). A plain STRING
+    is still accepted and tested exactly as the old signature did — that is not
+    laziness about the migration, it is the diagnostic path: this defect was
+    found on 2026-08-23 by importing the module and calling classify() directly
+    with a candidate turn, rather than reading refusal text and inferring. Keep
+    that call cheap and nobody has to guess again.
+    """
     if not blob.strip():
         return True, "empty"
-    if HUMAN_WANTS_CHOICE.search(human_last or ""):
-        return True, "human_asked_for_choice"
+    if isinstance(consent, str):
+        consent = (bool(HUMAN_WANTS_CHOICE.search(consent)),
+                   "human_asked_for_choice")
+    granted, why_granted = consent
+    if granted:
+        return True, why_granted
     if BOUNDARY.search(blob):
         return True, "boundary_change_is_constitutional"
     if FACT_CAPTURE.search(blob):
@@ -246,7 +443,13 @@ REASON = (
     "This gate does NOT block: asking him what only he knows (what happened in "
     "a meeting, what someone said, a vendor grade), anything client-facing, "
     "public-facing, money or irreversible, or anything that would widen the "
-    "system's own authority. Those still reach him."
+    "system's own authority. Those still reach him.\n\n"
+    "NOR does it block an interview HE COMMISSIONED. His own words open a "
+    "bounded window and it stays open across his answers, so a multi-item "
+    "walkthrough runs to the end instead of dying at item 2. If you are seeing "
+    "this during one, the window has closed — he gave a new instruction, or it "
+    "ran past its turn or time budget. Ask him to re-commission it; do not "
+    "rephrase this question to get around the gate."
 )
 
 LOOP_REASON = (
@@ -290,41 +493,22 @@ def main():
                 sys.exit(0)
             blob = loop_text(ti)
 
-        # The human's own last turn, for the "he asked" exemption. Best-effort:
-        # if the transcript is unreadable we simply lose one exemption and the
-        # other three still apply.
-        human_last = ""
+        # The consent window, for the "he asked" exemption. Best-effort: if the
+        # transcript is unreadable we lose one exemption and the other three
+        # still apply. The old 200-LINE tail is gone on purpose — 200 lines does
+        # not reach back past a couple of tool calls, let alone to the start of
+        # a 17-item interview, so the window would have been bounded by an
+        # accident of transcript density rather than by any of its four stated
+        # bounds. tail_records() reads by bytes instead.
+        consent = (False, "no_transcript")
         path = payload.get("transcript_path")
         if path and os.path.exists(path):
             try:
-                with open(path, "r", errors="replace") as fh:
-                    lines = fh.readlines()[-200:]
-                for line in reversed(lines):
-                    try:
-                        rec = json.loads(line.strip())
-                    except Exception:
-                        continue
-                    if rec.get("type") not in ("user", "human"):
-                        continue
-                    if rec.get("isMeta") or rec.get("isCompactSummary"):
-                        continue
-                    msg = rec.get("message") or rec
-                    c = msg.get("content")
-                    t = c if isinstance(c, str) else "\n".join(
-                        b.get("text", "") for b in c
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    ) if isinstance(c, list) else ""
-                    if not t or t.lstrip().startswith((
-                            "<system-reminder>", "<task-notification>",
-                            "[SYSTEM NOTIFICATION", "<local-command",
-                            "<command-name>", "Caveat:")):
-                        continue
-                    human_last = t
-                    break
+                consent = consent_window(tail_records(path))
             except Exception:
                 pass
 
-        allow, why = classify(blob, human_last)
+        allow, why = classify(blob, consent)
         if allow:
             dlog(f"ALLOW({why}) :: {' '.join(blob.split())[:160]}")
             sys.exit(0)

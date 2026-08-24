@@ -127,10 +127,26 @@ HUMAN_WANTS_COMMAND = re.compile(
     r"|\bi'?ll run (it|this|them)\b"
     r"|\b(don'?t|do not) run\b", re.I)
 
+# THIRD PERSON COUNTS, added 2026-08-23 on Joe's approval, and it is a real
+# widening rather than a typo fix. The list carried "walk me through" and not
+# "walk him through", so a commission Joe wrote ABOUT someone — "walk him
+# through the 17 declines one at a time", part of a client/driver package —
+# missed on turn ONE, before the consent window in escalation-gate.py ever got
+# a chance to extend it. He writes commissions in the third person routinely;
+# a first-person-only list reads his grammar instead of his intent.
+#
+# Kept to walk/talk THROUGH on purpose. "one at a time" and "ask me each" were
+# in the same live prompt and are deliberately NOT added: they are how a
+# session would naturally phrase its own preamble, so adding them would let a
+# session talk itself into a grant. A pronoun after walk/talk cannot be
+# self-granted, because the match still has to appear in one of Joe's own typed
+# turns — see human_text() in escalation-gate.py for what does and does not
+# count as one.
 HUMAN_WANTS_CHOICE = re.compile(
     r"\b(what are (my|the) options|lay out the options|give me options|which (would|do) you recommend"
     r"|what do you (think|recommend|suggest)|ask me|my call|let me (decide|choose|pick)"
-    r"|walk me through|talk me through|/options|/decide|/crux|/redteam|/premortem|/council)\b", re.I)
+    r"|(walk|talk) (me|him|her|us|them|dell|joe) through"
+    r"|/options|/decide|/crux|/redteam|/premortem|/council)\b", re.I)
 
 # A protected-class decision genuinely belongs to Joe (rule aa411351) and must
 # still be able to reach him. External-effect vocabulary.
