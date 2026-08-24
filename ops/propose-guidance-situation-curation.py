@@ -9,10 +9,10 @@ blocker:
     constitution      between 5 and 10 active items   — 5 candidates are reviewed
     coverage          zero failures                    — 204 on 2026-08-23
 
-Coverage is 204 because the registry is empty, and it is empty because the
-import refuses: every one of the 13 reviewed DOCTRINE guidance records needs an
-approved WR-AI-006 situation bridge, and production carries one approved concept
-of the thirteen. ops/guidance-situation-curation-preflight.py names each missing
+Coverage is 204 because the registry is empty, and it is empty because its
+importer refuses: every one of the 13 reviewed DOCTRINE guidance records needs
+an approved WR-AI-006 situation bridge, and production carries one approved
+concept of the thirteen. ops/guidance-situation-curation-preflight.py names each missing
 one exactly. Nothing had ever proposed them, so the whole machine sat waiting on
 a step nobody had been asked to take — the dormant-machine failure this work was
 told not to repeat.
