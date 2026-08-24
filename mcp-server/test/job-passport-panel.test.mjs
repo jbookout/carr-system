@@ -6,6 +6,8 @@ import { deriveJobPassports, jobPassportStatusLabel, parseJobPassportReceipt } f
 const fixture = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.observatory-projection.v1.json", import.meta.url)));
 const portfolio = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/carr-evaluation-kernel.synthetic.v1.json", import.meta.url)));
 const spatial = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.spatial-surface.v1.json", import.meta.url)));
+const elapsedTelemetry = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.elapsed-time.telemetry-measurement.v1.json", import.meta.url)));
+const unavailableCost = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.billed-cost.telemetry-measurement.v1.json", import.meta.url)));
 const roomSource = fs.readFileSync(new URL("../../dealroom/js/room.js", import.meta.url), "utf8");
 const roomCss = fs.readFileSync(new URL("../../dealroom/css/room.css", import.meta.url), "utf8");
 const turn = (payload, seq = 1) => ({ seq: String(seq), kind: "receipt", at: "2026-08-24T12:00:06Z", body: JSON.stringify(payload) });
@@ -68,7 +70,7 @@ test("typed facts count on the wire but cannot create a visual job from transcri
     turn(wrap("attempt_receipt", { schema_version: "attempt-receipt.v1" })),
   ]);
   assert.equal(model.enabled, false);
-  assert.deepEqual(model.typedCounts, { execution_envelope: 1, progress_event: 1, attempt_receipt: 1, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0, spatial_surface: 0 });
+  assert.deepEqual(model.typedCounts, { execution_envelope: 1, progress_event: 1, attempt_receipt: 1, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0, spatial_surface: 0, telemetry_measurement: 0 });
 });
 
 test("spatial Home Zone binds exact visual state, preserves list parity, and withholds stale/conflicting views", () => {
@@ -85,6 +87,21 @@ test("spatial Home Zone binds exact visual state, preserves list parity, and wit
   assert.match(roomSource, /Job Passport Home Zone/);
   assert.match(roomSource, /Telemetry: unavailable/);
   assert.match(roomCss, /passport-spatial-list/);
+});
+
+test("typed telemetry remains attributed, unavailable, and never manufactures a quota or cost zero", () => {
+  const model = deriveJobPassports([
+    turn(wrap("observatory_projection", fixture), 1), turn(wrap("telemetry_measurement", elapsedTelemetry), 2), turn(wrap("telemetry_measurement", unavailableCost), 3),
+  ]);
+  const telemetry = model.passports[0].telemetry_measurements;
+  assert.equal(telemetry.length, 2);
+  assert.equal(telemetry.find((row) => row.metric_kind === "elapsed_time").value.amount, 5000);
+  assert.equal(telemetry.find((row) => row.metric_kind === "billed_cost").value.kind, "unavailable");
+  const malformed = structuredClone(unavailableCost); malformed.value.amount = 0;
+  const withheld = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("telemetry_measurement", malformed), 2)]);
+  assert.equal(withheld.passports[0].telemetry_measurements.length, 0);
+  assert.ok(withheld.rejected.some((row) => row.reason === "invalid_telemetry_measurement"));
+  assert.match(roomSource, /unavailable — \$\{measurement\.value\.unavailable_reason\}/);
 });
 
 test("eval ladder binds to the exact visual projection and keeps critical regression visible without a score", () => {

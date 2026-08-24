@@ -7,7 +7,7 @@
 // canonical state before it is wrapped for the wire.
 
 const WIRE_VERSION = "job-passport-wire.v1";
-const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "eval_portfolio", "spatial_surface"]);
+const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "eval_portfolio", "spatial_surface", "telemetry_measurement"]);
 const PROGRESS = new Set(["active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"]);
 const LIFECYCLE = new Set(["succeeded", "failed", "timed_out", "cancelled", "partial", "unknown"]);
 const VERIFICATION = new Set(["verified_success", "verified_failure", "partial", "unknown", "not_attempted"]);
@@ -82,6 +82,21 @@ function validSpatialSurface(value) {
     && value.edges.every((edge) => object(edge) && ids.has(edge.from_node_id) && ids.has(edge.to_node_id));
 }
 
+function validTelemetryMeasurement(value) {
+  if (!object(value) || value.schema_version !== "telemetry-measurement.v1" || !string(value.measurement_id)
+    || !["subscription_quota", "session_tokens", "billed_cost", "elapsed_time", "lifecycle_activity", "other"].includes(value.metric_kind)
+    || !string(value.unit) || !string(value.scope) || !object(value.attribution) || !string(value.attribution.attempt_id)
+    || !object(value.source) || !object(value.value) || !string(value.observed_at)
+    || !["fresh", "stale", "unknown"].includes(value.freshness)) return false;
+  const sourceTypes = new Set(["structured_provider_event", "official_provider_api", "documented_cli_json", "deterministic_local_clock", "unavailable"]);
+  const kinds = new Set(["actual", "estimate", "unavailable"]);
+  if (!sourceTypes.has(value.source.type) || !Number.isInteger(value.source.priority) || !kinds.has(value.value.kind)) return false;
+  if (value.source.type === "unavailable" && value.value.kind !== "unavailable") return false;
+  if (value.value.kind === "unavailable") return value.value.amount === null && string(value.value.unavailable_reason);
+  if (typeof value.value.amount !== "number" || !Number.isFinite(value.value.amount)) return false;
+  return value.value.kind !== "estimate" || (string(value.value.estimate_method) && string(value.value.uncertainty));
+}
+
 function compareProjection(a, b) {
   const av = a.source_state.state_version;
   const bv = b.source_state.state_version;
@@ -113,9 +128,10 @@ function statusFor(projection) {
 export function deriveJobPassports(turns, { now = Date.now() } = {}) {
   const rows = new Map();
   const rejected = [];
-  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0, spatial_surface: 0 };
+  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0, spatial_surface: 0, telemetry_measurement: 0 };
   const portfolios = new Map();
   const surfaces = new Map();
+  const telemetryByAttempt = new Map();
   for (const turn of turns || []) {
     if (turn?.kind !== "receipt") continue;
     const parsed = parseJobPassportReceipt(turn.body);
@@ -134,6 +150,15 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       if (prior && binding.state_version < prior.payload.canonical_binding.state_version) { rejected.push({ seq: Number(turn.seq) || 0, reason: "stale_spatial_surface" }); continue; }
       if (prior && binding.state_version === prior.payload.canonical_binding.state_version && binding.canonical_record_digest !== prior.payload.canonical_binding.canonical_record_digest) { rejected.push({ seq: Number(turn.seq) || 0, reason: "conflicting_spatial_surface" }); continue; }
       if (!prior || (Number(turn.seq) || 0) > prior.seq) surfaces.set(binding.work_request_id, { payload: parsed.payload, seq: Number(turn.seq) || 0 });
+      continue;
+    }
+    if (parsed.kind === "telemetry_measurement") {
+      if (!validTelemetryMeasurement(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_telemetry_measurement" }); continue; }
+      const attemptId = parsed.payload.attribution.attempt_id;
+      const prior = telemetryByAttempt.get(attemptId) || new Map();
+      const existing = prior.get(parsed.payload.metric_kind);
+      if (!existing || at(parsed.payload.observed_at) > at(existing.payload.observed_at) || (at(parsed.payload.observed_at) === at(existing.payload.observed_at) && (Number(turn.seq) || 0) > existing.seq)) prior.set(parsed.payload.metric_kind, { payload: parsed.payload, seq: Number(turn.seq) || 0 });
+      telemetryByAttempt.set(attemptId, prior);
       continue;
     }
     if (parsed.kind !== "observatory_projection") continue;
@@ -169,6 +194,7 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       observed_at: observedAt || now, freshness: projection.state.progress === "stale" ? "stale" : "current_as_observed",
       eval_portfolio: portfolioBound ? portfolio : null,
       spatial_surface: spatialBound ? spatial : null,
+      telemetry_measurements: [...(telemetryByAttempt.get(projection.attempt_lane.attempt_id)?.values() || [])].map((row) => row.payload),
     };
   }).sort((a, b) => b.wire_seq - a.wire_seq);
   return { enabled: passports.length > 0, passports, rejected, typedCounts };

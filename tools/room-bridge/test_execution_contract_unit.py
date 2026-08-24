@@ -304,6 +304,18 @@ def telemetry_truth_does_not_cross_convert_or_turn_unavailable_into_zero():
     expect_refusal(lambda: spatial_surface.validate_telemetry_measurement(tokens), "masquerade")
 
 
+def typed_telemetry_wire_binds_attempt_and_preserves_unavailable_cost():
+    elapsed = json.loads((FIXTURES / "codex_desktop.elapsed-time.telemetry-measurement.v1.json").read_text())
+    cost = json.loads((FIXTURES / "codex_desktop.billed-cost.telemetry-measurement.v1.json").read_text())
+    assert contract.job_passport_wire_receipt("telemetry_measurement", elapsed)["job_passport"]["payload"] == elapsed
+    posted = []
+    rehearsal = bridge.rehearse_job_passport(envelope(), receipt(), [], {"profile_id": "profile:doc", "display_label": "Doc"}, telemetry_measurements=[elapsed, cost], add_room_turn=lambda **row: posted.append(row) or {"recorded": True})
+    assert rehearsal["published"][-2]["kind"] == "telemetry_measurement"
+    assert json.loads(posted[-1]["body"])["job_passport"]["payload"]["value"]["kind"] == "unavailable"
+    wrong = copy.deepcopy(elapsed); wrong["attribution"]["attempt_id"] = "attempt:other"
+    expect_refusal(lambda: bridge.rehearse_job_passport(envelope(), receipt(), [], {"profile_id": "profile:doc", "display_label": "Doc"}, telemetry_measurements=[wrong], add_room_turn=lambda **row: {}), "does not bind rehearsal attempt")
+
+
 def visual_extensions_are_inspectable_but_untrusted_or_unsafe_packages_are_refused():
     manifest = {"schema_version":"visual-extension-manifest.v1","extension_id":"extension:synthetic-map","version":"v1","api_version":"carr-visual-projection-api.v1","contributions":[{"contribution_id":"contribution:map","kind":"visual_projection","entry_path":"index.html"}],"permissions":["sanitized_projection_data"],"package":{"content_digest":"sha256:" + "a" * 64,"files":[{"path":"index.html","size_bytes":12,"digest":"sha256:" + "b" * 64}]},"provenance":{"publisher_id":"publisher:carr","signature_status":"verified","trust_status":"trusted"},"enablement":{"installed":False,"enabled":False,"human_authorization_ref":None}}
     assert spatial_surface.validate_visual_extension_manifest(manifest) == manifest
@@ -395,11 +407,12 @@ def self_contained_job_passport_artifact_binds_content_and_is_stale_visible():
     contract.validate_product_behavior_verification(behavior)
     portfolio = json.loads((FIXTURES / "carr-evaluation-kernel.synthetic.v1.json").read_text())
     surface = json.loads((FIXTURES / "codex_desktop.spatial-surface.v1.json").read_text())
-    document, artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), projection, behavior, portfolio, surface)
+    telemetry = [json.loads((FIXTURES / name).read_text()) for name in ("codex_desktop.elapsed-time.telemetry-measurement.v1.json", "codex_desktop.billed-cost.telemetry-measurement.v1.json")]
+    document, artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), projection, behavior, portfolio, surface, telemetry)
     assert artifact_renderer.verify_visual_artifact(document, artifact)
     assert artifact["content_digest"] == contract.canonical_digest(document)
     assert "https://" not in document and "fetch(" not in document
-    assert "prefers-reduced-motion" in document and "<details>" in document and "Behavior audit" in document and "Evaluation ladder" in document and "No aggregate score" in document and "Spatial Home Zone" in document and "Telemetry: unavailable" in document
+    assert "prefers-reduced-motion" in document and "<details>" in document and "Behavior audit" in document and "Evaluation ladder" in document and "No aggregate score" in document and "Spatial Home Zone" in document and "elapsed_time (ms): 5000" in document and "no approved provider billing source" in document
     stale = copy.deepcopy(projection)
     stale["state"]["progress"] = "stale"
     stale["observed_movement"]["progress_state"] = "stale"
@@ -462,6 +475,7 @@ if __name__ == "__main__":
         ("room wire accepts only validated typed Job Passport facts", wire_receipts_validate_projection_and_keep_typed_facts_distinct),
         ("spatial surface preserves canonical/layout separation and CAS", spatial_surface_separates_layout_from_canonical_state_and_rejects_stale_views),
         ("telemetry truth preserves unavailable and metric distinctions", telemetry_truth_does_not_cross_convert_or_turn_unavailable_into_zero),
+        ("typed telemetry wire binds current attempt and preserves unavailable", typed_telemetry_wire_binds_attempt_and_preserves_unavailable_cost),
         ("visual extension manifest denies unsafe or untrusted packages", visual_extensions_are_inspectable_but_untrusted_or_unsafe_packages_are_refused),
         ("evaluation ladder is multidimensional and rejects masked critical regression", eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression),
         ("shared kernel policy is risk-scaled and defaults deny", shared_kernel_policy_is_risk_scaled_and_default_deny),

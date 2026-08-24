@@ -28,7 +28,7 @@ def _short(value: str | None) -> str:
     return _text(str(value or "unknown").split(":", 1)[-1].replace("-", " ").replace("_", " "))
 
 
-def render_job_passport_html(projection: Any, behavior_audit: Any | None = None, portfolio: Any | None = None, spatial: Any | None = None) -> str:
+def render_job_passport_html(projection: Any, behavior_audit: Any | None = None, portfolio: Any | None = None, spatial: Any | None = None, telemetry_measurements: list[Any] | None = None) -> str:
     """Render only a validated projection into dependency-free accessible HTML."""
     value = contract.validate_observatory_projection(projection)
     lane = value["attempt_lane"]
@@ -40,6 +40,9 @@ def render_job_passport_html(projection: Any, behavior_audit: Any | None = None,
         raise contract.ContractError("behavior audit does not bind this exact visual projection")
     evaluated = evaluation_kernel.validate_evaluation_kernel(portfolio, value) if portfolio is not None else None
     surface = spatial_surface.validate_spatial_surface(spatial, value) if spatial is not None else None
+    telemetry = [spatial_surface.validate_telemetry_measurement(item) for item in telemetry_measurements or []]
+    if any(item["attribution"]["attempt_id"] != value["attempt_lane"]["attempt_id"] for item in telemetry):
+        raise contract.ContractError("telemetry artifact input does not bind visual attempt")
     nodes = "".join(
         f'<button type="button" class="node{ " current" if item["current"] else "" }" '
         f'aria-label="Component {_text(item["component_ref"])}">{_short(item["component_ref"])}'
@@ -87,7 +90,8 @@ def render_job_passport_html(projection: Any, behavior_audit: Any | None = None,
         spatial_html = ""
     else:
         ordered = [next(row for row in surface["nodes"] if row["node_id"] == node_id) for node_id in surface["list_order"]]
-        spatial_html = f'''<section><h2>Spatial Home Zone · deterministic projection</h2><p>{_text(surface["semantic_zoom"]["overview"]["summary"])} · {_text(surface["home_zone"]["return_label"])}</p><ol>{''.join(f'<li>{_text(row["accessibility"]["non_color_status_token"])}: {_text(row["accessibility"]["label"])}</li>' for row in ordered)}</ol><p class="meta">Telemetry: unavailable unless a typed trustworthy source is present; terminal text and session-token counts never stand in for quota or billed cost.</p></section>'''
+        telemetry_text = "; ".join(f'{item["metric_kind"]} ({item["unit"]}): {item["value"]["unavailable_reason"] if item["value"]["kind"] == "unavailable" else item["value"]["amount"]} · {item["value"]["kind"]} · {item["source"]["type"]} · {item["freshness"]}' for item in telemetry) or "unavailable unless a typed trustworthy source is present"
+        spatial_html = f'''<section><h2>Spatial Home Zone · deterministic projection</h2><p>{_text(surface["semantic_zoom"]["overview"]["summary"])} · {_text(surface["home_zone"]["return_label"])}</p><ol>{''.join(f'<li>{_text(row["accessibility"]["non_color_status_token"])}: {_text(row["accessibility"]["label"])}</li>' for row in ordered)}</ol><p class="meta">Telemetry: {_text(telemetry_text)}. Terminal text and session-token counts never stand in for quota or billed cost.</p></section>'''
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Job Passport · {_text(value["work_request_id"])}</title>
@@ -105,7 +109,7 @@ def render_job_passport_html(projection: Any, behavior_audit: Any | None = None,
 </main></body></html>'''
 
 
-def build_visual_artifact(envelope: Any, receipt: Any, projection: Any, behavior_audit: Any | None = None, portfolio: Any | None = None, spatial: Any | None = None) -> tuple[str, dict[str, Any]]:
+def build_visual_artifact(envelope: Any, receipt: Any, projection: Any, behavior_audit: Any | None = None, portfolio: Any | None = None, spatial: Any | None = None, telemetry_measurements: list[Any] | None = None) -> tuple[str, dict[str, Any]]:
     """Return HTML and the receipt-compatible provenance descriptor for it."""
     bound = contract.validate_execution_envelope(envelope)
     completed = contract.validate_attempt_receipt(receipt, bound)
@@ -114,7 +118,7 @@ def build_visual_artifact(envelope: Any, receipt: Any, projection: Any, behavior
         raise contract.ContractError("visual artifact projection does not bind its envelope and attempt")
     if view["source_state"]["state_version"] != bound["state_binding"]["state_version"] or view["source_state"]["canonical_record_digest"] != bound["state_binding"]["canonical_record_digest"]:
         raise contract.ContractError("visual artifact projection does not bind its exact canonical state")
-    document = render_job_passport_html(view, behavior_audit, portfolio, spatial)
+    document = render_job_passport_html(view, behavior_audit, portfolio, spatial, telemetry_measurements)
     artifact = {
         "artifact_ref": "artifact:job-passport-html", "media_type": "text/html", "self_contained": True,
         "external_service_dependency": False, "visual_form": "topology",
@@ -142,14 +146,15 @@ def verify_visual_artifact(document: str, artifact: Any) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render a deterministic CARR Job Passport HTML fixture")
     parser.add_argument("--envelope", type=Path, required=True); parser.add_argument("--receipt", type=Path, required=True)
-    parser.add_argument("--projection", type=Path, required=True); parser.add_argument("--behavior", type=Path); parser.add_argument("--portfolio", type=Path); parser.add_argument("--spatial", type=Path)
+    parser.add_argument("--projection", type=Path, required=True); parser.add_argument("--behavior", type=Path); parser.add_argument("--portfolio", type=Path); parser.add_argument("--spatial", type=Path); parser.add_argument("--telemetry", type=Path, action="append")
     parser.add_argument("--html-out", type=Path, required=True)
     parser.add_argument("--artifact-out", type=Path, required=True)
     args = parser.parse_args()
     behavior = json.loads(args.behavior.read_text()) if args.behavior else None
     portfolio = json.loads(args.portfolio.read_text()) if args.portfolio else None
     spatial = json.loads(args.spatial.read_text()) if args.spatial else None
-    document, artifact = build_visual_artifact(json.loads(args.envelope.read_text()), json.loads(args.receipt.read_text()), json.loads(args.projection.read_text()), behavior, portfolio, spatial)
+    telemetry = [json.loads(path.read_text()) for path in args.telemetry or []]
+    document, artifact = build_visual_artifact(json.loads(args.envelope.read_text()), json.loads(args.receipt.read_text()), json.loads(args.projection.read_text()), behavior, portfolio, spatial, telemetry)
     args.html_out.write_text(document, encoding="utf-8")
     args.artifact_out.write_text(json.dumps(artifact, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     return 0 if verify_visual_artifact(document, artifact) else 1

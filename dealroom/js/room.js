@@ -1499,7 +1499,18 @@ function boot() {
         }
         if (!passport.timeline.length) timeline.appendChild(el("span", "passport-event", "No observed progress event"));
         card.appendChild(timeline);
-        card.appendChild(el("p", "passport-telemetry", "Telemetry: unavailable — no trustworthy provider quota or billed-cost measurement was supplied. Session tokens, terminal text, and activity are not substituted."));
+        const telemetry = passport.telemetry_measurements || [];
+        if (!telemetry.length) {
+          card.appendChild(el("p", "passport-telemetry", "Telemetry: unavailable — no trustworthy provider quota or billed-cost measurement was supplied. Session tokens, terminal text, and activity are not substituted."));
+        } else {
+          const summary = telemetry.map((measurement) => {
+            const label = `${humanRef(measurement.metric_kind)} (${measurement.unit})`;
+            if (measurement.value.kind === "unavailable") return `${label}: unavailable — ${measurement.value.unavailable_reason}`;
+            const qualifier = measurement.value.kind === "estimate" ? `estimate via ${measurement.value.estimate_method}; uncertainty: ${measurement.value.uncertainty}` : "actual";
+            return `${label}: ${measurement.value.amount} · ${qualifier} · ${humanRef(measurement.source.type)} · ${measurement.freshness}`;
+          }).join("; ");
+          card.appendChild(el("p", "passport-telemetry", `Telemetry: ${summary}.`));
+        }
         if (passport.eval_portfolio) {
           const portfolio = passport.eval_portfolio;
           const ladder = el("section", "passport-eval");
