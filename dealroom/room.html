@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Montserrat:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/room.css">
+  <link rel="stylesheet" href="css/room.css?v=job-passport-spatial-v1">
   <title>Observatory · The Deal Room</title>
 </head>
 <body class="room-body">
@@ -64,6 +64,17 @@
       <span class="legend-item"><span class="legend-square"></span>backend worker</span>
     </div>
     <div class="stage-tooltip" id="stageTooltip" role="status" hidden></div>
+  </section>
+
+  <!-- Feature-gated by a valid, controller-built Job Passport projection on
+       the existing wire. This is a view of CARR state, never a second task
+       store and never a rendering model's inference. -->
+  <section class="job-passport panel" id="jobPassport" aria-label="Job Passport" hidden>
+    <div class="job-passport-head">
+      <div><h2 class="panel-title">Job Passport</h2><p id="jobPassportSummary" class="job-passport-summary"></p></div>
+      <span class="job-passport-feature">Wire-derived</span>
+    </div>
+    <div id="jobPassportList" class="job-passport-list"></div>
   </section>
 
   <aside class="room-desks panel collapsible" id="roomDesks" aria-label="Desks">
@@ -154,6 +165,6 @@
   <div class="room-banner" id="roomBanner" role="status" hidden></div>
   <div class="room-toast" id="roomToast" role="alert" hidden></div>
 
-  <script type="module" src="js/room.js"></script>
+  <script type="module" src="js/room.js?v=job-passport-spatial-v1"></script>
 </body>
 </html>

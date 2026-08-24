@@ -82,10 +82,11 @@ body.room-body {
   overflow: hidden;
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr) 300px;
-  grid-template-rows: 56px var(--stage-h) minmax(110px, 1fr) auto;
+  grid-template-rows: 56px var(--stage-h) auto minmax(110px, 1fr) auto;
   grid-template-areas:
     "header header header"
     "stage  stage  stage"
+    "passport passport passport"
     "desks  wire   rail"
     "desks  wire   health";
   gap: 10px;
@@ -232,6 +233,57 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   animation: enter-rise 420ms cubic-bezier(.2,.7,.3,1) 90ms forwards;
   --px: 0; --py: 0;
 }
+
+/* ------------------------------------------------------------- Job Passport */
+.job-passport { grid-area: passport; overflow: hidden; }
+.job-passport-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 0 12px 8px; }
+.job-passport-head .panel-title { padding: 10px 0 1px; }
+.job-passport-summary { margin: 0; font-size: 11px; color: var(--muted); }
+.job-passport-feature { flex: none; font-family: var(--display); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+.job-passport-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; padding: 0 10px 10px; max-height: none; overflow: visible; }
+.passport-card { border: 1px solid var(--line); border-left: 3px solid var(--passport); border-radius: 10px; background: rgba(9, 14, 24, .72); padding: 9px; min-width: 0; }
+.passport-card[data-status="verified_complete"] { --passport: var(--seat-claude); }
+.passport-card[data-status="aligned"] { --passport: var(--seat-sol); }
+.passport-card[data-status="deviation_candidate"], .passport-card[data-status="blocked"] { --passport: var(--orange); }
+.passport-card[data-status="quiet"], .passport-card[data-status="stale"], .passport-card[data-status="unknown_partial"] { --passport: var(--muted); }
+.passport-card[data-status="failed"] { --passport: var(--danger); }
+.passport-top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px; }
+.passport-work { font-family: var(--mono); font-size: 11px; color: var(--text); overflow-wrap: anywhere; }
+.passport-status { margin-left: auto; font-family: var(--display); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--passport); }
+.passport-freshness { margin: 4px 0 8px; font-size: 11px; color: var(--muted); }
+.passport-staffing { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-bottom: 8px; }
+.passport-staffing > div { border: 1px solid var(--line); border-radius: 7px; padding: 5px 6px; min-width: 0; }
+.passport-staffing label { display: block; font-family: var(--display); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.passport-staffing span { display: block; font-size: 11px; color: var(--text); overflow-wrap: anywhere; }
+.passport-map { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-bottom: 8px; }
+.passport-node { position: relative; max-width: 100%; border: 1px solid var(--line-bright); border-radius: 999px; padding: 3px 8px; font-size: 10px; color: var(--text); background: rgba(27, 62, 116, .26); overflow-wrap: anywhere; }
+.passport-node[data-current="true"] { border-style: solid; border-color: var(--passport); }
+.passport-node[data-current="true"]::after { content: " current"; color: var(--passport); }
+.passport-node + .passport-node::before { content: "← dependency"; color: var(--muted); font-size: 9px; margin-right: 5px; }
+.passport-alignment { margin: 0 0 7px; font-size: 11px; color: var(--muted); }
+.passport-home-zone { border-top: 1px solid var(--line); margin: 5px 0; padding-top: 7px; }
+.passport-home-title { margin: 0; font-family: var(--display); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; }
+.passport-home-summary, .passport-home-detail, .passport-telemetry { margin: 4px 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
+.passport-home-controls { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0; }
+.passport-home-action { border: 1px solid var(--line-bright); background: rgba(27,62,116,.26); color: var(--text); border-radius: 5px; padding: 3px 6px; font-size: 10px; }
+.passport-spatial-list { margin: 5px 0; padding-left: 20px; color: var(--muted); font-size: 10px; }
+.passport-spatial-list li { cursor: pointer; margin: 3px 0; }
+.passport-spatial-list li:focus-visible, .passport-home-action:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.passport-timeline { display: flex; gap: 4px; overflow-x: auto; padding: 2px 0 7px; }
+.passport-event { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 7px; padding: 3px 6px; color: var(--muted); background: rgba(14, 19, 31, .5); font-size: 10px; }
+.passport-event[data-state="blocked"], .passport-event[data-state="failed"] { border-color: var(--danger); }
+.passport-event[data-state="active"] { border-color: var(--seat-sol); }
+.passport-eval { border-top: 1px solid var(--line); margin-top: 3px; padding-top: 7px; }
+.passport-eval-title { margin: 0; font-family: var(--display); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--text); }
+.passport-eval-rungs, .passport-eval-frontier, .passport-eval-failures { margin: 4px 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
+.passport-eval-matrix { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 4px; margin: 5px 0; }
+.passport-eval-cell { border: 1px solid var(--line); border-left: 3px solid var(--muted); border-radius: 5px; padding: 3px 5px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.passport-eval-cell[data-state="passed"] { border-left-color: var(--seat-claude); }
+.passport-eval-cell[data-state="failed"] { border-left-color: var(--danger); }
+.passport-eval-cell[data-state="blocked"] { border-left-color: var(--orange); }
+.passport-detail { border-top: 1px solid var(--line); padding-top: 6px; }
+.passport-detail summary { cursor: pointer; color: var(--text); font-size: 11px; }
+.passport-detail-list { margin: 6px 0 0; padding-left: 17px; color: var(--muted); font-size: 10px; }
 .stage-svg {
   display: block; width: 100%; height: 100%;
   transform: perspective(900px)
@@ -596,8 +648,11 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   body.room-body {
     overflow-y: auto;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto var(--stage-h) minmax(320px, 1fr) auto auto;
-    grid-template-areas: "header" "health" "stage" "wire" "desks" "rail";
+    /* The Passport is an interactive card, not a zero-height overlay between
+       the stage and wire. Its explicit content-sized track prevents the wire
+       from occupying the same vertical space on a narrow viewport. */
+    grid-template-rows: auto auto var(--stage-h) minmax(280px, max-content) minmax(320px, 1fr) auto auto;
+    grid-template-areas: "header" "health" "stage" "passport" "wire" "desks" "rail";
     padding: 8px 8px 76px;
   }
   /* The page scrolls on a phone, so every panel gives its real height back.
@@ -609,6 +664,11 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   .room-desks, .room-rail, .room-health, .panel { min-height: auto; }
   .room-desks, .room-rail, .room-health, .room-health .health-grid { overflow: visible; }
   .room-wire { min-height: 60vh; }
+  /* `overflow: hidden` is useful on the desktop's bounded grid row, but it
+     makes this item's automatic minimum zero on a scrolling phone page. Give
+     the Passport its content height back so it cannot exist invisibly. */
+  .job-passport { overflow: visible; min-height: max-content; }
+  .job-passport-list { grid-template-columns: 1fr; max-height: none; }
   .room-figures { gap: 10px; }
   .room-figures .figure-label { display: none; }
   .room-nav { display: none; }
