@@ -1,4 +1,4 @@
--- 0287_retire_the_ledger_boundary_control.sql
+-- 0290_retire_the_ledger_boundary_control.sql
 -- THE CONTROL WHOSE ONLY IMPLEMENTATION NEVER RAN IS REMOVED FROM THE CATALOG.
 --
 -- WHY THIS EXISTS (2026-08-23). The process-audit council's dead-weight sweep
@@ -56,7 +56,7 @@ declare
 begin
   if not exists (select 1 from ops.enforcement_control_catalog
                   where control_key = 'ledger_boundary') then
-    raise notice '0287: ledger_boundary is already absent from the catalog; nothing to retire';
+    raise notice '0290: ledger_boundary is already absent from the catalog; nothing to retire';
     return;
   end if;
 
@@ -67,7 +67,7 @@ begin
     from ops.rule_control_binding
    where control_key = 'ledger_boundary';
   if bound > 0 then
-    raise exception '0287 REFUSED: ledger_boundary still has % rule binding(s); '
+    raise exception '0290 REFUSED: ledger_boundary still has % rule binding(s); '
                     'it is enforcing something and must not be retired', bound;
   end if;
 
@@ -76,7 +76,7 @@ begin
     join rule r on r.id = ar.rule_id and r.status = 'active'
    where 'ledger_boundary' = any(ar.requested_control_keys);
   if claimed > 0 then
-    raise exception '0287 REFUSED: ledger_boundary backs % active approved rule(s)', claimed;
+    raise exception '0290 REFUSED: ledger_boundary backs % active approved rule(s)', claimed;
   end if;
 
   delete from ops.enforcement_control_catalog where control_key = 'ledger_boundary';
@@ -112,7 +112,7 @@ begin
                                'hooks/guard-unattended.py; hooks/write-effect-check.py';
   get diagnostics updated = row_count;
   if updated = 0 then
-    raise notice '0287: record_home already carries the narrowed implementation list';
+    raise notice '0290: record_home already carries the narrowed implementation list';
   end if;
 end $$;
 
@@ -120,20 +120,20 @@ do $$
 begin
   if exists (select 1 from ops.enforcement_control_catalog
               where control_key = 'ledger_boundary') then
-    raise exception '0287 FAILED: ledger_boundary is still in the catalog after the delete';
+    raise exception '0290 FAILED: ledger_boundary is still in the catalog after the delete';
   end if;
 
   -- The neighbour it is one word away from must be untouched, or this migration
   -- retired the wrong control and the parity gate would have agreed with it.
   if not exists (select 1 from ops.enforcement_control_catalog
                   where control_key = 'ledger_capture') then
-    raise exception '0287 FAILED: ledger_capture is gone — the live ledger control was removed';
+    raise exception '0290 FAILED: ledger_capture is gone — the live ledger control was removed';
   end if;
 
   if exists (select 1 from ops.enforcement_control_catalog
               where control_key = 'record_home'
                 and implementation_ref like '%install-record-home-gate%') then
-    raise exception '0287 FAILED: record_home still names the deleted installer as evidence';
+    raise exception '0290 FAILED: record_home still names the deleted installer as evidence';
   end if;
 
   -- The gate it actually denies with must still be listed, or this narrowed the
@@ -141,7 +141,7 @@ begin
   if not exists (select 1 from ops.enforcement_control_catalog
                   where control_key = 'record_home'
                     and implementation_ref like '%hooks/record-home-gate.py%') then
-    raise exception '0287 FAILED: record_home no longer names hooks/record-home-gate.py';
+    raise exception '0290 FAILED: record_home no longer names hooks/record-home-gate.py';
   end if;
 end $$;
 
