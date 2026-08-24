@@ -1203,7 +1203,7 @@ step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 #
 # It opens an incident for each job whose LATEST run failed, appends a fact to
 # one that is already open rather than raising a second, and counts recurrences
-# on the row instead of reprinting them (0286). Since 0286 it also CLOSES a
+# on the row instead of reprinting them (0287). Since 0287 it also CLOSES a
 # SEV-2 or SEV-3 job incident whose job has run green three consecutive times,
 # through ops.clear_recovered_incident — a SECURITY DEFINER function that
 # re-derives that sequence itself. 0117's grant is untouched: carr_jobs still

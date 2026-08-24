@@ -99,7 +99,7 @@ class FakeCursor:
             self.facts.append((params[0], params[1], params[2]))
             self._one = None
         elif normalized.startswith("update ops.incident set occurrence_count"):
-            # The recurrence heartbeat (migration 0286). It runs only when a
+            # The recurrence heartbeat (migration 0287). It runs only when a
             # NEW piece of evidence attached to an incident that was already
             # open, so counting it here is what proves the writer does not
             # inflate the number on a replayed row.
@@ -210,7 +210,7 @@ def main() -> int:
     check("2f. recurrence correlation is traceable and idempotent",
           correlation_facts == [f"correlation:{new_corr}"],
           f"correlation facts={correlation_facts}")
-    # Migration 0286. Before it, all three of these arrivals left the row
+    # Migration 0287. Before it, all three of these arrivals left the row
     # reading exactly as it read after the first one, so a reader could not
     # tell a job failing constantly from one that failed once.
     check("2g. each recurrence counts on the open row rather than opening a new one",

@@ -1,4 +1,4 @@
--- 0286_incident_fingerprint_and_success_clears.sql
+-- 0287_incident_fingerprint_and_success_clears.sql
 -- THE INCIDENT LEDGER LEARNS TO COUNT, AND TO LET A GREEN RUN SPEAK.
 --
 -- Process-audit council, 2026-08-23, recommendation 3 — marked SAFE by both
@@ -136,7 +136,7 @@ update ops.incident i
 -- pairs below are the same data as its NAMED_EXIT_CLASSES, and
 -- ops/incident-fingerprint-selftest.py parses THIS FILE and fails if the two
 -- ever drift — which is the guard that makes writing them twice safe.
-create function pg_temp.normalize_signature_0286(sig text) returns text
+create function pg_temp.normalize_signature_0287(sig text) returns text
 language sql immutable as $norm$
   select split_part(sig, '|', 1) || '|'
       || split_part(sig, '|', 2) || '|'
@@ -171,12 +171,12 @@ $norm$;
 insert into ops.incident (ref, title, severity, state, environment,
                           detected_source, source_kind, source_ref, signature,
                           detected_at)
-values ('INC-0286-COLLIDE-1', 'collision proof (older)', 'SEV-3', 'detected',
+values ('INC-0287-COLLIDE-1', 'collision proof (older)', 'SEV-3', 'detected',
         'local', 'proof', 'collector', 'proof',
-        'migration-0286-collide|local|proof.job|exit_1', now() - interval '2 hours'),
-       ('INC-0286-COLLIDE-2', 'collision proof (newer)', 'SEV-3', 'detected',
+        'migration-0287-collide|local|proof.job|exit_1', now() - interval '2 hours'),
+       ('INC-0287-COLLIDE-2', 'collision proof (newer)', 'SEV-3', 'detected',
         'local', 'proof', 'collector', 'proof',
-        'migration-0286-collide|local|proof.job|exit_2', now() - interval '1 hour');
+        'migration-0287-collide|local|proof.job|exit_2', now() - interval '1 hour');
 
 -- COLLISIONS CLOSE AS DUPLICATES AND SAY SO IN THE FIRST WORDS (rule 7105955b).
 -- Two open rows that normalize to one fingerprint were always one problem; the
@@ -186,14 +186,14 @@ values ('INC-0286-COLLIDE-1', 'collision proof (older)', 'SEV-3', 'detected',
 -- survivor gains a fact pointing at it so the trace still reaches both.
 insert into ops.incident_fact (incident_id, text, source_ref)
 select keep.id,
-       'duplicate ' || dup.ref || ' folded in here by migration 0286: the same '
+       'duplicate ' || dup.ref || ' folded in here by migration 0287: the same '
          || 'job and the same failure, split only by a raw exit code',
-       'migration:0286'
+       'migration:0287'
   from (select n.id, n.ref, n.detected_at,
                first_value(n.id) over w as keep_id,
                row_number() over w as rn
           from (select x.id, x.ref, x.detected_at,
-                       pg_temp.normalize_signature_0286(x.signature) as new_signature
+                       pg_temp.normalize_signature_0287(x.signature) as new_signature
                   from ops.incident x
                  where x.signature is not null
                    and x.state not in ('resolved', 'reviewed')) n
@@ -209,14 +209,14 @@ update ops.incident i
                                         'ops.incident:' || keep.ref),
        root_cause = 'duplicate of ' || keep.ref || ' — the same job failing the '
                     || 'same way, split into two open rows only by a raw exit '
-                    || 'code. Folded by migration 0286; the evidence stays here '
+                    || 'code. Folded by migration 0287; the evidence stays here '
                     || 'and the surviving incident carries a fact pointing at it.',
        next_action = 'nothing — read ' || keep.ref
   from (select n.id, n.ref, n.detected_at,
                first_value(n.id) over w as keep_id,
                row_number() over w as rn
           from (select x.id, x.ref, x.detected_at,
-                       pg_temp.normalize_signature_0286(x.signature) as new_signature
+                       pg_temp.normalize_signature_0287(x.signature) as new_signature
                   from ops.incident x
                  where x.signature is not null
                    and x.state not in ('resolved', 'reviewed')) n
@@ -228,12 +228,12 @@ update ops.incident i
 -- 0116's partial unique index, because every row that would have collided is
 -- no longer open.
 update ops.incident i
-   set signature = pg_temp.normalize_signature_0286(i.signature)
+   set signature = pg_temp.normalize_signature_0287(i.signature)
  where i.signature is not null
    and i.state not in ('resolved', 'reviewed')
-   and i.signature is distinct from pg_temp.normalize_signature_0286(i.signature);
+   and i.signature is distinct from pg_temp.normalize_signature_0287(i.signature);
 
-drop function pg_temp.normalize_signature_0286(text);
+drop function pg_temp.normalize_signature_0287(text);
 
 -- ── what the merge just did to the seeded collision ──────────────────────────
 do $$
@@ -245,37 +245,37 @@ declare
   v_facts      int;
 begin
   select state, signature into v_keep_state, v_keep_sig
-    from ops.incident where ref = 'INC-0286-COLLIDE-1';
+    from ops.incident where ref = 'INC-0287-COLLIDE-1';
   select state, root_cause into v_dup_state, v_dup_cause
-    from ops.incident where ref = 'INC-0286-COLLIDE-2';
+    from ops.incident where ref = 'INC-0287-COLLIDE-2';
 
   if v_keep_state is distinct from 'detected' then
-    raise exception '0286 FAILED: the merge closed the OLDER row (%), which is '
+    raise exception '0287 FAILED: the merge closed the OLDER row (%), which is '
                     'the incident, not the duplicate', v_keep_state;
   end if;
-  if v_keep_sig is distinct from 'migration-0286-collide|local|proof.job|exit_status' then
-    raise exception '0286 FAILED: the surviving row did not take the normalized '
+  if v_keep_sig is distinct from 'migration-0287-collide|local|proof.job|exit_status' then
+    raise exception '0287 FAILED: the surviving row did not take the normalized '
                     'fingerprint, reads %', v_keep_sig;
   end if;
   if v_dup_state is distinct from 'resolved' then
-    raise exception '0286 FAILED: the duplicate row is still open (%)', v_dup_state;
+    raise exception '0287 FAILED: the duplicate row is still open (%)', v_dup_state;
   end if;
   -- Close-as-duplicate must say so in the FIRST words, so a reader scanning a
   -- list of closed incidents is never left guessing why this one shut.
   if v_dup_cause is null or left(v_dup_cause, 12) <> 'duplicate of' then
-    raise exception '0286 FAILED: a close-as-duplicate did not say so first: %',
+    raise exception '0287 FAILED: a close-as-duplicate did not say so first: %',
                     coalesce(v_dup_cause, '(null)');
   end if;
   select count(*) into v_facts from ops.incident_fact f
     join ops.incident i on i.id = f.incident_id
-   where i.ref = 'INC-0286-COLLIDE-1' and f.source_ref = 'migration:0286';
+   where i.ref = 'INC-0287-COLLIDE-1' and f.source_ref = 'migration:0287';
   if v_facts <> 1 then
-    raise exception '0286 FAILED: the survivor should carry exactly one fact '
+    raise exception '0287 FAILED: the survivor should carry exactly one fact '
                     'pointing at the folded duplicate, has %', v_facts;
   end if;
 
-  delete from ops.incident where ref like 'INC-0286-COLLIDE-%';
-  raise notice '0286: a collision folds into the older row, which keeps the '
+  delete from ops.incident where ref like 'INC-0287-COLLIDE-%';
+  raise notice '0287: a collision folds into the older row, which keeps the '
                'normalized fingerprint and a fact naming the duplicate; the '
                'younger row closes as a duplicate and says so first';
 end $$;
@@ -283,7 +283,7 @@ end $$;
 comment on column ops.incident.signature is
   'service|environment|operation|failure-class — the deterministic fingerprint of '
   'one problem. Two OPEN incidents cannot share one (0116''s partial unique '
-  'index). Since 0286 the failure class is normalized before it lands here: a '
+  'index). Since 0287 the failure class is normalized before it lands here: a '
   'named diagnosis is never rewritten, and only the bare exit_<n> shape collapses '
   '— and even then 69, 78 and the other codes this codebase gives a meaning keep '
   'their own class. tools/ops-record.py:normalize_failure_class is the rule.';
@@ -423,19 +423,19 @@ declare
   i         int;
 begin
   insert into ops.service (key, name, family, criticality, owner_actor)
-    values ('migration-0286-proof', 'proof', 'Data', 'medium', 'system')
+    values ('migration-0287-proof', 'proof', 'Data', 'medium', 'system')
     returning id into v_service;
 
   -- 1. AN INCIDENT WITH NO SUCCESS SEQUENCE DOES NOT CLOSE.
   insert into ops.incident (ref, title, severity, state, environment,
                             detected_source, source_kind, source_ref, signature)
-    values ('INC-0286-PROOF-1', 'proof', 'SEV-3', 'detected', 'local',
+    values ('INC-0287-PROOF-1', 'proof', 'SEV-3', 'detected', 'local',
             'proof', 'collector', 'proof',
-            'migration-0286-proof|local|proof.job|exit_status')
+            'migration-0287-proof|local|proof.job|exit_status')
     returning id into v_inc;
-  select ops.clear_recovered_incident('INC-0286-PROOF-1', 3) into v_ok;
+  select ops.clear_recovered_incident('INC-0287-PROOF-1', 3) into v_ok;
   if v_ok then
-    raise exception '0286 FAILED: closed an incident with no green runs at all';
+    raise exception '0287 FAILED: closed an incident with no green runs at all';
   end if;
 
   -- EVERY PROOF RUN CARRIES AN EXPLICIT observed_at, ONE MINUTE APART. now() is
@@ -451,11 +451,11 @@ begin
     insert into ops.run (kind, service_id, environment, run_key, state,
                          started_at, ended_at, observed_at, source_kind, source_ref)
       values ('job', v_service, 'local', 'proof.job', 'succeeded',
-              v_t, v_t, v_t, 'operator', 'migration-0286-proof');
+              v_t, v_t, v_t, 'operator', 'migration-0287-proof');
   end loop;
-  select ops.clear_recovered_incident('INC-0286-PROOF-1', 3) into v_ok;
+  select ops.clear_recovered_incident('INC-0287-PROOF-1', 3) into v_ok;
   if v_ok then
-    raise exception '0286 FAILED: two healthy runs satisfied a three-run sequence';
+    raise exception '0287 FAILED: two healthy runs satisfied a three-run sequence';
   end if;
 
   -- 3. THE THIRD GREEN RUN CLOSES IT, WITH THAT RUN AS THE EVIDENCE.
@@ -463,17 +463,17 @@ begin
   insert into ops.run (kind, service_id, environment, run_key, state,
                        started_at, ended_at, observed_at, source_kind, source_ref)
     values ('job', v_service, 'local', 'proof.job', 'succeeded',
-            v_t, v_t, v_t, 'operator', 'migration-0286-proof')
+            v_t, v_t, v_t, 'operator', 'migration-0287-proof')
     returning id into v_run;
-  select ops.clear_recovered_incident('INC-0286-PROOF-1', 3) into v_ok;
+  select ops.clear_recovered_incident('INC-0287-PROOF-1', 3) into v_ok;
   if not v_ok then
-    raise exception '0286 FAILED: three consecutive healthy runs did not close it';
+    raise exception '0287 FAILED: three consecutive healthy runs did not close it';
   end if;
   if not exists (select 1 from ops.incident
-                  where ref = 'INC-0286-PROOF-1' and state = 'resolved'
+                  where ref = 'INC-0287-PROOF-1' and state = 'resolved'
                     and resolved_at is not null
                     and recovery_evidence_ref = 'ops.run:' || v_run::text) then
-    raise exception '0286 FAILED: the close did not carry the green run as evidence';
+    raise exception '0287 FAILED: the close did not carry the green run as evidence';
   end if;
 
   -- 4. A FAILURE INSIDE THE SEQUENCE BREAKS IT, however green the runs before
@@ -481,30 +481,30 @@ begin
   --    runs, a failure, then a recovery. One green run is not a sequence.
   insert into ops.incident (ref, title, severity, state, environment,
                             detected_source, source_kind, source_ref, signature)
-    values ('INC-0286-PROOF-2', 'proof', 'SEV-3', 'detected', 'local',
+    values ('INC-0287-PROOF-2', 'proof', 'SEV-3', 'detected', 'local',
             'proof', 'collector', 'proof',
-            'migration-0286-proof|local|proof.flaky|exit_status');
+            'migration-0287-proof|local|proof.flaky|exit_status');
   v_t := now() - interval '1 hour';
   for i in 1..2 loop
     v_t := v_t + interval '1 minute';
     insert into ops.run (kind, service_id, environment, run_key, state,
                          started_at, ended_at, observed_at, source_kind, source_ref)
       values ('job', v_service, 'local', 'proof.flaky', 'succeeded',
-              v_t, v_t, v_t, 'operator', 'migration-0286-proof');
+              v_t, v_t, v_t, 'operator', 'migration-0287-proof');
   end loop;
   v_t := v_t + interval '1 minute';
   insert into ops.run (kind, service_id, environment, run_key, state, failure_class,
                        started_at, ended_at, observed_at, source_kind, source_ref)
     values ('job', v_service, 'local', 'proof.flaky', 'failed', 'exit_1',
-            v_t, v_t, v_t, 'operator', 'migration-0286-proof');
+            v_t, v_t, v_t, 'operator', 'migration-0287-proof');
   v_t := v_t + interval '1 minute';
   insert into ops.run (kind, service_id, environment, run_key, state,
                        started_at, ended_at, observed_at, source_kind, source_ref)
     values ('job', v_service, 'local', 'proof.flaky', 'succeeded',
-            v_t, v_t, v_t, 'operator', 'migration-0286-proof');
-  select ops.clear_recovered_incident('INC-0286-PROOF-2', 3) into v_ok;
+            v_t, v_t, v_t, 'operator', 'migration-0287-proof');
+  select ops.clear_recovered_incident('INC-0287-PROOF-2', 3) into v_ok;
   if v_ok then
-    raise exception '0286 FAILED: a failure inside the window did not break the sequence';
+    raise exception '0287 FAILED: a failure inside the window did not break the sequence';
   end if;
 
   -- 4b. AND A SKIPPED RUN NEITHER BREAKS NOR COMPLETES A SEQUENCE. A nightly
@@ -515,84 +515,84 @@ begin
   insert into ops.run (kind, service_id, environment, run_key, state,
                        started_at, ended_at, observed_at, source_kind, source_ref)
     values ('job', v_service, 'local', 'proof.flaky', 'skipped',
-            v_t, v_t, v_t, 'operator', 'migration-0286-proof');
-  select ops.clear_recovered_incident('INC-0286-PROOF-2', 3) into v_ok;
+            v_t, v_t, v_t, 'operator', 'migration-0287-proof');
+  select ops.clear_recovered_incident('INC-0287-PROOF-2', 3) into v_ok;
   if v_ok then
-    raise exception '0286 FAILED: a skipped run completed a success sequence';
+    raise exception '0287 FAILED: a skipped run completed a success sequence';
   end if;
   v_t := v_t + interval '1 minute';
   insert into ops.run (kind, service_id, environment, run_key, state,
                        started_at, ended_at, observed_at, source_kind, source_ref)
     values ('job', v_service, 'local', 'proof.flaky', 'succeeded',
-            v_t, v_t, v_t, 'operator', 'migration-0286-proof');
+            v_t, v_t, v_t, 'operator', 'migration-0287-proof');
   v_t := v_t + interval '1 minute';
   insert into ops.run (kind, service_id, environment, run_key, state,
                        started_at, ended_at, observed_at, source_kind, source_ref)
     values ('job', v_service, 'local', 'proof.flaky', 'succeeded',
-            v_t, v_t, v_t, 'operator', 'migration-0286-proof');
-  select ops.clear_recovered_incident('INC-0286-PROOF-2', 3) into v_ok;
+            v_t, v_t, v_t, 'operator', 'migration-0287-proof');
+  select ops.clear_recovered_incident('INC-0287-PROOF-2', 3) into v_ok;
   if not v_ok then
-    raise exception '0286 FAILED: three green runs either side of a skip did not close it';
+    raise exception '0287 FAILED: three green runs either side of a skip did not close it';
   end if;
 
   -- 5. SEV-1 NEVER CLOSES HERE, however perfect the evidence.
   insert into ops.incident (ref, title, severity, state, environment,
                             detected_source, source_kind, source_ref, signature)
-    values ('INC-0286-PROOF-3', 'proof', 'SEV-1', 'detected', 'local',
+    values ('INC-0287-PROOF-3', 'proof', 'SEV-1', 'detected', 'local',
             'proof', 'collector', 'proof',
-            'migration-0286-proof|local|proof.job|dependency_unavailable');
-  select ops.clear_recovered_incident('INC-0286-PROOF-3', 3) into v_ok;
+            'migration-0287-proof|local|proof.job|dependency_unavailable');
+  select ops.clear_recovered_incident('INC-0287-PROOF-3', 3) into v_ok;
   if v_ok then
-    raise exception '0286 FAILED: a SEV-1 closed without a human';
+    raise exception '0287 FAILED: a SEV-1 closed without a human';
   end if;
 
   -- 6. A HAND-OPENED INCIDENT NEVER CLOSES HERE EITHER.
   insert into ops.incident (ref, title, severity, state, environment,
                             detected_source, source_kind, source_ref, signature)
-    values ('INC-0286-PROOF-4', 'proof', 'SEV-3', 'detected', 'local',
+    values ('INC-0287-PROOF-4', 'proof', 'SEV-3', 'detected', 'local',
             'proof', 'operator', 'proof',
-            'migration-0286-proof|local|proof.job|hand_written');
-  select ops.clear_recovered_incident('INC-0286-PROOF-4', 3) into v_ok;
+            'migration-0287-proof|local|proof.job|hand_written');
+  select ops.clear_recovered_incident('INC-0287-PROOF-4', 3) into v_ok;
   if v_ok then
-    raise exception '0286 FAILED: the machine closed an incident a human opened';
+    raise exception '0287 FAILED: the machine closed an incident a human opened';
   end if;
 
   -- 7. THE CALLER CANNOT SHORTEN THE SEQUENCE. One green run on a job that has
   --    only ever run once, and a caller asking for a sequence of one.
   insert into ops.incident (ref, title, severity, state, environment,
                             detected_source, source_kind, source_ref, signature)
-    values ('INC-0286-PROOF-5', 'proof', 'SEV-3', 'detected', 'local',
+    values ('INC-0287-PROOF-5', 'proof', 'SEV-3', 'detected', 'local',
             'proof', 'collector', 'proof',
-            'migration-0286-proof|local|proof.once|exit_status');
+            'migration-0287-proof|local|proof.once|exit_status');
   insert into ops.run (kind, service_id, environment, run_key, state,
                        started_at, ended_at, observed_at, source_kind, source_ref)
     values ('job', v_service, 'local', 'proof.once', 'succeeded',
-            now(), now(), now(), 'operator', 'migration-0286-proof');
-  select ops.clear_recovered_incident('INC-0286-PROOF-5', 1) into v_ok;
+            now(), now(), now(), 'operator', 'migration-0287-proof');
+  select ops.clear_recovered_incident('INC-0287-PROOF-5', 1) into v_ok;
   if v_ok then
-    raise exception '0286 FAILED: a caller asking for one run got one run';
+    raise exception '0287 FAILED: a caller asking for one run got one run';
   end if;
-  select ops.clear_recovered_incident('INC-0286-PROOF-5', 0) into v_ok;
+  select ops.clear_recovered_incident('INC-0287-PROOF-5', 0) into v_ok;
   if v_ok then
-    raise exception '0286 FAILED: a caller asking for zero runs got zero runs';
+    raise exception '0287 FAILED: a caller asking for zero runs got zero runs';
   end if;
 
   -- 8. DISTINCT NAMED FAILURE CLASSES ON ONE JOB REMAIN TWO OPEN INCIDENTS.
   --    This is the council's kill condition, held as data rather than intent.
   insert into ops.incident (ref, title, severity, state, environment,
                             detected_source, source_kind, source_ref, signature)
-    values ('INC-0286-PROOF-6', 'proof', 'SEV-3', 'detected', 'local',
+    values ('INC-0287-PROOF-6', 'proof', 'SEV-3', 'detected', 'local',
             'proof', 'collector', 'proof',
-            'migration-0286-proof|local|restore.key-recovery|pubkey_mismatch'),
-           ('INC-0286-PROOF-7', 'proof', 'SEV-3', 'detected', 'local',
+            'migration-0287-proof|local|restore.key-recovery|pubkey_mismatch'),
+           ('INC-0287-PROOF-7', 'proof', 'SEV-3', 'detected', 'local',
             'proof', 'collector', 'proof',
-            'migration-0286-proof|local|restore.key-recovery|restore_failed');
+            'migration-0287-proof|local|restore.key-recovery|restore_failed');
 
-  delete from ops.incident where ref like 'INC-0286-PROOF-%';
+  delete from ops.incident where ref like 'INC-0287-PROOF-%';
   delete from ops.run where service_id = v_service;
   delete from ops.service where id = v_service;
 
-  raise notice '0286: three consecutive healthy runs close a SEV-3 job incident with '
+  raise notice '0287: three consecutive healthy runs close a SEV-3 job incident with '
                'the green run as evidence; two do not, a failure inside the sequence '
                'does not, a SEV-1 never does, a hand-opened incident never does, the '
                'caller cannot shorten the sequence, and two named failure classes on '

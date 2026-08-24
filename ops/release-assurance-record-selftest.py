@@ -63,7 +63,7 @@ class Cursor:
             self.one = ("run-1",)
         elif ("from ops.incident" in normalized
               and "starts_with(signature, %s)" in normalized):
-            # Since migration 0286 a SUCCEEDED run asks whether this job has any
+            # Since migration 0287 a SUCCEEDED run asks whether this job has any
             # open incident to clear. These receipts are all successes, so they
             # all ask. The answer here is "none", which is the shape that
             # matters for this file: with no open incident the recovery path
@@ -163,7 +163,7 @@ def main() -> int:
           ended - started == timedelta(milliseconds=999))
     check("1c. run is bound to the exact release and approved budget",
           cursor.run_params[3] == "release-1" and cursor.run_params[12] == 1000)
-    # Migration 0286 made a green run ask whether this job has an open incident
+    # Migration 0287 made a green run ask whether this job has an open incident
     # to clear. It must ask about THIS job and no other: the lookup is a prefix
     # over the fingerprint, so a service or run key that leaked into it would
     # quietly clear a different service's incidents on somebody else's success.
