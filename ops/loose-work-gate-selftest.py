@@ -397,15 +397,17 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a clean, pushed worktree is not blamed for canonical's unpushed commit",
           rc == 0, f"rc={rc}: {out[:200]}")
 
-    # The same session, genuinely leaving its OWN commit loose, is still stopped:
-    # scoping the gate must not turn it off.
+    # The same session, genuinely leaving its OWN commit loose, is still caught:
+    # scoping the gate must not turn it off. (Caught now means ANNOUNCED — this
+    # gate was demoted 2026-08-23 and an exit 2 is itself a regression.)
     with open(os.path.join(wt, "tracked.txt"), "w") as fh:
         fh.write("this session's real fix\n")
     git(wt, "add", "tracked.txt")
     git(wt, "commit", "-q", "-m", "the fix nobody could see")
     rc, out = run(wt, committing_transcript(tmp),
                   env={"CARR_LOOSE_WORK_REPO": canonical})
-    check("...but its own unpushed commit still stops it", rc == 2,
+    check("...but its own unpushed commit is still announced",
+          rc == 0 and ("unpushed" in out.lower() or "no other machine" in out.lower()),
           f"rc={rc}: {out[:200]}")
 
 print()
