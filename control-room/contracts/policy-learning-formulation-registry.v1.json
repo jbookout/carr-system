@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "1.0.0",
+  "status": "phase1_contract_foundation_not_deployed",
+  "title": "CARR Policy Learning Formulation Registry v1",
+  "description": "Provider-neutral registry for offline policy evaluation. It does not train models, write business records, or grant runtime authority.",
+  "default_effect": "deny",
+  "learnability_boundary": {
+    "production_learning": "forbidden",
+    "automatic_promotion": "forbidden",
+    "private_business_content": "forbidden",
+    "conversation_token_learning": "forbidden",
+    "tool_environment_observations": "masked_not_actions"
+  },
+  "lifecycle": ["observed", "shadow", "eligible_for_human_review", "bounded_exploration", "active"],
+  "domains": [
+    {
+      "domain_id": "provider_model_route",
+      "formulation": "completion_contextual_bandit",
+      "learnability": "offline_policy_evaluation_only",
+      "reversible": true,
+      "allowed_action_kinds": ["provider", "model"],
+      "max_risk_class": "R2"
+    },
+    {
+      "domain_id": "effort_route",
+      "formulation": "completion_contextual_bandit",
+      "learnability": "offline_policy_evaluation_only",
+      "reversible": true,
+      "allowed_action_kinds": ["effort"],
+      "max_risk_class": "R2"
+    },
+    {
+      "domain_id": "router_route",
+      "formulation": "completion_contextual_bandit",
+      "learnability": "offline_policy_evaluation_only",
+      "reversible": true,
+      "allowed_action_kinds": ["route"],
+      "max_risk_class": "R2"
+    },
+    {
+      "domain_id": "visual_recipe_route",
+      "formulation": "completion_contextual_bandit",
+      "learnability": "offline_policy_evaluation_only",
+      "reversible": true,
+      "allowed_action_kinds": ["visual_recipe"],
+      "max_risk_class": "R1"
+    },
+    {
+      "domain_id": "evaluation_route",
+      "formulation": "completion_contextual_bandit",
+      "learnability": "offline_policy_evaluation_only",
+      "reversible": true,
+      "allowed_action_kinds": ["evaluation_route"],
+      "max_risk_class": "R2"
+    },
+    {
+      "domain_id": "agentic_trajectory_observation",
+      "formulation": "token_or_trajectory_mdp",
+      "learnability": "observational_only",
+      "reversible": false,
+      "allowed_action_kinds": [],
+      "max_risk_class": "R0"
+    }
+  ],
+  "ineligible_action_classes": ["business_decision", "external_communication", "authorization", "release", "destructive_action", "write", "high_risk_action"]
+}

@@ -12,6 +12,7 @@ from typing import Any
 import execution_contract as contract
 from evaluation_rubrics import rubric_for
 import design_kernel
+import policy_learning
 
 
 class EvalPortfolioError(contract.ContractError):
@@ -261,7 +262,7 @@ def cost_curve_gate(portfolio: Any) -> list[dict[str, Any]]:
 
 
 def admission_decision(kernel: Any, *, as_of: str | None = None, visual_gate_report: Any | None = None,
-                       design_contract: Any | None = None) -> dict[str, Any]:
+                       design_contract: Any | None = None, policy_learning_assessment: Any | None = None) -> dict[str, Any]:
     """Return a deterministic recommendation with evidence-backed reason codes.
 
     It never promotes canonical state.  `eligible_for_controller_review` means
@@ -313,6 +314,13 @@ def admission_decision(kernel: Any, *, as_of: str | None = None, visual_gate_rep
                 expected_projection_digest=value["binding"]["projection_digest"],
             ))
         except design_kernel.DesignKernelError as exc:
+            raise EvalPortfolioError(str(exc)) from exc
+    if policy_learning_assessment is not None:
+        try:
+            # This is a reason-code projection, not a score contribution: a
+            # learning refusal cannot be averaged away by other dimensions.
+            reasons.extend(policy_learning.evaluation_kernel_blockers(policy_learning_assessment))
+        except policy_learning.PolicyLearningError as exc:
             raise EvalPortfolioError(str(exc)) from exc
     if value["provenance"]["source_class"] == "synthetic_only":
         reasons.append("synthetic_evidence_not_controller_promotion")

@@ -123,3 +123,17 @@ test("audit taxonomy is append only and reconstructable", () => {
   for (const field of ["organization_tenant_id", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "session_capability_profile"]) assert.ok(audit.required_fields.includes(field), field);
   assert.ok(audit.families.governance.includes("unsupported_action.refused"));
 });
+
+test("policy learning stays offline, bounded, and non-authoritative", () => {
+  const registry = read("contracts/policy-learning-formulation-registry.v1.json");
+  const envelope = read("contracts/policy-learning-envelope.v1.schema.json");
+  assert.equal(registry.default_effect, "deny");
+  assert.equal(registry.learnability_boundary.production_learning, "forbidden");
+  assert.equal(registry.learnability_boundary.automatic_promotion, "forbidden");
+  assert.equal(registry.learnability_boundary.tool_environment_observations, "masked_not_actions");
+  assert.ok(registry.ineligible_action_classes.includes("write"));
+  assert.ok(registry.ineligible_action_classes.includes("release"));
+  assert.ok(registry.domains.some(row => row.formulation === "token_or_trajectory_mdp" && row.learnability === "observational_only"));
+  assert.equal(envelope.properties.data_class.enum.includes("synthetic_only"), true);
+  assert.equal(envelope.additionalProperties, false);
+});
