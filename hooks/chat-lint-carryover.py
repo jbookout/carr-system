@@ -35,12 +35,24 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CARRY_DIR = os.path.join(REPO, "out", "chat-lint-carry")
+
+
+def repo_root():
+    """The repo root, from CARR_REPO_ROOT env or script-relative.
+
+    Same contract as hooks/chat-lint-gate.py's repo_root(): the selftest sets
+    CARR_REPO_ROOT so concurrent runs never share one out/chat-lint-carry
+    directory. Production leaves the variable unset.
+    """
+    env = os.environ.get("CARR_REPO_ROOT")
+    if env and os.path.isdir(env):
+        return os.path.realpath(env)
+    return REPO
 
 
 def carry_path(session):
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session or "unknown"))[:64]
-    return os.path.join(CARRY_DIR, f"{safe}.txt")
+    return os.path.join(repo_root(), "out", "chat-lint-carry", f"{safe}.txt")
 
 
 def main():

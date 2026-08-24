@@ -92,7 +92,8 @@ def main() -> int:
           hooks_config.count("/usr/bin/python3 {{REPO}}/hooks/run-record-gate.py drift-") == 2
           and "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py" not in hooks_config)
 
-    with tempfile.TemporaryDirectory(dir=REPO) as tmp:
+    # PRIVATE TMP, NOT THE REPO ROOT (2026-08-23 load-flake sweep): was dir=REPO.
+    with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         for directory in (root / "hooks", root / "lib", root / ".venv" / "bin"):
             directory.mkdir(parents=True, exist_ok=True)

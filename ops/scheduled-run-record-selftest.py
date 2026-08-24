@@ -39,6 +39,7 @@ RUN IT:
 import json
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 import uuid
@@ -62,6 +63,13 @@ HOOK = os.path.join(REPO, "hooks", "scheduled-run-record.py")
 CLI = os.path.join(REPO, "bin", "record-scheduled-run.py")
 PYTHON = os.path.join(REPO, ".venv", "bin", "python")
 PY = PYTHON if os.path.exists(PYTHON) else sys.executable
+
+# A PRIVATE REPO ROOT PER RUN (2026-08-23 load-flake sweep). The hook derives
+# its per-session idempotency cache from CARR_REPO_ROOT when the variable is
+# set (hooks/scheduled-run-record.py _repo_root()); without it every concurrent
+# ci.sh run shared one fixed-name out/scheduled-run-record-cache directory.
+PRIVATE_ROOT = tempfile.mkdtemp(prefix="scheduled-run-record-selftest.")
+os.makedirs(os.path.join(PRIVATE_ROOT, "out"), exist_ok=True)
 
 PASSES: list[str] = []
 FAILURES: list[str] = []
@@ -163,6 +171,10 @@ def unreachable_db_env() -> dict:
     env = dict(os.environ)
     for name in OPS_RECORD.credential_names():
         env[name] = DEAD_DSN
+    # PRIVATE REPO ROOT PER RUN (2026-08-23 load-flake sweep): the hook derives
+    # its idempotency cache from CARR_REPO_ROOT when set, so pointing it at a
+    # throwaway tree keeps concurrent ci.sh runs from sharing one out/ dir.
+    env["CARR_REPO_ROOT"] = PRIVATE_ROOT
     return env
 
 
@@ -226,7 +238,7 @@ def main() -> int:
 
     # ── the hook itself, subprocess, real payloads ───────────────────────
     print("\n4. the real hook, end to end, with an unreachable database")
-    cache_dir = os.path.join(REPO, "out", "scheduled-run-record-cache")
+    cache_dir = os.path.join(PRIVATE_ROOT, "out", "scheduled-run-record-cache")
 
     p = fixture_not_scheduled(sid="selftest-notsched-" + uuid.uuid4().hex[:8])
     rc, out = run_hook({"hook_event_name": "Stop", "session_id": "selftest-notsched",
@@ -284,6 +296,8 @@ def main() -> int:
         run_tier2()
 
     print(f"\n{len(PASSES)} passed, {len(FAILURES)} failed")
+    # The private repo root is throwaway state; nothing downstream reads it.
+    shutil.rmtree(PRIVATE_ROOT, ignore_errors=True)
     if FAILURES:
         print("\nSELFTEST NOT MET:")
         for f in FAILURES:
