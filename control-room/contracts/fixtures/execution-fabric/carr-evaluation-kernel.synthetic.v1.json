@@ -1,9 +1,13 @@
 {
-  "schema_version": "job-passport-eval-portfolio.v1",
-  "portfolio_id": "portfolio:job-passport-synthetic",
+  "schema_version": "carr-evaluation-kernel.v1",
+  "portfolio_id": "portfolio:carr-synthetic-read-only",
   "data_class": "synthetic_only",
   "generated_at": "2026-08-24T12:00:06Z",
-  "binding": {"work_request_id":"wr-synthetic-read-only","plan_revision_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_version":1,"canonical_record_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","projection_digest":"sha256:7ef1df546040c0aa000a437902fdc4d83decaf1960f63001790b11a422b5dfb9"},
+  "workflow": {"workflow_id":"workflow:job-passport","rubric_id":"rubric:job-passport-visual","rubric_version":"rubricver:01","rubric_digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","case_set_digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+  "policy": {"policy_id":"policy:shared-evaluation","policy_version":"policyver:01","policy_digest":"sha256:9999999999999999999999999999999999999999999999999999999999999999","default_effect":"deny","risk_requirements":[{"risk_class":"R0","lifecycle":"rehearsal","required_rungs":["smoke"],"independent_review_required":false},{"risk_class":"R1","lifecycle":"change","required_rungs":["smoke","regression"],"independent_review_required":false},{"risk_class":"R2","lifecycle":"experiment","required_rungs":["smoke","regression","hill_climb"],"independent_review_required":false},{"risk_class":"R3","lifecycle":"launch","required_rungs":["smoke","regression","launch"],"independent_review_required":true}]},
+  "provenance": {"source_class":"synthetic_only","production_trace_review":"unavailable_no_production_traces","expires_at":"2026-09-01T12:00:00Z"},
+  "migration": {"canonical_contract":"contract:carr-evaluation-kernel-v1","legacy_aliases":["job-passport-eval-portfolio.v1"]},
+  "binding": {"work_request_id":"wr-synthetic-read-only","plan_revision_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_version":1,"canonical_record_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","accepted_resource_revisions":[{"resource_ref":"resource:worktree-a","revision_ref":"revision:synthetic-1","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}],"projection_digest":"sha256:7ef1df546040c0aa000a437902fdc4d83decaf1960f63001790b11a422b5dfb9","risk_class":"R0","lifecycle":"rehearsal"},
   "case_set": {"case_set_id":"case-set:job-passport","version":"ver:01","refresh_state":"current_synthetic","production_trace_review":"unavailable_no_production_traces"},
   "taxonomy": {"taxonomy_version":"failure-taxonomy:job-passport-v1","refresh_state":"current_synthetic","production_trace_review":"unavailable_no_production_traces","failure_modes":[
     {"failure_mode_id":"failure:wire-contract","parent_id":null,"class_name":"wire_contract","status":"active","affected_stages":["typed_receipt_ingestion"],"affected_dimensions":["receipt_integrity"],"evidence_refs":["evidence:synthetic-wire"],"provenance":"synthetic_fixture","refresh_state":"current_synthetic"},

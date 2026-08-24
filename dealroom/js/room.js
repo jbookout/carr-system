@@ -1477,7 +1477,9 @@ function boot() {
           ladder.setAttribute("aria-label", "Evaluation ladder and stage diagnostics");
           ladder.appendChild(el("h3", "passport-eval-title", "Evaluation ladder · synthetic/offline"));
           const rungs = [...new Set(portfolio.cases.map((row) => row.rung))];
-          ladder.appendChild(el("p", "passport-eval-rungs", `Rungs represented: ${rungs.join(", ")} · no aggregate score`));
+          const requirement = portfolio.policy.risk_requirements.find((row) => row.risk_class === portfolio.binding.risk_class && row.lifecycle === portfolio.binding.lifecycle);
+          const completed = [...new Set(portfolio.results.filter((row) => row.status === "passed").map((row) => row.rung))];
+          ladder.appendChild(el("p", "passport-eval-rungs", `Required: ${requirement?.required_rungs?.join(", ") || "unknown / default deny"} · completed: ${completed.join(", ") || "not run"} · represented: ${rungs.join(", ")} · no aggregate score`));
           const matrix = el("div", "passport-eval-matrix");
           const baseline = portfolio.results.find((row) => row.result_id === "result:codex-baseline") || portfolio.results[0];
           for (const stage of baseline.stage_results || []) {

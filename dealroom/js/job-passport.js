@@ -7,7 +7,7 @@
 // canonical state before it is wrapped for the wire.
 
 const WIRE_VERSION = "job-passport-wire.v1";
-const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "eval_portfolio"]);
+const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "eval_portfolio"]);
 const PROGRESS = new Set(["active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"]);
 const LIFECYCLE = new Set(["succeeded", "failed", "timed_out", "cancelled", "partial", "unknown"]);
 const VERIFICATION = new Set(["verified_success", "verified_failure", "partial", "unknown", "not_attempted"]);
@@ -51,8 +51,9 @@ function validProjection(value) {
 }
 
 function validEvalPortfolio(value) {
-  if (!object(value) || value.schema_version !== "job-passport-eval-portfolio.v1" || value.data_class !== "synthetic_only"
-    || !object(value.binding) || !string(value.binding.work_request_id) || !number(value.binding.state_version)
+  if (!object(value) || value.schema_version !== "carr-evaluation-kernel.v1" || value.data_class !== "synthetic_only"
+    || !object(value.workflow) || !string(value.workflow.workflow_id) || !object(value.policy) || value.policy.default_effect !== "deny"
+    || !object(value.provenance) || !object(value.binding) || !string(value.binding.work_request_id) || !number(value.binding.state_version)
     || !DIGEST.test(value.binding.plan_revision_digest) || !DIGEST.test(value.binding.canonical_record_digest)
     || !DIGEST.test(value.binding.projection_digest) || !list(value.cases) || !list(value.results)
     || !list(value.frontier_comparisons) || !list(value.taxonomy?.failure_modes)) return false;
@@ -97,14 +98,14 @@ function statusFor(projection) {
 export function deriveJobPassports(turns, { now = Date.now() } = {}) {
   const rows = new Map();
   const rejected = [];
-  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0, eval_portfolio: 0 };
+  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0 };
   const portfolios = new Map();
   for (const turn of turns || []) {
     if (turn?.kind !== "receipt") continue;
     const parsed = parseJobPassportReceipt(turn.body);
     if (!parsed.ok) continue;
     typedCounts[parsed.kind] += 1;
-    if (parsed.kind === "eval_portfolio") {
+    if (parsed.kind === "evaluation_kernel" || parsed.kind === "eval_portfolio") {
       if (!validEvalPortfolio(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_eval_portfolio" }); continue; }
       const prior = portfolios.get(parsed.payload.binding.work_request_id);
       if (!prior || (Number(turn.seq) || 0) > prior.seq) portfolios.set(parsed.payload.binding.work_request_id, { payload: parsed.payload, seq: Number(turn.seq) || 0 });

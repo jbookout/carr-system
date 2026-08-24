@@ -54,13 +54,14 @@ HANDOFF_FIELDS = {"mode", "replaces_agent_session_id", "capability_inherited"}
 STATE_BINDING_FIELDS = {"state_version", "canonical_record_digest", "accepted_resource_revisions", "compare_and_swap_required"}
 RESOURCE_REVISION_FIELDS = {"resource_ref", "revision_ref", "digest"}
 PHASE_BINDING_FIELDS = {"phase_id", "session_affinity", "switch_conditions", "native_session_transfer"}
-EVALUATION_CONTEXT_FIELDS = {"experiment_arm", "auditor_mode"}
+EVALUATION_CONTEXT_FIELDS = {"experiment_arm", "auditor_mode", "evaluation_kernel_ref", "workflow_rubric_digest", "case_set_digest"}
 
 RECEIPT_FIELDS = {
     "schema_version", "attempt_id", "envelope_digest", "attempt_ordinal", "adapter", "lifecycle",
     "result", "attestation", "negative_knowledge", "telemetry", "tool_event_summaries", "observation",
-    "interventions", "handoff_proposal", "visual_artifacts",
+    "interventions", "handoff_proposal", "visual_artifacts", "evaluation_binding",
 }
+RECEIPT_EVALUATION_BINDING_FIELDS = {"evaluation_kernel_ref", "workflow_rubric_digest", "case_set_digest", "evidence_refs"}
 LIFECYCLE_FIELDS = {"started_at", "ended_at", "state", "retry_count", "recovery_count", "failure_class"}
 RESULT_FIELDS = {"job_ref", "outcome", "verification_state", "artifact_refs", "evidence_refs", "validation_results"}
 TELEMETRY_FIELDS = {"latency_ms", "cost_usd", "usage", "reset_tax"}
@@ -304,6 +305,9 @@ def _validate_evaluation_context(value: Any) -> dict[str, Any]:
         raise ContractError("evaluation_context experiment_arm is invalid")
     if context["auditor_mode"] not in {"none", "same_pair_auditor", "diverse_read_only_auditor"}:
         raise ContractError("evaluation_context auditor_mode is invalid")
+    _string(context["evaluation_kernel_ref"], "evaluation_context evaluation_kernel_ref", identifier=True)
+    _digest(context["workflow_rubric_digest"], "evaluation_context workflow_rubric_digest")
+    _digest(context["case_set_digest"], "evaluation_context case_set_digest")
     return context
 
 
@@ -493,6 +497,11 @@ def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[
         raise ContractError("unsupported attempt receipt schema_version")
     _string(value["attempt_id"], "attempt receipt attempt_id", identifier=True)
     _digest(value["envelope_digest"], "attempt receipt envelope_digest")
+    evaluation_binding = _expect_exact(value["evaluation_binding"], RECEIPT_EVALUATION_BINDING_FIELDS, "attempt receipt evaluation_binding")
+    _string(evaluation_binding["evaluation_kernel_ref"], "attempt receipt evaluation_kernel_ref", identifier=True)
+    _digest(evaluation_binding["workflow_rubric_digest"], "attempt receipt workflow_rubric_digest")
+    _digest(evaluation_binding["case_set_digest"], "attempt receipt case_set_digest")
+    _list_of_strings(evaluation_binding["evidence_refs"], "attempt receipt evaluation evidence_refs")
     if not isinstance(value["attempt_ordinal"], int) or isinstance(value["attempt_ordinal"], bool) or value["attempt_ordinal"] < 1:
         raise ContractError("attempt receipt attempt_ordinal must be a positive integer")
     _validate_adapter(value["adapter"])
@@ -548,6 +557,9 @@ def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[
             raise ContractError("attempt receipt adapter does not match the envelope adapter")
         if result["job_ref"] != bound["request"]["job_ref"]:
             raise ContractError("attempt receipt job_ref does not match the envelope request")
+        context = bound["evaluation_context"]
+        if any(evaluation_binding[field] != context[field] for field in ("evaluation_kernel_ref", "workflow_rubric_digest", "case_set_digest")):
+            raise ContractError("attempt receipt evaluation binding does not match the exact envelope context")
     return value
 
 
@@ -721,9 +733,12 @@ def job_passport_wire_receipt(kind: str, payload: Any) -> dict[str, Any]:
     }
     # Import lazily: the portfolio reuses the contract's strict primitives,
     # while the core envelope seam remains usable without an eval consumer.
-    if kind == "eval_portfolio":
-        from eval_portfolio import validate_eval_portfolio
-        validators["eval_portfolio"] = validate_eval_portfolio
+    if kind in {"evaluation_kernel", "eval_portfolio"}:
+        from evaluation_kernel import validate_evaluation_kernel
+        validators["evaluation_kernel"] = validate_evaluation_kernel
+        # Deprecated read-only wire alias; it validates the canonical shared
+        # record and cannot revive a Job-Passport-owned contract.
+        validators["eval_portfolio"] = validate_evaluation_kernel
     if kind not in validators:
         raise ContractError("job passport wire kind is invalid")
     value = validators[kind](payload)
@@ -836,6 +851,7 @@ def receipt_from_dispatch_row(envelope: Any, row: dict[str, Any], *, attempt_id:
         "schema_version": "attempt-receipt.v1",
         "attempt_id": attempt_id or str(row.get("msg_id") or "attempt-unknown"),
         "envelope_digest": execution_envelope_digest(bound),
+        "evaluation_binding": {"evaluation_kernel_ref": bound["evaluation_context"]["evaluation_kernel_ref"], "workflow_rubric_digest": bound["evaluation_context"]["workflow_rubric_digest"], "case_set_digest": bound["evaluation_context"]["case_set_digest"], "evidence_refs": []},
         "attempt_ordinal": 1,
         "adapter": bound["server_binding"]["adapter"],
         "lifecycle": {

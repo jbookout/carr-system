@@ -17,7 +17,8 @@ import execution_contract as contract  # noqa: E402
 import dispatch  # noqa: E402
 import job_passport_artifact as artifact_renderer  # noqa: E402
 import bridge  # noqa: E402
-import eval_portfolio  # noqa: E402
+import evaluation_kernel  # noqa: E402
+import evaluation_rubrics  # noqa: E402
 
 
 FIXTURES = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric"
@@ -53,11 +54,13 @@ def expect_refusal(fn, contains):
 
 
 def schemas_are_versioned_and_fail_closed():
-    for name in ("execution-envelope.v1.schema.json", "attempt-receipt.v1.schema.json", "job-passport-eval-portfolio.v1.schema.json"):
+    for name in ("execution-envelope.v1.schema.json", "attempt-receipt.v1.schema.json", "carr-evaluation-kernel.v1.schema.json"):
         schema = json.loads((ROOT / "control-room" / "contracts" / name).read_text())
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert schema["additionalProperties"] is False
         assert schema["properties"]["schema_version"]["const"].endswith(".v1")
+    legacy = json.loads((ROOT / "control-room" / "contracts" / "job-passport-eval-portfolio.v1.schema.json").read_text())
+    assert legacy["x-carr-migration"]["canonical_schema"] == "carr-evaluation-kernel.v1.schema.json"
 
 
 def unknown_fields_fail_closed():
@@ -275,9 +278,9 @@ def wire_receipts_validate_projection_and_keep_typed_facts_distinct():
 
 def eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression():
     projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
-    portfolio = json.loads((FIXTURES / "job-passport-eval-portfolio.synthetic.v1.json").read_text())
-    assert eval_portfolio.validate_eval_portfolio(portfolio, projection) == portfolio
-    gates = eval_portfolio.cost_curve_gate(portfolio)
+    portfolio = json.loads((FIXTURES / "carr-evaluation-kernel.synthetic.v1.json").read_text())
+    assert evaluation_kernel.validate_evaluation_kernel(portfolio, projection) == portfolio
+    gates = evaluation_kernel.cost_curve_gate(portfolio)
     assert gates[0]["promotion_state"] == "not_eligible"
     assert gates[0]["blocked_dimensions"] == ["visual_accessibility"]
     assert gates[1]["promotion_state"] == "blocked"
@@ -287,13 +290,42 @@ def eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regressi
     }
     changed = copy.deepcopy(portfolio)
     changed["results"][0]["score"] = 99
-    expect_refusal(lambda: eval_portfolio.validate_eval_portfolio(changed), "unknown fields")
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "unknown fields")
     changed = copy.deepcopy(portfolio)
     changed["taxonomy"]["failure_modes"][0]["class_name"] = "bad_answer"
-    expect_refusal(lambda: eval_portfolio.validate_eval_portfolio(changed), "never generic")
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "never generic")
     changed = copy.deepcopy(portfolio)
     changed["results"][2]["stage_results"] = [changed["results"][2]["stage_results"][0]]
-    expect_refusal(lambda: eval_portfolio.validate_eval_portfolio(changed), "not diagnosable")
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "not diagnosable")
+
+
+def shared_kernel_policy_is_risk_scaled_and_default_deny():
+    kernel = json.loads((FIXTURES / "carr-evaluation-kernel.synthetic.v1.json").read_text())
+    decision = evaluation_kernel.admission_decision(kernel)
+    assert decision["decision"] == "not_admitted"
+    assert "synthetic_evidence_not_controller_promotion" in decision["reason_codes"]
+    changed = copy.deepcopy(kernel)
+    changed["binding"]["risk_class"] = "R3"
+    changed["binding"]["lifecycle"] = "launch"
+    decision = evaluation_kernel.admission_decision(changed)
+    assert "required_case_not_passed:case:launch-representation:blocked" in decision["reason_codes"]
+    assert "independent_review_required" in decision["reason_codes"]
+    changed = copy.deepcopy(kernel)
+    changed["binding"]["risk_class"] = "R6"
+    changed["binding"]["lifecycle"] = "launch"
+    decision = evaluation_kernel.admission_decision(changed)
+    assert "risk_lifecycle_unmapped_default_deny" in decision["reason_codes"]
+    decision = evaluation_kernel.admission_decision(kernel, as_of="2026-10-01T00:00:00Z")
+    assert "evidence_stale_or_revalidation_required" in decision["reason_codes"]
+    changed = copy.deepcopy(kernel)
+    changed["workflow"]["rubric_id"] = "rubric:retrieval-only"
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "not registered")
+    changed = copy.deepcopy(kernel)
+    changed["cases"][0]["job_stages"] = ["not-a-shared-stage"]
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "unknown workflow rubric stage")
+    rubrics = evaluation_rubrics.WORKFLOW_RUBRICS
+    assert {"workflow:claude-desktop-readonly", "workflow:codex-desktop-readonly", "workflow:hermes-orchestration", "workflow:grok-x-native-retrieval"}.issubset(rubrics)
+    assert len({tuple(sorted(rubrics[key]["critical_dimensions"])) for key in rubrics}) == len(rubrics)
 
 
 def synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire():
@@ -305,23 +337,25 @@ def synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wir
         "causation_id": "cause:dispatch-1", "redaction_class": "metadata_only", "evidence_refs": ["evidence:synthetic-check"], "retention": "ephemeral",
     }
     posted = []
+    kernel = json.loads((FIXTURES / "carr-evaluation-kernel.synthetic.v1.json").read_text())
     rehearsal = bridge.rehearse_job_passport(
         envelope(), receipt(), [event], {"profile_id": "profile:doc", "display_label": "Doc"},
+        evaluation_kernel=kernel,
         add_room_turn=lambda **row: posted.append(row) or {"recorded": True},
     )
     assert rehearsal["mode"] == "synthetic_read_only_rehearsal"
     assert [json.loads(row["body"])["job_passport"]["kind"] for row in posted] == [
-        "execution_envelope", "progress_event", "attempt_receipt", "observatory_projection",
+        "execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel",
     ]
     assert all(row["seat"] == "hermes" and row["kind"] == "receipt" for row in posted)
-    assert rehearsal["projection"]["projection_digest"] == json.loads(posted[-1]["body"])["job_passport"]["payload"]["projection_digest"]
+    assert rehearsal["projection"]["projection_digest"] == json.loads(posted[-2]["body"])["job_passport"]["payload"]["projection_digest"]
 
 
 def self_contained_job_passport_artifact_binds_content_and_is_stale_visible():
     projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
     behavior = json.loads((FIXTURES / "codex_desktop.job-passport.behavior-verification.v1.json").read_text())
     contract.validate_product_behavior_verification(behavior)
-    portfolio = json.loads((FIXTURES / "job-passport-eval-portfolio.synthetic.v1.json").read_text())
+    portfolio = json.loads((FIXTURES / "carr-evaluation-kernel.synthetic.v1.json").read_text())
     document, artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), projection, behavior, portfolio)
     assert artifact_renderer.verify_visual_artifact(document, artifact)
     assert artifact["content_digest"] == contract.canonical_digest(document)
@@ -388,6 +422,7 @@ if __name__ == "__main__":
         ("observatory projection preserves profile/staffing distinction", observatory_projection_groups_by_work_request_and_separates_profile_from_staffing),
         ("room wire accepts only validated typed Job Passport facts", wire_receipts_validate_projection_and_keep_typed_facts_distinct),
         ("evaluation ladder is multidimensional and rejects masked critical regression", eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression),
+        ("shared kernel policy is risk-scaled and defaults deny", shared_kernel_policy_is_risk_scaled_and_default_deny),
         ("synthetic read-only rehearsal publishes typed facts on the existing wire", synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire),
         ("self-contained Job Passport artifact has verified content and stale posture", self_contained_job_passport_artifact_binds_content_and_is_stale_visible),
         ("behavior audit fails closed on dangling or non-live verification", behavior_audit_fails_closed_on_dangling_claim_or_fake_live_verification),

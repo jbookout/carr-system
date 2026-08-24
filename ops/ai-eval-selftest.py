@@ -19,7 +19,7 @@ OBSERVED_RUN_PATH = ROOT / "evals" / "ai" / "synthetic-observed-run.v1.json"
 BASELINE_HISTORY_PATH = ROOT / "evals" / "ai" / "synthetic-baseline-history.v1.json"
 ENVELOPE_FIXTURE_PATH = ROOT / "evals" / "ai" / "response-envelope.v1.json"
 ACCEPTANCE_PATH = ROOT / "workspace" / "contracts" / "phase0-acceptance.v1.json"
-JOB_PASSPORT_PORTFOLIO_PATH = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric" / "job-passport-eval-portfolio.synthetic.v1.json"
+SHARED_EVALUATION_KERNEL_PATH = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric" / "carr-evaluation-kernel.synthetic.v1.json"
 JOB_PASSPORT_PROJECTION_PATH = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric" / "codex_desktop.observatory-projection.v1.json"
 
 SPEC = importlib.util.spec_from_file_location("ai_eval", MODULE_PATH)
@@ -40,14 +40,17 @@ class SuiteTests(unittest.TestCase):
         self.assertCountEqual(actual, expected)
         self.assertEqual(len(actual), len(set(actual)))
 
-    def test_job_passport_portfolio_keeps_named_dimensions_and_rejects_masked_regression(self):
+    def test_shared_evaluation_kernel_keeps_named_dimensions_and_rejects_masked_regression(self):
         projection = json.loads(JOB_PASSPORT_PROJECTION_PATH.read_text())
-        portfolio = ai_eval.load_job_passport_eval_portfolio(JOB_PASSPORT_PORTFOLIO_PATH, projection)
+        portfolio = ai_eval.load_shared_evaluation_kernel(SHARED_EVALUATION_KERNEL_PATH, projection)
         self.assertNotIn("score", portfolio)
         gates = ai_eval.job_passport_cost_curve(portfolio)
         self.assertEqual(gates[0]["promotion_state"], "not_eligible")
         self.assertEqual(gates[0]["blocked_dimensions"], ["visual_accessibility"])
         self.assertEqual(gates[1]["promotion_state"], "blocked")
+        admission = ai_eval.shared_evaluation_admission(portfolio)
+        self.assertEqual(admission["decision"], "not_admitted")
+        self.assertIn("synthetic_evidence_not_controller_promotion", admission["reason_codes"])
 
     def test_suite_is_synthetic_and_has_no_runtime_or_write_authority(self):
         self.assertEqual(self.suite["data_class"], "synthetic_only")

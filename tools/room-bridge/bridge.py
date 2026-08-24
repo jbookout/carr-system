@@ -111,13 +111,14 @@ def publish_job_passport_fact(kind: str, payload: dict, *, add_room_turn) -> dic
             "result": result}
 
 
-def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], profile: dict, *, add_room_turn) -> dict:
+def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], profile: dict, *, evaluation_kernel: dict | None = None, add_room_turn) -> dict:
     """Exercise the full typed wire path using only synthetic, read-only facts.
 
     This is a rehearsal helper, never an autonomous runtime: caller-supplied
     material must already be a synthetic v1 envelope with server-derived
     read-only authority. It emits the exact envelope, progress, receipt, and
-    deterministic Observatory projection shapes the Model Room consumes.
+    deterministic Observatory projection shapes the Model Room consumes. An
+    optional shared evaluation kernel is relayed as evidence, never promoted.
     """
     bound = execution_contract.validate_execution_envelope(envelope)
     if bound["request"]["data_class"] != "synthetic_only" or bound["server_binding"]["authority"]["read_only"] is not True:
@@ -128,6 +129,8 @@ def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], pro
     published.extend(publish_job_passport_fact("progress_event", event, add_room_turn=add_room_turn) for event in events)
     published.append(publish_job_passport_fact("attempt_receipt", completed, add_room_turn=add_room_turn))
     published.append(publish_job_passport_fact("observatory_projection", projection, add_room_turn=add_room_turn))
+    if evaluation_kernel is not None:
+        published.append(publish_job_passport_fact("evaluation_kernel", evaluation_kernel, add_room_turn=add_room_turn))
     return {"mode": "synthetic_read_only_rehearsal", "work_request_id": bound["work_request_id"],
             "attempt_id": completed["attempt_id"], "projection": projection, "published": published}
 

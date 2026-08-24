@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import execution_contract as contract
-import eval_portfolio
+import evaluation_kernel
 
 
 def _text(value: Any) -> str:
@@ -37,7 +37,7 @@ def render_job_passport_html(projection: Any, behavior_audit: Any | None = None,
     audit = contract.validate_product_behavior_verification(behavior_audit) if behavior_audit is not None else None
     if audit is not None and (audit["binding"]["work_request_id"] != value["work_request_id"] or audit["binding"]["projection_digest"] != value["projection_digest"]):
         raise contract.ContractError("behavior audit does not bind this exact visual projection")
-    evaluated = eval_portfolio.validate_eval_portfolio(portfolio, value) if portfolio is not None else None
+    evaluated = evaluation_kernel.validate_evaluation_kernel(portfolio, value) if portfolio is not None else None
     nodes = "".join(
         f'<button type="button" class="node{ " current" if item["current"] else "" }" '
         f'aria-label="Component {_text(item["component_ref"])}">{_short(item["component_ref"])}'
@@ -72,11 +72,13 @@ def render_job_passport_html(projection: Any, behavior_audit: Any | None = None,
         eval_html = ""
     else:
         baseline = next((row for row in evaluated["results"] if row["result_id"] == "result:codex-baseline"), evaluated["results"][0])
+        requirement = next((row for row in evaluated["policy"]["risk_requirements"] if row["risk_class"] == evaluated["binding"]["risk_class"] and row["lifecycle"] == evaluated["binding"]["lifecycle"]), None)
+        completed = sorted({row["rung"] for row in evaluated["results"] if row["status"] == "passed"})
         comparison = evaluated["frontier_comparisons"][0] if evaluated["frontier_comparisons"] else None
         candidate = next((row for row in evaluated["results"] if comparison and row["result_id"] == comparison["candidate_result_id"]), None)
         matrix = "".join(f'<li><b>{_short(row["stage_id"])}:</b> {_text(row["status"])} · {_text(", ".join(row["dimension_ids"]))}</li>' for row in baseline["stage_results"])
         regressed = ", ".join(_short(row["dimension_id"]) for row in (candidate or {}).get("dimension_results", []) if row["direction_vs_baseline"] == "regressed") or "none"
-        eval_html = f'''<section><h2>Evaluation ladder · synthetic/offline</h2><p class="meta">Rungs: {_text(", ".join(sorted({row["rung"] for row in evaluated["cases"]})))}. No aggregate score; critical dimensions decide promotion.</p>
+        eval_html = f'''<section><h2>Evaluation ladder · synthetic/offline</h2><p class="meta">Required: {_text(", ".join((requirement or {}).get("required_rungs", ["unknown / default deny"])))} · completed: {_text(", ".join(completed) or "not run")} · represented: {_text(", ".join(sorted({row["rung"] for row in evaluated["cases"]})))}. No aggregate score; critical dimensions decide promotion.</p>
 <ul>{matrix}</ul><p><b>Quality frontier / cost curve:</b> {_text(comparison["promotion_state"].replace("_", " ") if comparison else "unavailable")} · critical regression: {_text(regressed)} · candidate latency/cost: {_text((candidate or {}).get("telemetry", {}).get("latency_ms", "unknown"))} ms / {_text((candidate or {}).get("telemetry", {}).get("cost_usd", "unknown"))}.</p>
 <p class="meta">Failure taxonomy: {_text(", ".join(row["class_name"] for row in evaluated["taxonomy"]["failure_modes"]))}</p></section>'''
     return f'''<!doctype html>
