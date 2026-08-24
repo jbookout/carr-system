@@ -3046,6 +3046,13 @@
         ],
         "why": "An installed stop gate delivers this at its binding moment."
       },
+      "6cfb67f5": {
+        "load_layer": "control",
+        "packs": [
+          "delegation-council"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
       "6ec7312d": {
         "load_layer": "pack",
         "packs": [
