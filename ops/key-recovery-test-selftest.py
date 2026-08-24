@@ -22,13 +22,20 @@ its own comparison all run for real. The ONE thing it cannot afford is a
 terminal to type into and a real Neon branch — so it uses TWO test-only env
 hooks, chained:
 
-  CARR_KEY_RECOVERY_TEST_SELFTEST(_TYPED_KEY|_PUBKEY_FILE|_PAUSE_AFTER_WRITE)
+  CARR_KEY_RECOVERY_TEST_SELFTEST(_TYPED_KEY|_PUBKEY_FILE|_PAUSE_AFTER_WRITE
+                                   |_PAUSE_MARKER_FILE)
       Mirrors bin/restore-rehearse.sh's CARR_RESTORE_REHEARSE_SELFTEST
       precedent, but stands in for the interactive `read -s` ALONE — shape
       validation, the real age-keygen -y derivation, the real comparison
       against a FIXTURE public-key file (never the repo's own
       backups-public-key.txt), and — on a match — the real call into
       bin/restore-rehearse.sh, all still execute for real.
+      _PAUSE_MARKER_FILE makes the interrupt window OBSERVABLE rather than
+      guessed at: the script writes <marker>.paused (carrying its own temp
+      dir and identity path) just before the pause and <marker>.completed
+      just after it, so this suite waits for a real signal-ready state and
+      then reads "did the pause run out?" off the filesystem instead of a
+      stopwatch. See the timeout block below for the flake that bought it.
 
   CARR_RESTORE_REHEARSE_SELFTEST(_*)
       bin/restore-rehearse.sh's OWN existing selftest hook (proven by
@@ -81,11 +88,13 @@ that proceeds into a REAL call to bin/restore-rehearse.sh, chained through
 THAT script's own selftest hook to a synthetic PASS (exit 0, detail names the
 dump); a real match whose restore then fails (failure_class restore_failed);
 an interrupt (SIGINT to the whole process group, matching what a terminal's
-Ctrl-C actually delivers) sent while the script is deliberately paused right
-after writing the identity file, proving the temp file and its containing
-directory are BOTH gone afterward and the run is recorded aborted; and, across
-every scenario, that the throwaway secret key value never appears verbatim in
-the script's stdout or stderr.
+Ctrl-C actually delivers) sent once the script has REPORTED it is paused right
+after writing the identity file, proving the trap fired on the signal rather
+than the pause being slept out (the pause's own completion marker is absent),
+that the exit code is 130, that cleanup ran exactly once, and that THIS RUN'S
+temp file and containing directory are both gone afterward with the run
+recorded aborted; and, across every scenario, that the throwaway secret key
+value never appears verbatim in the script's stdout or stderr.
 
 TIER 2 (a genuine key-recovery drill, run only by Joe, only with the real
 paper copy) is deliberately NOT part of this file — it needs a human typing
@@ -95,7 +104,6 @@ from paper and touches production's real ops.run row. That live proof is
 RUN IT:
     python3 ops/key-recovery-test-selftest.py
 """
-import glob
 import os
 import shutil
 import signal
@@ -107,11 +115,6 @@ import time
 from typing import Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-# How long bin/key-recovery-test.sh is told to pause after writing the identity
-# file, so the interrupt lands while it is paused. Wide on purpose — see the
-# note at the interrupted-path case below.
-PAUSE_SECONDS = 45
 sys.path.insert(0, REPO)
 
 from lib.loadpy import load_module_from_path  # noqa: E402
@@ -135,6 +138,57 @@ ROUTINE_ENV_FILE.chmod(0o600)
 # spelling it whole here would still read oddly out of context, so it is kept
 # split for a human skimming this file too.
 AGE_KEYGEN = "age-key" "gen"
+
+# ── TIMEOUTS ARE WEDGE BACKSTOPS HERE, NEVER ASSERTIONS. ─────────────────────
+# Every number below bounds how long this suite is willing to WAIT for a
+# process; not one of them is a property the suite claims to prove. That
+# distinction is the whole point, and it was learned the expensive way.
+#
+# WHAT WENT WRONG (2026-08-23, worktree festive-antonelli-56e0a8). The
+# interrupted-path scenario used to assert `elapsed < 6` seconds, measured from
+# before Popen through the child's death, and called that "the script
+# terminated promptly on SIGINT (well under the 8s pause)". It failed the whole
+# `gates` class on a Mac at load average ~428 with swap exhausted and fourteen
+# concurrent ci.sh runs, on a branch that never touched this file, and it
+# failed again standalone at 7.4s on the same machine before passing clean on a
+# third run. Hosted CI was green throughout.
+#
+# PR #546 GOT THERE FIRST AND ITS FIX IS SUPERSEDED HERE, NOT LOST. That PR
+# moved the clock start from the spawn to the signal and widened the pause from
+# 8s to 45s, so the distinction became 20s vs 45s instead of 6s vs 8s — a
+# genuine improvement, and it is why PAUSE_SECONDS is 45 below rather than 8.
+# What it kept was the wall clock itself, and the quantity inside that clock is
+# still cleanup()'s teardown: two dd passes, an rm -rf and a Python interpreter
+# start. 20 seconds of headroom is a lot of headroom, but it is headroom over an
+# unbounded quantity on a machine that has been measured at 7.6s for a single
+# `import psycopg`. This branch removes the timer instead of sizing it, so there
+# is no headroom left to be wrong about. #546's other two findings — the 1.5s
+# pre-signal sleep and the shared-$TMPDIR leftover glob — were untouched by it
+# and are fixed below.
+#
+# WHY THAT CONSTANT WAS MEASURING THE WRONG THING. The 6s window contained a
+# fixed 1.5s pre-signal sleep plus, after the signal, all of cleanup(): two dd
+# passes, an rm -rf, and record_run() spawning `.venv/bin/python
+# tools/ops-record.py`. Measured on this machine while fixing it, that Python
+# start alone is 2.2–2.5s under load (0.3s idle). So the assertion was mostly a
+# stopwatch on interpreter startup, and signal handling — the thing it named —
+# was the small remainder. Raising 6 to some larger number would just move the
+# same unbounded quantity under a new constant nobody could defend either; the
+# fix is to stop timing a property that is not about time. See the interrupted
+# path below for what replaced it.
+PAUSE_SECONDS = 45           # how long bin/key-recovery-test.sh holds still
+                             # (#546's value, kept: the suite signals as soon as
+                             # the pause reports itself ready, so a wide pause
+                             # costs nothing and leaves the completion marker
+                             # unambiguous)
+PAUSE_READY_TIMEOUT = 90     # waiting for the script to REACH that pause
+SIGNAL_EXIT_TIMEOUT = 90     # waiting for it to die after the SIGINT
+DRIVE_TIMEOUT = 180          # any one non-interactive scenario end to end
+# 90 and 180 are deliberately far above anything a healthy run needs (a whole
+# five-scenario suite takes ~60s on a loaded machine, ~15s idle). They cost
+# nothing when things work — every wait ends the moment the process does — and
+# they exist only so a genuinely WEDGED script is reported as wedged instead of
+# hanging a CI class forever.
 
 FAILED: list[str] = []
 
@@ -220,11 +274,39 @@ def gen_throwaway_keypair(workdir: str) -> tuple[str, str]:
     return secret, pub
 
 
-def drive(env_extra: dict, timeout: int = 60) -> subprocess.CompletedProcess:
+def drive(env_extra: dict, timeout: int = DRIVE_TIMEOUT) -> subprocess.CompletedProcess:
     """Run the REAL script with the REAL selftest hook."""
     env = unreachable_env({"CARR_KEY_RECOVERY_TEST_SELFTEST": "1", **env_extra})
     return subprocess.run([SCRIPT], capture_output=True, text=True,
                            timeout=timeout, env=env, cwd=REPO)
+
+
+def wait_for_file(path: str, timeout: float,
+                   proc: subprocess.Popen) -> Optional[str]:
+    """Block until `path` exists and return its text, or None on give-up.
+
+    Gives up early — without burning the full timeout — the moment `proc` has
+    exited, because a marker the script writes before a pause can never appear
+    after the script is gone. Polls rather than watches: the wait is at most a
+    few seconds in practice and a kqueue watcher would be more moving parts
+    than the thing it replaces.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return open(path, encoding="utf-8").read()
+        except FileNotFoundError:
+            pass
+        if proc.poll() is not None:
+            # One last look: the process may have written the marker and then
+            # died between the read above and this check.
+            try:
+                return open(path, encoding="utf-8").read()
+            except FileNotFoundError:
+                return None
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.02)
 
 
 def evidence_lines(proc: subprocess.CompletedProcess) -> str:
@@ -363,48 +445,83 @@ def tier1_age(workdir: str) -> None:
     #    tried first while building this and did NOT interrupt the paused
     #    child; a process-group signal does), sent while the script is
     #    deliberately paused right after writing the identity file ──────────
-    tmp_glob = os.path.join(os.environ.get("TMPDIR", "/tmp"), "carr-key-recovery.*")
-    before = set(glob.glob(tmp_glob))
+    #
+    # NOTHING HERE IS TIMED ANY MORE, and that is the fix rather than a bigger
+    # constant. See PAUSE_READY_TIMEOUT and SIGNAL_EXIT_TIMEOUT above for the
+    # measurement that retired the wall clock; the two properties this scenario
+    # actually owns are now asserted directly:
+    #   reached the pause  — wait for the script's own <marker>.paused file
+    #                        instead of sleeping 1.5s and hoping. A guessed
+    #                        wait can signal a process that has not created its
+    #                        temp dir yet, which proves nothing about a
+    #                        teardown and reads as a mystery pass.
+    #   died on the signal — <marker>.completed is written by the statement
+    #                        immediately after the pause, so it exists if and
+    #                        only if the pause ran to completion. Its absence
+    #                        is exactly "the trap fired and the script never
+    #                        came back from the sleep", with no dependence on
+    #                        how fast this machine happens to be.
+    marker = os.path.join(workdir, "pause-marker")
     env = unreachable_env({
         "CARR_KEY_RECOVERY_TEST_SELFTEST": "1",
         "CARR_KEY_RECOVERY_TEST_SELFTEST_TYPED_KEY": secret,
         "CARR_KEY_RECOVERY_TEST_SELFTEST_PUBKEY_FILE": match_pubkey_file,
         "CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE": str(PAUSE_SECONDS),
+        "CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_MARKER_FILE": marker,
+        # Belt for the path this scenario is designed never to take. The pubkey
+        # file above is the MATCH fixture, so if the pause ever did run out
+        # before the signal landed, the script would fall through into a REAL
+        # `./run.sh restore-rehearse`. Chaining that script's own already-proven
+        # selftest hook keeps an overrun cheap and offline; it changes nothing
+        # about the interrupt itself, which happens two steps earlier.
+        "CARR_RESTORE_REHEARSE_SELFTEST": "1",
+        "CARR_RESTORE_REHEARSE_SELFTEST_EXIT": "0",
     })
     proc2 = subprocess.Popen([SCRIPT], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, env=env, cwd=REPO, start_new_session=True)
-    time.sleep(1.5)
-    # THE CLOCK STARTS AT THE SIGNAL, NOT AT THE SPAWN, and the pause is wide.
-    #
-    # This was `t0 = time.time()` before the Popen, a pause of 8 and a bound of
-    # `elapsed < 6` — 4.5 seconds of headroom covering a subprocess spawn, a
-    # 1.5s sleep, signal delivery and teardown. On 2026-08-23 that failed on
-    # main, with no branch changes, at load average ~380: the whole suite spent
-    # 4s of CPU against 45s of wall clock (9% CPU) and this one check went red,
-    # refusing every push from the machine for as long as the load lasted.
-    #
-    # A wall-clock proxy is the right idea and was simply cut too fine. Two
-    # changes, and neither weakens what is being proved: the window now excludes
-    # the spawn, which was never part of the question, and the pause is wide
-    # enough that thrash cannot close the gap between "died on the signal" and
-    # "sat out the pause". The distinction under test is 20s vs 45s instead of
-    # 6s vs 8s.
-    #
-    # THE BEHAVIOURAL PROOF WAS NEVER THE TIMER. The exit-code check directly
-    # below already establishes death by signal (130); this one exists only to
-    # rule out the script sleeping through its pause and dying afterwards for
-    # some other reason. Widening it costs nothing that was being caught.
-    signalled = time.time()
+    paused_file = wait_for_file(marker + ".paused", PAUSE_READY_TIMEOUT, proc2)
+    if not check("interrupted path: the script reached its deliberate pause "
+                 "holding a written identity file (the precondition this "
+                 "scenario needs, waited for rather than guessed at)",
+                 paused_file is not None,
+                 f"no {marker}.paused after {PAUSE_READY_TIMEOUT}s; "
+                 f"process rc={proc2.poll()}"):
+        proc2.kill()
+        proc2.communicate()
+        return
+
+    reported = paused_file.splitlines()
+    script_workdir = reported[0].strip() if reported else ""
+    identity_path = reported[1].strip() if len(reported) > 1 else ""
+    # The script reports its OWN temp dir, so the teardown assertion below is
+    # about this run and no other. Globbing $TMPDIR/carr-key-recovery.* was the
+    # old spelling, and on a machine running several ci.sh at once it charged
+    # this run with a sibling run's still-live directory.
+    check("interrupted path: the identity file really existed while the "
+          "script was paused (so the teardown below has something real to "
+          "prove, not a vacuous pass)",
+          bool(identity_path) and os.path.isfile(identity_path),
+          f"workdir={script_workdir!r} identity={identity_path!r}")
+
     os.killpg(os.getpgid(proc2.pid), signal.SIGINT)
+    killed_by_us = False
     try:
-        out, err = proc2.communicate(timeout=PAUSE_SECONDS - 5)
+        out, err = proc2.communicate(timeout=SIGNAL_EXIT_TIMEOUT)
     except subprocess.TimeoutExpired:
+        killed_by_us = True
         proc2.kill()
         out, err = proc2.communicate()
-    elapsed = time.time() - signalled
-    check(f"interrupted path: the script actually terminated promptly on "
-          f"SIGINT (well under the {PAUSE_SECONDS}s pause, not after it)",
-          elapsed < 20, f"took {elapsed:.1f}s after the signal")
+
+    check("interrupted path: the script exited on its own after the SIGINT, "
+          f"within the {SIGNAL_EXIT_TIMEOUT}s wedge backstop",
+          not killed_by_us,
+          f"still running {SIGNAL_EXIT_TIMEOUT}s after the signal; this suite "
+          f"had to SIGKILL it")
+    check("interrupted path: the pause did NOT run to completion — the trap "
+          "fired on the signal instead of the script sleeping it out",
+          not os.path.exists(marker + ".completed"),
+          f"{marker}.completed exists, so the {PAUSE_SECONDS}s pause returned "
+          f"normally and the SIGINT landed somewhere else")
     check("interrupted path: exit code is a signal-death code (130 for "
           "SIGINT), not a clean 0 or 1",
           proc2.returncode == 130, f"got {proc2.returncode}")
@@ -415,11 +532,26 @@ def tier1_age(workdir: str) -> None:
     check("interrupted path: cleanup ran exactly once (one evidence block, "
           "not the double-fire a trap with no explicit exit produces)",
           out.count("evidence: state=") == 1, out)
-    after = set(glob.glob(tmp_glob))
-    leftover = after - before
-    check("interrupted path: no carr-key-recovery temp dir survives — the "
-          "identity file and its directory were both shredded and removed",
-          not leftover, f"leftover: {leftover}")
+
+    # "CLEANUP DID NOT RUN" AND "CLEANUP NEVER GOT TO RUN" ARE DIFFERENT
+    # FINDINGS, and only the first is a defect in the script. cleanup() shreds
+    # and removes BEFORE record_run() and exit, so once the process has exited
+    # of its own accord there is no teardown still in flight and a surviving
+    # directory is real. If this suite had to SIGKILL the process instead, the
+    # directory survives because of the kill, and reporting that as a broken
+    # teardown would be a fabricated finding — so it is reported as not proven.
+    if killed_by_us:
+        print("  not run  interrupted path: whether the temp dir survives — "
+              "this suite SIGKILLed the process mid-teardown, so a leftover "
+              "directory would say nothing about cleanup() (not authorized vs "
+              "not possible, rule 88e9b5eb)")
+    else:
+        survivors = [p for p in (identity_path, script_workdir)
+                     if p and os.path.exists(p)]
+        check("interrupted path: this run's own temp dir does not survive — "
+              "the identity file and its directory were both shredded and "
+              "removed",
+              not survivors, f"leftover: {survivors}")
     assert_no_leak((out, err), secret, "interrupted path")
 
 

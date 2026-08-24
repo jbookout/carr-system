@@ -273,7 +273,42 @@ if [ -n "${CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE:-}" ]; then
   # TEST HOOK ONLY: gives a selftest a reliable window to send SIGINT and
   # prove the identity file is gone afterward, before this script would
   # otherwise have raced ahead into the comparison below.
+  #
+  # _PAUSE_MARKER_FILE (added 2026-08-23) makes that window OBSERVABLE instead
+  # of something the test has to guess at with a sleep and a stopwatch. Two
+  # files, written either side of the pause:
+  #
+  #   <marker>.paused     immediately BEFORE the sleep, carrying this run's own
+  #                       WORKDIR on line 1 and its identity file on line 2. A
+  #                       test waits for this file rather than sleeping a
+  #                       guessed interval, so it can never signal a process
+  #                       that has not reached the pause yet — and it learns
+  #                       which directory is THIS run's, instead of globbing a
+  #                       TMPDIR that every concurrent run on the machine
+  #                       shares.
+  #   <marker>.completed  immediately AFTER the sleep returns. It exists only
+  #                       if the pause ran to COMPLETION, because a signal
+  #                       arriving during the sleep sends cleanup() down its
+  #                       own `exit` and this line is never reached. Its
+  #                       ABSENCE is therefore an exact, load-independent proof
+  #                       that the trap fired on the signal — the thing a
+  #                       wall-clock threshold could only approximate, and got
+  #                       wrong on a loaded machine, because the elapsed time
+  #                       it measured was dominated by cleanup()'s own
+  #                       record_run() Python startup rather than by anything
+  #                       about signal handling.
+  PAUSE_MARKER="${CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_MARKER_FILE:-}"
+  if [ -n "$PAUSE_MARKER" ]; then
+    # Written then renamed, so a poller can never read a half-written path.
+    print -r -- "$WORKDIR"       >  "$PAUSE_MARKER.partial"
+    print -r -- "$IDENTITY_FILE" >> "$PAUSE_MARKER.partial"
+    mv -f -- "$PAUSE_MARKER.partial" "$PAUSE_MARKER.paused"
+  fi
   sleep "${CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE}"
+  if [ -n "$PAUSE_MARKER" ]; then
+    print -r -- "the ${CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE}s pause ran to completion — no signal arrived" \
+      > "$PAUSE_MARKER.completed"
+  fi
 fi
 
 # ── PHASE 1: the decisive comparison. Does the paper key match the key that
