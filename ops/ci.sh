@@ -438,14 +438,18 @@ PYEOF
   # threshold, because coverage stands at three of twenty-three and a check that
   # fails every run is one people learn to scroll past. It fails only when a job
   # that HAD a workflow binding loses it.
+  # reachability-check JOINED 2026-08-23, from the completion-integrity council's
+  # fix D: it is the one question none of the others ask — whether anything
+  # CALLS a declared control.
   # selftest-git-isolation-check JOINED 2026-08-23, council recommendation 1.
   # Same kind again: repository content only, no machine state and no database —
   # it reads every selftest that builds a git fixture and fails when one is not
-  # wired to ops/git_env.py. It belongs in this list rather than being a selftest
-  # itself because it is an inventory question about the suite, and a suite
-  # cannot be trusted to audit its own isolation from inside.
+  # wired to ops/git_env.py. Both belong in this list rather than being selftests
+  # themselves because each is an inventory question about the suite or its
+  # bindings, and a suite cannot be trusted to audit its own isolation from
+  # inside.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             rule-enforcement-map-check selftest-git-isolation-check \
+             rule-enforcement-map-check reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
     [ -f "ops/$inv.py" ] || continue
