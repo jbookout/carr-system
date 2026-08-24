@@ -27,7 +27,8 @@ TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 ENVELOPE_FIELDS = {
     "schema_version", "envelope_id", "work_request_id", "plan_revision", "agent_session",
-    "issued_at", "expires_at", "request", "server_binding", "handoff",
+    "issued_at", "expires_at", "state_binding", "phase_binding", "evaluation_context", "request",
+    "server_binding", "handoff",
 }
 REQUEST_FIELDS = {"job_ref", "input_digest", "data_class", "allowed_actions", "declared_expectations"}
 CLIENT_REQUEST_FIELDS = {"job_ref", "input_digest", "data_class"}
@@ -50,19 +51,27 @@ ADAPTER_FIELDS = {
     "model_id", "native_session_ref", "configuration_fingerprint",
 }
 HANDOFF_FIELDS = {"mode", "replaces_agent_session_id", "capability_inherited"}
+STATE_BINDING_FIELDS = {"state_version", "canonical_record_digest", "accepted_resource_revisions", "compare_and_swap_required"}
+RESOURCE_REVISION_FIELDS = {"resource_ref", "revision_ref", "digest"}
+PHASE_BINDING_FIELDS = {"phase_id", "session_affinity", "switch_conditions", "native_session_transfer"}
+EVALUATION_CONTEXT_FIELDS = {"experiment_arm", "auditor_mode"}
 
 RECEIPT_FIELDS = {
     "schema_version", "attempt_id", "envelope_digest", "attempt_ordinal", "adapter", "lifecycle",
-    "result", "telemetry", "tool_event_summaries", "observation", "interventions", "handoff_proposal",
+    "result", "attestation", "negative_knowledge", "telemetry", "tool_event_summaries", "observation",
+    "interventions", "handoff_proposal",
 }
 LIFECYCLE_FIELDS = {"started_at", "ended_at", "state", "retry_count", "recovery_count", "failure_class"}
 RESULT_FIELDS = {"job_ref", "outcome", "verification_state", "artifact_refs", "evidence_refs", "validation_results"}
-TELEMETRY_FIELDS = {"latency_ms", "cost_usd", "usage"}
+TELEMETRY_FIELDS = {"latency_ms", "cost_usd", "usage", "reset_tax"}
 USAGE_FIELDS = {"input_tokens", "output_tokens", "cached_input_tokens"}
+RESET_TAX_FIELDS = {"context_reconstruction_ms", "duplicated_tool_calls", "repeated_failed_approach_count", "human_correction_count", "switch_overhead_ms"}
 TOOL_SUMMARY_FIELDS = {"tool_name", "result_class", "duration_ms"}
 INTERVENTION_FIELDS = {"kind", "occurred_at", "summary"}
-HANDOFF_PROPOSAL_FIELDS = {"proposed", "reason", "replacement_session_ref"}
+HANDOFF_PROPOSAL_FIELDS = {"proposed", "reason", "replacement_session_ref", "checkpoint_ref", "requires_independent_verification"}
 VALIDATION_RESULT_FIELDS = {"check_id", "state", "evidence_refs"}
+ATTESTATION_FIELDS = {"claim_state", "canonical_promotion_state", "independent_evidence_required"}
+NEGATIVE_KNOWLEDGE_FIELDS = {"approach_ref", "evidence_refs", "applicability", "revalidate_after", "expires_at"}
 OBSERVATION_FIELDS = {
     "progress_state", "coverage_state", "activity_fidelity", "declared_refs_observed",
     "unmapped_activity_refs", "deviation_candidates", "uncertainty",
@@ -90,7 +99,7 @@ FORBIDDEN_CLIENT_SELECTORS = {
     "organization_tenant_id", "tenant_id", "sponsoring_human_id", "agent_principal_id",
     "runtime_principal", "environment", "risk_class", "capability_profile", "capability_grant_ref",
     "personal_brain_scope", "personal_brain_version", "provider_id", "model_id", "adapter_id",
-    "harness_id", "surface", "configuration_fingerprint",
+    "harness_id", "surface", "configuration_fingerprint", "phase_id", "session_affinity",
 }
 
 
@@ -230,6 +239,49 @@ def _validate_server_binding(value: Any) -> dict[str, Any]:
     return binding
 
 
+def _validate_state_binding(value: Any) -> dict[str, Any]:
+    binding = _expect_exact(value, STATE_BINDING_FIELDS, "state_binding")
+    if not isinstance(binding["state_version"], int) or isinstance(binding["state_version"], bool) or binding["state_version"] < 1:
+        raise ContractError("state_binding state_version must be a positive integer")
+    _digest(binding["canonical_record_digest"], "state_binding canonical_record_digest")
+    if binding["compare_and_swap_required"] is not True:
+        raise ContractError("state_binding requires compare_and_swap_required")
+    if not isinstance(binding["accepted_resource_revisions"], list):
+        raise ContractError("state_binding accepted_resource_revisions must be a list")
+    for row in binding["accepted_resource_revisions"]:
+        resource = _expect_exact(row, RESOURCE_REVISION_FIELDS, "accepted resource revision")
+        _string(resource["resource_ref"], "accepted resource revision resource_ref", identifier=True)
+        _string(resource["revision_ref"], "accepted resource revision revision_ref", identifier=True)
+        _digest(resource["digest"], "accepted resource revision digest")
+    return binding
+
+
+def _validate_phase_binding(value: Any) -> dict[str, Any]:
+    phase = _expect_exact(value, PHASE_BINDING_FIELDS, "phase_binding")
+    _string(phase["phase_id"], "phase_binding phase_id", identifier=True)
+    if phase["session_affinity"] not in {"same_native_session_required", "same_native_session_preferred", "fresh_native_session_required"}:
+        raise ContractError("phase_binding session_affinity is invalid")
+    if not isinstance(phase["switch_conditions"], list) or not phase["switch_conditions"]:
+        raise ContractError("phase_binding switch_conditions must be a non-empty list")
+    allowed = {"verified_checkpoint", "native_session_unavailable", "phase_boundary", "capability_expired"}
+    if not set(phase["switch_conditions"]).issubset(allowed) or "verified_checkpoint" not in phase["switch_conditions"]:
+        raise ContractError("phase_binding only permits a switch at a verified_checkpoint")
+    if phase["native_session_transfer"] != "semantic_state_only":
+        raise ContractError("phase_binding cannot promise portable native session internals")
+    return phase
+
+
+def _validate_evaluation_context(value: Any) -> dict[str, Any]:
+    context = _expect_exact(value, EVALUATION_CONTEXT_FIELDS, "evaluation_context")
+    if context["experiment_arm"] not in {
+        "fixed_native_pair", "same_pair_audited_state", "audited_state_routed_executors", "diverse_auditor",
+    }:
+        raise ContractError("evaluation_context experiment_arm is invalid")
+    if context["auditor_mode"] not in {"none", "same_pair_auditor", "diverse_read_only_auditor"}:
+        raise ContractError("evaluation_context auditor_mode is invalid")
+    return context
+
+
 def validate_execution_envelope(envelope: Any) -> dict[str, Any]:
     value = _expect_exact(envelope, ENVELOPE_FIELDS, "execution envelope")
     if value["schema_version"] != "execution-envelope.v1":
@@ -246,18 +298,24 @@ def validate_execution_envelope(envelope: Any) -> dict[str, Any]:
     _timestamp(session["lease_expires_at"], "agent_session lease_expires_at")
     _timestamp(value["issued_at"], "execution envelope issued_at")
     _timestamp(value["expires_at"], "execution envelope expires_at")
+    _validate_state_binding(value["state_binding"])
+    _validate_phase_binding(value["phase_binding"])
+    _validate_evaluation_context(value["evaluation_context"])
     _validate_request(value["request"])
     _validate_server_binding(value["server_binding"])
-    handoff = _expect_exact(value["handoff"], HANDOFF_FIELDS, "handoff")
+    handoff = _expect_exact(value["handoff"], HANDOFF_FIELDS | {"checkpoint_ref", "native_session_transfer"}, "handoff")
     if handoff["mode"] not in {"original", "replacement"}:
         raise ContractError("handoff mode is invalid")
     if handoff["capability_inherited"] is not False:
         raise ContractError("handoff capability_inherited must be false")
     replacement = handoff["replaces_agent_session_id"]
-    if handoff["mode"] == "original" and replacement is not None:
-        raise ContractError("original envelope cannot name a replacement session")
+    if handoff["native_session_transfer"] != "semantic_state_only":
+        raise ContractError("handoff cannot promise portable native session internals")
+    if handoff["mode"] == "original" and (replacement is not None or handoff["checkpoint_ref"] is not None):
+        raise ContractError("original envelope cannot name a replacement session or checkpoint")
     if handoff["mode"] == "replacement":
         _string(replacement, "handoff replaces_agent_session_id", identifier=True)
+        _string(handoff["checkpoint_ref"], "handoff checkpoint_ref", identifier=True)
         if replacement == session["id"]:
             raise ContractError("replacement envelope must use a new agent session")
     return value
@@ -312,6 +370,28 @@ def _validate_receipt_result(value: Any) -> dict[str, Any]:
     return result
 
 
+def _validate_attestation(value: Any) -> dict[str, Any]:
+    attestation = _expect_exact(value, ATTESTATION_FIELDS, "receipt attestation")
+    if attestation["claim_state"] != "executor_claim" or attestation["canonical_promotion_state"] != "not_promoted":
+        raise ContractError("attempt receipt is executor evidence, not canonical verified state")
+    if attestation["independent_evidence_required"] is not True:
+        raise ContractError("attempt receipt requires independent evidence before canonical promotion")
+    return attestation
+
+
+def _validate_negative_knowledge(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ContractError("receipt negative_knowledge must be a list")
+    for row in value:
+        item = _expect_exact(row, NEGATIVE_KNOWLEDGE_FIELDS, "receipt negative knowledge")
+        _string(item["approach_ref"], "receipt negative knowledge approach_ref", identifier=True)
+        _list_of_strings(item["evidence_refs"], "receipt negative knowledge evidence_refs")
+        _string(item["applicability"], "receipt negative knowledge applicability", identifier=True)
+        _timestamp(item["revalidate_after"], "receipt negative knowledge revalidate_after")
+        _timestamp(item["expires_at"], "receipt negative knowledge expires_at")
+    return value
+
+
 def _validate_observation(value: Any) -> dict[str, Any]:
     """Validate redacted declared-versus-observed evidence without overclaiming."""
     observation = _expect_exact(value, OBSERVATION_FIELDS, "receipt observation")
@@ -355,12 +435,17 @@ def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[
     _validate_adapter(value["adapter"])
     lifecycle = _validate_receipt_lifecycle(value["lifecycle"])
     result = _validate_receipt_result(value["result"])
+    _validate_attestation(value["attestation"])
+    _validate_negative_knowledge(value["negative_knowledge"])
     telemetry = _expect_exact(value["telemetry"], TELEMETRY_FIELDS, "receipt telemetry")
     _nonnegative_int(telemetry["latency_ms"], "receipt telemetry latency_ms")
     _finite_nonnegative(telemetry["cost_usd"], "receipt telemetry cost_usd")
     usage = _expect_exact(telemetry["usage"], USAGE_FIELDS, "receipt telemetry usage")
     for field in USAGE_FIELDS:
         _nonnegative_int(usage[field], f"receipt telemetry usage {field}")
+    reset_tax = _expect_exact(telemetry["reset_tax"], RESET_TAX_FIELDS, "receipt telemetry reset_tax")
+    for field in RESET_TAX_FIELDS:
+        _nonnegative_int(reset_tax[field], f"receipt telemetry reset_tax {field}")
     if not isinstance(value["tool_event_summaries"], list):
         raise ContractError("receipt tool_event_summaries must be a list")
     for row in value["tool_event_summaries"]:
@@ -384,8 +469,11 @@ def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[
     if proposal["proposed"]:
         _string(proposal["reason"], "receipt handoff_proposal reason")
         _string(proposal["replacement_session_ref"], "receipt handoff_proposal replacement_session_ref", identifier=True)
-    elif proposal["reason"] is not None or proposal["replacement_session_ref"] is not None:
-        raise ContractError("non-proposed handoff cannot name a reason or replacement")
+        _string(proposal["checkpoint_ref"], "receipt handoff_proposal checkpoint_ref", identifier=True)
+        if proposal["requires_independent_verification"] is not True:
+            raise ContractError("handoff proposal requires independent checkpoint verification")
+    elif any(proposal[field] is not None for field in ("reason", "replacement_session_ref", "checkpoint_ref")) or proposal["requires_independent_verification"] is not False:
+        raise ContractError("non-proposed handoff cannot name a reason, checkpoint, or replacement")
     if envelope is not None:
         bound = validate_execution_envelope(envelope)
         if value["envelope_digest"] != execution_envelope_digest(bound):
@@ -519,9 +607,13 @@ def receipt_from_dispatch_row(envelope: Any, row: dict[str, Any], *, attempt_id:
             "verification_state": mapped[2], "artifact_refs": [], "evidence_refs": [],
             "validation_results": [],
         },
+        "attestation": {"claim_state": "executor_claim", "canonical_promotion_state": "not_promoted", "independent_evidence_required": True},
+        "negative_knowledge": [],
         "telemetry": {"latency_ms": 0, "cost_usd": 0, "usage": {
             "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0,
-        }},
+        }, "reset_tax": {"context_reconstruction_ms": 0, "duplicated_tool_calls": 0,
+                           "repeated_failed_approach_count": 0, "human_correction_count": 0,
+                           "switch_overhead_ms": 0}},
         "tool_event_summaries": [{"tool_name": "room_bridge_dispatch", "result_class": result_class, "duration_ms": 0}],
         "observation": {
             "progress_state": "unknown", "coverage_state": "unknown", "activity_fidelity": "none",
@@ -529,5 +621,6 @@ def receipt_from_dispatch_row(envelope: Any, row: dict[str, Any], *, attempt_id:
             "uncertainty": "unknown",
         },
         "interventions": [],
-        "handoff_proposal": {"proposed": False, "reason": None, "replacement_session_ref": None},
+        "handoff_proposal": {"proposed": False, "reason": None, "replacement_session_ref": None,
+                              "checkpoint_ref": None, "requires_independent_verification": False},
     }

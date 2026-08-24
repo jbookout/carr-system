@@ -99,13 +99,57 @@ def replacement_cannot_inherit_capability():
     replacement["agent_session"]["id"] = "session-synthetic-replacement"
     replacement["handoff"] = {
         "mode": "replacement", "replaces_agent_session_id": previous["agent_session"]["id"],
-        "capability_inherited": False,
+        "capability_inherited": False, "checkpoint_ref": "checkpoint:synthetic-verified",
+        "native_session_transfer": "semantic_state_only",
     }
     replacement["server_binding"]["authority"]["capability_grant_ref"] = "grant-synthetic-replacement"
     contract.validate_replacement_envelope(previous, replacement)
     replacement["server_binding"]["authority"]["capability_grant_ref"] = \
         previous["server_binding"]["authority"]["capability_grant_ref"]
     expect_refusal(lambda: contract.validate_replacement_envelope(previous, replacement), "cannot inherit")
+
+
+def state_binding_requires_compare_and_swap_and_handoff_checkpoint():
+    value = envelope()
+    assert value["state_binding"]["state_version"] == 1
+    assert value["state_binding"]["compare_and_swap_required"] is True
+    value["state_binding"]["compare_and_swap_required"] = False
+    expect_refusal(lambda: contract.validate_execution_envelope(value), "compare_and_swap_required")
+    previous = envelope()
+    replacement = copy.deepcopy(previous)
+    replacement["envelope_id"] = "env-synthetic-checkpoint-replacement"
+    replacement["agent_session"]["id"] = "session-synthetic-checkpoint-replacement"
+    replacement["server_binding"]["authority"]["capability_grant_ref"] = "grant-synthetic-checkpoint-replacement"
+    replacement["handoff"] = {
+        "mode": "replacement", "replaces_agent_session_id": previous["agent_session"]["id"],
+        "capability_inherited": False, "checkpoint_ref": None, "native_session_transfer": "semantic_state_only",
+    }
+    expect_refusal(lambda: contract.validate_replacement_envelope(previous, replacement), "checkpoint_ref")
+
+
+def receipts_are_claims_not_canonical_promotion_and_measure_reset_tax():
+    value = receipt()
+    assert value["attestation"]["canonical_promotion_state"] == "not_promoted"
+    assert set(value["telemetry"]["reset_tax"]) == {
+        "context_reconstruction_ms", "duplicated_tool_calls", "repeated_failed_approach_count",
+        "human_correction_count", "switch_overhead_ms",
+    }
+    value["negative_knowledge"] = [{
+        "approach_ref": "approach:synthetic-failed", "evidence_refs": ["evidence:synthetic-check"],
+        "applicability": "scope:synthetic-read", "revalidate_after": "2026-08-25T12:00:00Z",
+        "expires_at": "2026-09-01T12:00:00Z",
+    }]
+    contract.validate_attempt_receipt(value, envelope())
+    value["attestation"]["canonical_promotion_state"] = "promoted"
+    expect_refusal(lambda: contract.validate_attempt_receipt(value, envelope()), "not canonical verified state")
+
+
+def phase_binding_preserves_native_sessions_and_reserves_evaluation_arms():
+    value = envelope()
+    assert value["phase_binding"]["native_session_transfer"] == "semantic_state_only"
+    assert value["evaluation_context"]["experiment_arm"] == "same_pair_audited_state"
+    value["phase_binding"]["switch_conditions"] = ["phase_boundary"]
+    expect_refusal(lambda: contract.validate_execution_envelope(value), "verified_checkpoint")
 
 
 def native_transports_have_comparable_receipt_shapes():
@@ -216,6 +260,9 @@ if __name__ == "__main__":
         ("canonical digest is deterministic", digest_is_canonical_and_deterministic),
         ("receipt for another envelope is refused", different_envelope_receipt_is_refused),
         ("handoff replacement cannot inherit capability", replacement_cannot_inherit_capability),
+        ("state binding requires CAS and verified handoff checkpoint", state_binding_requires_compare_and_swap_and_handoff_checkpoint),
+        ("receipts are claims and carry reset-tax metrics", receipts_are_claims_not_canonical_promotion_and_measure_reset_tax),
+        ("phase binding preserves native sessions", phase_binding_preserves_native_sessions_and_reserves_evaluation_arms),
         ("native transports produce comparable receipt shapes", native_transports_have_comparable_receipt_shapes),
         ("lifecycle and verification states stay distinct", terminal_and_verification_states_remain_distinct),
         ("declared versus observed remains uncertain", declared_vs_observed_is_uncertain_and_filesystem_alone_is_not_a_deviation),
