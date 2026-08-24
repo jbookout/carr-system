@@ -22,6 +22,27 @@ ceilings on this surface:
   about. The click is the whole manual step, stated out loud here so no later
   session mistakes this for full automation.
 
+IT ANNOUNCES, IT NO LONGER REOPENS (2026-08-23, Joe's Stop-gate rationing off
+the gates-audit council). It emitted {"decision": "block"}, which forces a whole
+extra assistant message. Eleven Stop hooks held that power; one measured shipped
+session paid nine such reopens for findings that changed nothing, and reopens
+are direct token spend against a standing no-ceremony constraint. Three keep it:
+core conduct, completion-evidence, drift-assertion.
+
+THIS IS THE DEMOTION WITH THE THINNEST CASE, and saying so is the point of
+writing it down rather than letting a later reader assume it was obvious. The
+council's own test asks whether the next message would be the RESULT OF WORK or
+a restatement, and here it is genuinely work: the packet, the chip and the push
+all get written in the reopened turn. Two things carry it anyway. The band latch
+already caps this at one intervention per band per session, so it contributes
+almost nothing to the reopen count the rationing is aimed at — and the
+announcement arrives at the same moment carrying the same instructions, so the
+work is ordered either way; what changes is that a session mid-thought is asked
+rather than compelled. REOPEN THIS ONE FIRST if a week of hook telemetry shows
+bands crossed with no packet written after them: restoring it is one line, the
+`announce(...)` call below going back to
+`print(json.dumps({"decision": "block", "reason": ...}))`.
+
 THE LAST MILE, added 2026-08-10 (decision aa6c00fa). The chip renders ONLY in
 the desktop app. Joe checked his phone: "Yes it was not visible on my phone."
 So the handoff completed exactly when he was already at the machine — the case
@@ -106,6 +127,9 @@ import os
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from stop_latch import announce  # noqa: E402
 LOG = os.path.join(REPO, "out", "context-handoff.jsonl")
 STATE = os.path.join(REPO, "out", "context-handoff-state.json")
 
@@ -323,8 +347,8 @@ def main():
             "window": WINDOW,
         })
 
-        dlog(f"BLOCK band={band} {pct:.1f}% ({used:,})")
-        print(json.dumps({"decision": "block", "reason": reason_for(band, pct, used)}))
+        dlog(f"ANNOUNCE band={band} {pct:.1f}% ({used:,})")
+        announce(reason_for(band, pct, used))
         sys.exit(0)
 
     except Exception as exc:

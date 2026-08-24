@@ -1627,7 +1627,7 @@
       "binding_moment": "session Stop",
       "control": "loose_work",
       "exceptions": "CARR_ALLOW_LOOSE_WORK=1 for a deliberate hand-off or mid-investigation park",
-      "note": "Both halves now hold at Stop: loose-work-gate.py refuses a session that leaves its OWN edits uncommitted, and as of 2026-08-15 also one that committed and never pushed (reachability from any remote ref, so a push under a different branch name still counts as landed). The sweep half of this rule stays with git-writer-gate.py, which bans -A/-a/. when the tree is shared; that narrower scope is deliberate and argued in its own docstring."
+      "note": "Both halves are found at Stop, and as of 2026-08-23 loose-work-gate.py ANNOUNCES them rather than reopening the turn (Joe's Stop-gate rationing off that day's gates-audit council: three hooks keep the reopen, and this is not one of them). It names a session's OWN uncommitted edits, and as of 2026-08-15 also a commit that never got pushed (reachability from any remote ref, so a push under a different branch name still counts as landed). The sweep half of this rule stays with git-writer-gate.py, which bans -A/-a/. when the tree is shared; that narrower scope is deliberate and argued in its own docstring."
     },
     "88e9b5eb": {
       "category": "hard_pre_action",

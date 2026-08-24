@@ -1,29 +1,31 @@
 {
-  "_note": "Blessed gate files that no control in rule-enforcement-map.json names. Created 2026-08-15 with twenty entries, when ops/enforcement-coverage-check.py first measured that 21 of 40 blessed gates were invisible to the coverage map — which is why rule 4a53ff82 read 'unbuilt' while hooks/canonical-edit-gate.py was already enforcing it. The fourteen real gates were mapped the same day; what remains are the shared modules, which are not gates.",
-  "_how_to_clear_one": "Add a control to control_catalog naming the file, then point every rule it actually enforces at that control and set their category and enforcement_class to agree. Then delete the entry here. ops/rule-enforcement-map-check.py enforces that pairing.",
-  "_why_these_remain": "They are modules imported BY gates, blessed so tampering stays detectable, denying nothing on their own. A control naming one would claim enforcement that does not exist there. They are listed rather than silently filtered, because a silent filter is how a real gate gets excluded by accident — and this file exists because exactly that kind of blindness cost a day.",
-  "unmapped_gates": [
-    "hook_meter.py",
-    "hook-meter-run.py",
-    "cmd_text.py",
-    "conduct_patterns.py",
-    "corpus_renders.py",
-    "gate_paths.py",
-    "md_manifest.py",
-    "refused_content.py",
-    "turn_origin.py",
-    "worktree_scope.py"
-  ],
-  "reasons": {
-    "hook_meter.py": "shared helper — the live/fixture/unclassified split and the telemetry writer, imported by the 21 gates that write out/hook-guard.log; denies nothing itself, and every gate that imports it does so inside a try so that losing it cannot change a verdict",
-    "hook-meter-run.py": "measurement, not enforcement — every wired gate now runs inside it so each firing can be timed and recorded, but it reaches no verdict of its own: it passes the gate's exit code, stdout and stderr through untouched, which ops/hook-meter-selftest.py proves by firing 14 real gates bare and wrapped and requiring byte-identical results. A control naming it would claim a refusal it never makes. It lives in hooks/ rather than ops/ deliberately, so gate-integrity.py hashes it like every other file in the enforcement path — it is blessed for tamper-detection, not because it enforces anything",
-    "cmd_text.py": "shared helper — command-text extraction imported by the Bash-facing gates; denies nothing itself",
-    "conduct_patterns.py": "shared helper — the pattern table imported by conduct-stop-gate.py",
-    "corpus_renders.py": "shared helper — render-path resolution imported by the corpus gates",
-    "gate_paths.py": "shared helper — path resolution imported across gates",
-    "md_manifest.py": "shared helper — manifest reading imported by record-home-gate.py",
-    "refused_content.py": "shared helper — refusal-text shaping imported by the write gates",
-    "turn_origin.py": "shared helper — the one answer to whether a partner actually typed a turn, imported by ledger-sweep and weekend-quiet-gate; reads no hook payload, refuses nothing and runs on no schedule. It exists because those two gates answered that question differently and the weaker answer shipped, matching zero of 3,271 real records for a week. Enforcement lives in the gates that import it, so a control naming this file would claim a refusal it cannot make.",
-    "worktree_scope.py": "shared helper — resolves WHICH TREE a Bash command is about (a named worktree, else the session's cwd, else the canonical checkout), imported by git-writer-gate.py, staging-attribution-gate.py and staging-observation-tracker.py; denies nothing itself"
-  }
+ "_note": "Blessed gate files that no control in rule-enforcement-map.json names. Created 2026-08-15 with twenty entries, when ops/enforcement-coverage-check.py first measured that 21 of 40 blessed gates were invisible to the coverage map — which is why rule 4a53ff82 read 'unbuilt' while hooks/canonical-edit-gate.py was already enforcing it. The fourteen real gates were mapped the same day; what remains are the shared modules, which are not gates.",
+ "_how_to_clear_one": "Add a control to control_catalog naming the file, then point every rule it actually enforces at that control and set their category and enforcement_class to agree. Then delete the entry here. ops/rule-enforcement-map-check.py enforces that pairing.",
+ "_why_these_remain": "They are modules imported BY gates, blessed so tampering stays detectable, denying nothing on their own. A control naming one would claim enforcement that does not exist there. They are listed rather than silently filtered, because a silent filter is how a real gate gets excluded by accident — and this file exists because exactly that kind of blindness cost a day.",
+ "unmapped_gates": [
+  "cmd_text.py",
+  "conduct_patterns.py",
+  "corpus_renders.py",
+  "gate_paths.py",
+  "md_manifest.py",
+  "refused_content.py",
+  "stop_latch.py",
+  "turn_origin.py",
+  "worktree_scope.py",
+  "hook_meter.py",
+  "hook-meter-run.py"
+ ],
+ "reasons": {
+  "cmd_text.py": "shared helper — command-text extraction imported by the Bash-facing gates; denies nothing itself",
+  "conduct_patterns.py": "shared helper — the pattern table imported by conduct-stop-gate.py",
+  "corpus_renders.py": "shared helper — render-path resolution imported by the corpus gates",
+  "gate_paths.py": "shared helper — path resolution imported across gates",
+  "md_manifest.py": "shared helper — manifest reading imported by record-home-gate.py",
+  "refused_content.py": "shared helper — refusal-text shaping imported by the write gates",
+  "stop_latch.py": "shared helper — the Stop-gate register, added 2026-08-23 with Joe's Stop-gate rationing. Two things live in it: a claim-set latch keyed on WHAT was claimed rather than how it was worded (hooks/drift-assertion-gate.py held a council chair twice over one changed word because its own latch was a hash of the prose), and the announce emit the five demoted gates now speak through. It reads no hook payload, has no entry point and refuses nothing — the enforcement lives in the gates that import it, so a control naming this file would claim a refusal it cannot make.",
+  "turn_origin.py": "shared helper — the one answer to whether a partner actually typed a turn, imported by ledger-sweep and weekend-quiet-gate; reads no hook payload, refuses nothing and runs on no schedule. It exists because those two gates answered that question differently and the weaker answer shipped, matching zero of 3,271 real records for a week. Enforcement lives in the gates that import it, so a control naming this file would claim a refusal it cannot make.",
+  "worktree_scope.py": "shared helper — resolves WHICH TREE a Bash command is about (a named worktree, else the session's cwd, else the canonical checkout), imported by git-writer-gate.py, staging-attribution-gate.py and staging-observation-tracker.py; denies nothing itself",
+  "hook_meter.py": "shared helper — the live/fixture/unclassified split and the telemetry writer (PR #554), imported by the gates that write out/hook-guard.log; denies nothing itself, and every gate that imports it does so inside a try so that losing it cannot change a verdict",
+  "hook-meter-run.py": "measurement, not enforcement — every wired gate now runs inside it so each firing can be timed and recorded, but it reaches no verdict of its own: it passes the gate's exit code, stdout and stderr through untouched, which ops/hook-meter-selftest.py proves by firing real gates bare and wrapped and requiring identical results. It lives in hooks/ rather than ops/ deliberately, so gate-integrity.py hashes it like every other file in the enforcement path — it is blessed for tamper-detection, not because it enforces anything"
+ }
 }
