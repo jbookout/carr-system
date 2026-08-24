@@ -52,7 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 TOOL = os.path.join(REPO, "tools", "ops-record.py")
 MIGRATION = os.path.join(
-    REPO, "migrations", "0293_incident_fingerprint_and_success_clears.sql")
+    REPO, "migrations", "0294_incident_fingerprint_and_success_clears.sql")
 
 spec = importlib.util.spec_from_file_location("ops_record", TOOL)
 assert spec is not None and spec.loader is not None, f"cannot load {TOOL}"
