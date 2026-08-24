@@ -197,6 +197,79 @@ def main():
             secondary_bad_install_rc = mod.cmd_install(True)
         secondary_bad_output = secondary_bad_out.getvalue()
         modified_task_preserved = modified_task.read_text(encoding="utf-8") == "modified CARR task\n"
+        # A launchd body that contains a literal token string and /Users path in a
+        # comment must still compare equal after install-style concrete rendering.
+        # A shared helper, not a duplicated ad hoc compare, now owns that rule.
+        token_comment_name = "com.carr.literal-comment-token.plist"
+        token_comment_body = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!--\n"
+            "  NOTE: this comment keeps the literal text {{REPO}} while documenting the\n"
+            "  same home path as /Users/booko for human readability.\n"
+            "-->\n"
+            "<plist version=\"1.0\">\n"
+            "<dict>\n"
+            "<key>Label</key>\n"
+            "<string>com.carr.literal-comment-token</string>\n"
+            "<key>ProgramArguments</key>\n"
+            "<array>\n"
+            "  <string>/usr/bin/env</string>\n"
+            "  <string>zsh</string>\n"
+            "</array>\n"
+            "<key>RunAtLoad</key>\n"
+            "<false/>\n"
+            "</dict>\n"
+            "</plist>\n"
+        )
+        token_comment_case_home = home / "launchd-token-comment-case"
+        token_comment_case_repo = token_comment_case_home / "carr-system"
+        token_comment_case_config = token_comment_case_repo / "ops" / "config"
+        token_comment_case_launchd = token_comment_case_repo / "ops" / "launchd"
+        for p in [token_comment_case_config, token_comment_case_launchd]:
+            p.mkdir(parents=True, exist_ok=True)
+        original_state = {name: getattr(mod, name) for name in [
+            "REPO", "SETTINGS", "TASKS_SRC", "TASKS_REPO", "TASKS_QUARANTINE",
+            "LAUNCHD_SRC", "LAUNCHD_REPO", "HOOKS_REPO", "CODEX_HOOKS_SRC",
+            "CODEX_HOOKS_REPO", "CODEX_CONFIG", "CODEX_PERMISSIONS_REPO",
+        ]}
+        token_comment_home = token_comment_case_home / "home"
+        token_comment_case_settings = token_comment_home / ".claude" / "settings.json"
+        hooks = {"PreToolUse": []}
+        (token_comment_home / ".claude").mkdir(parents=True, exist_ok=True)
+        token_comment_case_settings.write_text(json.dumps({"hooks": hooks}, indent=2) + "\n", encoding="utf-8")
+        (token_comment_case_config / "hooks.json").write_text(
+            json.dumps(hooks, indent=2) + "\n", encoding="utf-8"
+        )
+        mod.REPO = str(token_comment_case_repo)
+        mod.SETTINGS = str(token_comment_case_settings)
+        mod.TASKS_SRC = str(token_comment_home / ".claude" / "scheduled-tasks")
+        mod.TASKS_REPO = str(token_comment_case_repo / "ops" / "scheduled-tasks")
+        mod.TASKS_QUARANTINE = str(token_comment_home / ".claude" / "scheduled-tasks-quarantine" / "carr-primary-only")
+        mod.LAUNCHD_SRC = str(token_comment_home / "Library" / "LaunchAgents")
+        mod.LAUNCHD_REPO = str(token_comment_case_launchd)
+        mod.HOOKS_REPO = str(token_comment_case_config / "hooks.json")
+        mod.CODEX_HOOKS_SRC = str(token_comment_home / ".codex" / "hooks.json")
+        mod.CODEX_HOOKS_REPO = str(token_comment_case_config / "codex-hooks.json")
+        mod.CODEX_CONFIG = str(token_comment_home / ".codex" / "config.toml")
+        mod.CODEX_PERMISSIONS_REPO = str(token_comment_case_config / "codex-permissions.toml")
+        (Path(mod.LAUNCHD_SRC)).mkdir(parents=True, exist_ok=True)
+        token_comment_source = token_comment_case_launchd / token_comment_name
+        token_comment_source.write_text(token_comment_body, encoding="utf-8")
+        token_comment_live = Path(mod.LAUNCHD_SRC) / token_comment_name
+        token_comment_live.write_text(mod.concrete(token_comment_body), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as token_comment_out:
+            token_comment_clean_check_rc = mod.cmd_check()
+        token_comment_clean_output = token_comment_out.getvalue()
+        token_comment_live.write_text(
+            mod.concrete(token_comment_body).replace("<string>zsh</string>", "<string>bash</string>"),
+            encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as token_comment_drift_out:
+            token_comment_drift_check_rc = mod.cmd_check()
+        token_comment_drift_output = token_comment_drift_out.getvalue()
+        for name, value in original_state.items():
+            setattr(mod, name, value)
+        token_comment_source.unlink(missing_ok=True)
+
         # PIN THE MACHINE ROLE FOR THE LAUNCHD CASES. This used to restore the
         # real machine's role here, which silently made the three launchd
         # assertions below mean different things on different Macs: the synthetic
@@ -463,6 +536,11 @@ def main():
         ("secondary refuses to quarantine or overwrite a modified CARR task",
          secondary_bad_install_rc == 1 and "refusing to move or overwrite" in secondary_bad_output
          and modified_task_preserved),
+        ("installed launchd comment tokens compare clean when the live copy differs only by concrete expansion",
+         token_comment_clean_check_rc == 0),
+        ("launchd comment-token case reports a true byte drift",
+         token_comment_drift_check_rc == 1 and "TRACKED BUT DIFFERENT from the live copy" in token_comment_drift_output
+         and "launchd com.carr.literal-comment-token.plist" in token_comment_drift_output),
         ("LaunchAgent load failure and idempotent retry both stay nonzero",
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
         ("definition-only control-plane tick is not installed before cutover",

@@ -184,7 +184,10 @@ def main() -> int:
     def a_turn_reaches_a_live_codex_seat():
         srv = FakeAppServer(sock)
         try:
-            reg.register("cx", "codex-live", socket=sock, cwd=str(root))
+            reg.register(
+                "cx", "codex-live", socket=sock, cwd=str(root), model="gpt-5.1-codex-mini",
+                effort="medium",
+            )
             row = dispatch.dispatch("cx", "do the thing", registry=reg, results_path=results)
             assert row["status"] == "completed", row
             assert row["result"] == "the live seat answered", row
@@ -200,7 +203,10 @@ def main() -> int:
         srv = FakeAppServer(sock)
         try:
             reg.forget("cx2")
-            reg.register("cx2", "codex-live", socket=sock, cwd=str(root))
+            reg.register(
+                "cx2", "codex-live", socket=sock, cwd=str(root), model="gpt-5.1-codex-mini",
+                effort="medium",
+            )
             dispatch.dispatch("cx2", "again", registry=reg, results_path=results)
             got = srv.methods()
             assert got[:4] == ["initialize", "initialized", "thread/start", "turn/start"], got
@@ -226,7 +232,10 @@ def main() -> int:
 
     def a_pid_socket_is_still_refused():
         try:
-            reg.register("sneaky", "codex-live", socket="/tmp/cc-socks/4242.sock")
+            reg.register(
+                "sneaky", "codex-live", socket="/tmp/cc-socks/4242.sock",
+                model="gpt-5.1-codex-mini", effort="medium",
+            )
         except desks.DeskError as e:
             assert e.code == "unlabeled_target", e.code
         else:
@@ -235,7 +244,10 @@ def main() -> int:
     check("the pid-socket guard covers the new kind too", a_pid_socket_is_still_refused)
 
     def a_dead_app_server_is_refused():
-        reg.register("gone", "codex-live", socket=str(root / "nothing.sock"), cwd=str(root))
+        reg.register(
+            "gone", "codex-live", socket=str(root / "nothing.sock"), cwd=str(root),
+            model="gpt-5.1-codex-mini", effort="medium",
+        )
         try:
             reg.resolve("gone")
         except desks.DeskError as e:

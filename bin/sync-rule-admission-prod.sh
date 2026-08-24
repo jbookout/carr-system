@@ -113,6 +113,35 @@ if (( ! APPLY )); then
     print "  incomplete     = admitted without applicability/projection/reachability"
     print "Re-run with --apply once $MAP covers every active rule."
   fi
+  print ""
+  print "== read-only: ops/rule-delivery-audit.py against production =="
+  set +e
+  DATABASE_URL="$DSN" "$PY" "$REPO/ops/rule-delivery-audit.py"
+  drc=$?
+  set -e
+  if (( drc == 0 )); then
+    stamp "OK read-only: production delivery tags are complete"
+  elif (( drc == 2 )); then
+    # A DIFFERENT FINDING WITH A DIFFERENT REMEDY, and saying so is rule 88e9b5eb.
+    stamp "BLOCKED read-only delivery: the delivery tables are absent"
+    print ""
+    print "the delivery tables are not in this database yet, so there is nothing"
+    print "to audit. Apply migration 0288 (./bin/migrate-prod.sh), then re-run."
+  else
+    stamp "GAP read-only delivery rc=$drc"
+    print ""
+    print "production's DELIVERY tags are incomplete (counts above)."
+    print "  untagged   = active rules no load layer covers — omitted by omission"
+    print "  orphaned   = a tag naming a rule that is no longer active"
+    print "  wildcarded = a '*' pack, which is the current behaviour in a scoping costume"
+    print "  emptypack  = a pack no active rule is in — a trigger that loads nothing"
+    print "Re-run with --apply once $MAP tags every active rule."
+  fi
+  # WRITTEN AS AN IF RATHER THAN `(( )) && rc=$drc`. Under `set -e` that form is
+  # the last command of its own && list, so a FALSE test — the ordinary case
+  # where the admission half already failed — exits the script on the spot and
+  # the delivery finding never reaches the operator.
+  if (( rc == 0 )); then rc=$drc; fi
   exit $rc
 fi
 
@@ -124,6 +153,23 @@ if ! DATABASE_URL="$DSN" "$PY" "$REPO/tools/sync-rule-admission.py"; then
   print -u2 "if it named an active rule absent from the reviewed enforcement map,"
   print -u2 "that rule is the finding: extend $MAP with its"
   print -u2 "category and control, have the entry reviewed, commit, and re-run."
+  exit $rc
+fi
+
+# THE DELIVERY HALF, added 2026-08-23 with the rules council's load-layer tags.
+# It rides THIS door rather than a second one for the reason this door exists at
+# all: the enforcement half spent months with no production caller and nobody
+# noticed, because a missing door produces no drift to see. Two doors for one
+# reviewed file would reopen exactly that gap on the half nobody happened to run.
+print ""
+print "== installing the reviewed delivery tags (layer0 / control / pack) =="
+if ! DATABASE_URL="$DSN" "$PY" "$REPO/tools/sync-rule-load-layers.py"; then
+  rc=$?
+  stamp "FAIL delivery tags rc=$rc"
+  print -u2 "the delivery tags refused or failed; the admission half above DID land."
+  print -u2 "if it named an active rule with no reviewed delivery tag, that rule is"
+  print -u2 "the finding: extend rule_load_layers in $MAP, have it"
+  print -u2 "reviewed, commit, and re-run."
   exit $rc
 fi
 
@@ -141,4 +187,22 @@ else
   print -u2 "THE BACKFILL RAN AND THE AUDIT STILL DISAGREES. Read the counts above:"
   print -u2 "they name which of the four failure shapes is left."
 fi
+
+print ""
+print "== reading production back through ops/rule-delivery-audit.py =="
+set +e
+DATABASE_URL="$DSN" "$PY" "$REPO/ops/rule-delivery-audit.py"
+drc=$?
+set -e
+if (( drc == 0 )); then
+  stamp "OK delivery tags applied and verified"
+  print "every active rule in production now carries a reviewed delivery tag."
+  print "Delivery stays in SHADOW mode until Joe flips ops.rule_delivery_policy:"
+  print "the selector runs beside full recitation and nothing is cut yet."
+else
+  stamp "FAIL delivery applied but audit rc=$drc"
+  print -u2 "THE TAGS LANDED AND THE DELIVERY AUDIT STILL DISAGREES. The counts above"
+  print -u2 "name which shape is left."
+fi
+if (( rc == 0 )); then rc=$drc; fi
 exit $rc
