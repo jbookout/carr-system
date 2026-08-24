@@ -42,6 +42,17 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "chat-lint-gate.py")
 
+# The fixture session id must be UNIQUE PER PROCESS. out/ is a symlink back to
+# the canonical checkout in every worktree on this Mac, so a fixed "selftest"
+# id meant every concurrent ops/ci.sh run read and wrote the SAME carry file.
+# Observed 2026-08-23 with three worktrees running ci.sh at once: failures in
+# BOTH directions — an expect-caught case seeing nothing because another run
+# had already consumed the note, and an expect-clean case seeing another run's
+# leftover. The same fixtures pass 26/26 standalone, which is exactly what a
+# shared-state flake looks like.
+SESSION = f"selftest-{os.getpid()}"
+CARRY = os.path.join(REPO, "out", "chat-lint-carry", f"{SESSION}.txt")
+
 # (name, assistant_text, expect_caught)
 CASES = [
     ("vocab-banned", "This will seamlessly unlock a transformative workflow "
@@ -94,6 +105,13 @@ passed = 0
 bad: list[str] = []
 
 
+def unlink(path):
+    try:
+        os.unlink(path)
+    except Exception:
+        pass
+
+
 def run_stop(assistant_text, event="Stop", stop_active=False):
     fd, path = tempfile.mkstemp(suffix=".jsonl")
     try:
@@ -103,32 +121,28 @@ def run_stop(assistant_text, event="Stop", stop_active=False):
             fh.write(json.dumps({"type": "assistant",
                 "message": {"content": [{"type": "text", "text": assistant_text}]}}) + "\n")
         payload = {"hook_event_name": event, "transcript_path": path,
-                   "session_id": "selftest", "stop_hook_active": stop_active}
+                   "session_id": SESSION, "stop_hook_active": stop_active}
         # The gate no longer BLOCKS on a wording fault (rule 1d50a3bb: the bad
         # text has already reached Joe, so a block only buys a restatement he
         # pays for twice). It parks a note that hooks/chat-lint-carryover.py
         # injects before the next reply. So "caught" now means a note was
         # written, and exit 2 would itself be a regression.
-        carry = os.path.join(REPO, "out", "chat-lint-carry", "selftest.txt")
-        try:
-            os.unlink(carry)
-        except Exception:
-            pass
+        unlink(CARRY)
         p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
                            capture_output=True, text=True, timeout=30)
         if p.returncode == 2:
             return False, "REGRESSION: gate blocked instead of carrying"
         note = ""
-        if os.path.exists(carry):
-            with open(carry) as fh:
+        if os.path.exists(CARRY):
+            with open(CARRY) as fh:
                 note = fh.read()
-            os.unlink(carry)
         return bool(note.strip()), note
     finally:
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
+        # Both cleanups run on EVERY path, including the exit-2 regression
+        # return above, which used to leave the note parked for whoever came
+        # next.
+        unlink(path)
+        unlink(CARRY)
 
 
 def main():
