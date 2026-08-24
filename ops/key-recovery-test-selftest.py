@@ -87,6 +87,20 @@ directory are BOTH gone afterward and the run is recorded aborted; and, across
 every scenario, that the throwaway secret key value never appears verbatim in
 the script's stdout or stderr.
 
+NO WALL-CLOCK CONSTANT SURVIVES IN THE INTERRUPT CHECK. It once sent the signal
+a fixed 1.5s after spawn and asserted the whole thing finished in under 6s;
+both numbers measured this 16GB laptop rather than the script, and the second
+went red at 7.9s in the CANONICAL checkout at load average 110 and 340 while
+every other interrupt check stayed green — blocking unrelated branches at the
+ops/ci.sh gates class. The signal is now gated on the script's own observed
+state (its identity file appearing), and promptness is judged against a control
+run of the same script timed moments later under the same load, so load moves
+both terms together, and the fixed-length pause a broken script would sleep out
+is the only term load cannot move. Widening the constant was rejected: a bigger
+constant measures the host too, just less often. See the block itself for the
+full reasoning, and ops/hook-meter-selftest.py for the same correction made to
+the meter's cost threshold on the same day.
+
 TIER 2 (a genuine key-recovery drill, run only by Joe, only with the real
 paper copy) is deliberately NOT part of this file — it needs a human typing
 from paper and touches production's real ops.run row. That live proof is
@@ -239,6 +253,40 @@ def assert_no_leak(proc_or_output, secret: str, label: str) -> None:
           secret not in err)
 
 
+def wait_until_paused(proc: subprocess.Popen, before: set, tmp_glob: str,
+                      secret: str, budget_s: float = 240.0) -> Optional[str]:
+    """Block until the script has WRITTEN ITS IDENTITY FILE, then return its
+    temp dir — the load-proof replacement for `time.sleep(1.5)`.
+
+    bin/key-recovery-test.sh writes the identity file on the statement right
+    before its selftest pause, so this directory appearing is the script
+    saying "I am at the pause now". Waiting on that instead of a fixed delay is
+    what keeps the SIGINT landing INSIDE the pause on a thrashing host, where
+    the interpreter may not even have started at 1.5s and the signal would
+    otherwise kill zsh before its trap exists.
+
+    The wait itself asserts nothing about how long it took — that number is the
+    host's, not the script's. It only refuses to wait forever, and it gives up
+    early if the child dies. Candidate dirs are matched by CONTENT against this
+    run's own throwaway secret, so a concurrent CI run's temp dir under the
+    shared TMPDIR can never be mistaken for this one.
+    """
+    want = secret.strip()
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        for d in set(glob.glob(tmp_glob)) - before:
+            idfile = os.path.join(d, "identity.txt")
+            try:
+                if open(idfile, encoding="utf-8").read().strip() == want:
+                    return d
+            except OSError:
+                continue
+        if proc.poll() is not None:
+            return None
+        time.sleep(0.02)
+    return None
+
+
 def tier1_portable() -> None:
     print("\nTIER 1a — portable checks that need no external tool")
     check("the script exists and is executable",
@@ -358,28 +406,134 @@ def tier1_age(workdir: str) -> None:
     #    tried first while building this and did NOT interrupt the paused
     #    child; a process-group signal does), sent while the script is
     #    deliberately paused right after writing the identity file ──────────
+    #
+    # NOTHING HERE IS A WALL-CLOCK CONSTANT, and that is a correction rather
+    # than a convenience — the same one ops/hook-meter-selftest.py took on
+    # 2026-08-23 ("a threshold that measured the laptop"). Two constants used
+    # to sit in this block and both of them measured the host, not the script:
+    #
+    #   * the signal was sent a fixed 1.5s after spawn, ASSUMING the script had
+    #     reached its pause by then. On a thrashing 16GB Mac the interpreter
+    #     may not have started yet, and a SIGINT that lands before the trap is
+    #     installed kills zsh outright — no cleanup, no evidence row, and a red
+    #     suite that says "the interrupt path is broken" about a script that
+    #     was never given the chance to run it.
+    #   * the result was asserted as `elapsed < 6`, spawn to exit. Measured
+    #     2026-08-23 in the CANONICAL checkout, which no in-flight branch had
+    #     touched: 7.9s at load average 110 and again at 340 — exit code 130,
+    #     cleanup fired exactly once, temp dir gone, every other check green.
+    #     The script was right; the laptop was slow, and the gates class blocked
+    #     unrelated branches on it. A bigger constant measures the host too,
+    #     just less often, so the constant is gone instead of widened.
+    #
+    # WHAT REPLACES THEM. The signal is now gated on OBSERVED READINESS — the
+    # suite waits for this run's own identity file to appear on disk, written
+    # on the statement immediately before the pause — so the SIGINT lands
+    # inside the pause at any load. And promptness is asserted against a
+    # CONTROL run of the same script, on the same machine, moments later, under
+    # whatever load exists: an uninterrupted mismatch run does strictly MORE
+    # work than the interrupted run's remaining teardown (the same zsh start,
+    # the same shred, the same ops-record write, plus a real age-keygen -y
+    # derivation the interrupted run never reaches), so load moves both terms
+    # together. The one term load cannot move is the `sleep` itself, and a
+    # quarter of it is handed over as slack for run-to-run variance in the
+    # ops-record write both runs pay.
+    #
+    # THE PAUSE IS LONG ON PURPOSE, and it is free. Nothing waits it out any
+    # more — the signal goes the moment readiness is observed — so its length
+    # costs a healthy run nothing at all, and is paid only by a script that
+    # ignores the signal, which is a red suite either way. Length is what buys
+    # the detection margin, and the margin needed measuring rather than
+    # guessing. Three samples taken while building this, all on a thrashing Mac
+    # — control against teardown: 9.2s/5.3s at load ~250, 10.2s/9.9s at load
+    # ~323, and 7.6s/9.3s at load ~232.
+    #
+    # READ THAT LAST ONE. The control does strictly more WORK than the teardown,
+    # but it is not a guaranteed upper bound on its TIME: load swings between
+    # the two measurements, and the ops-record write they share is the dominant
+    # term in both, so the teardown can and does come out the slower of the two.
+    # Anyone tempted to shave the slack because "the control already covers it"
+    # should re-read this sample. The slack is not decoration; it is what makes
+    # the inversion harmless, and 7.5s against a largest-observed inversion of
+    # 1.7s is the ratio being kept.
+    #
+    # At the 8s pause this block first used, the mutation test below was caught
+    # by 0.1s: caught, but one bad sample from a false pass, and a false pass
+    # here is a check that no longer checks anything. At 30s it is caught by
+    # ~19s, and detection would not begin to fail until a control run outran
+    # its own teardown by more than 22s.
+    PAUSE_S = 30
     tmp_glob = os.path.join(os.environ.get("TMPDIR", "/tmp"), "carr-key-recovery.*")
     before = set(glob.glob(tmp_glob))
     env = unreachable_env({
         "CARR_KEY_RECOVERY_TEST_SELFTEST": "1",
         "CARR_KEY_RECOVERY_TEST_SELFTEST_TYPED_KEY": secret,
         "CARR_KEY_RECOVERY_TEST_SELFTEST_PUBKEY_FILE": match_pubkey_file,
-        "CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE": "8",
+        "CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE": str(PAUSE_S),
     })
-    t0 = time.time()
+    t_spawn = time.monotonic()
     proc2 = subprocess.Popen([SCRIPT], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, env=env, cwd=REPO, start_new_session=True)
-    time.sleep(1.5)
+    paused_dir = wait_until_paused(proc2, before, tmp_glob, secret)
+    ready_s = time.monotonic() - t_spawn
+    check("interrupted path: the script was observed reaching the pause (this "
+          "run's identity file appeared on disk), so the SIGINT below lands "
+          "inside the pause at any load — never a fixed delay a loaded host "
+          "can outrun", paused_dir is not None,
+          "no carr-key-recovery temp dir holding this run's identity ever "
+          "appeared; the script exited early or never started")
+    # A short settle so the signal lands in `sleep` itself rather than in the
+    # two statements between the write and it. Not an assertion: if a loaded
+    # host is still short of the sleep, the trap fires a moment earlier and
+    # everything below still holds — a script that ignored the signal would go
+    # on to sleep the full pause and blow the budget exactly the same way.
+    time.sleep(0.3)
+    t_sig = time.monotonic()
     os.killpg(os.getpgid(proc2.pid), signal.SIGINT)
     try:
-        out, err = proc2.communicate(timeout=15)
+        # Generous, because a timeout here is a KILL and a killed child fails
+        # every check below for the wrong reason. Lateness is caught by the
+        # calibrated budget, not by this number.
+        out, err = proc2.communicate(timeout=300)
     except subprocess.TimeoutExpired:
         proc2.kill()
         out, err = proc2.communicate()
-    elapsed = time.time() - t0
-    check("interrupted path: the script actually terminated promptly on "
-          "SIGINT (well under the 8s pause, not after it)",
-          elapsed < 6, f"took {elapsed:.1f}s")
+    post_signal = time.monotonic() - t_sig
+
+    # THE CONTROL, timed immediately after the interrupted run so it sees the
+    # same load: the same script, the same hook, no pause, dying at the phase-1
+    # mismatch — an uninterrupted run whose work is a superset of the teardown
+    # the interrupted run had left to do.
+    t_ctl = time.monotonic()
+    ctl = drive({
+        "CARR_KEY_RECOVERY_TEST_SELFTEST_TYPED_KEY": secret,
+        "CARR_KEY_RECOVERY_TEST_SELFTEST_PUBKEY_FILE": mismatch_pubkey_file,
+    }, timeout=300)
+    control_s = time.monotonic() - t_ctl
+    check("interrupted path: the control run is a usable yardstick (it ran the "
+          "same prologue, shred and ops.run write through to the end)",
+          ctl.returncode != 0 and "evidence: state=failed" in ctl.stdout,
+          f"control rc={ctl.returncode}\n{ctl.stdout[-400:]}")
+    budget = control_s + PAUSE_S / 4.0
+    check("interrupted path: the script died inside the pause instead of "
+          "sleeping it out — teardown after SIGINT finished inside one whole "
+          "uninterrupted run of the same script on this same machine, plus a "
+          "quarter of the pause",
+          post_signal < budget,
+          f"teardown took {post_signal:.1f}s; budget {budget:.1f}s "
+          f"(control run {control_s:.1f}s + {PAUSE_S / 4.0:.1f}s slack). "
+          f"A script that slept the whole {PAUSE_S}s pause lands here, "
+          f"~{PAUSE_S * 0.75:.0f}s past the budget, at any load.")
+    # Printed on the green path too, deliberately. These four numbers are how a
+    # human reading a CI log tells "the interrupt path is healthy" from "this
+    # host is thrashing and everything here is slow" — the distinction the old
+    # constant could not draw, and the reason it went red on a working script.
+    print(f"        timings on this host: startup-to-pause {ready_s:.1f}s, "
+          f"teardown-after-SIGINT {post_signal:.1f}s, control run "
+          f"{control_s:.1f}s, budget {budget:.1f}s")
+    check("interrupted path: the script never reached phase 1 — the pause was "
+          "cut short, not run out (this one holds at any load, no clock "
+          "involved)", "phase 1:" not in out, out)
     check("interrupted path: exit code is a signal-death code (130 for "
           "SIGINT), not a clean 0 or 1",
           proc2.returncode == 130, f"got {proc2.returncode}")
@@ -390,11 +544,26 @@ def tier1_age(workdir: str) -> None:
     check("interrupted path: cleanup ran exactly once (one evidence block, "
           "not the double-fire a trap with no explicit exit produces)",
           out.count("evidence: state=") == 1, out)
-    after = set(glob.glob(tmp_glob))
-    leftover = after - before
+    # SCOPED TO THIS RUN'S OWN DIRECTORY, because TMPDIR is shared by every
+    # session on this Mac. This was a glob diff — "no carr-key-recovery.* dir
+    # exists that did not exist before" — and it went red at 21:46 on
+    # 2026-08-23 on a directory ANOTHER session created while this suite was
+    # mid-run. Same class of false red as the wall-clock bound above (a check
+    # reporting on the machine rather than on the script under test) and the
+    # same cure. wait_until_paused() already handed back the exact directory
+    # THIS run wrote its identity into, so that is the one that must be gone.
+    # The glob diff stays only as the fallback for a run that never got a
+    # directory to name, where it is all there is.
+    if paused_dir is not None:
+        survived = os.path.exists(paused_dir)
+        leftover_detail = f"still on disk: {paused_dir}"
+    else:
+        leftover = set(glob.glob(tmp_glob)) - before
+        survived = bool(leftover)
+        leftover_detail = f"leftover: {leftover}"
     check("interrupted path: no carr-key-recovery temp dir survives — the "
           "identity file and its directory were both shredded and removed",
-          not leftover, f"leftover: {leftover}")
+          not survived, leftover_detail)
     assert_no_leak((out, err), secret, "interrupted path")
 
 
