@@ -18,6 +18,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+# Job Passport portfolio results use the same offline evaluator boundary.  The
+# import is deliberately local-path based because room-bridge is a tool folder,
+# not a deployable dependency or a parallel evaluation service.
+ROOM_BRIDGE = Path(__file__).parents[1] / "tools" / "room-bridge"
+if str(ROOM_BRIDGE) not in sys.path:
+    sys.path.insert(0, str(ROOM_BRIDGE))
+from evaluation_kernel import admission_decision, cost_curve_gate, validate_evaluation_kernel  # noqa: E402
+
 
 RESPONSE_FIELDS = {
     "status",
@@ -88,6 +96,13 @@ ATTRIBUTION_FIELDS = {
     "route_digest",
     "policy_digest",
     "observed_by",
+}
+# v1 provider observations predate the portable execution envelope.  Keep their
+# exact legacy attribution valid, while accepting the additive, versioned
+# model+harness+adapter identity needed to compare Job Passport attempts.
+EXECUTION_ATTRIBUTION_FIELDS = {
+    "surface", "adapter_id", "adapter_version", "harness_id", "harness_version",
+    "native_session_ref", "configuration_fingerprint",
 }
 SCORECARD_ATTRIBUTION_FIELDS = {"provider_id", "model_id", "route_id", "observed_by"}
 PROVIDER_OUTPUT_FIELDS = {
@@ -190,6 +205,40 @@ class SuiteError(ValueError):
     """The versioned suite is malformed or unsafe to execute."""
 
 
+def load_shared_evaluation_kernel(path: Path, projection: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Load a strict, offline shared evaluation kernel without a score.
+
+    Kept additive to the legacy provider scorecard loader: live-program users
+    retain their v1 envelope behavior while Job Passport receives attributable
+    model+harness+adapter, stage, and frontier evidence.
+    """
+    try:
+        raw = json.loads(path.read_text())
+        return validate_evaluation_kernel(raw, projection)
+    except (OSError, ValueError) as exc:
+        raise SuiteError(f"invalid Job Passport eval portfolio: {exc}") from exc
+
+
+def shared_evaluation_admission(kernel: dict[str, Any]) -> dict[str, Any]:
+    """Return a controller-input recommendation; it never self-promotes."""
+    try:
+        return admission_decision(kernel)
+    except ValueError as exc:
+        raise SuiteError(f"invalid shared evaluation admission: {exc}") from exc
+
+
+def job_passport_cost_curve(portfolio: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return per-comparison gates; intentionally never returns an overall score."""
+    try:
+        return cost_curve_gate(portfolio)
+    except ValueError as exc:
+        raise SuiteError(f"invalid Job Passport cost curve: {exc}") from exc
+
+
+# Read-compatible name for the already-shipped Job Passport consumer.
+load_job_passport_eval_portfolio = load_shared_evaluation_kernel
+
+
 def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
@@ -249,20 +298,34 @@ def _validate_summary(value: Any, label: str) -> dict[str, int]:
 
 
 def _validate_attribution(value: Any, label: str) -> dict[str, Any]:
-    attribution = _expect_exact_keys(value, ATTRIBUTION_FIELDS, label)
+    allowed = ATTRIBUTION_FIELDS | EXECUTION_ATTRIBUTION_FIELDS
+    if not isinstance(value, dict) or set(value) not in (ATTRIBUTION_FIELDS, allowed):
+        raise SuiteError(f"{label} fields do not match the v1 contract")
+    attribution = value
     for field in ("provider_id", "model_id", "route_id", "observed_by"):
         if not _is_nonempty_string(attribution[field]):
             raise SuiteError(f"{label} {field} must be a non-empty string")
     for field in ("route_digest", "policy_digest"):
         if not _is_sha256(attribution[field]):
             raise SuiteError(f"{label} {field} must be a lowercase SHA-256 digest")
+    if set(attribution) == allowed:
+        for field in EXECUTION_ATTRIBUTION_FIELDS - {"configuration_fingerprint"}:
+            if not _is_nonempty_string(attribution[field]):
+                raise SuiteError(f"{label} {field} must be a non-empty string")
+        if not _is_sha256(attribution["configuration_fingerprint"]):
+            raise SuiteError(f"{label} configuration_fingerprint must be a lowercase SHA-256 digest")
     return attribution
 
 
 def _validate_scorecard_attribution(value: Any, label: str) -> dict[str, str]:
-    attribution = _expect_exact_keys(value, SCORECARD_ATTRIBUTION_FIELDS, label)
+    allowed = SCORECARD_ATTRIBUTION_FIELDS | EXECUTION_ATTRIBUTION_FIELDS
+    if not isinstance(value, dict) or set(value) not in (SCORECARD_ATTRIBUTION_FIELDS, allowed):
+        raise SuiteError(f"{label} fields do not match the v1 contract")
+    attribution = value
     if any(not _is_nonempty_string(attribution[field]) for field in attribution):
         raise SuiteError(f"{label} values must be non-empty strings")
+    if "configuration_fingerprint" in attribution and not _is_sha256(attribution["configuration_fingerprint"]):
+        raise SuiteError(f"{label} configuration_fingerprint must be a lowercase SHA-256 digest")
     return attribution
 
 
@@ -500,13 +563,7 @@ def load_provider_run(path: Path) -> dict[str, Any]:
             raise SuiteError(f"provider run {field} must be a non-empty string")
     if not _is_sha256(observed_run["suite_digest"]):
         raise SuiteError("provider run suite_digest must be a lowercase SHA-256 digest")
-    attribution = _expect_exact_keys(observed_run["attribution"], ATTRIBUTION_FIELDS, "attribution")
-    for field in ("provider_id", "model_id", "route_id", "observed_by"):
-        if not _is_nonempty_string(attribution[field]):
-            raise SuiteError(f"attribution {field} must be a non-empty string")
-    for field in ("route_digest", "policy_digest"):
-        if not _is_sha256(attribution[field]):
-            raise SuiteError(f"attribution {field} must be a lowercase SHA-256 digest")
+    _validate_attribution(observed_run["attribution"], "attribution")
     if not isinstance(observed_run["outputs"], list) or not observed_run["outputs"]:
         raise SuiteError("provider run must contain outputs")
     return observed_run
@@ -748,6 +805,7 @@ def evaluate_provider_run(suite: dict[str, Any], observed_run: dict[str, Any]) -
             "model_id": attribution["model_id"],
             "route_id": attribution["route_id"],
             "observed_by": attribution["observed_by"],
+            **{field: attribution[field] for field in EXECUTION_ATTRIBUTION_FIELDS if field in attribution},
         },
         "replay": {
             "suite_digest": suite["_digest"],

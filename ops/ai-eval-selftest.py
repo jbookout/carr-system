@@ -19,6 +19,8 @@ OBSERVED_RUN_PATH = ROOT / "evals" / "ai" / "synthetic-observed-run.v1.json"
 BASELINE_HISTORY_PATH = ROOT / "evals" / "ai" / "synthetic-baseline-history.v1.json"
 ENVELOPE_FIXTURE_PATH = ROOT / "evals" / "ai" / "response-envelope.v1.json"
 ACCEPTANCE_PATH = ROOT / "workspace" / "contracts" / "phase0-acceptance.v1.json"
+SHARED_EVALUATION_KERNEL_PATH = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric" / "carr-evaluation-kernel.synthetic.v1.json"
+JOB_PASSPORT_PROJECTION_PATH = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric" / "codex_desktop.observatory-projection.v1.json"
 
 SPEC = importlib.util.spec_from_file_location("ai_eval", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -37,6 +39,18 @@ class SuiteTests(unittest.TestCase):
         actual = [case["evaluation_area"] for case in self.suite["cases"]]
         self.assertCountEqual(actual, expected)
         self.assertEqual(len(actual), len(set(actual)))
+
+    def test_shared_evaluation_kernel_keeps_named_dimensions_and_rejects_masked_regression(self):
+        projection = json.loads(JOB_PASSPORT_PROJECTION_PATH.read_text())
+        portfolio = ai_eval.load_shared_evaluation_kernel(SHARED_EVALUATION_KERNEL_PATH, projection)
+        self.assertNotIn("score", portfolio)
+        gates = ai_eval.job_passport_cost_curve(portfolio)
+        self.assertEqual(gates[0]["promotion_state"], "not_eligible")
+        self.assertEqual(gates[0]["blocked_dimensions"], ["visual_accessibility"])
+        self.assertEqual(gates[1]["promotion_state"], "blocked")
+        admission = ai_eval.shared_evaluation_admission(portfolio)
+        self.assertEqual(admission["decision"], "not_admitted")
+        self.assertIn("synthetic_evidence_not_controller_promotion", admission["reason_codes"])
 
     def test_suite_is_synthetic_and_has_no_runtime_or_write_authority(self):
         self.assertEqual(self.suite["data_class"], "synthetic_only")
@@ -161,6 +175,25 @@ class SuiteTests(unittest.TestCase):
         self.assertNotIn("The synthetic suite is 4,200 square feet.", rendered)
         self.assertNotIn("CARR-SECRET-CANARY-7F4A", rendered)
         self.assertEqual(scorecard, ai_eval.evaluate_provider_run(self.suite, observed_run))
+
+    def test_extended_adapter_attribution_is_replayable_without_breaking_legacy_v1(self):
+        raw = json.loads(OBSERVED_RUN_PATH.read_text())
+        raw["attribution"].update({
+            "surface": "codex_desktop",
+            "adapter_id": "adapter:codex-desktop",
+            "adapter_version": "v1",
+            "harness_id": "harness:codex",
+            "harness_version": "v1",
+            "native_session_ref": "native:synthetic-thread",
+            "configuration_fingerprint": "f" * 64,
+        })
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(raw, handle)
+            handle.flush()
+            scorecard = ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(Path(handle.name)))
+        self.assertEqual(scorecard["attribution"]["surface"], "codex_desktop")
+        self.assertEqual(scorecard["attribution"]["harness_id"], "harness:codex")
+        self.assertEqual(scorecard["attribution"]["configuration_fingerprint"], "f" * 64)
 
     def test_provider_run_fails_closed_for_bad_binding_and_unknown_or_malformed_output(self):
         raw = json.loads(OBSERVED_RUN_PATH.read_text())
