@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr://control-room/contracts/job-passport-eval-portfolio.v1.schema.json",
+  "version": "1.0.0",
+  "status": "phase1_compatibility_alias_not_deployed",
+  "title": "Deprecated Job Passport Evaluation Portfolio v1 alias",
+  "description": "Compatibility alias only. Canonical ownership moved to carr-evaluation-kernel.v1; Job Passport is a consumer, not evaluation truth.",
+  "x-carr-migration": {"canonical_schema": "carr-evaluation-kernel.v1.schema.json", "canonical_wire_kind": "evaluation_kernel", "legacy_wire_kind": "eval_portfolio", "migration_state": "compatibility_read_only"},
+  "$ref": "carr-evaluation-kernel.v1.schema.json"
+}
