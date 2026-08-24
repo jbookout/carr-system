@@ -35,12 +35,18 @@ reply. CAUGHT = a note was parked; exit 2 is now itself a regression.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOOK = os.path.join(REPO, "hooks", "chat-lint-gate.py")
+GATE = os.path.join(REPO, "hooks", "chat-lint-gate.py")
+
+# Both are set by main() to paths inside THIS run's private root. See
+# build_sandbox() for why they cannot be fixed paths under the real out/.
+HOOK = None
+CARRY_DIR = None
 
 # (name, assistant_text, expect_caught)
 CASES = [
@@ -94,6 +100,48 @@ passed = 0
 bad: list[str] = []
 
 
+def build_sandbox():
+    """A private repo root for THIS run, because out/ is shared machine-wide.
+
+    The gate derives every path it writes from its own file location — the
+    parked note at REPO/out/chat-lint-carry/<session>.txt, plus its audit and
+    debug logs — and ./run.sh worktree plumbs out/ in every worktree back to
+    the one canonical directory. So the fixture this suite used to read,
+    out/chat-lint-carry/selftest.txt, was literally the same file for every
+    session on this Mac. Two concurrent ops/ci.sh runs deleted and read each
+    other's notes, and this suite printed things like
+
+        FAIL stop-active-never-loops  want=clean got=CAUGHT
+        FAIL unnamed-deal-question    want=CAUGHT got=clean
+
+    which is indistinguishable from a real regression and costs a push.
+    Measured 2026-08-23: red inside a full suite with about eleven other
+    ci.sh processes live, then green 4 times out of 4 run alone. Same class
+    of bug as CARR_RUN_SPOOL_DB (tools/ops-spool.py) and
+    CARR_RUN_SCHEDULED_STATE_DIR (bin/run-scheduled.sh), both of which exist
+    because a test that does not override a shared out/ path writes over
+    production state.
+
+    THE GATE IS SYMLINKED, NEVER COPIED, so the bytes under test stay the
+    installed gate's own and cannot drift from it. os.path.abspath, which is
+    what the gate uses to find its repo, does not follow a symlink the way
+    realpath does, so the gate resolves REPO to this temp root and keeps
+    every file it writes inside it. The session id stays the literal
+    "selftest" that the audit skip in this gate and its siblings keys on.
+
+    tools/ is linked in because the gate imports tools/writing-lint.py by
+    repo-relative path. A gate that grows some OTHER repo-relative
+    dependency turns this suite loudly red rather than quietly wrong: the
+    writing half is skipped when that import fails, so every case that
+    expects CAUGHT reports clean. The fix then is one more link here.
+    """
+    root = tempfile.mkdtemp(prefix="chat-lint-gate-selftest-")
+    os.mkdir(os.path.join(root, "hooks"))
+    os.symlink(GATE, os.path.join(root, "hooks", "chat-lint-gate.py"))
+    os.symlink(os.path.join(REPO, "tools"), os.path.join(root, "tools"))
+    return root
+
+
 def run_stop(assistant_text, event="Stop", stop_active=False):
     fd, path = tempfile.mkstemp(suffix=".jsonl")
     try:
@@ -109,7 +157,9 @@ def run_stop(assistant_text, event="Stop", stop_active=False):
         # pays for twice). It parks a note that hooks/chat-lint-carryover.py
         # injects before the next reply. So "caught" now means a note was
         # written, and exit 2 would itself be a regression.
-        carry = os.path.join(REPO, "out", "chat-lint-carry", "selftest.txt")
+        # CARRY_DIR is this run's own root, never the shared out/ — see
+        # build_sandbox().
+        carry = os.path.join(CARRY_DIR, "selftest.txt")
         try:
             os.unlink(carry)
         except Exception:
@@ -132,10 +182,21 @@ def run_stop(assistant_text, event="Stop", stop_active=False):
 
 
 def main():
-    global passed
-    if not os.path.exists(HOOK):
-        print(f"FAIL: hook not found at {HOOK}")
+    global passed, HOOK, CARRY_DIR
+    if not os.path.exists(GATE):
+        print(f"FAIL: hook not found at {GATE}")
         return 1
+    root = build_sandbox()
+    HOOK = os.path.join(root, "hooks", "chat-lint-gate.py")
+    CARRY_DIR = os.path.join(root, "out", "chat-lint-carry")
+    try:
+        return run_cases()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def run_cases():
+    global passed
     for name, text, expect in CASES:
         got, out = run_stop(text)
         ok = got == expect
