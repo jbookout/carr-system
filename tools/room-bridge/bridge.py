@@ -134,13 +134,12 @@ def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], pro
     if spatial_surface is not None:
         from spatial_surface import validate_spatial_surface
         published.append(publish_job_passport_fact("spatial_surface", validate_spatial_surface(spatial_surface, projection), add_room_turn=add_room_turn))
-    if telemetry_measurements:
-        from spatial_surface import validate_telemetry_measurement
-        for measurement in telemetry_measurements:
-            validated = validate_telemetry_measurement(measurement)
-            if validated["attribution"]["attempt_id"] != completed["attempt_id"]:
-                raise execution_contract.ContractError("telemetry measurement does not bind rehearsal attempt")
-            published.append(publish_job_passport_fact("telemetry_measurement", validated, add_room_turn=add_room_turn))
+    from spatial_surface import measurements_from_attempt_receipt, validate_telemetry_measurement
+    for measurement in telemetry_measurements if telemetry_measurements is not None else measurements_from_attempt_receipt(completed):
+        validated = validate_telemetry_measurement(measurement)
+        if validated["attribution"]["attempt_id"] != completed["attempt_id"]:
+            raise execution_contract.ContractError("telemetry measurement does not bind rehearsal attempt")
+        published.append(publish_job_passport_fact("telemetry_measurement", validated, add_room_turn=add_room_turn))
     return {"mode": "synthetic_read_only_rehearsal", "work_request_id": bound["work_request_id"],
             "attempt_id": completed["attempt_id"], "projection": projection, "published": published}
 

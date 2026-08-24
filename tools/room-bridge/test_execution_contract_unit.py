@@ -314,6 +314,9 @@ def typed_telemetry_wire_binds_attempt_and_preserves_unavailable_cost():
     assert json.loads(posted[-1]["body"])["job_passport"]["payload"]["value"]["kind"] == "unavailable"
     wrong = copy.deepcopy(elapsed); wrong["attribution"]["attempt_id"] = "attempt:other"
     expect_refusal(lambda: bridge.rehearse_job_passport(envelope(), receipt(), [], {"profile_id": "profile:doc", "display_label": "Doc"}, telemetry_measurements=[wrong], add_room_turn=lambda **row: {}), "does not bind rehearsal attempt")
+    derived = spatial_surface.measurements_from_attempt_receipt(receipt())
+    assert [(row["metric_kind"], row["value"]["kind"]) for row in derived] == [("elapsed_time", "actual"), ("billed_cost", "unavailable")]
+    assert derived[0]["value"]["amount"] == 5000
 
 
 def visual_extensions_are_inspectable_but_untrusted_or_unsafe_packages_are_refused():
@@ -395,10 +398,11 @@ def synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wir
     )
     assert rehearsal["mode"] == "synthetic_read_only_rehearsal"
     assert [json.loads(row["body"])["job_passport"]["kind"] for row in posted] == [
-        "execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel",
+        "execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "telemetry_measurement", "telemetry_measurement",
     ]
     assert all(row["seat"] == "hermes" and row["kind"] == "receipt" for row in posted)
-    assert rehearsal["projection"]["projection_digest"] == json.loads(posted[-2]["body"])["job_passport"]["payload"]["projection_digest"]
+    projection_wire = next(row for row in posted if json.loads(row["body"])["job_passport"]["kind"] == "observatory_projection")
+    assert rehearsal["projection"]["projection_digest"] == json.loads(projection_wire["body"])["job_passport"]["payload"]["projection_digest"]
 
 
 def self_contained_job_passport_artifact_binds_content_and_is_stale_visible():

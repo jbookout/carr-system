@@ -41,13 +41,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                  "causation_id": "cause:dispatch-1", "redaction_class": "metadata_only", "evidence_refs": ["evidence:synthetic-check"], "retention": "ephemeral"}
         posted = []
         portfolio = json.loads((self.fixtures / "carr-evaluation-kernel.synthetic.v1.json").read_text())
-        telemetry = [json.loads((self.fixtures / name).read_text()) for name in (
-            "codex_desktop.elapsed-time.telemetry-measurement.v1.json",
-            "codex_desktop.billed-cost.telemetry-measurement.v1.json",
-        )]
         projection = contract.project_observatory_attempt(envelope, receipt, [event], {"profile_id": "profile:doc", "display_label": "Doc"})
         rehearsal = bridge.rehearse_job_passport(envelope, receipt, [event], {"profile_id": "profile:doc", "display_label": "Doc"},
-                                                  evaluation_kernel=portfolio, spatial_surface=spatial_surface.project_job_passport_surface(projection), telemetry_measurements=telemetry,
+                                                  evaluation_kernel=portfolio, spatial_surface=spatial_surface.project_job_passport_surface(projection),
                                                   add_room_turn=lambda **row: posted.append(row) or {"preview": True})
         turns = [{"seq": str(index), "msg_id": f"preview-job-passport-{index}", "at": "2026-08-24T12:00:06Z",
                   "sponsor": "joe", "seat": row["seat"], "kind": row["kind"], "body": row["body"]}

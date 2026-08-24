@@ -6,6 +6,7 @@ malformed observations from becoming a newer visual truth.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import execution_contract as contract
@@ -144,6 +145,31 @@ def validate_telemetry_measurement(value: Any) -> dict:
     if val["kind"] == "unavailable" and (val["amount"] is not None or not val["unavailable_reason"]): raise contract.ContractError("unavailable telemetry is never zero")
     if row["metric_kind"] == "session_tokens" and "quota" in row["unit"].lower(): raise contract.ContractError("session tokens cannot masquerade as subscription quota")
     return row
+
+
+def measurements_from_attempt_receipt(receipt: Any) -> list[dict]:
+    """Project only measurements whose source is already deterministic.
+
+    AttemptReceipt is a redacted CARR evidence record, not a provider billing
+    response. Its lifecycle timestamps can prove elapsed time through the
+    local controller clock. Its numeric ``cost_usd`` and token fields cannot
+    prove billed cost or subscription quota without a separately approved
+    provider source, so cost remains explicitly unavailable here.
+    """
+    completed = contract.validate_attempt_receipt(receipt)
+    adapter = completed["adapter"]
+    start = datetime.fromisoformat(completed["lifecycle"]["started_at"].replace("Z", "+00:00"))
+    end = datetime.fromisoformat(completed["lifecycle"]["ended_at"].replace("Z", "+00:00"))
+    elapsed_ms = max(0, int((end - start).total_seconds() * 1000))
+    attribution = {"provider_id": adapter["provider_id"], "model_id": adapter["model_id"], "harness_id": adapter["harness_id"], "adapter_id": adapter["adapter_id"], "attempt_id": completed["attempt_id"], "native_session_ref": adapter["native_session_ref"]}
+    common = {"schema_version": "telemetry-measurement.v1", "scope": "attempt", "attribution": attribution,
+              "observed_at": completed["lifecycle"]["ended_at"], "source_window": {"started_at": completed["lifecycle"]["started_at"], "ended_at": completed["lifecycle"]["ended_at"]}}
+    evidence = f"evidence:attempt-receipt-{completed['attempt_id']}"
+    values = [
+        {**common, "measurement_id": f"measurement:{completed['attempt_id']}:elapsed", "metric_kind": "elapsed_time", "unit": "ms", "source": {"type": "deterministic_local_clock", "priority": 4, "provenance_ref": evidence}, "freshness": "fresh", "value": {"kind": "actual", "amount": elapsed_ms, "estimate_method": None, "uncertainty": None, "unavailable_reason": None}},
+        {**common, "measurement_id": f"measurement:{completed['attempt_id']}:billed-cost", "metric_kind": "billed_cost", "unit": "USD", "source": {"type": "unavailable", "priority": 5, "provenance_ref": evidence}, "freshness": "unknown", "value": {"kind": "unavailable", "amount": None, "estimate_method": None, "uncertainty": None, "unavailable_reason": "no approved provider billing source"}},
+    ]
+    return [validate_telemetry_measurement(value) for value in values]
 
 
 def validate_visual_extension_manifest(value: Any) -> dict:
