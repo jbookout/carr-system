@@ -167,9 +167,18 @@ exec /usr/bin/python3 "$@"
     check("system bootstrap reaches fixed interpreter, scrubs PYTHONPATH, and blocks on canonical context",
           write.returncode == 0 and "quokka-indexer" in write.stdout
           and assertion.returncode == 2 and "quokka-indexer" in assertion.stderr)
+    bootstrap_faults = {"unknown": unknown, "malformed": malformed,
+                        "missing dependency": missing_dependency,
+                        "missing interpreter": missing_interpreter, "timeout": timeout}
     check("launcher fails closed for unknown/malformed/missing dependency/interpreter/timeout",
-          all(item.returncode != 0 for item in (unknown, malformed, missing_dependency,
-                                                 missing_interpreter, timeout)))
+          all(item.returncode != 0 for item in bootstrap_faults.values()))
+    # A mute exit 2 reads as an objection to the assistant's work rather than as
+    # the launcher never reaching the gate, so each fault must name itself and
+    # the five names must be distinguishable from one another.
+    reasons = {name: item.stderr.strip() for name, item in bootstrap_faults.items()}
+    check("every closed-gate bootstrap fault names a distinct reason on stderr",
+          all(reason.startswith("run-record-gate: gate not run: ") for reason in reasons.values())
+          and len(set(reasons.values())) == len(reasons))
 
     if failures:
         print(f"FAIL {len(failures)}: {', '.join(failures)}")
