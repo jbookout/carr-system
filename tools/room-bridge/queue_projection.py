@@ -26,9 +26,21 @@ def event_msg_id(board: str, event_id: int) -> str:
     return str(uuid.uuid5(EVENT_NAMESPACE, f"{board}:{event_id}"))
 
 
+def _as_int(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError("bool is not an epoch")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        return int(value)
+    raise TypeError(type(value))
+
+
 def _iso(epoch: object) -> str:
     try:
-        return datetime.fromtimestamp(int(epoch), timezone.utc).isoformat().replace("+00:00", "Z")
+        return datetime.fromtimestamp(_as_int(epoch), timezone.utc).isoformat().replace("+00:00", "Z")
     except (TypeError, ValueError, OSError):
         return datetime.fromtimestamp(0, timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -54,7 +66,7 @@ def _source_seq(task: dict) -> int | None:
 
 def _priority(value: object) -> str:
     try:
-        return f"P{max(0, min(4, 4 - int(value)))}"
+        return f"P{max(0, min(4, 4 - _as_int(value)))}"
     except (TypeError, ValueError):
         return "P2"
 
