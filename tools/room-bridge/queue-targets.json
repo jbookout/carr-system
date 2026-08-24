@@ -1,0 +1,59 @@
+{
+  "v": 1,
+  "targets": {
+    "sol": {
+      "enabled": true,
+      "adapter": "desk",
+      "assignee": "desk:codex-desk",
+      "desk": "codex-desk",
+      "effective_model": "gpt-5.6-sol",
+      "capabilities": ["read"]
+    },
+    "claude": {
+      "enabled": true,
+      "adapter": "desk",
+      "assignee": "desk:joe-desk",
+      "desk": "joe-desk",
+      "effective_model": "claude",
+      "capabilities": ["read"]
+    },
+    "ox-alpha": {
+      "enabled": false,
+      "adapter": "hermes",
+      "assignee": "builder",
+      "model": "stealth/ox-alpha",
+      "provider": "openrouter",
+      "effective_model": "stealth/ox-alpha",
+      "capabilities": ["read"],
+      "unavailable_reason": "Ox Alpha is retired for this queue."
+    },
+    "grok": {
+      "enabled": true,
+      "adapter": "hermes",
+      "assignee": "default",
+      "effective_model": "Grok 4.6",
+      "capabilities": ["read"]
+    },
+    "kimi": {
+      "enabled": true,
+      "adapter": "hermes",
+      "assignee": "designer",
+      "effective_model": "Kimi",
+      "capabilities": ["read"]
+    },
+    "deepseek": {
+      "enabled": true,
+      "adapter": "hermes",
+      "assignee": "reviewer",
+      "effective_model": "DeepSeek",
+      "capabilities": ["read"]
+    },
+    "joe": {
+      "enabled": true,
+      "adapter": "manual",
+      "assignee": "human:joe",
+      "effective_model": "Joe manual lane",
+      "capabilities": ["read"]
+    }
+  }
+}

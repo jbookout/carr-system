@@ -8,23 +8,17 @@ ever asks a model to interpret intent. Two forms, both one line:
     @<seat> assign <ref> <one-line title>
     @<seat> claim <ref>
 
-VERSION 1 SCOPE (orchestrator addendum, 2026-08-22 — read before touching this
-file): no queue-write verb is bound yet. claim-card is the lead-pool candidate
-reservoir, not work-item claiming, and current-work-requests / work-request-
-card are explicitly read-only. A separate, in-flight build is consolidating
-the work queue; THAT is the verb this grammar should eventually call. Until it
-lands, apply_assignment() is the one seam: it validates, records the intent
-locally, and posts a machine-readable receipt — never a queue mutation. See
-loop #508 (blocker other_lane) for the re-pointing follow-up.
+LEGACY SCOPE. The canonical queue now enters through ``@queue`` and Hermes;
+these old ``@<seat> assign|claim`` commands are retained only so their senders
+receive an explicit deprecation receipt. They never create a local JSON
+assignment log and cannot infer a safe queue capability or task body.
 
-AUTHORIZATION. Only a turn whose `seat` is "human" may trigger an assignment.
+AUTHORIZATION. Only a turn whose `seat` is "human" may trigger a legacy
+assignment deprecation receipt.
 A model seat (claude, codex, grok, sol, hermes) can echo or paraphrase a
 command in the room, and this bridge must not treat that as instruction —
-only a person typing it counts. This is deliberately narrower than "any
-seat", and is the judgment-boundary the ruled test draws: routing turns
-between desks is mechanical and open to every seat; deciding to mutate a
-queue is not, and stays behind a person until the record layer itself gates
-it more precisely.
+only a person typing it counts. Model seats enqueue their permitted work
+through the separately closed ``@queue`` grammar.
 
 THREE OUTCOMES, so a near-miss is never silently ignored:
   "not_a_command"  — body does not look like an attempt at this grammar at
@@ -46,7 +40,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
 AUTHORIZED_SEATS = frozenset({"human"})
 
@@ -60,9 +53,6 @@ _REF = r"[A-Za-z][A-Za-z0-9_-]{0,40}"
 _LOOSE_TRIGGER = re.compile(rf"^@\S+\s+(assign|claim)\b", re.IGNORECASE)
 _ASSIGN_RE = re.compile(rf"^@(?P<seat>{_SEAT})\s+assign\s+(?P<ref>{_REF})\s+(?P<title>\S.{{0,199}})$")
 _CLAIM_RE = re.compile(rf"^@(?P<seat>{_SEAT})\s+claim\s+(?P<ref>{_REF})$")
-
-DEFAULT_ASSIGNMENTS_LOG = Path.home() / ".config" / "carr" / "room-bridge-assignments.json"
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -107,37 +97,15 @@ def classify(turn: dict) -> tuple[str, dict | None, str | None]:
     return "ok", parsed, None
 
 
-def _load_log(path: Path) -> list[dict]:
-    try:
-        return json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+def apply_assignment(turn: dict, parsed: dict, *, add_room_turn) -> dict:
+    """Deprecate the local assignment-log pseudo-queue without replacing it.
 
-
-def _save_log(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rows, indent=2) + "\n")
-    tmp.replace(path)
-
-
-def apply_assignment(turn: dict, parsed: dict, *, add_room_turn,
-                      log_path: Path = DEFAULT_ASSIGNMENTS_LOG) -> dict:
-    """THE SEAM (orchestrator's word for it). Everything this function does is
-    disposable except its signature: when the consolidated work queue's write
-    verb exists, this is the one place that changes — call it instead of (or
-    alongside) recording locally. Today it:
-      1. appends the assignment intent to a local JSON log (an audit trail,
-         not a queue — nothing here claims or assigns anything real yet);
-      2. posts a kind=receipt turn whose body is machine-readable JSON, so a
-         future reconciliation pass (or a human) can replay every intent
-         recorded before the real verb existed.
-    `add_room_turn` is injected (body, seat, kind, msg_id) -> dict, exactly
-    verb_io.add_room_turn's signature, so this is unit-testable with a
-    recording fake and no network.
+    The canonical path is now ``@queue enqueue ... cap=read``.  This legacy
+    grammar cannot safely infer a queue title/body/capability, so it does not
+    translate automatically and, critically, writes no second task ledger.
     """
     record = {
-        "assignment": {
+        "assignment_deprecated": {
             "seat": parsed["target_seat"],
             "verb": parsed["verb"],
             "ref": parsed["ref"],
@@ -145,16 +113,11 @@ def apply_assignment(turn: dict, parsed: dict, *, add_room_turn,
             "by": turn.get("sponsor"),
             "at_seq": turn.get("seq"),
             "source_msg_id": turn.get("msg_id"),
-            "recorded_at": _now(),
+            "deprecated_at": _now(),
         },
-        "status": "recorded_no_queue_verb_yet",
-        "note": "loop #508 — no consolidated-queue write verb bound yet; this is a "
-                "local record only, not a real claim or assignment.",
+        "status": "deprecated_use_queue",
+        "note": "Use @queue enqueue target=<alias> cap=read :: <title>. No local assignment log was written.",
     }
-    rows = _load_log(log_path)
-    rows.append(record)
-    _save_log(log_path, rows)
-
     receipt = add_room_turn(
         body=json.dumps(record, separators=(",", ":")),
         seat="hermes",
