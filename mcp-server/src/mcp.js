@@ -63,6 +63,16 @@ export const PROFILES = {
     // human, so it is the seat that most needs to be able to file its own — and the
     // verb is purely additive, keyed, and cannot touch any other record.
     "record-defect",
+    // open-incident (2026-08-23) is here for record-defect's reason exactly, and
+    // it is the verb that reason was really written for: a 2am scheduled run is
+    // the seat most likely to be the FIRST thing to see a service fail, and the
+    // least likely to have a human beside it. It is additive and keyed, it
+    // de-dupes onto an open fingerprint rather than growing the pile, and it
+    // structurally cannot touch the columns that close an incident — closing is
+    // partner authority (close-incident is humanOnly and refuses anything that
+    // is not Joe or Dell), so the widest thing this profile can do with the
+    // operational ledger is say truthfully that something broke.
+    "open-incident",
   ]),
 
   // AWAY MODE, added 2026-08-03 on Joe's ruling. The scheduled CEO session that
@@ -97,7 +107,7 @@ export const PROFILES = {
     // everything capture holds
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
-    "record-signal", "record-branch-evidence", "record-defect",
+    "record-signal", "record-branch-evidence", "record-defect", "open-incident",
     // plus: close what it opened, advance the book, draft, and keep the record honest
     "close-loop", "update-deal", "add-premises", "record-counter",
     "prepare-document", "update-document-status",

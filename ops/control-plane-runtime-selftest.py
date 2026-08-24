@@ -110,8 +110,15 @@ def main() -> int:
     original_connect = getattr(module, "connect")
     setattr(module, "connect", lambda: Connection())
     try:
+        # WAIT-UNTIL-TWO, NOT A FIXED SLEEP (2026-08-23 load-flake sweep). The
+        # keeper renews every 10ms; under load the first renew can land well
+        # past 35ms of wall clock and a fixed sleep asserted the machine's
+        # scheduler, not the renewal loop. Poll until two heartbeats exist
+        # (bounded), so any scheduling delay is absorbed.
         with module.LeaseKeeper("job", "lease", seconds=9, interval=0.01):
-            time.sleep(0.035)
+            deadline = time.monotonic() + 5
+            while len(heartbeats) < 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
     finally:
         setattr(module, "connect", original_connect)
     check("long work renews the committed lease more than once",len(heartbeats) >= 2)
