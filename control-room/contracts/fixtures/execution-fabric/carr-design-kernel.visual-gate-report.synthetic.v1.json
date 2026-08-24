@@ -1,0 +1,47 @@
+{
+  "schema_version": "carr-visual-gate-report.v1",
+  "report_id": "report:job-passport-visual-gates",
+  "kernel_binding": {
+    "contract_id": "contract:carr-design-kernel",
+    "version": "v1",
+    "content_digest": "sha256:b90ff17db1c84ebff2fc89607b16f64dfe7d363197bc5b3f508596ea32bec747",
+    "adapter_id": "adapter:job-passport-html"
+  },
+  "target": {
+    "intent_id": "intent:generated-artifact",
+    "surface_family": "generated-artifact",
+    "work_request_id": "wr-synthetic-read-only",
+    "projection_digest": "sha256:7ef1df546040c0aa000a437902fdc4d83decaf1960f63001790b11a422b5dfb9"
+  },
+  "evidence": {
+    "runner": "real_browser_measurement",
+    "browser": "browser:synthetic-chromium",
+    "captured_at": "2026-08-24T12:00:10Z",
+    "refs": ["browser_measurement:job-passport-synthetic"]
+  },
+  "gate_results": [
+    {"gate_id": "focus_visible", "status": "passed", "evidence_refs": ["browser_measurement:focus"], "measurement": {"focus_ring_visible": true}},
+    {"gate_id": "reduced_motion", "status": "passed", "evidence_refs": ["browser_measurement:reduced-motion"], "measurement": {"motion_suppressed": true, "content_visible": true}},
+    {"gate_id": "narrow_280", "status": "passed", "evidence_refs": ["browser_measurement:280"], "measurement": {"viewport_width_px": 280, "overflowing_elements": 0}},
+    {"gate_id": "narrow_320", "status": "passed", "evidence_refs": ["browser_measurement:320"], "measurement": {"viewport_width_px": 320, "overflowing_elements": 0}},
+    {"gate_id": "narrow_414", "status": "passed", "evidence_refs": ["browser_measurement:414"], "measurement": {"viewport_width_px": 414, "overflowing_elements": 0}},
+    {"gate_id": "overflow_clip", "status": "passed", "evidence_refs": ["browser_measurement:overflow"], "measurement": {"unintended_clip_count": 0}},
+    {"gate_id": "light_theme", "status": "passed", "evidence_refs": ["browser_measurement:light"], "measurement": {"theme": "light", "contrast_passed": true}},
+    {"gate_id": "dark_theme", "status": "passed", "evidence_refs": ["browser_measurement:dark"], "measurement": {"theme": "dark", "contrast_passed": true}},
+    {"gate_id": "semantic_tokens", "status": "passed", "evidence_refs": ["browser_measurement:tokens"], "measurement": {"semantic_token_violations": 0}},
+    {"gate_id": "hardcode_lint", "status": "passed", "evidence_refs": ["browser_measurement:hardcode"], "measurement": {"unapproved_hardcodes": 0}},
+    {"gate_id": "non_color_meaning", "status": "passed", "evidence_refs": ["browser_measurement:non-color"], "measurement": {"color_only_status_count": 0}},
+    {"gate_id": "rtl_when_relevant", "status": "not_applicable", "evidence_refs": ["browser_measurement:rtl-scope"], "measurement": {"relevance": "not_applicable_for_current_copy"}}
+  ],
+  "aesthetic_critique": {
+    "verdict": "advisory_pass",
+    "evidence_refs": ["browser_measurement:job-passport-synthetic"],
+    "authority": "advisory_never_promotion"
+  },
+  "admission": {
+    "aggregate_score": null,
+    "state": "eligible_for_controller_review",
+    "critical_blockers": [],
+    "promotion": "not_performed"
+  }
+}

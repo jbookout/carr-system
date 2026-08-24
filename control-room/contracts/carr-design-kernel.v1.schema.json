@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr://control-room/contracts/carr-design-kernel.v1.schema.json",
+  "version": "1.0.0",
+  "status": "phase1_contract_active_not_a_runtime_or_authority",
+  "title": "CARR Design Kernel v1",
+  "description": "Provider-neutral visual contract. It is a machine-readable design source and evaluation input, never a UI runtime or promotion authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract_id", "version", "status", "priority_hierarchy", "token_architecture", "context_slices", "design_intents", "component_state_contract", "visual_gate_portfolio", "aesthetic_critique", "adapter_projection", "provenance"],
+  "properties": {
+    "schema_version": {"const": "carr-design-kernel.v1"},
+    "contract_id": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "status": {"const": "active_contract_not_a_runtime_or_authority"},
+    "priority_hierarchy": {"type": "array", "minItems": 6, "items": {"type": "string"}},
+    "token_architecture": {"type": "object"},
+    "context_slices": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "design_intents": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "component_state_contract": {"type": "object"},
+    "visual_gate_portfolio": {"type": "object"},
+    "aesthetic_critique": {"type": "object"},
+    "adapter_projection": {"type": "object"},
+    "provenance": {"type": "object"}
+  }
+}
