@@ -1,0 +1,16 @@
+{
+  "_note": "Admission cards for gates BORN AFTER 2026-08-23. Read by hooks/gate-edit-gate.py, which refuses a NEW blocking gate whose card is absent or incomplete. A matcher that only announces needs no card: this prices the power to refuse work, never the work of building a check.",
+  "_why": "The 2026-08-23 gates-audit council (out/council/gates-audit-20260823/) found the system running 59 named controls, born one reasonable afternoon at a time, with gate-edit re-blessing hashes and nothing anywhere asking whether the next control should be able to stop a session. Grok's chair, high confidence: 'This is the missing gate that prevents the next 59 from becoming 90.'",
+  "_grandfathered": "Every gate already in ops/config/gate-baseline.json on 2026-08-23 keeps its place with no card. That is deliberate, not an oversight: a check that failed on day one across forty-odd existing gates would be muted on day one, which is the failure ops/enforcement-coverage-check.py documents at length and answers the same way. The debt is real and belongs to the telemetry sentence the same council ordered, not to a wall in front of today's work.",
+  "_questions": {
+    "parent_incident": "the dated incident where prose failed. Either this or landing_harm is required; a recitation of a taught rule is not parentage.",
+    "landing_harm": "one sentence: if this does not bind, WHICH artifact lands in WHOSE hands. 'Could be bad' does not qualify.",
+    "bind_moment": "the last cheap reversible moment before that harm. A true rule at the wrong moment is a tax.",
+    "consumer": "who receives the wrong artifact. If the only consumer is the gate's own log, the gate is sediment.",
+    "self_serve_remedy": "what a refused session can DO, without a new login. A dead end fails even when the rule is right.",
+    "scarce_resource_cost": "what it spends, in order of scarcity: Joe's and Dell's attention, this Mac's wall-clock under parallel sessions, Stop-reopen tokens, billed CI minutes.",
+    "unique_bind": "why nothing already binds this class at this moment. Two blockers on one claim-set fail uniqueness.",
+    "matcher_test": "a repo-relative fixture path that EXISTS, written before the gate (rule e65efc68). A card naming a test nobody wrote is the box-ticking version of this control."
+  },
+  "cards": {}
+}

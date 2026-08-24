@@ -13,7 +13,8 @@
     "refused_content.py",
     "turn_origin.py",
     "worktree_scope.py",
-    "rule-pack-preuse-reselection.py"
+    "rule-pack-preuse-reselection.py",
+    "stop_latch.py"
   ],
   "reasons": {
     "hook_meter.py": "shared helper — the live/fixture/unclassified split and the telemetry writer, imported by the 21 gates that write out/hook-guard.log; denies nothing itself, and every gate that imports it does so inside a try so that losing it cannot change a verdict",
@@ -26,6 +27,7 @@
     "refused_content.py": "shared helper — refusal-text shaping imported by the write gates",
     "turn_origin.py": "shared helper — the one answer to whether a partner actually typed a turn, imported by ledger-sweep and weekend-quiet-gate; reads no hook payload, refuses nothing and runs on no schedule. It exists because those two gates answered that question differently and the weaker answer shipped, matching zero of 3,271 real records for a week. Enforcement lives in the gates that import it, so a control naming this file would claim a refusal it cannot make.",
     "worktree_scope.py": "shared helper — resolves WHICH TREE a Bash command is about (a named worktree, else the session's cwd, else the canonical checkout), imported by git-writer-gate.py, staging-attribution-gate.py and staging-observation-tracker.py; denies nothing itself",
-    "rule-pack-preuse-reselection.py": "temporary mapped-control debt — this shadow-only pre-use gate is part of pack_delivery and has a CI-run selftest, but rule-enforcement-map.json is the sha256-pinned base inventory of audits/guidance-situation-curation-review.v1.json while that review remains proposed. The repository's compiler explicitly forbids changing or reblessing that inventory without a real human review. Move this implementation and ops/rule-pack-preuse-reselection-selftest.py into pack_delivery, then remove this entry, when the curation review settles."
+    "rule-pack-preuse-reselection.py": "temporary mapped-control debt — this shadow-only pre-use gate is part of pack_delivery and has a CI-run selftest, but rule-enforcement-map.json is the sha256-pinned base inventory of audits/guidance-situation-curation-review.v1.json while that review remains proposed. The repository's compiler explicitly forbids changing or reblessing that inventory without a real human review. Move this implementation and ops/rule-pack-preuse-reselection-selftest.py into pack_delivery, then remove this entry, when the curation review settles.",
+    "stop_latch.py": "shared helper — the Stop-gate register, added 2026-08-23 with Joe's Stop-gate rationing. Two things live in it: a claim-set latch keyed on WHAT was claimed rather than how it was worded (hooks/drift-assertion-gate.py held a council chair twice over one changed word because its own latch was a hash of the prose), and the announce emit the five demoted gates now speak through. It reads no hook payload, has no entry point and refuses nothing — the enforcement lives in the gates that import it, so a control naming this file would claim a refusal it cannot make."
   }
 }
