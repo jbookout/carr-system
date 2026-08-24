@@ -88,6 +88,7 @@ import { appendRoomTurn, DEFAULT_ROOM, readRoomQueue, readRoomTurns } from "./pa
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
+import { readCommandCenterSummary } from "./workspace-command-center.js";
 import { wrapWithCorrelation } from "./correlation.js";
 import { withFailureRecording, scheduleFailureRecord, actorUnresolvedFailureClass } from "./trace.js";
 
@@ -561,6 +562,11 @@ const dealroomHandler = createDealroomHandler({
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
   program6Handler: (request, env, ctx, actor, session) =>
     program6RoutineController.fetch(request, env, ctx, actor, session),
+  commandCenterReader: async (env, actor, correlationId) => {
+    const sql = neon(env.DATABASE_URL_READER);
+    const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
+    return readCommandCenterSummary({ client, actor, correlationId: correlationId || env.CORRELATION_ID });
+  },
   // The Model Room observatory's two doors onto the partner room. Both call the
   // SAME functions the read-room / add-room-turn verbs call (partner-room.js) —
   // these two adapters supply a connection and nothing else, so the panel can
