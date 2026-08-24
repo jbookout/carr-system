@@ -739,6 +739,9 @@ def job_passport_wire_receipt(kind: str, payload: Any) -> dict[str, Any]:
         # Deprecated read-only wire alias; it validates the canonical shared
         # record and cannot revive a Job-Passport-owned contract.
         validators["eval_portfolio"] = validate_evaluation_kernel
+    if kind == "spatial_surface":
+        from spatial_surface import validate_spatial_surface
+        validators["spatial_surface"] = validate_spatial_surface
     if kind not in validators:
         raise ContractError("job passport wire kind is invalid")
     value = validators[kind](payload)

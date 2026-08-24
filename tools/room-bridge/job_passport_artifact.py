@@ -17,6 +17,7 @@ from typing import Any
 
 import execution_contract as contract
 import evaluation_kernel
+import spatial_surface
 
 
 def _text(value: Any) -> str:
@@ -27,7 +28,7 @@ def _short(value: str | None) -> str:
     return _text(str(value or "unknown").split(":", 1)[-1].replace("-", " ").replace("_", " "))
 
 
-def render_job_passport_html(projection: Any, behavior_audit: Any | None = None, portfolio: Any | None = None) -> str:
+def render_job_passport_html(projection: Any, behavior_audit: Any | None = None, portfolio: Any | None = None, spatial: Any | None = None) -> str:
     """Render only a validated projection into dependency-free accessible HTML."""
     value = contract.validate_observatory_projection(projection)
     lane = value["attempt_lane"]
@@ -38,6 +39,7 @@ def render_job_passport_html(projection: Any, behavior_audit: Any | None = None,
     if audit is not None and (audit["binding"]["work_request_id"] != value["work_request_id"] or audit["binding"]["projection_digest"] != value["projection_digest"]):
         raise contract.ContractError("behavior audit does not bind this exact visual projection")
     evaluated = evaluation_kernel.validate_evaluation_kernel(portfolio, value) if portfolio is not None else None
+    surface = spatial_surface.validate_spatial_surface(spatial, value) if spatial is not None else None
     nodes = "".join(
         f'<button type="button" class="node{ " current" if item["current"] else "" }" '
         f'aria-label="Component {_text(item["component_ref"])}">{_short(item["component_ref"])}'
@@ -81,6 +83,11 @@ def render_job_passport_html(projection: Any, behavior_audit: Any | None = None,
         eval_html = f'''<section><h2>Evaluation ladder · synthetic/offline</h2><p class="meta">Required: {_text(", ".join((requirement or {}).get("required_rungs", ["unknown / default deny"])))} · completed: {_text(", ".join(completed) or "not run")} · represented: {_text(", ".join(sorted({row["rung"] for row in evaluated["cases"]})))}. No aggregate score; critical dimensions decide promotion.</p>
 <ul>{matrix}</ul><p><b>Quality frontier / cost curve:</b> {_text(comparison["promotion_state"].replace("_", " ") if comparison else "unavailable")} · critical regression: {_text(regressed)} · candidate latency/cost: {_text((candidate or {}).get("telemetry", {}).get("latency_ms", "unknown"))} ms / {_text((candidate or {}).get("telemetry", {}).get("cost_usd", "unknown"))}.</p>
 <p class="meta">Failure taxonomy: {_text(", ".join(row["class_name"] for row in evaluated["taxonomy"]["failure_modes"]))}</p></section>'''
+    if surface is None:
+        spatial_html = ""
+    else:
+        ordered = [next(row for row in surface["nodes"] if row["node_id"] == node_id) for node_id in surface["list_order"]]
+        spatial_html = f'''<section><h2>Spatial Home Zone · deterministic projection</h2><p>{_text(surface["semantic_zoom"]["overview"]["summary"])} · {_text(surface["home_zone"]["return_label"])}</p><ol>{''.join(f'<li>{_text(row["accessibility"]["non_color_status_token"])}: {_text(row["accessibility"]["label"])}</li>' for row in ordered)}</ol><p class="meta">Telemetry: unavailable unless a typed trustworthy source is present; terminal text and session-token counts never stand in for quota or billed cost.</p></section>'''
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Job Passport · {_text(value["work_request_id"])}</title>
@@ -93,11 +100,12 @@ def render_job_passport_html(projection: Any, behavior_audit: Any | None = None,
 <section><h2>Observed movement</h2><p>{alignment}</p><ol>{timeline}</ol></section>
 <details><summary>Evidence and verified-checkpoint posture</summary><ul>{evidence}</ul><p>{"Independently verified complete; a replacement can begin only from a verified checkpoint." if state["verification"] == "verified_success" else "Executor evidence is not a canonical promotion; no verified handoff is implied."}</p></details>
 {eval_html}
+{spatial_html}
 {audit_html}
 </main></body></html>'''
 
 
-def build_visual_artifact(envelope: Any, receipt: Any, projection: Any, behavior_audit: Any | None = None, portfolio: Any | None = None) -> tuple[str, dict[str, Any]]:
+def build_visual_artifact(envelope: Any, receipt: Any, projection: Any, behavior_audit: Any | None = None, portfolio: Any | None = None, spatial: Any | None = None) -> tuple[str, dict[str, Any]]:
     """Return HTML and the receipt-compatible provenance descriptor for it."""
     bound = contract.validate_execution_envelope(envelope)
     completed = contract.validate_attempt_receipt(receipt, bound)
@@ -106,7 +114,7 @@ def build_visual_artifact(envelope: Any, receipt: Any, projection: Any, behavior
         raise contract.ContractError("visual artifact projection does not bind its envelope and attempt")
     if view["source_state"]["state_version"] != bound["state_binding"]["state_version"] or view["source_state"]["canonical_record_digest"] != bound["state_binding"]["canonical_record_digest"]:
         raise contract.ContractError("visual artifact projection does not bind its exact canonical state")
-    document = render_job_passport_html(view, behavior_audit, portfolio)
+    document = render_job_passport_html(view, behavior_audit, portfolio, spatial)
     artifact = {
         "artifact_ref": "artifact:job-passport-html", "media_type": "text/html", "self_contained": True,
         "external_service_dependency": False, "visual_form": "topology",
@@ -134,13 +142,14 @@ def verify_visual_artifact(document: str, artifact: Any) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render a deterministic CARR Job Passport HTML fixture")
     parser.add_argument("--envelope", type=Path, required=True); parser.add_argument("--receipt", type=Path, required=True)
-    parser.add_argument("--projection", type=Path, required=True); parser.add_argument("--behavior", type=Path); parser.add_argument("--portfolio", type=Path)
+    parser.add_argument("--projection", type=Path, required=True); parser.add_argument("--behavior", type=Path); parser.add_argument("--portfolio", type=Path); parser.add_argument("--spatial", type=Path)
     parser.add_argument("--html-out", type=Path, required=True)
     parser.add_argument("--artifact-out", type=Path, required=True)
     args = parser.parse_args()
     behavior = json.loads(args.behavior.read_text()) if args.behavior else None
     portfolio = json.loads(args.portfolio.read_text()) if args.portfolio else None
-    document, artifact = build_visual_artifact(json.loads(args.envelope.read_text()), json.loads(args.receipt.read_text()), json.loads(args.projection.read_text()), behavior, portfolio)
+    spatial = json.loads(args.spatial.read_text()) if args.spatial else None
+    document, artifact = build_visual_artifact(json.loads(args.envelope.read_text()), json.loads(args.receipt.read_text()), json.loads(args.projection.read_text()), behavior, portfolio, spatial)
     args.html_out.write_text(document, encoding="utf-8")
     args.artifact_out.write_text(json.dumps(artifact, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     return 0 if verify_visual_artifact(document, artifact) else 1

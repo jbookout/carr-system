@@ -9,7 +9,7 @@ WORKFLOW_RUBRICS = {
     "workflow:job-passport": {
         "rubric_id": "rubric:job-passport-visual",
         "stages": {"typed_receipt_ingestion", "freshness_cas_selection", "projection", "visual_interaction_accessibility", "evidence_promotion_display"},
-        "critical_dimensions": {"receipt_integrity", "freshness_integrity", "visual_accessibility"},
+        "critical_dimensions": {"receipt_integrity", "freshness_integrity", "visual_accessibility", "visual_comprehension", "telemetry_truth", "layout_authority_separation"},
     },
     "workflow:claude-desktop-readonly": {
         "rubric_id": "rubric:claude-desktop-readonly",

@@ -5,6 +5,7 @@ import { deriveJobPassports, jobPassportStatusLabel, parseJobPassportReceipt } f
 
 const fixture = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.observatory-projection.v1.json", import.meta.url)));
 const portfolio = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/carr-evaluation-kernel.synthetic.v1.json", import.meta.url)));
+const spatial = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.spatial-surface.v1.json", import.meta.url)));
 const roomSource = fs.readFileSync(new URL("../../dealroom/js/room.js", import.meta.url), "utf8");
 const roomCss = fs.readFileSync(new URL("../../dealroom/css/room.css", import.meta.url), "utf8");
 const turn = (payload, seq = 1) => ({ seq: String(seq), kind: "receipt", at: "2026-08-24T12:00:06Z", body: JSON.stringify(payload) });
@@ -67,7 +68,23 @@ test("typed facts count on the wire but cannot create a visual job from transcri
     turn(wrap("attempt_receipt", { schema_version: "attempt-receipt.v1" })),
   ]);
   assert.equal(model.enabled, false);
-  assert.deepEqual(model.typedCounts, { execution_envelope: 1, progress_event: 1, attempt_receipt: 1, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0 });
+  assert.deepEqual(model.typedCounts, { execution_envelope: 1, progress_event: 1, attempt_receipt: 1, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0, spatial_surface: 0 });
+});
+
+test("spatial Home Zone binds exact visual state, preserves list parity, and withholds stale/conflicting views", () => {
+  const model = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("spatial_surface", spatial), 2)]);
+  const view = model.passports[0].spatial_surface;
+  assert.equal(view.home_zone.return_label, "Return to Job Passport Home");
+  assert.deepEqual(view.list_order, view.nodes.map((node) => node.node_id));
+  assert.equal(view.nodes.find((node) => node.node_type === "attempt_lane").resource_refs[0], "native:codex-thread-1");
+  const stale = structuredClone(spatial); stale.canonical_binding.state_version = 0;
+  const mismatch = structuredClone(spatial); mismatch.canonical_binding.source_projection_digest = "sha256:" + "0".repeat(64);
+  const withheld = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("spatial_surface", stale), 2), turn(wrap("spatial_surface", mismatch), 3)]);
+  assert.equal(withheld.passports[0].spatial_surface, null);
+  assert.ok(withheld.rejected.some((row) => row.reason === "mismatched_spatial_surface"));
+  assert.match(roomSource, /Job Passport Home Zone/);
+  assert.match(roomSource, /Telemetry: unavailable/);
+  assert.match(roomCss, /passport-spatial-list/);
 });
 
 test("eval ladder binds to the exact visual projection and keeps critical regression visible without a score", () => {

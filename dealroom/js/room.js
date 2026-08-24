@@ -1,4 +1,4 @@
-import { deriveJobPassports, jobPassportStatusLabel } from "./job-passport.js";
+import { deriveJobPassports, jobPassportStatusLabel } from "./job-passport.js?v=job-passport-spatial-v1";
 
 // MODEL ROOM OBSERVATORY — the panel Joe watches the model fleet from.
 //
@@ -1423,7 +1423,8 @@ function boot() {
         card.dataset.status = passport.status;
         card.replaceChildren();
         const top = el("div", "passport-top");
-        top.appendChild(el("span", "passport-work", passport.work_request_id));
+        const workLabel = el("span", "passport-work", passport.work_request_id); workLabel.tabIndex = -1;
+        top.appendChild(workLabel);
         top.appendChild(el("span", "passport-status", jobPassportStatusLabel(passport.status)));
         card.appendChild(top);
         const freshness = passport.freshness === "stale" ? "STALE — last signal" : "Observed";
@@ -1436,6 +1437,33 @@ function boot() {
         const execution = el("div"); execution.appendChild(el("label", null, "Actual staffing"));
         execution.appendChild(el("span", null, `${humanRef(actual.surface)} · ${humanRef(actual.model_id)} · ${humanRef(actual.harness_id)}`));
         staffing.append(profile, execution); card.appendChild(staffing);
+
+        if (passport.spatial_surface) {
+          const surface = passport.spatial_surface;
+          const home = el("section", "passport-home-zone");
+          home.setAttribute("aria-label", "Spatial Home Zone and list parity");
+          home.appendChild(el("h3", "passport-home-title", "Job Passport Home Zone"));
+          home.appendChild(el("p", "passport-home-summary", `${surface.semantic_zoom.overview.summary}. ${surface.home_zone.attention_node_ids.length ? "Needs attention: evidence or approval requires review." : "No inferred stuck state."}`));
+          const controls = el("div", "passport-home-controls");
+          const returnHome = el("button", "passport-home-action", surface.home_zone.return_label); returnHome.type = "button";
+          returnHome.addEventListener("click", () => card.querySelector(".passport-work")?.focus());
+          controls.appendChild(returnHome);
+          const detailToggle = el("button", "passport-home-action", "Show semantic detail"); detailToggle.type = "button";
+          detailToggle.setAttribute("aria-pressed", card.dataset.zoomDetail === "true" ? "true" : "false");
+          detailToggle.addEventListener("click", () => { card.dataset.zoomDetail = String(card.dataset.zoomDetail !== "true"); renderJobPassport(model); });
+          controls.appendChild(detailToggle); home.appendChild(controls);
+          const listView = el("ol", "passport-spatial-list");
+          for (const nodeId of surface.list_order) {
+            const nodeData = surface.nodes.find((row) => row.node_id === nodeId);
+            const item = el("li", null, `${nodeData.accessibility.non_color_status_token}: ${nodeData.accessibility.label}`);
+            item.tabIndex = 0; item.dataset.nodeId = nodeId;
+            item.addEventListener("click", () => { card.dataset.detailOpen = "true"; card.querySelector("details")?.setAttribute("open", ""); });
+            listView.appendChild(item);
+          }
+          home.appendChild(listView);
+          if (card.dataset.zoomDetail === "true") home.appendChild(el("p", "passport-home-detail", surface.semantic_zoom.detail.summary));
+          card.appendChild(home);
+        }
 
         const map = el("div", "passport-map");
         for (const component of passport.component_map) {
@@ -1471,6 +1499,7 @@ function boot() {
         }
         if (!passport.timeline.length) timeline.appendChild(el("span", "passport-event", "No observed progress event"));
         card.appendChild(timeline);
+        card.appendChild(el("p", "passport-telemetry", "Telemetry: unavailable — no trustworthy provider quota or billed-cost measurement was supplied. Session tokens, terminal text, and activity are not substituted."));
         if (passport.eval_portfolio) {
           const portfolio = passport.eval_portfolio;
           const ladder = el("section", "passport-eval");

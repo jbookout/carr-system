@@ -240,7 +240,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .job-passport-head .panel-title { padding: 10px 0 1px; }
 .job-passport-summary { margin: 0; font-size: 11px; color: var(--muted); }
 .job-passport-feature { flex: none; font-family: var(--display); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
-.job-passport-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; padding: 0 10px 10px; max-height: 300px; overflow-y: auto; }
+.job-passport-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; padding: 0 10px 10px; max-height: none; overflow: visible; }
 .passport-card { border: 1px solid var(--line); border-left: 3px solid var(--passport); border-radius: 10px; background: rgba(9, 14, 24, .72); padding: 9px; min-width: 0; }
 .passport-card[data-status="verified_complete"] { --passport: var(--seat-claude); }
 .passport-card[data-status="aligned"] { --passport: var(--seat-sol); }
@@ -261,6 +261,14 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .passport-node[data-current="true"]::after { content: " current"; color: var(--passport); }
 .passport-node + .passport-node::before { content: "← dependency"; color: var(--muted); font-size: 9px; margin-right: 5px; }
 .passport-alignment { margin: 0 0 7px; font-size: 11px; color: var(--muted); }
+.passport-home-zone { border-top: 1px solid var(--line); margin: 5px 0; padding-top: 7px; }
+.passport-home-title { margin: 0; font-family: var(--display); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; }
+.passport-home-summary, .passport-home-detail, .passport-telemetry { margin: 4px 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
+.passport-home-controls { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0; }
+.passport-home-action { border: 1px solid var(--line-bright); background: rgba(27,62,116,.26); color: var(--text); border-radius: 5px; padding: 3px 6px; font-size: 10px; }
+.passport-spatial-list { margin: 5px 0; padding-left: 20px; color: var(--muted); font-size: 10px; }
+.passport-spatial-list li { cursor: pointer; margin: 3px 0; }
+.passport-spatial-list li:focus-visible, .passport-home-action:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
 .passport-timeline { display: flex; gap: 4px; overflow-x: auto; padding: 2px 0 7px; }
 .passport-event { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 7px; padding: 3px 6px; color: var(--muted); background: rgba(14, 19, 31, .5); font-size: 10px; }
 .passport-event[data-state="blocked"], .passport-event[data-state="failed"] { border-color: var(--danger); }

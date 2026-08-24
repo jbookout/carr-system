@@ -111,7 +111,7 @@ def publish_job_passport_fact(kind: str, payload: dict, *, add_room_turn) -> dic
             "result": result}
 
 
-def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], profile: dict, *, evaluation_kernel: dict | None = None, add_room_turn) -> dict:
+def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], profile: dict, *, evaluation_kernel: dict | None = None, spatial_surface: dict | None = None, add_room_turn) -> dict:
     """Exercise the full typed wire path using only synthetic, read-only facts.
 
     This is a rehearsal helper, never an autonomous runtime: caller-supplied
@@ -131,6 +131,9 @@ def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], pro
     published.append(publish_job_passport_fact("observatory_projection", projection, add_room_turn=add_room_turn))
     if evaluation_kernel is not None:
         published.append(publish_job_passport_fact("evaluation_kernel", evaluation_kernel, add_room_turn=add_room_turn))
+    if spatial_surface is not None:
+        from spatial_surface import validate_spatial_surface
+        published.append(publish_job_passport_fact("spatial_surface", validate_spatial_surface(spatial_surface, projection), add_room_turn=add_room_turn))
     return {"mode": "synthetic_read_only_rehearsal", "work_request_id": bound["work_request_id"],
             "attempt_id": completed["attempt_id"], "projection": projection, "published": published}
 

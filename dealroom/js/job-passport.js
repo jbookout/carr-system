@@ -7,7 +7,7 @@
 // canonical state before it is wrapped for the wire.
 
 const WIRE_VERSION = "job-passport-wire.v1";
-const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "eval_portfolio"]);
+const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "eval_portfolio", "spatial_surface"]);
 const PROGRESS = new Set(["active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"]);
 const LIFECYCLE = new Set(["succeeded", "failed", "timed_out", "cancelled", "partial", "unknown"]);
 const VERIFICATION = new Set(["verified_success", "verified_failure", "partial", "unknown", "not_attempted"]);
@@ -67,6 +67,21 @@ function validEvalPortfolio(value) {
         && ["improved", "equivalent", "regressed", "not_compared"].includes(dimension.direction_vs_baseline)));
 }
 
+function validSpatialSurface(value) {
+  if (!object(value) || value.schema_version !== "spatial-surface-projection.v1" || !DIGEST.test(value.projection_digest)
+    || !object(value.canonical_binding) || !string(value.canonical_binding.work_request_id) || !number(value.canonical_binding.state_version)
+    || !DIGEST.test(value.canonical_binding.canonical_record_digest) || !DIGEST.test(value.canonical_binding.source_projection_digest)
+    || !list(value.nodes) || !list(value.edges) || !object(value.semantic_zoom) || !object(value.home_zone) || !list(value.list_order)) return false;
+  const ids = new Set();
+  for (const node of value.nodes) {
+    if (!object(node) || !string(node.node_id) || ids.has(node.node_id) || !object(node.geometry) || !object(node.presentation)
+      || !object(node.status) || !object(node.accessibility) || !string(node.accessibility.label) || !string(node.accessibility.non_color_status_token)) return false;
+    ids.add(node.node_id);
+  }
+  return value.list_order.length === ids.size && value.list_order.every((id) => ids.has(id)) && ids.has(value.home_zone.home_node_id)
+    && value.edges.every((edge) => object(edge) && ids.has(edge.from_node_id) && ids.has(edge.to_node_id));
+}
+
 function compareProjection(a, b) {
   const av = a.source_state.state_version;
   const bv = b.source_state.state_version;
@@ -98,8 +113,9 @@ function statusFor(projection) {
 export function deriveJobPassports(turns, { now = Date.now() } = {}) {
   const rows = new Map();
   const rejected = [];
-  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0 };
+  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0, spatial_surface: 0 };
   const portfolios = new Map();
+  const surfaces = new Map();
   for (const turn of turns || []) {
     if (turn?.kind !== "receipt") continue;
     const parsed = parseJobPassportReceipt(turn.body);
@@ -109,6 +125,15 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       if (!validEvalPortfolio(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_eval_portfolio" }); continue; }
       const prior = portfolios.get(parsed.payload.binding.work_request_id);
       if (!prior || (Number(turn.seq) || 0) > prior.seq) portfolios.set(parsed.payload.binding.work_request_id, { payload: parsed.payload, seq: Number(turn.seq) || 0 });
+      continue;
+    }
+    if (parsed.kind === "spatial_surface") {
+      if (!validSpatialSurface(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_spatial_surface" }); continue; }
+      const binding = parsed.payload.canonical_binding;
+      const prior = surfaces.get(binding.work_request_id);
+      if (prior && binding.state_version < prior.payload.canonical_binding.state_version) { rejected.push({ seq: Number(turn.seq) || 0, reason: "stale_spatial_surface" }); continue; }
+      if (prior && binding.state_version === prior.payload.canonical_binding.state_version && binding.canonical_record_digest !== prior.payload.canonical_binding.canonical_record_digest) { rejected.push({ seq: Number(turn.seq) || 0, reason: "conflicting_spatial_surface" }); continue; }
+      if (!prior || (Number(turn.seq) || 0) > prior.seq) surfaces.set(binding.work_request_id, { payload: parsed.payload, seq: Number(turn.seq) || 0 });
       continue;
     }
     if (parsed.kind !== "observatory_projection") continue;
@@ -134,10 +159,16 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       && portfolio.binding.canonical_record_digest === projection.source_state.canonical_record_digest
       && portfolio.binding.projection_digest === projection.projection_digest;
     if (portfolio && !portfolioBound) rejected.push({ seq: portfolios.get(projection.work_request_id).seq, reason: "mismatched_eval_portfolio" });
+    const spatial = surfaces.get(projection.work_request_id)?.payload;
+    const spatialBound = spatial && spatial.canonical_binding.state_version === projection.source_state.state_version
+      && spatial.canonical_binding.canonical_record_digest === projection.source_state.canonical_record_digest
+      && spatial.canonical_binding.source_projection_digest === projection.projection_digest;
+    if (spatial && !spatialBound) rejected.push({ seq: surfaces.get(projection.work_request_id).seq, reason: "mismatched_spatial_surface" });
     return {
       ...projection, wire_seq: row.seq, conflict: row.conflict, status: row.conflict ? "unknown_partial" : statusFor(projection),
       observed_at: observedAt || now, freshness: projection.state.progress === "stale" ? "stale" : "current_as_observed",
       eval_portfolio: portfolioBound ? portfolio : null,
+      spatial_surface: spatialBound ? spatial : null,
     };
   }).sort((a, b) => b.wire_seq - a.wire_seq);
   return { enabled: passports.length > 0, passports, rejected, typedCounts };

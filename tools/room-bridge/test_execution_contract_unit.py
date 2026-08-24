@@ -19,6 +19,7 @@ import job_passport_artifact as artifact_renderer  # noqa: E402
 import bridge  # noqa: E402
 import evaluation_kernel  # noqa: E402
 import evaluation_rubrics  # noqa: E402
+import spatial_surface  # noqa: E402
 
 
 FIXTURES = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric"
@@ -54,7 +55,7 @@ def expect_refusal(fn, contains):
 
 
 def schemas_are_versioned_and_fail_closed():
-    for name in ("execution-envelope.v1.schema.json", "attempt-receipt.v1.schema.json", "carr-evaluation-kernel.v1.schema.json"):
+    for name in ("execution-envelope.v1.schema.json", "attempt-receipt.v1.schema.json", "carr-evaluation-kernel.v1.schema.json", "spatial-surface-projection.v1.schema.json", "telemetry-measurement.v1.schema.json", "visual-extension-manifest.v1.schema.json"):
         schema = json.loads((ROOT / "control-room" / "contracts" / name).read_text())
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert schema["additionalProperties"] is False
@@ -276,6 +277,42 @@ def wire_receipts_validate_projection_and_keep_typed_facts_distinct():
     expect_refusal(lambda: contract.validate_observatory_projection(projection), "does not bind")
 
 
+def spatial_surface_separates_layout_from_canonical_state_and_rejects_stale_views():
+    projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
+    surface = json.loads((FIXTURES / "codex_desktop.spatial-surface.v1.json").read_text())
+    assert spatial_surface.validate_spatial_surface(surface, projection) == surface
+    assert spatial_surface.project_job_passport_surface(projection) == surface
+    changed = copy.deepcopy(surface)
+    changed["nodes"][0]["geometry"]["user_layout_preference"] = {"x": 33, "y": 44, "width": 150, "height": 72}
+    changed["projection_digest"] = contract.canonical_digest({k: v for k, v in changed.items() if k != "projection_digest"})
+    spatial_surface.validate_spatial_surface(changed, projection)
+    assert changed["canonical_binding"] == surface["canonical_binding"], "layout is not canonical state"
+    expect_refusal(lambda: spatial_surface.select_newer_surface(surface, surface), "stale spatial surface")
+    conflict = copy.deepcopy(surface); conflict["canonical_binding"]["canonical_record_digest"] = "sha256:" + "f" * 64
+    conflict["projection_digest"] = contract.canonical_digest({k: v for k, v in conflict.items() if k != "projection_digest"})
+    expect_refusal(lambda: spatial_surface.select_newer_surface(surface, conflict), "same-version spatial conflict")
+
+
+def telemetry_truth_does_not_cross_convert_or_turn_unavailable_into_zero():
+    base = {"schema_version":"telemetry-measurement.v1","measurement_id":"metric:elapsed","metric_kind":"elapsed_time","unit":"ms","scope":"attempt","attribution":{"provider_id":"provider:openai","model_id":"model:codex-synthetic","harness_id":"harness:codex","adapter_id":"adapter:codex-desktop","attempt_id":"attempt-synthetic-codex","native_session_ref":"native:codex-thread-1"},"source":{"type":"deterministic_local_clock","priority":4,"provenance_ref":"evidence:local-clock"},"observed_at":"2026-08-24T12:00:05Z","source_window":{"started_at":"2026-08-24T12:00:00Z","ended_at":"2026-08-24T12:00:05Z"},"freshness":"fresh","value":{"kind":"actual","amount":5000,"estimate_method":None,"uncertainty":None,"unavailable_reason":None}}
+    assert spatial_surface.validate_telemetry_measurement(base) == base
+    unavailable = copy.deepcopy(base); unavailable["measurement_id"] = "metric:quota"; unavailable["metric_kind"] = "subscription_quota"; unavailable["unit"] = "percent"; unavailable["source"] = {"type":"unavailable","priority":5,"provenance_ref":"evidence:provider-unavailable"}; unavailable["value"] = {"kind":"unavailable","amount":None,"estimate_method":None,"uncertainty":None,"unavailable_reason":"provider did not expose quota"}; unavailable["freshness"] = "unknown"
+    spatial_surface.validate_telemetry_measurement(unavailable)
+    unavailable["value"]["amount"] = 0
+    expect_refusal(lambda: spatial_surface.validate_telemetry_measurement(unavailable), "never zero")
+    tokens = copy.deepcopy(base); tokens["measurement_id"] = "metric:tokens"; tokens["metric_kind"] = "session_tokens"; tokens["unit"] = "quota_tokens"
+    expect_refusal(lambda: spatial_surface.validate_telemetry_measurement(tokens), "masquerade")
+
+
+def visual_extensions_are_inspectable_but_untrusted_or_unsafe_packages_are_refused():
+    manifest = {"schema_version":"visual-extension-manifest.v1","extension_id":"extension:synthetic-map","version":"v1","api_version":"carr-visual-projection-api.v1","contributions":[{"contribution_id":"contribution:map","kind":"visual_projection","entry_path":"index.html"}],"permissions":["sanitized_projection_data"],"package":{"content_digest":"sha256:" + "a" * 64,"files":[{"path":"index.html","size_bytes":12,"digest":"sha256:" + "b" * 64}]},"provenance":{"publisher_id":"publisher:carr","signature_status":"verified","trust_status":"trusted"},"enablement":{"installed":False,"enabled":False,"human_authorization_ref":None}}
+    assert spatial_surface.validate_visual_extension_manifest(manifest) == manifest
+    unsafe = copy.deepcopy(manifest); unsafe["package"]["files"][0]["path"] = "../escape.html"
+    expect_refusal(lambda: spatial_surface.validate_visual_extension_manifest(unsafe), "path containment")
+    untrusted = copy.deepcopy(manifest); untrusted["provenance"]["trust_status"] = "unknown"
+    expect_refusal(lambda: spatial_surface.validate_visual_extension_manifest(untrusted), "not trusted")
+
+
 def eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression():
     projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
     portfolio = json.loads((FIXTURES / "carr-evaluation-kernel.synthetic.v1.json").read_text())
@@ -326,6 +363,7 @@ def shared_kernel_policy_is_risk_scaled_and_default_deny():
     rubrics = evaluation_rubrics.WORKFLOW_RUBRICS
     assert {"workflow:claude-desktop-readonly", "workflow:codex-desktop-readonly", "workflow:hermes-orchestration", "workflow:grok-x-native-retrieval"}.issubset(rubrics)
     assert len({tuple(sorted(rubrics[key]["critical_dimensions"])) for key in rubrics}) == len(rubrics)
+    assert {"visual_comprehension", "telemetry_truth", "layout_authority_separation"}.issubset(rubrics["workflow:job-passport"]["critical_dimensions"])
 
 
 def synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire():
@@ -356,11 +394,12 @@ def self_contained_job_passport_artifact_binds_content_and_is_stale_visible():
     behavior = json.loads((FIXTURES / "codex_desktop.job-passport.behavior-verification.v1.json").read_text())
     contract.validate_product_behavior_verification(behavior)
     portfolio = json.loads((FIXTURES / "carr-evaluation-kernel.synthetic.v1.json").read_text())
-    document, artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), projection, behavior, portfolio)
+    surface = json.loads((FIXTURES / "codex_desktop.spatial-surface.v1.json").read_text())
+    document, artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), projection, behavior, portfolio, surface)
     assert artifact_renderer.verify_visual_artifact(document, artifact)
     assert artifact["content_digest"] == contract.canonical_digest(document)
     assert "https://" not in document and "fetch(" not in document
-    assert "prefers-reduced-motion" in document and "<details>" in document and "Behavior audit" in document and "Evaluation ladder" in document and "No aggregate score" in document
+    assert "prefers-reduced-motion" in document and "<details>" in document and "Behavior audit" in document and "Evaluation ladder" in document and "No aggregate score" in document and "Spatial Home Zone" in document and "Telemetry: unavailable" in document
     stale = copy.deepcopy(projection)
     stale["state"]["progress"] = "stale"
     stale["observed_movement"]["progress_state"] = "stale"
@@ -421,6 +460,9 @@ if __name__ == "__main__":
         ("progress event is ephemeral and observational", progress_event_is_redacted_observational_and_can_stay_ephemeral),
         ("observatory projection preserves profile/staffing distinction", observatory_projection_groups_by_work_request_and_separates_profile_from_staffing),
         ("room wire accepts only validated typed Job Passport facts", wire_receipts_validate_projection_and_keep_typed_facts_distinct),
+        ("spatial surface preserves canonical/layout separation and CAS", spatial_surface_separates_layout_from_canonical_state_and_rejects_stale_views),
+        ("telemetry truth preserves unavailable and metric distinctions", telemetry_truth_does_not_cross_convert_or_turn_unavailable_into_zero),
+        ("visual extension manifest denies unsafe or untrusted packages", visual_extensions_are_inspectable_but_untrusted_or_unsafe_packages_are_refused),
         ("evaluation ladder is multidimensional and rejects masked critical regression", eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression),
         ("shared kernel policy is risk-scaled and defaults deny", shared_kernel_policy_is_risk_scaled_and_default_deny),
         ("synthetic read-only rehearsal publishes typed facts on the existing wire", synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire),
