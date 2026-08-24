@@ -41,6 +41,7 @@
     "no_send_worker": "judgment_ambient",
     "one_repo": "deny_gate",
     "outbound_format": "transactional_schema",
+    "pack_delivery": "stop_gate",
     "path_hygiene": "deny_gate",
     "peer_broadcast": "deny_gate",
     "record_home": "deny_gate",
