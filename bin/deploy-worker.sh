@@ -147,7 +147,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-attempt-id needs a UUID" >&2; exit 64; }
       RECOVERY_ATTEMPT_ID="$2"; shift ;;
     --recovery-step)
-      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-step needs current_before|prior|current_after" >&2; exit 64; }
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-step needs current_before|prior|current_after|restore_only" >&2; exit 64; }
       RECOVERY_STEP="$2"; shift ;;
     --recovery-prior-release-key)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-prior-release-key needs a key" >&2; exit 64; }
@@ -183,7 +183,7 @@ case "$RECOVERY_STEP" in
     [ -z "$RECOVERY_ATTEMPT_ID$RECOVERY_PRIOR_RELEASE_KEY" ] \
       || fail "standalone staging deploy cannot carry recovery attempt/prior fields."
     ;;
-  current_before|prior|current_after)
+  current_before|prior|current_after|restore_only)
     [ "$TARGET_ENV" = "staging" ] && [ -n "$RECOVERY_ATTEMPT_ID" ] \
       && [ -n "$RECOVERY_PRIOR_RELEASE_KEY" ] && [ -n "$REQUESTED_RELEASE_KEY" ] \
       || fail "recovery deploy requires staging plus --release-key, --recovery-attempt-id, --recovery-prior-release-key and --recovery-step."
@@ -192,7 +192,7 @@ case "$RECOVERY_STEP" in
       || fail "--recovery-attempt-id must be an exact UUID."
     RECOVERY_ATTEMPT_ID="$(printf '%s' "$RECOVERY_ATTEMPT_ID" | tr 'A-F' 'a-f')"
     ;;
-  *) fail "--recovery-step must be standalone|current_before|prior|current_after." ;;
+  *) fail "--recovery-step must be standalone|current_before|prior|current_after|restore_only." ;;
 esac
 if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "production" ]; then
   fail "Production source deploy is disabled. Upload an immutable candidate with
@@ -720,7 +720,13 @@ else
 
     staging_attempt() {
       attempt_action="$1"; shift
-      if [ "$RECOVERY_STEP" = "standalone" ]; then
+      if [ "$RECOVERY_STEP" = "restore_only" ]; then
+        "$PY" "$REPO/tools/ops-record.py" staging-restore-only "$attempt_action" \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
+          --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+          --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --git-sha "$HEAD_SHA" \
+          --correlation "$CARR_CORRELATION_ID" "$@"
+      elif [ "$RECOVERY_STEP" = "standalone" ]; then
         "$PY" "$REPO/tools/ops-record.py" staging-attempt "$attempt_action" \
           --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
           --recovery-step standalone --git-sha "$HEAD_SHA" \
@@ -737,7 +743,9 @@ else
     DEPLOY_TAG="$(staging_attempt prepare --field expected_provider_tag)" \
       || fail "the exact staging deployment attempt was not durably prepared."
     [ -n "$DEPLOY_TAG" ] || fail "the prepared staging attempt returned no provider tag."
-    ATTEMPT_DEPLOY_CLAIMED="$(staging_attempt prepare --field deploy_claimed)" \
+    ATTEMPT_CLAIM_FIELD="deploy_claimed"
+    [ "$RECOVERY_STEP" != "restore_only" ] || ATTEMPT_CLAIM_FIELD="mutation_claimed"
+    ATTEMPT_DEPLOY_CLAIMED="$(staging_attempt prepare --field "$ATTEMPT_CLAIM_FIELD")" \
       || fail "the prepared staging attempt claim state could not be read."
 
     verify_staging_receipt_file() {
@@ -765,7 +773,13 @@ else
     record_staging_receipt_file() {
       receipt_file="$1"
       verify_staging_receipt_file "$receipt_file" || return 1
-      if [ "$RECOVERY_STEP" = "standalone" ]; then
+      if [ "$RECOVERY_STEP" = "restore_only" ]; then
+        "$PY" "$REPO/tools/ops-record.py" staging-restore-only result \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --status succeeded \
+          --git-sha "$HEAD_SHA" --expected-provider-tag "$DEPLOY_TAG" \
+          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+          --staging-readback-file "$receipt_file"
+      elif [ "$RECOVERY_STEP" = "standalone" ]; then
         "$PY" "$REPO/tools/ops-record.py" deployment --service carr-mcp \
           --environment staging --state complete --git-sha "$HEAD_SHA" \
           --correlation "$CARR_CORRELATION_ID" --source-kind wrapper \
@@ -811,7 +825,9 @@ else
     if [ "$STAGING_DEPLOY_RECOVERED" = 1 ]; then
       echo "  recovered exact serving staging tag; provider deploy skipped"
     else
-      DEPLOY_ALLOWED="$(staging_attempt claim --field deploy_allowed)" \
+      DEPLOY_CLAIM_FIELD="deploy_allowed"
+      [ "$RECOVERY_STEP" != "restore_only" ] || DEPLOY_CLAIM_FIELD="mutation_allowed"
+      DEPLOY_ALLOWED="$(staging_attempt claim --field "$DEPLOY_CLAIM_FIELD")" \
         || fail "the prepared staging attempt could not be claimed."
       [ "$DEPLOY_ALLOWED" = "true" ] \
         || fail "deployment already claimed but its exact tag is not serving; refusing redeploy"
