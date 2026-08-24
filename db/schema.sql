@@ -6230,6 +6230,57 @@ $$;
 
 
 --
+-- Name: rule_delivery_plan(text, text[]); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.rule_delivery_plan(p_actor text DEFAULT NULL::text, p_packs text[] DEFAULT '{}'::text[]) RETURNS TABLE(rule_id uuid, short_id text, load_layer text, packs text[], scope text, selected boolean)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'ops'
+    AS $$
+  select r.id, l.short_id, l.load_layer, l.packs, l.scope,
+         (l.load_layer = 'layer0'
+          or l.packs && coalesce(p_packs, '{}'::text[])) as selected
+    from public.rule r
+    join ops.rule_load_layer l on l.rule_id = r.id
+   where r.status = 'active'
+     and (l.scope = 'shared' or (p_actor is not null and l.scope = p_actor))
+   order by l.load_layer, l.short_id
+$$;
+
+
+--
+-- Name: FUNCTION rule_delivery_plan(p_actor text, p_packs text[]); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.rule_delivery_plan(p_actor text, p_packs text[]) IS 'The DELIVERY selector: which active rules a scoped boot would hand this partner for these packs. Not ops.applicable_rules, which is the receipt-bound ENFORCEMENT compiler and returns only rules carrying a live approval receipt.';
+
+
+--
+-- Name: rule_pack_index(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.rule_pack_index() RETURNS TABLE(pack text, title text, description text, triggers text[], rule_count bigint)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'ops'
+    AS $$
+  select p.pack, p.title, p.description, p.triggers,
+         count(l.rule_id) filter (where r.status = 'active') as rule_count
+    from ops.rule_pack p
+    left join ops.rule_load_layer l on p.pack = any(l.packs)
+    left join public.rule r on r.id = l.rule_id
+   group by p.pack, p.title, p.description, p.triggers
+   order by p.pack
+$$;
+
+
+--
+-- Name: FUNCTION rule_pack_index(); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.rule_pack_index() IS 'The PACK INDEX a Layer 0 boot returns instead of the packs themselves: names and triggers, so an undeclared session knows what exists and what would load it.';
+
+
+--
 -- Name: schedule_calendar_prebrief_joe_live_job(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -7474,6 +7525,25 @@ begin
        select observed_at from ops.staging_release_readback_receipt where id=b.current_before_receipt_id)
      or new.ended_at is distinct from b.completed_at then
     raise exception 'recovery rehearsal run does not exactly match its typed bundle';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: validate_rule_load_layer_packs(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.validate_rule_load_layer_packs() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare missing text;
+begin
+  select string_agg(p, ', ') into missing
+    from unnest(new.packs) p
+   where not exists (select 1 from ops.rule_pack rp where rp.pack = p);
+  if missing is not null then
+    raise exception 'rule % names undefined pack(s): %', new.short_id, missing;
   end if;
   return new;
 end $$;
@@ -10139,6 +10209,28 @@ COMMENT ON TABLE ops.rule_control_binding IS 'Owner/deployment-authored exact se
 
 
 --
+-- Name: rule_delivery_policy; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_delivery_policy (
+    singleton boolean DEFAULT true NOT NULL,
+    mode text DEFAULT 'shadow'::text NOT NULL,
+    changed_by text,
+    reason text,
+    changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rule_delivery_policy_mode CHECK ((mode = ANY (ARRAY['shadow'::text, 'enforced'::text]))),
+    CONSTRAINT rule_delivery_policy_singleton CHECK (singleton)
+);
+
+
+--
+-- Name: TABLE rule_delivery_policy; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.rule_delivery_policy IS 'shadow = compute the scoped set, report it, recite everything anyway. enforced = deliver the scoped set. Both council chairs required a week of shadow at zero unexplained misses before this row may say enforced.';
+
+
+--
 -- Name: rule_enforcement_point; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -10154,6 +10246,60 @@ CREATE TABLE ops.rule_enforcement_point (
     CONSTRAINT installed_control_has_verification CHECK (((NOT installed) OR (btrim(test_ref) <> ''::text))),
     CONSTRAINT rule_enforcement_point_enforcement_class_check CHECK ((enforcement_class = ANY (ARRAY['deny_gate'::text, 'stop_gate'::text, 'schema'::text, 'surfacing'::text, 'transactional_schema'::text, 'judgment_ambient'::text])))
 );
+
+
+--
+-- Name: rule_load_layer; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_load_layer (
+    rule_id uuid NOT NULL,
+    short_id text NOT NULL,
+    load_layer text NOT NULL,
+    packs text[] DEFAULT '{}'::text[] NOT NULL,
+    scope text NOT NULL,
+    why text,
+    source text NOT NULL,
+    map_digest text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rule_load_layer_known CHECK ((load_layer = ANY (ARRAY['layer0'::text, 'control'::text, 'pack'::text]))),
+    CONSTRAINT rule_load_layer_layer0_reasoned CHECK (((load_layer <> 'layer0'::text) OR (COALESCE(btrim(why), ''::text) <> ''::text))),
+    CONSTRAINT rule_load_layer_layer0_unconditional CHECK (((load_layer <> 'layer0'::text) OR (cardinality(packs) = 0))),
+    CONSTRAINT rule_load_layer_no_wildcard CHECK ((NOT ('*'::text = ANY (packs)))),
+    CONSTRAINT rule_load_layer_pack_has_pack CHECK (((load_layer <> 'pack'::text) OR (cardinality(packs) >= 1))),
+    CONSTRAINT rule_load_layer_scope CHECK ((scope = ANY (ARRAY['shared'::text, 'joe'::text, 'dell'::text])))
+);
+
+
+--
+-- Name: TABLE rule_load_layer; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.rule_load_layer IS 'WHEN each active rule''s text reaches a session. layer0 = every boot. control = an installed deny/stop/schema control prints it at the moment it binds. pack = when the observed work matches a pack trigger. ops/rule-load-layer-check.py holds the same contract statically, including the one this table cannot see: that `control` is only honest for a rule whose enforcement_class is actually built.';
+
+
+--
+-- Name: rule_pack; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_pack (
+    pack text NOT NULL,
+    title text NOT NULL,
+    description text NOT NULL,
+    triggers text[] NOT NULL,
+    source text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rule_pack_has_triggers CHECK ((cardinality(triggers) >= 1)),
+    CONSTRAINT rule_pack_named CHECK (((btrim(pack) <> ''::text) AND (pack <> '*'::text) AND (btrim(title) <> ''::text) AND (btrim(description) <> ''::text))),
+    CONSTRAINT rule_pack_no_wildcard_trigger CHECK ((NOT ('*'::text = ANY (triggers))))
+);
+
+
+--
+-- Name: TABLE rule_pack; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.rule_pack IS 'The task packs a session can load. Triggers are OBSERVED-WORK nouns and verbs, never session names: rule 347a9ca6 forbids predicting the work from the title.';
 
 
 --
@@ -20732,6 +20878,14 @@ ALTER TABLE ONLY ops.rule_control_binding
 
 
 --
+-- Name: rule_delivery_policy rule_delivery_policy_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_delivery_policy
+    ADD CONSTRAINT rule_delivery_policy_pkey PRIMARY KEY (singleton);
+
+
+--
 -- Name: rule_enforcement_point rule_enforcement_point_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -20745,6 +20899,22 @@ ALTER TABLE ONLY ops.rule_enforcement_point
 
 ALTER TABLE ONLY ops.rule_enforcement_point
     ADD CONSTRAINT rule_enforcement_point_rule_id_control_key_key UNIQUE (rule_id, control_key);
+
+
+--
+-- Name: rule_load_layer rule_load_layer_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_load_layer
+    ADD CONSTRAINT rule_load_layer_pkey PRIMARY KEY (rule_id);
+
+
+--
+-- Name: rule_pack rule_pack_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_pack
+    ADD CONSTRAINT rule_pack_pkey PRIMARY KEY (pack);
 
 
 --
@@ -24167,6 +24337,13 @@ CREATE TRIGGER rule_approval_receipt_append_only BEFORE DELETE OR UPDATE ON ops.
 
 
 --
+-- Name: rule_load_layer rule_load_layer_packs_exist; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_load_layer_packs_exist BEFORE INSERT OR UPDATE ON ops.rule_load_layer FOR EACH ROW EXECUTE FUNCTION ops.validate_rule_load_layer_packs();
+
+
+--
 -- Name: rule_retirement_receipt rule_retirement_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -25541,6 +25718,14 @@ ALTER TABLE ONLY ops.rule_control_binding
 
 ALTER TABLE ONLY ops.rule_enforcement_point
     ADD CONSTRAINT rule_enforcement_point_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_load_layer rule_load_layer_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_load_layer
+    ADD CONSTRAINT rule_load_layer_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id);
 
 
 --
@@ -28072,6 +28257,7 @@ revoke all on function ops.validate_guidance_import_manifest(p_manifest jsonb) f
 revoke all on function ops.validate_guidance_lifecycle_event() from public;
 revoke all on function ops.validate_guidance_revision() from public;
 revoke all on function ops.validate_guidance_situation_mapping() from public;
+revoke all on function ops.validate_rule_load_layer_packs() from public;
 revoke all on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function public.assert_situation_retrieval_golden(p_suite_digest text) from public;
 revoke all on function public.capture_call_context(requested_deal_ids uuid[]) from public;
@@ -28221,9 +28407,18 @@ grant select on table ops.rule_control_binding to carr_authority;
 grant select on table ops.rule_control_binding to carr_jobs;
 grant select on table ops.rule_control_binding to carr_reader;
 grant select on table ops.rule_control_binding to carr_writer;
+grant select on table ops.rule_delivery_policy to carr_jobs;
+grant select on table ops.rule_delivery_policy to carr_reader;
+grant select on table ops.rule_delivery_policy to carr_writer;
 grant select on table ops.rule_enforcement_point to carr_jobs;
 grant select on table ops.rule_enforcement_point to carr_reader;
 grant insert, select, update on table ops.rule_enforcement_point to carr_writer;
+grant select on table ops.rule_load_layer to carr_jobs;
+grant select on table ops.rule_load_layer to carr_reader;
+grant select on table ops.rule_load_layer to carr_writer;
+grant select on table ops.rule_pack to carr_jobs;
+grant select on table ops.rule_pack to carr_reader;
+grant select on table ops.rule_pack to carr_writer;
 grant select on table ops.rule_retirement_receipt to carr_authority;
 grant select on table ops.rule_retirement_receipt to carr_jobs;
 grant select on table ops.rule_retirement_receipt to carr_reader;
@@ -28792,6 +28987,11 @@ grant execute on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_a
 grant execute on function ops.resolve_calendar_prebrief_email_ref(p_email text) to carr_calendar_prebrief_email_resolver;
 grant execute on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
 grant execute on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) to carr_authority;
+grant execute on function ops.rule_delivery_plan(p_actor text, p_packs text[]) to carr_reader;
+grant execute on function ops.rule_delivery_plan(p_actor text, p_packs text[]) to carr_writer;
+grant execute on function ops.rule_pack_index() to carr_jobs;
+grant execute on function ops.rule_pack_index() to carr_reader;
+grant execute on function ops.rule_pack_index() to carr_writer;
 grant execute on function ops.schedule_calendar_prebrief_joe_live_job() to carr_jobs;
 grant execute on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) to carr_renewal_source_attestors;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
@@ -29079,6 +29279,9 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0286_the_incident_ledger_gets_a_front_door.sql	197c530999579556254c5b43cef0d10d0193ad10292687a384f45c6ccf9dcf0e	2026-08-24 02:53:35.145353+00
 0288_control_catalog_delegation_model_effort.sql	7d0c275d19d71740b8b251b891a5b920ffc891a6b47a426d757306134a8a591a	2026-08-24 12:22:03.480037+00
 0289_bind_delegation_model_effort_rule.sql	a8b295d878b2fe9c138d1ee64aa38ebae3602cfde43aeeda1f5af63cdb788a37	2026-08-24 12:41:17.650535+00
+0290_retire_the_ledger_boundary_control.sql	05d12bd747085e1c26a455d2317bf09339127a6e929401620906c1f5cbab0d3e	2026-08-24 16:04:55.763377+00
+0291_rule_delivery_layers.sql	a8c3b89116d1b38a2964acf95565f305ba0e3e9042908927a97bbe3af309a53f	2026-08-24 16:04:56.010827+00
+0292_pack_delivery_control_catalog.sql	0bb8b301ea0dc5658bda16b7f1105cdd2fea2336ffbbed8bb38ae88917814a47	2026-08-24 16:04:56.295072+00
 \.
 
 
@@ -29548,7 +29751,6 @@ insert into ops.enforcement_control_catalog (control_key,implementation_ref,test
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('human_authority_runtime','migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js','mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py','transactional_schema','t','2026-08-20T15:09:01.704306Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('index_upkeep','ops/githooks/index-upkeep-check.py; ops/githooks/pre-commit','ops/path-index-hygiene-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('lead_client_pair','mcp-server/src/tools.js','mcp-server/test/confirm-merge-lead-client.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
-insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('ledger_boundary','hooks/ledger-boundary-sweep.py','external:no dedicated suite yet','stop_gate','f',NULL::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('ledger_capture','hooks/ledger-sweep.py','external:ledger scope regressions','stop_gate','f',NULL::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('loop_guard','migrations/0081_loop_blocker.sql; mcp-server/src/tools.js','external:migration probes','transactional_schema','f',NULL::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('loop_successor','mcp-server/src/tools.js','mcp-server/test/loop-version-and-marker.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
@@ -29559,10 +29761,11 @@ insert into ops.enforcement_control_catalog (control_key,implementation_ref,test
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('no_send_worker','mcp-server/src/mcp.js','glob:mcp-server/test/*.test.js','judgment_ambient','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('one_repo','hooks/one-repo-gate.py; hooks/bash-write-gate.py','ops/one-repo-gate-selftest.py; ops/bash-write-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('outbound_format','mcp-server/src/tools.js','mcp-server/test/document-outbound-format.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('pack_delivery','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','stop_gate','t','2026-08-24T16:04:56.103125Z'::timestamptz,'2026-08-24T16:04:56.103125Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('path_hygiene','ops/githooks/path-hygiene-check.py; ops/githooks/pre-commit','ops/path-index-hygiene-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('peer_broadcast','hooks/peer-broadcast-gate.py','ops/peer-broadcast-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('platform_metering_pre_dispatch','lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py','ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py','deny_gate','t','2026-08-20T15:09:01.704306Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
-insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('record_home','hooks/record-home-gate.py; hooks/install-record-home-gate.py; hooks/bash-write-gate.py; hooks/guard-unattended.py; hooks/write-effect-check.py','tools/test-record-home-gate.py; ops/bash-write-gate-selftest.py; ops/guard-selftest.py; ops/write-effect-check-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('record_home','hooks/record-home-gate.py; hooks/bash-write-gate.py; hooks/guard-unattended.py; hooks/write-effect-check.py','tools/test-record-home-gate.py; ops/bash-write-gate-selftest.py; ops/guard-selftest.py; ops/write-effect-check-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-24T16:04:55.510694Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('record_research','mcp-server/src/tools.js','mcp-server/test/intake-research-gates.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('rule_shape','hooks/rule-shape-gate.py; migrations/0194_atomic_rule_approval.sql; migrations/0228_atomic_rule_lifecycle_forward_upgrade.sql; mcp-server/src/tools.js','ops/rule-shape-gate-selftest.py; ops/atomic-rule-approval-selftest.py; mcp-server/test/rule-admission.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('scheduled_run_record','hooks/scheduled-run-record.py','ops/scheduled-run-record-selftest.py','stop_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
