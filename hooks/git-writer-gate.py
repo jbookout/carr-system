@@ -23,7 +23,13 @@ pattern as rules 14e0408b / e313a3ca / 179be4b8, which were all active, all
 recited at session start, and all violated within hours. Prose does not bind.
 This does.
 
-WHAT IT BLOCKS, and only when the tree is genuinely SHARED (another writer has
+WHICH TREE IT JUDGES: the one the command is aimed at — a worktree the command
+names, else the worktree the session is STANDING IN (the payload's cwd), else
+the shared canonical checkout. Never "always canonical", which is how this gate
+spent 2026-08-14 to 08-22 refusing clean worktrees over other sessions' files.
+See the long comment above target_tree().
+
+WHAT IT BLOCKS, and only when THAT tree is genuinely SHARED (another writer has
 uncommitted changes this session did not make):
   - `git checkout <branch>` / `git switch` — the move that silently removes
     files belonging to whoever else is mid-build
@@ -156,43 +162,26 @@ def dirty_files(tree=None, tracked_only=False):
 # about that command. Measured 2026-08-14: the remedy the gate recommends was
 # unusable while the condition it complains about was true, which is exactly when
 # a session needs it.
-_CD_RE = re.compile(r"\bcd\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))")
-_DASH_C_RE = re.compile(r"\bgit\s+-C\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))")
-
-
-def target_tree(cmd):
-    """The worktree this command operates in, or None for the shared checkout.
-
-    Only ever returns a path UNDER the repo's own worktrees directory. Anything
-    else — an unrelated repo, a path outside REPO — falls back to the shared
-    tree, so this can never be used to point the gate at a tree that makes it
-    look clean.
-    """
-    wt_root = os.path.realpath(os.path.join(REPO, ".claude", "worktrees"))
-    for rx in (_DASH_C_RE, _CD_RE):
-        for m in rx.finditer(cmd):
-            raw = next((g for g in m.groups() if g), None)
-            if not raw:
-                continue
-            raw = os.path.expanduser(raw)
-            # A RELATIVE PATH IS THE NATURAL FORM AND WAS BEING MISSED. Commands
-            # here routinely read `cd ~/carr-system && cd .claude/worktrees/x`,
-            # and resolving that against the HOOK's cwd rather than the repo made
-            # the exemption apply only to absolute paths — so the first real use
-            # of it after it shipped was refused. Relative candidates resolve
-            # against REPO, which is the only directory a relative `cd` in these
-            # commands is ever written against.
-            candidates = [raw] if os.path.isabs(raw) else [os.path.join(REPO, raw), raw]
-            for c in candidates:
-                try:
-                    cand = os.path.realpath(c)
-                except Exception:
-                    continue
-                # Still bounded exactly as before: under this repo's own
-                # worktrees directory, and actually present on disk.
-                if cand.startswith(wt_root + os.sep) and os.path.isdir(cand):
-                    return cand
-    return None
+#
+# THAT FIX WAS HALF A FIX, and the missing half cost another eight days. It read
+# the worktree out of the COMMAND TEXT only — a literal `cd <path>` or
+# `git -C <path>` — so the exemption reached a command that spelled its tree out
+# and no other. The habit every session here actually has is prefixing with
+# `cd "$(pwd)" && …`, which names no literal path at all: the regex matched
+# nothing, the gate fell back to the shared checkout, and on 2026-08-22 a
+# `reset --hard` in a PERFECTLY CLEAN worktree was refused while listing files
+# belonging to some other session. The refusal was correct about the risk and
+# wrong about the tree, which is the worst shape a gate can have — it teaches the
+# reader that the gate does not know what it is talking about.
+#
+# THE ANSWER MOVED OUT, 2026-08-23, to hooks/worktree_scope.py, because two more
+# gates need exactly this answer and staging-attribution-gate.py's own docstring
+# already says it reuses the tracker's `git status` diff. Rule a8c55a47: one job,
+# one definition — the same arrangement gate_paths.py and cmd_text.py already
+# have. That module carries the full reasoning, the resolution order, and the
+# reason cwd (from the harness) cannot be spelled into something convenient.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from worktree_scope import target_tree, tree_label  # noqa: E402
 
 
 # A PATH-SCOPED CHECKOUT IS NOT A BRANCH MOVE. `git checkout <ref> -- <paths>`
@@ -216,8 +205,7 @@ _CHECKOUT_PATHS_RE = re.compile(
 # hooks/staging-attribution-gate.py, which refused the same prose one moment
 # later for a different reason. Two gates, one definition of what is not a
 # command. Two copies would drift silently, because each would still pass its
-# own tests.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# own tests. (sys.path is already extended above, for worktree_scope.)
 from cmd_text import strip_inert_text  # noqa: E402
 
 
@@ -269,7 +257,9 @@ def main():
         # Judge the tree the command is actually aimed at, not always the shared
         # one. target_tree() only ever returns a path under this repo's own
         # worktrees directory, so this cannot be pointed somewhere convenient.
-        tree = target_tree(cmd)
+        cwd = (payload.get("cwd") or payload.get("working_directory")
+               or payload.get("workingDirectory"))
+        tree = target_tree(cmd, cwd)
         dirty = dirty_files(tree, tracked_only=bool(tree))
         if not dirty:
             where = f" in worktree {os.path.basename(tree)}" if tree else ""
@@ -291,11 +281,21 @@ def main():
         shown = "\n".join(f"    {f}" for f in dirty[:12])
         more = f"\n    ... and {len(dirty) - 12} more" if len(dirty) > 12 else ""
 
+        # NAME THE TREE THAT WAS ACTUALLY JUDGED. The old text always said
+        # "~/carr-system", so on the days the gate read the wrong tree it also
+        # reported the wrong one, and a session standing in a clean worktree was
+        # handed a list of files it had never seen with no way to tell where they
+        # lived. Whatever this refuses, the reader can now check it directly.
+        judged = (f"Your worktree `{os.path.basename(tree)}`" if tree
+                  else "~/carr-system (the SHARED canonical checkout)")
+        peers = ("" if tree else
+                 " and this machine runs several Claude sessions against that one "
+                 "tree, so some of these are very likely another session's "
+                 "in-flight work")
+
         reason = (
             f"GIT WRITER GATE — refused `{hit}`.\n\n"
-            f"~/carr-system has {len(dirty)} uncommitted path(s) right now, and this "
-            f"machine runs several Claude sessions against ONE shared working tree. "
-            f"Some of these are very likely another session's in-flight work:\n\n"
+            f"{judged} has {len(dirty)} uncommitted path(s) right now{peers}:\n\n"
             f"{shown}{more}\n\n"
             "WHAT THIS PREVENTS, which already happened on 2026-08-09: a session ran "
             "`git commit` sweeping another session's files onto its own branch, then "
@@ -314,8 +314,13 @@ def main():
 
         audit({"ts": now(), "hook": "git-writer-gate", "classes": ["shared_tree_git"],
                "patterns": [f"git:{hit}"], "session": payload.get("session_id"),
-               "dirty_count": len(dirty), "excerpt": cmd[:300]})
-        dlog(f"DENY({hit}) dirty={len(dirty)} :: {cmd[:160]}")
+               "dirty_count": len(dirty), "excerpt": cmd[:300],
+               # WHICH TREE, in the audit trail too. Without it the log cannot
+               # answer the question this whole change is about — how often a
+               # refusal was about the caller's own tree versus somebody else's.
+               "tree": tree_label(tree)})
+        dlog(f"DENY({hit}) tree={tree_label(tree)} "
+             f"dirty={len(dirty)} :: {cmd[:160]}")
         # Exit 2, not JSON: on any build that does not parse the structured
         # contract, exit 0 reads as ALLOW and the gate fails open silently.
         print(reason, file=sys.stderr)

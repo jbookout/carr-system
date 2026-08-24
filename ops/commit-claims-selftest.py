@@ -44,6 +44,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+# The one scrubber (ops/git_env.py), not a local copy. GIT_DIR is exported by
+# every git hook and overrides cwd for any child git process — the 2026-08-14
+# incident where fixture commits landed on live main happened because a
+# hand-rolled scrub here would have been one more copy to keep in sync.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "ops" / "githooks" / "commit-msg"
 HELPER = REPO / "ops" / "githooks" / "commit-claims-check.py"
@@ -63,11 +70,7 @@ def check(name, cond, detail=""):
 
 
 def git(repo, *args, env=None, check_rc=False):
-    e = dict(os.environ)
-    for var in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX",
-                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                "GIT_COMMON_DIR", "GIT_NAMESPACE"):
-        e.pop(var, None)
+    e = fixture_env()
     if env:
         e.update(env)
     p = subprocess.run(["git", "-C", str(repo)] + list(args),

@@ -144,7 +144,7 @@ class FakeDbTap:
 def import_case_own_path_allowed():
     transcript = make_transcript(tool_write(os.path.join(REPO, "fake/mine.py")))
     orig = mod.porcelain_status
-    mod.porcelain_status = lambda: {"fake/mine.py": "M "}
+    mod.porcelain_status = lambda tree=None: {"fake/mine.py": "M "}
     try:
         code, out, err = run_main("git add fake/mine.py", transcript)
     finally:
@@ -156,7 +156,7 @@ def import_case_own_path_allowed():
 def import_case_foreign_path_denied():
     transcript = make_transcript(tool_write(os.path.join(REPO, "fake/mine.py")))
     orig = mod.porcelain_status
-    mod.porcelain_status = lambda: {"fake/foreign.py": "M "}
+    mod.porcelain_status = lambda tree=None: {"fake/foreign.py": "M "}
     try:
         code, out, err = run_main("git add fake/foreign.py", transcript)
         mentions = "fake/foreign.py" in err
@@ -169,7 +169,7 @@ def import_case_foreign_path_denied():
 def import_case_untracked_new_file_allowed():
     transcript = make_transcript()
     orig = mod.porcelain_status
-    mod.porcelain_status = lambda: {"fake/brand-new.py": "??"}
+    mod.porcelain_status = lambda tree=None: {"fake/brand-new.py": "??"}
     try:
         code, out, err = run_main("git add fake/brand-new.py", transcript)
     finally:
@@ -182,7 +182,7 @@ def import_case_override_allowed_and_receipted():
     transcript = make_transcript()
     orig_status = mod.porcelain_status
     orig_dbtap = mod._db_tap
-    mod.porcelain_status = lambda: {"fake/foreign.py": "M "}
+    mod.porcelain_status = lambda tree=None: {"fake/foreign.py": "M "}
     spy = FakeDbTap()
     mod._db_tap = lambda: spy
     try:
@@ -201,7 +201,7 @@ def import_case_override_allowed_and_receipted():
 def import_case_override_flag_without_reason_still_denied():
     transcript = make_transcript()
     orig = mod.porcelain_status
-    mod.porcelain_status = lambda: {"fake/foreign.py": "M "}
+    mod.porcelain_status = lambda tree=None: {"fake/foreign.py": "M "}
     try:
         code, out, err = run_main(
             "CARR_ADOPT_ORPHAN=1 git add fake/foreign.py", transcript
@@ -246,7 +246,7 @@ def import_case_observed_script_write_allowed():
     orig_status, orig_dir = mod.porcelain_status, mod.OBSERVED_DIR
     tmp_observed = tempfile.mkdtemp(prefix="sag-observed-")
     session = "observed-fixture-session"
-    mod.porcelain_status = lambda: {"fake/script-written.py": "M "}
+    mod.porcelain_status = lambda tree=None: {"fake/script-written.py": "M "}
     mod.OBSERVED_DIR = tmp_observed
     try:
         with open(os.path.join(tmp_observed, f"{session}.json"), "w") as fh:
@@ -268,7 +268,7 @@ def import_case_not_observed_and_not_written_denied():
     orig_status, orig_dir = mod.porcelain_status, mod.OBSERVED_DIR
     tmp_observed = tempfile.mkdtemp(prefix="sag-observed-empty-")
     session = "no-observation-session"
-    mod.porcelain_status = lambda: {"fake/untouched.py": "M "}
+    mod.porcelain_status = lambda tree=None: {"fake/untouched.py": "M "}
     mod.OBSERVED_DIR = tmp_observed  # empty: no state file for this session
     try:
         code, out, err = run_main("git add fake/untouched.py", transcript, session=session)
@@ -290,7 +290,7 @@ def import_case_observed_set_does_not_bypass_wholesale():
     orig_status, orig_dir = mod.porcelain_status, mod.OBSERVED_DIR
     tmp_observed = tempfile.mkdtemp(prefix="sag-observed-wholesale-")
     session = "observed-wholesale-session"
-    mod.porcelain_status = lambda: {"fake/a.py": "M ", "fake/b.py": "M "}
+    mod.porcelain_status = lambda tree=None: {"fake/a.py": "M ", "fake/b.py": "M "}
     mod.OBSERVED_DIR = tmp_observed
     try:
         with open(os.path.join(tmp_observed, f"{session}.json"), "w") as fh:

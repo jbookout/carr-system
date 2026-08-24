@@ -49,6 +49,8 @@ REPO = os.path.dirname(HOOKS)
 sys.path.insert(0, HOOKS)
 sys.path.insert(0, REPO)
 
+from worktree_scope import worktree_root  # noqa: E402
+
 
 def _helpers():
     """written_path() and read_tail(), imported from the gates that own them."""
@@ -164,7 +166,16 @@ def main():
     if os.environ.get("CARR_ALLOW_LOOSE_WORK") == "1":
         return 0
 
-    repo = os.environ.get("CARR_LOOSE_WORK_REPO") or REPO
+    # WHICH TREE THIS SESSION IS ABOUT. REPO is this file's own parent, so it is
+    # always the canonical checkout — hooks run from there in every worktree
+    # (hooksPath is absolute). Judging canonical made this gate report ANOTHER
+    # session's unpushed commit to a session whose own worktree was clean and
+    # fully pushed; observed 2026-08-23, canonical HEAD 9c23a9ca. Council
+    # recommendation 1 of the same date: a git gate evaluates the INVOKING
+    # worktree. worktree_root() returns None when the session really is standing
+    # in the canonical checkout, and then canonical is the honest answer.
+    canonical = os.environ.get("CARR_LOOSE_WORK_REPO") or REPO
+    repo = worktree_root(payload.get("cwd") or os.getcwd(), canonical) or canonical
     transcript = payload.get("transcript_path")
     if not transcript or not os.path.exists(transcript):
         return 0

@@ -275,6 +275,39 @@ check_contract() {
 check_gates() {
   local failures="" count=0 skiplist=""
 
+  # THE INVOKING TREE MUST SURVIVE ITS OWN TEST SUITE, and on 2026-08-14 it did
+  # not. A selftest built a throwaway repository with tempfile.mkdtemp and called
+  # git with cwd=<temp>, which git ignored entirely because GIT_DIR — exported
+  # into every hook, inherited straight through to here — OVERRIDES cwd. Every
+  # fixture commit landed on the LIVE checkout: local main six commits ahead of
+  # origin on a tree of THREE files, five commits named "seed", all 818 paths
+  # staged as additions.
+  #
+  # Three layers now stand between that and this line. ops/githooks/pre-push
+  # strips the variables before invoking CI; ops/git_env.py gives every selftest
+  # its own scrubber; ops/selftest-git-isolation-check.py (in the inventory list
+  # below) fails when a git-fixture selftest is not wired to it. This is the
+  # fourth, and it is the only one that does not depend on knowing HOW a test
+  # might reach the real tree: it simply reads the tree's identity before and
+  # after, and fails the class if the suite moved it.
+  #
+  # Council recommendation 1, 2026-08-23 process audit, is explicit that this is
+  # the acceptance criterion rather than a nicety: "the canonical HEAD, index,
+  # and file set remain unchanged". Cost is two git invocations for the whole
+  # class. NOTE the scope word: this reads the tree ci.sh was INVOKED in, which
+  # under pre-push is the session's own worktree — never a hardcoded canonical
+  # path — so it makes exactly the assertion the same recommendation demands
+  # everywhere else.
+  tree_fingerprint() {
+    printf '%s\n' "$(git rev-parse HEAD 2>/dev/null)"
+    # Tracked modifications and the staged index. Untracked files are excluded
+    # deliberately: out/ is gitignored and every class in this file writes logs
+    # there, so counting them would fail the class on its own bookkeeping.
+    git status --porcelain --untracked-files=no 2>/dev/null
+    git diff --cached --name-only 2>/dev/null
+  }
+  local tree_before; tree_before="$(tree_fingerprint)"
+
   # Exceptions come from ops/config/ci-check-scope.json and are ANNOUNCED, never
   # applied silently. A quarantined check is skipped everywhere; a local_only one
   # is skipped only where its dependency genuinely cannot exist (a runner has no
@@ -406,29 +439,40 @@ PYEOF
   # fails every run is one people learn to scroll past. It fails only when a job
   # that HAD a workflow binding loses it.
   # reachability-check JOINED 2026-08-23, from the completion-integrity council's
-  # fix D, and it is the one question none of the others ask. Every check above
-  # asks whether a declared thing EXISTS and is internally consistent;
-  # gate-integrity --strict hashes all fifty hooks whether or not a settings file
-  # names one. None asks whether anything CALLS it. That is how
-  # hooks/ledger-boundary-sweep.py sat green since 2026-08-06 with its own
-  # documentation reading "WRITTEN BUT REGISTERED NOWHERE", and how a fleet-sync
-  # plist no service declares stayed invisible to every health row.
-  #
-  # IT BELONGS IN THIS LIST AND NOT IN A CLASS OF ITS OWN. The ten classes are
-  # the doctrine seeded-failure taxonomy, one gate each, and an eleventh entry
-  # would claim a seeded-failure class doctrine does not have. This is the same
-  # kind of check as the seven above it: repository content only, no machine
-  # state, no network, no database, so a bare runner and Joe's Mac get the same
-  # answer. Its cost is a fifth of a second of CPU, which the 2026-08-23
-  # actions-minutes council's budget for this class can carry.
+  # fix D: it is the one question none of the others ask — whether anything
+  # CALLS a declared control.
+  # selftest-git-isolation-check JOINED 2026-08-23, council recommendation 1.
+  # Same kind again: repository content only, no machine state and no database —
+  # it reads every selftest that builds a git fixture and fails when one is not
+  # wired to ops/git_env.py. Both belong in this list rather than being selftests
+  # themselves because each is an inventory question about the suite or its
+  # bindings, and a suite cannot be trusted to audit its own isolation from
+  # inside.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             rule-enforcement-map-check reachability-check \
+             rule-enforcement-map-check reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
+
+  # Did the suite move the tree it was invoked in? See tree_fingerprint() above.
+  if [ "$(tree_fingerprint)" != "$tree_before" ]; then
+    failures="$failures tree-mutated-by-selftests"
+    {
+      echo "  A selftest in this class CHANGED THE WORKING TREE it was invoked in."
+      echo "  HEAD, tracked-file state, or the index differs from before the suite ran."
+      echo "  This is the 2026-08-14 failure mode: git exports GIT_DIR into hooks and"
+      echo "  it OVERRIDES cwd, so a fixture built with cwd=<tempdir> and no scrub"
+      echo "  writes into whatever repository GIT_DIR names."
+      echo "  Find the culprit with: ops/selftest-git-isolation-check.py"
+      echo "  Recover with a mixed reset; do not commit anything from this tree until"
+      echo "  you have read what changed:"
+      git status --porcelain --untracked-files=no 2>/dev/null | head -20
+    } >&2
+  fi
+
   if [ -n "$failures" ]; then
     bad gates "failed:$failures"
   elif [ -n "$skiplist" ]; then

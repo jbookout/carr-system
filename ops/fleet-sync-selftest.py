@@ -36,9 +36,17 @@ import subprocess
 import sys
 import tempfile
 
+# The one scrubber (ops/git_env.py), not a local copy. GIT_DIR is exported by
+# every git hook and overrides cwd for any child git process — the 2026-08-14
+# incident where fixture commits landed on live main is exactly what an
+# unscrubbed ENV here would reproduce, since ENV is handed to every git call
+# and to fleet-sync.sh itself (which shells out to git internally).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "bin", "fleet-sync.sh")
-ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+ENV = dict(fixture_env(), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 
 STUB = "import sys\nprint('stub installer')\nsys.exit(0)\n"
