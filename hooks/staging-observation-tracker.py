@@ -88,7 +88,12 @@ from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.join(REPO, "out", "staging-observed")
-DEBUG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    DEBUG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    DEBUG = os.path.join(REPO, "out", "hook-guard.log")
 MAX_PENDING = 200  # defensive cap: a killed session must not leak forever
 
 # WHICH TREE THIS SNAPSHOTS, and it was the wrong one for every worktree session.

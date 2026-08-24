@@ -88,9 +88,20 @@ def main() -> int:
     # nonempty canonical v_decision_entry row; no direct-gate monkeypatches are
     # accepted as evidence for this boundary.
     hooks_config = (REPO / "ops" / "config" / "hooks.json").read_text()
+    # Both drift entries now run through hooks/hook-meter-run.py (2026-08-23,
+    # hook telemetry). What this check protects is unchanged and is NOT the
+    # wrapper: it is that the bootstrap is the FIXED, absolute /usr/bin/python3
+    # rather than a PATH-resolved `env python3`, because PATH is attacker-
+    # influenced and this pair of gates is what records drift. The wrapper
+    # inherits that interpreter and runs the gate in it, so the property holds;
+    # only the literal moved. The `env python3` clause is asserted against BOTH
+    # spellings so the wrapper cannot become a way to reintroduce it.
     check("installed drift hooks use fixed system bootstrap and repository interpreter",
-          hooks_config.count("/usr/bin/python3 {{REPO}}/hooks/run-record-gate.py drift-") == 2
-          and "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py" not in hooks_config)
+          hooks_config.count("/usr/bin/python3 {{REPO}}/hooks/hook-meter-run.py "
+                             "{{REPO}}/hooks/run-record-gate.py drift-") == 2
+          and "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py" not in hooks_config
+          and ("/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py "
+               "{{REPO}}/hooks/run-record-gate.py") not in hooks_config)
 
     # PRIVATE TMP, NOT THE REPO ROOT (2026-08-23 load-flake sweep): was dir=REPO.
     with tempfile.TemporaryDirectory() as tmp:

@@ -124,7 +124,11 @@ from worktree_scope import target_tree  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "staging-attribution-gate.jsonl")
-DEBUG = os.path.join(REPO, "out", "hook-guard.log")
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    DEBUG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    DEBUG = os.path.join(REPO, "out", "hook-guard.log")
 # Written by hooks/staging-observation-tracker.py's Pre/Post Bash pair -- see
 # that file's docstring for the observation mechanism this reads.
 OBSERVED_DIR = os.path.join(REPO, "out", "staging-observed")

@@ -33,7 +33,12 @@ from datetime import datetime, timezone
 VAULT = ("/Users/booko/Library/CloudStorage/"
          "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 RUN_SH = "/Users/booko/carr-system/run.sh"
-LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(os.path.expanduser("~/carr-system"))
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 TIMEOUT = 25
 
 

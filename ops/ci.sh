@@ -290,6 +290,17 @@ check_contract() {
 check_gates() {
   local failures="" count=0 skiplist=""
 
+  # EVERY GATE FIRED IN THIS CLASS IS A FIXTURE, and saying so once here is what
+  # keeps the enforcement numbers honest. A selftest drives a real gate with an
+  # attack payload; the gate then writes its ordinary log line. Before this
+  # marker existed those lines went to out/hook-guard.log beside live refusals,
+  # which is how that file reached 134,595 DENY events that the 2026-08-23
+  # council could not use: an upper bound with an unknown amount of test traffic
+  # in it. hooks/hook_meter.py reads this variable, children inherit it, and the
+  # fixture traffic lands in out/fixtures/ instead. It changes no verdict —
+  # only which file the line is written to.
+  export CARR_HOOK_FIXTURE=1
+
   # THE INVOKING TREE MUST SURVIVE ITS OWN TEST SUITE, and on 2026-08-14 it did
   # not. A selftest built a throwaway repository with tempfile.mkdtemp and called
   # git with cwd=<temp>, which git ignored entirely because GIT_DIR — exported

@@ -1221,6 +1221,25 @@ tombstone "incident sweep" \
   "authority capability — 0117 withholds resolved_at and root_cause from carr_jobs, so closing needs the owner credential through break-glass" \
   "that credential is provisioned here and the break-glass close path is restored to this line"
 
+# WHAT THE ENFORCEMENT STACK COST LAST WEEK, printed where the rest of the
+# night's reporting already lands. 13 hook processes fire per Bash tool call and
+# 11 per turn on this machine; until 2026-08-23 nobody could say what that cost
+# or which of those gates had caught anything real, because live refusals and
+# selftest fixtures were written to the same file. They are separate streams now
+# and hooks/hook-meter-run.py records one line per firing, so this prints per-
+# gate p95 latency, live denies, turn reopens and the 7-day trend.
+#
+# IT REPORTS AND NEVER ACTS, including the retire-candidate list, which is a
+# list of gates to LOOK at — a gate whose deterrent is working looks exactly
+# like a gate nobody needs. It exits 0 even when a provisional budget is
+# exceeded (--strict is for a human at a terminal), because a chain step that
+# goes red on a latency number would be the check that teaches people to stop
+# reading the chain.
+#
+# NO NEW SCHEDULED JOB: this is the council's "piggyback on what already runs",
+# and one more step on a chain that is already awake is the whole cost.
+step "hook telemetry rollup (reports, never retires)"  ./.venv/bin/python ops/hook-telemetry-rollup.py --days 7
+
 if [ "$seam_blocked" -gt 0 ]; then
   say "===== $seam_blocked step(s) BLOCKED on a missing canonical seam — not counted as failures ====="
 fi
