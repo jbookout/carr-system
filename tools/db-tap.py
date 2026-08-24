@@ -38,6 +38,12 @@ receipt to out/break-glass-receipts.log before the target ever runs. That
 receipt records whether an agent session or a person in a shell engaged the
 guard (run_by=, see run_by() below).
 
+Arguments are validated FIRST, so a bad one exits before any receipt is
+written — a missing --file target earns "no such file" and no log line at all.
+Nothing has reached the database at that point, so nothing goes unaudited, but
+do not read that log as a record of every ATTEMPT: it records every run that
+got as far as engaging.
+
 Never prints the DSN. ON_ERROR_STOP is always set for sql mode.
 """
 import json
