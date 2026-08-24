@@ -45,7 +45,11 @@ TWO CHECKS, both on the turn's final assistant message:
 NEVER LOOPS: stop_hook_active short-circuits, same as every Stop gate here.
 FAILS OPEN on any internal error, and if writing-lint cannot be imported the
 writing half is skipped rather than the session wedged. Audit rows share
-out/conduct-gate.jsonl; fixtures (session 'selftest') do not count.
+out/conduct-gate.jsonl; fixtures (any session id starting 'selftest') do not
+count. The PREFIX, not an exact match, is what lets ops/chat-lint-gate-selftest.py
+give every case its own session id — which it must, because the carry file is keyed
+by session and out/ is shared across every worktree on this machine. No real session
+id can collide: session ids are uuids, and l/s/f/t are not hex digits.
 
 Fixtures: ops/chat-lint-gate-selftest.py.
 """
@@ -216,7 +220,10 @@ def carry(note, session=None):
 
 
 def audit(record):
-    if record.get("session") == "selftest":
+    # PREFIX, not equality: the fixtures give every case its own session id
+    # (selftest-<pid>-<n>) so concurrent suites cannot eat each other's parked
+    # notes, and all of them must still stay out of the real conduct trail.
+    if str(record.get("session") or "").startswith("selftest"):
         return
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)

@@ -33,6 +33,9 @@ Joe and a block only buys a restatement he pays for twice (rule 1d50a3bb). The
 gate now parks a note that hooks/chat-lint-carryover.py injects before the next
 reply. CAUGHT = a note was parked; exit 2 is now itself a regression.
 """
+import atexit
+import glob
+import itertools
 import json
 import os
 import subprocess
@@ -41,6 +44,56 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "chat-lint-gate.py")
+CARRY_DIR = os.path.join(REPO, "out", "chat-lint-carry")
+
+# EVERY CASE GETS ITS OWN SESSION ID, and that is not tidiness — it is the whole
+# reason this suite was non-deterministic. The gate keys its parked note by
+# session id (hooks/chat-lint-gate.py carry_path), out/ is a symlink back to the
+# canonical checkout from every worktree on this machine, and these fixtures used
+# to hardcode session "selftest". So two suites running at once — routine here,
+# ops/ci.sh runs in several worktrees concurrently — both read and wrote
+# out/chat-lint-carry/selftest.txt and ate each other's findings. Observed
+# 2026-08-23: three runs of a byte-identical tree gave 26/26, one failure, and a
+# different pair of failures, plus a FileNotFoundError when the file vanished
+# between the exists() check and the unlink. A different case failing each time is
+# the signature of shared fixture state, never of a content regression.
+#
+# The id carries the pid AND a per-case counter: the pid separates concurrent
+# suites, the counter separates cases within one suite so a note parked by one
+# case can never be read as another's. It stays under the "selftest" PREFIX
+# because that prefix is what keeps fixture rows out of the real conduct audit
+# log (hooks/chat-lint-gate.py audit()).
+_case_seq = itertools.count(1)
+SESSION_PREFIX = f"selftest-{os.getpid()}"
+
+
+def session_id():
+    return f"{SESSION_PREFIX}-{next(_case_seq)}"
+
+
+def carry_path(session):
+    """Mirror of the gate's own path derivation. If the gate ever changes how it
+    names these files, this suite must stop reading notes and fail loudly rather
+    than silently reporting every case clean."""
+    return os.path.join(CARRY_DIR, f"{session}.txt")
+
+
+def drop(path):
+    """Unlink without the exists()-then-unlink race that crashed a real run."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+@atexit.register
+def _sweep():
+    """Leave nothing of this process behind in the shared carry directory, even
+    on a crash. Scoped to this pid so a concurrent suite is never touched."""
+    for stray in glob.glob(os.path.join(CARRY_DIR, f"{SESSION_PREFIX}-*.txt")):
+        drop(stray)
 
 # (name, assistant_text, expect_caught)
 CASES = [
@@ -95,6 +148,8 @@ bad: list[str] = []
 
 
 def run_stop(assistant_text, event="Stop", stop_active=False):
+    session = session_id()
+    carry = carry_path(session)
     fd, path = tempfile.mkstemp(suffix=".jsonl")
     try:
         with os.fdopen(fd, "w") as fh:
@@ -103,32 +158,31 @@ def run_stop(assistant_text, event="Stop", stop_active=False):
             fh.write(json.dumps({"type": "assistant",
                 "message": {"content": [{"type": "text", "text": assistant_text}]}}) + "\n")
         payload = {"hook_event_name": event, "transcript_path": path,
-                   "session_id": "selftest", "stop_hook_active": stop_active}
+                   "session_id": session, "stop_hook_active": stop_active}
         # The gate no longer BLOCKS on a wording fault (rule 1d50a3bb: the bad
         # text has already reached Joe, so a block only buys a restatement he
         # pays for twice). It parks a note that hooks/chat-lint-carryover.py
         # injects before the next reply. So "caught" now means a note was
         # written, and exit 2 would itself be a regression.
-        carry = os.path.join(REPO, "out", "chat-lint-carry", "selftest.txt")
-        try:
-            os.unlink(carry)
-        except Exception:
-            pass
+        #
+        # This case's note is the ONLY note at this path: the session id is
+        # unique per case per process, so an empty read here means this case's
+        # text was clean, never that a neighbour consumed the evidence.
+        drop(carry)
         p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
                            capture_output=True, text=True, timeout=30)
         if p.returncode == 2:
             return False, "REGRESSION: gate blocked instead of carrying"
         note = ""
-        if os.path.exists(carry):
+        try:
             with open(carry) as fh:
                 note = fh.read()
-            os.unlink(carry)
+        except FileNotFoundError:
+            pass
         return bool(note.strip()), note
     finally:
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
+        drop(carry)
+        drop(path)
 
 
 def main():
