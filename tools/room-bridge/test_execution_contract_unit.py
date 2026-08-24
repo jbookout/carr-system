@@ -15,6 +15,7 @@ sys.path.insert(0, str(HERE))
 
 import execution_contract as contract  # noqa: E402
 import dispatch  # noqa: E402
+import job_passport_artifact as artifact_renderer  # noqa: E402
 
 
 FIXTURES = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric"
@@ -256,7 +257,45 @@ def observatory_projection_groups_by_work_request_and_separates_profile_from_sta
     assert actual["work_request_id"] == "wr-synthetic-read-only"
     assert actual["attempt_lane"]["persistent_profile"]["display_label"] == "Doc"
     assert actual["attempt_lane"]["actual_staffing"]["model_id"] == "model:codex-synthetic"
+    assert actual["projection_digest"] == contract.canonical_digest({key: value for key, value in actual.items() if key != "projection_digest"})
+    assert actual["source_state"]["state_version"] == 1
     assert "raw provider answer" not in json.dumps(actual)
+
+
+def wire_receipts_validate_projection_and_keep_typed_facts_distinct():
+    projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
+    wire = contract.job_passport_wire_receipt("observatory_projection", projection)
+    assert wire["job_passport"]["schema_version"] == "job-passport-wire.v1"
+    assert wire["job_passport"]["payload"]["projection_digest"] == projection["projection_digest"]
+    projection["source_state"]["state_version"] = 2
+    expect_refusal(lambda: contract.validate_observatory_projection(projection), "does not bind")
+
+
+def self_contained_job_passport_artifact_binds_content_and_is_stale_visible():
+    projection = json.loads((FIXTURES / "codex_desktop.observatory-projection.v1.json").read_text())
+    behavior = json.loads((FIXTURES / "codex_desktop.job-passport.behavior-verification.v1.json").read_text())
+    contract.validate_product_behavior_verification(behavior)
+    document, artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), projection, behavior)
+    assert artifact_renderer.verify_visual_artifact(document, artifact)
+    assert artifact["content_digest"] == contract.canonical_digest(document)
+    assert "https://" not in document and "fetch(" not in document
+    assert "prefers-reduced-motion" in document and "<details>" in document and "Behavior audit" in document
+    stale = copy.deepcopy(projection)
+    stale["state"]["progress"] = "stale"
+    stale["observed_movement"]["progress_state"] = "stale"
+    stale["projection_digest"] = contract.canonical_digest({key: value for key, value in stale.items() if key != "projection_digest"})
+    _, stale_artifact = artifact_renderer.build_visual_artifact(envelope(), receipt(), stale)
+    assert stale_artifact["freshness"]["state"] == "stale"
+    assert artifact_renderer.verify_visual_artifact(document + "tampered", artifact) is False
+
+
+def behavior_audit_fails_closed_on_dangling_claim_or_fake_live_verification():
+    behavior = json.loads((FIXTURES / "codex_desktop.job-passport.behavior-verification.v1.json").read_text())
+    behavior["items"][0]["claim_id"] = "claim:missing"
+    expect_refusal(lambda: contract.validate_product_behavior_verification(behavior), "dangling")
+    behavior = json.loads((FIXTURES / "codex_desktop.job-passport.behavior-verification.v1.json").read_text())
+    behavior["items"][0]["status"] = "passed"
+    expect_refusal(lambda: contract.validate_product_behavior_verification(behavior), "live browser evidence")
 
 
 def compatibility_wrapper_uses_existing_dispatch_with_a_fake_and_redacts_result():
@@ -298,6 +337,9 @@ if __name__ == "__main__":
         ("declared versus observed remains uncertain", declared_vs_observed_is_uncertain_and_filesystem_alone_is_not_a_deviation),
         ("progress event is ephemeral and observational", progress_event_is_redacted_observational_and_can_stay_ephemeral),
         ("observatory projection preserves profile/staffing distinction", observatory_projection_groups_by_work_request_and_separates_profile_from_staffing),
+        ("room wire accepts only validated typed Job Passport facts", wire_receipts_validate_projection_and_keep_typed_facts_distinct),
+        ("self-contained Job Passport artifact has verified content and stale posture", self_contained_job_passport_artifact_binds_content_and_is_stale_visible),
+        ("behavior audit fails closed on dangling or non-live verification", behavior_audit_fails_closed_on_dangling_claim_or_fake_live_verification),
         ("compatibility wrapper uses a fake without persisting raw result", compatibility_wrapper_uses_existing_dispatch_with_a_fake_and_redacts_result),
     ]:
         check(name, fn)

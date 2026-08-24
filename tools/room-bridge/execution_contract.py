@@ -96,9 +96,22 @@ PROGRESS_EVENT_FIELDS = {
 }
 PROFILE_FIELDS = {"profile_id", "display_label"}
 OBSERVATORY_PROJECTION_FIELDS = {
-    "schema_version", "work_request_id", "declared_intent", "component_map", "attempt_lane",
+    "schema_version", "projection_digest", "generated_at", "work_request_id", "source_state", "declared_intent", "component_map", "attempt_lane",
     "state", "observed_movement", "timeline", "evidence_refs",
 }
+COMPONENT_FIELDS = {"component_ref", "depends_on_component_refs", "current"}
+ATTEMPT_LANE_FIELDS = {"attempt_id", "persistent_profile", "actual_staffing"}
+OBSERVATORY_STATE_FIELDS = {"lifecycle", "progress", "verification"}
+TIMELINE_FIELDS = {"sequence", "occurred_at", "event_type", "declared_step_ref", "observed_resource_ref", "observed_component_ref", "tool_class", "state", "evidence_refs", "retention"}
+SOURCE_STATE_FIELDS = {"state_version", "canonical_record_digest", "plan_revision_digest"}
+JOB_PASSPORT_WIRE_FIELDS = {"schema_version", "kind", "payload"}
+BEHAVIOR_RECORD_FIELDS = {"schema_version", "surface", "binding", "state_chart", "claims", "items", "findings", "audit_state"}
+BEHAVIOR_SURFACE_FIELDS = {"surface_id", "surface_version", "commit_ref"}
+BEHAVIOR_BINDING_FIELDS = {"work_request_id", "projection_digest", "execution_evidence_refs"}
+BEHAVIOR_STATE_CHART_FIELDS = {"starting_state", "immediate_ending", "becoming_extended", "while_extended", "finishing", "modifiers_variants", "cancel_interrupt", "cross_system_effects", "edge_cases", "open_verification"}
+BEHAVIOR_CLAIM_FIELDS = {"claim_id", "state_ref", "priority", "observable_claim"}
+BEHAVIOR_ITEM_FIELDS = {"item_id", "claim_id", "priority", "setup", "steps", "expected", "status", "evidence_refs"}
+BEHAVIOR_FINDING_FIELDS = {"finding_id", "root_cause_key", "actual", "expected", "repro", "code_location", "severity", "decision", "post_fix_status", "evidence_refs"}
 
 TERMINAL_STATES = {"succeeded", "failed", "timed_out", "cancelled", "partial", "unknown"}
 OUTCOMES = {"success", "failure", "timeout", "cancellation", "partial", "unknown"}
@@ -598,9 +611,15 @@ def project_observatory_attempt(envelope: Any, receipt: Any, events: list[Any], 
     evidence_refs = sorted(set(completed["result"]["evidence_refs"] + [
         ref for row in timeline for ref in row["evidence_refs"]
     ]))
-    return {
+    projection = {
         "schema_version": "observatory-attempt-projection.v1",
+        "generated_at": completed["lifecycle"]["ended_at"],
         "work_request_id": bound["work_request_id"],
+        "source_state": {
+            "state_version": bound["state_binding"]["state_version"],
+            "canonical_record_digest": bound["state_binding"]["canonical_record_digest"],
+            "plan_revision_digest": bound["plan_revision"]["digest"],
+        },
         "declared_intent": declared,
         "component_map": [{
             "component_ref": ref, "depends_on_component_refs": sorted(dependencies.get(ref, [])),
@@ -620,6 +639,169 @@ def project_observatory_attempt(envelope: Any, receipt: Any, events: list[Any], 
         "timeline": timeline,
         "evidence_refs": evidence_refs,
     }
+    projection["projection_digest"] = canonical_digest(projection)
+    return projection
+
+
+def validate_observatory_projection(projection: Any) -> dict[str, Any]:
+    """Validate a complete, transcript-free projection before it reaches a viewer.
+
+    This validates a read model only. It does not promote an executor claim or
+    make the browser an authority source.
+    """
+    value = _expect_exact(projection, OBSERVATORY_PROJECTION_FIELDS, "observatory projection")
+    if value["schema_version"] != "observatory-attempt-projection.v1":
+        raise ContractError("unsupported observatory projection schema_version")
+    _digest(value["projection_digest"], "observatory projection projection_digest")
+    without_digest = {key: item for key, item in value.items() if key != "projection_digest"}
+    if value["projection_digest"] != canonical_digest(without_digest):
+        raise ContractError("observatory projection digest does not bind its exact content")
+    _string(value["work_request_id"], "observatory projection work_request_id", identifier=True)
+    _timestamp(value["generated_at"], "observatory projection generated_at")
+    source_state = _expect_exact(value["source_state"], SOURCE_STATE_FIELDS, "observatory source_state")
+    if not isinstance(source_state["state_version"], int) or isinstance(source_state["state_version"], bool) or source_state["state_version"] < 1:
+        raise ContractError("observatory source_state state_version must be a positive integer")
+    _digest(source_state["canonical_record_digest"], "observatory source_state canonical_record_digest")
+    _digest(source_state["plan_revision_digest"], "observatory source_state plan_revision_digest")
+    _validate_request({"job_ref": "job:projection", "input_digest": "sha256:" + "0" * 64,
+                       "data_class": "metadata_only", "allowed_actions": [],
+                       "declared_expectations": value["declared_intent"]})
+    if not isinstance(value["component_map"], list):
+        raise ContractError("observatory projection component_map must be a list")
+    for component in value["component_map"]:
+        row = _expect_exact(component, COMPONENT_FIELDS, "observatory component")
+        _string(row["component_ref"], "observatory component component_ref")
+        _list_of_strings(row["depends_on_component_refs"], "observatory component dependencies")
+        if not isinstance(row["current"], bool):
+            raise ContractError("observatory component current must be boolean")
+    lane = _expect_exact(value["attempt_lane"], ATTEMPT_LANE_FIELDS, "observatory attempt lane")
+    _string(lane["attempt_id"], "observatory attempt lane attempt_id", identifier=True)
+    profile = _expect_exact(lane["persistent_profile"], PROFILE_FIELDS, "observatory profile")
+    _string(profile["profile_id"], "observatory profile profile_id", identifier=True)
+    _string(profile["display_label"], "observatory profile display_label")
+    _validate_adapter(lane["actual_staffing"])
+    state = _expect_exact(value["state"], OBSERVATORY_STATE_FIELDS, "observatory state")
+    if state["lifecycle"] not in TERMINAL_STATES or state["progress"] not in {"active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"} or state["verification"] not in VERIFICATION_STATES:
+        raise ContractError("observatory projection state is invalid")
+    _validate_observation(value["observed_movement"])
+    if not isinstance(value["timeline"], list):
+        raise ContractError("observatory projection timeline must be a list")
+    previous_sequence = 0
+    for item in value["timeline"]:
+        event = _expect_exact(item, TIMELINE_FIELDS, "observatory timeline event")
+        if not isinstance(event["sequence"], int) or event["sequence"] <= previous_sequence:
+            raise ContractError("observatory projection timeline must be strictly sequence ordered")
+        previous_sequence = event["sequence"]
+        _timestamp(event["occurred_at"], "observatory timeline occurred_at")
+        _string(event["event_type"], "observatory timeline event_type")
+        for field in ("declared_step_ref", "observed_resource_ref", "observed_component_ref", "tool_class"):
+            if event[field] is not None:
+                _string(event[field], f"observatory timeline {field}")
+        _string(event["state"], "observatory timeline state")
+        _list_of_strings(event["evidence_refs"], "observatory timeline evidence_refs")
+        if event["retention"] not in {"ephemeral", "material_redacted"}:
+            raise ContractError("observatory timeline retention is invalid")
+    _list_of_strings(value["evidence_refs"], "observatory projection evidence_refs")
+    return value
+
+
+def job_passport_wire_receipt(kind: str, payload: Any) -> dict[str, Any]:
+    """Wrap a typed Job Passport fact for the existing room wire.
+
+    The wrapper makes the room parser extensible without making wire receipt
+    shape, browser state, or native transcript an authority source. Projection
+    receipts are the UI-ready deterministic read model; the other kinds remain
+    useful auditable wire facts and can be assembled by the controller.
+    """
+    validators = {
+        "execution_envelope": validate_execution_envelope,
+        "progress_event": validate_progress_event,
+        "attempt_receipt": validate_attempt_receipt,
+        "observatory_projection": validate_observatory_projection,
+    }
+    if kind not in validators:
+        raise ContractError("job passport wire kind is invalid")
+    value = validators[kind](payload)
+    return {"job_passport": {"schema_version": "job-passport-wire.v1", "kind": kind, "payload": value}}
+
+
+def validate_product_behavior_verification(record: Any) -> dict[str, Any]:
+    """Validate a compact outside-in behavior audit for a projection surface.
+
+    One item validates one observable claim. A `passed` result is allowed only
+    with a concrete live-browser evidence reference, which prevents static
+    fixtures or model assertions from being represented as product verification.
+    """
+    value = _expect_exact(record, BEHAVIOR_RECORD_FIELDS, "product behavior verification")
+    if value["schema_version"] != "product-behavior-verification.v1":
+        raise ContractError("unsupported product behavior verification schema_version")
+    surface = _expect_exact(value["surface"], BEHAVIOR_SURFACE_FIELDS, "behavior surface")
+    for field in BEHAVIOR_SURFACE_FIELDS:
+        _string(surface[field], f"behavior surface {field}")
+    binding = _expect_exact(value["binding"], BEHAVIOR_BINDING_FIELDS, "behavior binding")
+    _string(binding["work_request_id"], "behavior binding work_request_id", identifier=True)
+    _digest(binding["projection_digest"], "behavior binding projection_digest")
+    _list_of_strings(binding["execution_evidence_refs"], "behavior binding execution_evidence_refs")
+    chart = _expect_exact(value["state_chart"], BEHAVIOR_STATE_CHART_FIELDS, "behavior state chart")
+    for field in BEHAVIOR_STATE_CHART_FIELDS:
+        _list_of_strings(chart[field], f"behavior state chart {field}")
+    if not isinstance(value["claims"], list) or not value["claims"]:
+        raise ContractError("behavior claims must be a non-empty list")
+    claim_ids = set()
+    for raw in value["claims"]:
+        claim = _expect_exact(raw, BEHAVIOR_CLAIM_FIELDS, "behavior claim")
+        _string(claim["claim_id"], "behavior claim claim_id", identifier=True)
+        if claim["claim_id"] in claim_ids:
+            raise ContractError("behavior claims cannot duplicate claim_id")
+        claim_ids.add(claim["claim_id"])
+        _string(claim["state_ref"], "behavior claim state_ref")
+        if claim["priority"] not in {"P0", "P1", "P2", "P3"}:
+            raise ContractError("behavior claim priority is invalid")
+        _string(claim["observable_claim"], "behavior claim observable_claim")
+    if not isinstance(value["items"], list) or not value["items"]:
+        raise ContractError("behavior items must be a non-empty list")
+    item_ids = set()
+    for raw in value["items"]:
+        item = _expect_exact(raw, BEHAVIOR_ITEM_FIELDS, "behavior verification item")
+        _string(item["item_id"], "behavior item item_id", identifier=True)
+        if item["item_id"] in item_ids:
+            raise ContractError("behavior items cannot duplicate item_id")
+        item_ids.add(item["item_id"])
+        if item["claim_id"] not in claim_ids:
+            raise ContractError("behavior item has dangling claim_id")
+        if item["priority"] not in {"P0", "P1", "P2", "P3"}:
+            raise ContractError("behavior item priority is invalid")
+        _string(item["setup"], "behavior item setup")
+        _list_of_strings(item["steps"], "behavior item steps")
+        _string(item["expected"], "behavior item expected")
+        if item["status"] not in {"planned", "passed", "failed", "blocked"}:
+            raise ContractError("behavior item status is invalid")
+        _list_of_strings(item["evidence_refs"], "behavior item evidence_refs")
+        if item["status"] == "passed" and not any(ref.startswith("browser_live:") for ref in item["evidence_refs"]):
+            raise ContractError("behavior item cannot pass without live browser evidence")
+    if not isinstance(value["findings"], list):
+        raise ContractError("behavior findings must be a list")
+    roots = set()
+    for raw in value["findings"]:
+        finding = _expect_exact(raw, BEHAVIOR_FINDING_FIELDS, "behavior finding")
+        _string(finding["finding_id"], "behavior finding finding_id", identifier=True)
+        _string(finding["root_cause_key"], "behavior finding root_cause_key", identifier=True)
+        if finding["root_cause_key"] in roots:
+            raise ContractError("behavior findings must dedupe root_cause_key")
+        roots.add(finding["root_cause_key"])
+        for field in ("actual", "expected", "code_location"):
+            _string(finding[field], f"behavior finding {field}")
+        _list_of_strings(finding["repro"], "behavior finding repro")
+        _list_of_strings(finding["evidence_refs"], "behavior finding evidence_refs")
+        if finding["severity"] not in {"P0", "P1", "P2", "P3"} or finding["decision"] not in {"fix", "product_call", "accepted"} or finding["post_fix_status"] not in {"open", "fixed_pending_live_verification", "verified_fixed", "blocked"}:
+            raise ContractError("behavior finding vocabulary is invalid")
+        if finding["post_fix_status"] == "verified_fixed" and not any(ref.startswith("browser_live:") for ref in finding["evidence_refs"]):
+            raise ContractError("behavior finding cannot be verified fixed without live browser evidence")
+    if value["audit_state"] not in {"draft", "live_verified", "blocked"}:
+        raise ContractError("behavior audit_state is invalid")
+    if value["audit_state"] == "live_verified" and any(item["status"] != "passed" for item in value["items"]):
+        raise ContractError("live verified behavior audit requires every item to pass")
+    return value
 
 
 def receipt_from_dispatch_row(envelope: Any, row: dict[str, Any], *, attempt_id: str | None = None) -> dict[str, Any]:

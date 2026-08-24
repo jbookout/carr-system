@@ -1,3 +1,5 @@
+import { deriveJobPassports, jobPassportStatusLabel } from "./job-passport.js";
+
 // MODEL ROOM OBSERVATORY — the panel Joe watches the model fleet from.
 //
 // Ruled by Joe on 2026-08-22 (decision 0892c539): "once you complete the desk —
@@ -504,6 +506,9 @@ export function deriveModel(turns, { now = Date.now(), viewer = "joe" } = {}) {
     authKnown: roster.filter((d) => d.auth !== null).length,
     presence: { partner: other, at: presenceAt,
       state: presenceAt && (now - presenceAt) / 1000 <= PRESENCE_ACTIVE_S ? "healthy" : "dormant" },
+    // Feature-gated: no typed projection, no Job Passport panel. The page
+    // never attempts to infer a job from prose or a raw transcript.
+    jobPassports: deriveJobPassports(turns, { now }),
   };
 }
 
@@ -664,6 +669,11 @@ function boot() {
       if (node) { existing.delete(id); update?.(node, item); } else {
         node = create(item);
         node.dataset.key = id;
+        // New keyed rows need the same data pass as retained rows. Most
+        // surfaces build their static skeleton in create(), while Job Passport
+        // cards intentionally keep all live state in update(); doing both
+        // keeps first paint and later polls identical.
+        update?.(node, item);
       }
       return node;
     });
@@ -1387,6 +1397,94 @@ function boot() {
     });
   }
 
+  /* ----------------------------------------------------------- Job Passport */
+
+  function humanRef(ref) {
+    return String(ref || "unknown").replace(/^[^:]+:/, "").replace(/[-_]/g, " ");
+  }
+
+  function renderJobPassport(model) {
+    const feature = model.jobPassports;
+    const section = $("jobPassport");
+    if (!feature?.enabled) { section.hidden = true; return; }
+    section.hidden = false;
+    const rejected = feature.rejected.length;
+    $("jobPassportSummary").textContent = `${feature.passports.length} Work Request${feature.passports.length === 1 ? "" : "s"} · deterministic wire projection${rejected ? ` · ${rejected} stale, malformed, or conflicting update${rejected === 1 ? "" : "s"} withheld` : ""}`;
+    const host = $("jobPassportList");
+    reconcile(host, feature.passports, {
+      key: (passport) => `passport:${passport.work_request_id}`,
+      create: (passport) => {
+        const card = el("article", "passport-card");
+        card.tabIndex = 0;
+        card.setAttribute("aria-label", `Job Passport ${passport.work_request_id}`);
+        return card;
+      },
+      update: (card, passport) => {
+        card.dataset.status = passport.status;
+        card.replaceChildren();
+        const top = el("div", "passport-top");
+        top.appendChild(el("span", "passport-work", passport.work_request_id));
+        top.appendChild(el("span", "passport-status", jobPassportStatusLabel(passport.status)));
+        card.appendChild(top);
+        const freshness = passport.freshness === "stale" ? "STALE — last signal" : "Observed";
+        card.appendChild(el("p", "passport-freshness", `${freshness} ${relativeAgo(passport.observed_at, model.now)} · state v${passport.source_state.state_version}`));
+
+        const staffing = el("div", "passport-staffing");
+        const profile = el("div"); profile.appendChild(el("label", null, "Persistent profile"));
+        profile.appendChild(el("span", null, passport.attempt_lane.persistent_profile.display_label));
+        const actual = passport.attempt_lane.actual_staffing;
+        const execution = el("div"); execution.appendChild(el("label", null, "Actual staffing"));
+        execution.appendChild(el("span", null, `${humanRef(actual.surface)} · ${humanRef(actual.model_id)} · ${humanRef(actual.harness_id)}`));
+        staffing.append(profile, execution); card.appendChild(staffing);
+
+        const map = el("div", "passport-map");
+        for (const component of passport.component_map) {
+          const node = el("button", "passport-node", humanRef(component.component_ref));
+          node.type = "button"; node.dataset.current = String(component.current);
+          node.title = component.depends_on_component_refs.length
+            ? `Depends on ${component.depends_on_component_refs.map(humanRef).join(", ")}` : "No declared dependencies";
+          const openDetail = () => {
+            card.dataset.detailOpen = "true";
+            card.querySelector("details")?.setAttribute("open", "");
+          };
+          node.addEventListener("click", openDetail);
+          // Native buttons should already activate for Enter/Space, but this
+          // explicit path keeps the component-to-evidence relationship intact
+          // across browser/harness keyboard implementations.
+          node.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDetail(); }
+          });
+          map.appendChild(node);
+        }
+        card.appendChild(map);
+        const observation = passport.observed_movement;
+        const alignment = observation.deviation_candidates?.length
+          ? `${observation.deviation_candidates.length} deviation candidate${observation.deviation_candidates.length === 1 ? "" : "s"}; review required.`
+          : `${observation.coverage_state.replace(/_/g, " ")} declared coverage · ${observation.activity_fidelity.replace(/_/g, " ")} observation · uncertainty: ${observation.uncertainty.replace(/_/g, " ")}`;
+        card.appendChild(el("p", "passport-alignment", alignment));
+        const timeline = el("div", "passport-timeline"); timeline.setAttribute("aria-label", "Observed progress timeline");
+        for (const event of passport.timeline) {
+          const step = event.declared_step_ref ? ` · ${humanRef(event.declared_step_ref)}` : "";
+          const entry = el("span", "passport-event", `${event.sequence}. ${humanRef(event.event_type)}${step}`);
+          entry.dataset.state = event.state; entry.title = `${event.occurred_at} · ${event.retention}`;
+          timeline.appendChild(entry);
+        }
+        if (!passport.timeline.length) timeline.appendChild(el("span", "passport-event", "No observed progress event"));
+        card.appendChild(timeline);
+        const detail = el("details", "passport-detail");
+        detail.open = card.dataset.detailOpen === "true";
+        detail.addEventListener("toggle", () => { card.dataset.detailOpen = String(detail.open); });
+        detail.appendChild(el("summary", null, "Evidence, checkpoint, and handoff"));
+        const list = el("ul", "passport-detail-list");
+        for (const ref of passport.evidence_refs) list.appendChild(el("li", null, ref));
+        const checkpoint = passport.state.verification === "verified_success" ? "Independent verification recorded; handoff only at a verified checkpoint." : "Executor claim remains unpromoted; no verified handoff implied.";
+        list.appendChild(el("li", null, checkpoint));
+        list.appendChild(el("li", null, `Adapter: ${actual.adapter_id} ${actual.adapter_version} · native session retained as ${actual.native_session_ref}`));
+        detail.appendChild(list); card.appendChild(detail);
+      },
+    });
+  }
+
   /* --------------------------------------------------------------- health */
 
   function renderHealth(model) {
@@ -1612,6 +1710,7 @@ function boot() {
     renderWire(fresh.length > 0);
     renderAssignments(model);
     renderSessions(model);
+    renderJobPassport(model);
     renderHealth(model);
     if (fresh.length) animateArrivals(fresh, model);
   }

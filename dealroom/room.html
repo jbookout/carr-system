@@ -66,6 +66,17 @@
     <div class="stage-tooltip" id="stageTooltip" role="status" hidden></div>
   </section>
 
+  <!-- Feature-gated by a valid, controller-built Job Passport projection on
+       the existing wire. This is a view of CARR state, never a second task
+       store and never a rendering model's inference. -->
+  <section class="job-passport panel" id="jobPassport" aria-label="Job Passport" hidden>
+    <div class="job-passport-head">
+      <div><h2 class="panel-title">Job Passport</h2><p id="jobPassportSummary" class="job-passport-summary"></p></div>
+      <span class="job-passport-feature">Wire-derived</span>
+    </div>
+    <div id="jobPassportList" class="job-passport-list"></div>
+  </section>
+
   <aside class="room-desks panel collapsible" id="roomDesks" aria-label="Desks">
     <h2 class="panel-title">Desks
       <button type="button" class="chip chip-plain collapsible-toggle" id="desksToggle" aria-expanded="true">Hide</button>
