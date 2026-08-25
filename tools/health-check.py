@@ -853,6 +853,52 @@ WATCH = [
      "KNOWN BLOCKED on Dell's OS update (memory: dell-calendar-fetch-blocked) — expected stale until he updates"),
 ]
 
+def _retired_watch_entries(watch, retired_paths):
+    """Drop only dead-man rows whose exact output is a retired export target."""
+    retired = [entry for entry in watch if entry[1] in retired_paths]
+    active = [entry for entry in watch if entry[1] not in retired_paths]
+    return active, retired
+
+
+# THE CUTOFF REACHES THIS LIST TOO, and until 2026-08-23 it did not.
+#
+# The markdown-render cutoff fired 2026-08-19: exporters/run_exports.py skips
+# every .md target and prints RETIRED instead of writing it. Both export-freshness
+# checks in this file already ask the same flag function and drop the retired
+# targets. This dead-man list did not, so four rows watched files the exporter now
+# refuses to write and reported a CHOSEN state as four failures every single day —
+# the compiled shared rules, Joe's personal rules, the introduction rules, and the
+# active-client roster.
+#
+# Worse than noise: the remedy those rows printed was bin/refresh-rules.sh, which
+# exits 0 and writes nothing after the cutoff. A red row whose fix silently does
+# nothing costs more than no row, because somebody runs it and believes it.
+#
+# MATCHED AGAINST THE EXPORT REGISTRY, NOT AGAINST ".md". The first version of
+# this block dropped any row whose path ended in .md, which took the radar digest
+# and the two repo-local job reports with it — three files still written nightly
+# by tools the cutoff never touched. The cutoff is about EXPORT TARGETS, so this
+# asks the registry which paths it has stopped writing and drops exactly those.
+#
+# Gated on the same flag rather than deleted, so flipping doctrine.md_renders_retired
+# back to false restores the rows with no code change — one contract, no second
+# place to decide what "retired" means.
+try:
+    from exporters.run_exports import md_renders_retired as _md_retired
+    from exporters.targets import TARGETS as _EXPORT_TARGETS
+    if _md_retired():
+        _retired_paths = {rel for rel, _fn in _EXPORT_TARGETS.values()
+                          if rel.lower().endswith(".md")}
+        WATCH, _retired_watch = _retired_watch_entries(WATCH, _retired_paths)
+        for _w in _retired_watch:
+            print(f"  -- {_w[0]:<18} RETIRED at the markdown-render cutoff; the store "
+                  f"serves this (standing-context / read-doctrine / catch-me-up)")
+except Exception as _exc:
+    # Fails OPEN, the same direction run_exports.py chose: a dead config lookup
+    # keeps every row rather than silently hiding a watch that still matters.
+    print(f"  -- {'md cutoff':<18} could not read the cutoff registry "
+          f"({type(_exc).__name__}); watching every row")
+
 # --- credential gates (added 2026-08-02) -------------------------------------
 # A JOB THAT CANNOT RUN IS NOT A JOB THAT FAILED, and reporting both as MISSING
 # is how a dashboard loses its readers. The matcher and the cadence engine exit
