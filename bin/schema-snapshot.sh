@@ -758,7 +758,7 @@ fi
 # active Hermes local environment or admit an Engineering Passport slice.
 #
 # The values below are the exact reviewed built-in seed from 0309 and the
-# exact engineering-slice:v1 contract from 0310.  They are deliberately
+# final engineering-slice:v1 contract from 0310 through 0312.  They are deliberately
 # rendered from repository text, with no production payload or observed
 # timestamp copied into the tracked snapshot.  The fixed conformance time is
 # a historical source observation, not a freshness claim; the provider's
@@ -823,23 +823,28 @@ begin
 end
 $carr_governed_execution_seeds$;
 
--- 0310's exact enabled on-demand engineering-slice:v1 job contract.  This is
--- the existing ops.job queue projection, not a second workflow or task store.
+-- The exact enabled on-demand engineering-slice:v1 job contract through 0312.
+-- A post-0312 snapshot marks 0311/0312 applied in its migration ledger, so a
+-- fresh rebuild will not replay their contract updates.  This INSERT uses
+-- ON CONFLICT DO NOTHING deliberately: it must therefore already be the final
+-- sponsored, lease-bound controller declaration rather than the old 0310 row.
+-- It remains the existing ops.job queue projection, not a second workflow or
+-- task store.
 insert into ops.job_definition
   (key,version,enabled,risk,owner_actor,execution_kind,execution_contract,
    inventory_contract,state_contract,routing_contract,filtering_contract,
    recurrence,validation_contract,retry_policy,deduplication,completion_contract,legacy_schedule)
 values
   ('engineering-slice',1,true,'yellow','hermes','deterministic',
-   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runCodexSlice","args":[],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
-   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["Codex Desktop fresh-native-session adapter"],"authority":"server-derived shadow execution only; no caller-selected identity, model, authority, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
+   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runEngineeringWorker","args":["room-bridge-engineering-controller"],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
+   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["room-bridge lease-bound controller","Codex Desktop fresh-native-session adapter"],"authority":"server-derived sponsored Codex execution with a closed repository action allowlist; no caller-selected identity, authority, model, action, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
    '{"states":["queued","running","succeeded","failed","timed_out"]}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["capability.candidate_admitted","runner.identity_bound"]},"description":"an accepted capability candidate and bound runner identity admit the slice"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.registered_args_selected"]},"description":"only the registered fresh Codex adapter is selected"}'::jsonb,
    '{"kind":"on_demand","schedule":null,"cron":null,"timezone":"America/Chicago","source":"MCP admit-engineering-slice only"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.exit_zero","command.workflow_marker_valid"]},"description":"the bounded adapter succeeds and returns its typed workflow marker"}'::jsonb,
    '{"max_attempts":2,"backoff":"constant","base_seconds":30,"cap_seconds":300,"timeout_seconds":1800}'::jsonb,
-   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}"}'::jsonb,
+   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}:generation:{generation}"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.receipt_persisted","command.execution_evidence_reconciles"]},"description":"lease-bound typed receipt persists and reconciles to the issued envelope","receipt_kind":"engineering_slice"}'::jsonb,
    '{"provider":"none","status":"disabled","disable_requires":"no scheduler exists; on-demand MCP admission only"}'::jsonb)
 on conflict (key,version) do nothing;
