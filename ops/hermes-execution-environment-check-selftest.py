@@ -10,6 +10,10 @@ import pathlib
 import subprocess
 import tempfile
 
+from git_env import fixture_env
+
+
+GIT_ENV = fixture_env()
 
 SOURCE = pathlib.Path(__file__).with_name("hermes-execution-environment-check.py")
 SPEC = importlib.util.spec_from_file_location("hermes_environment_check", SOURCE)
@@ -34,15 +38,15 @@ def fake_tree(root: pathlib.Path, backend: str = "local", version: str = "0.20.5
     )
     (source / "base.py").write_text("class BaseEnvironment:\n    pass\n", encoding="utf-8")
     source_root = root / "source"
-    subprocess.run(["git", "-C", str(source_root), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(source_root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source_root), "init", "-q"], check=True, env=GIT_ENV)
+    subprocess.run(["git", "-C", str(source_root), "add", "."], check=True, env=GIT_ENV)
     subprocess.run([
         "git", "-C", str(source_root), "-c", "user.name=Fixture", "-c",
         "user.email=fixture@example.invalid", "commit", "-qm", "fixture",
-    ], check=True)
+    ], check=True, env=GIT_ENV)
     commit = subprocess.run(
         ["git", "-C", str(source_root), "rev-parse", "HEAD"],
-        text=True, capture_output=True, check=True,
+        text=True, capture_output=True, check=True, env=GIT_ENV,
     ).stdout.strip()
     binary.write_text(
         "#!/bin/sh\n"

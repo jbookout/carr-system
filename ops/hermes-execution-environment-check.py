@@ -13,6 +13,8 @@ import re
 import subprocess
 import sys
 
+from git_env import scrubbed_env
+
 
 EXPECTED_LOCAL_IMPLEMENTATION_DIGEST = "sha256:7d680c252bedc88ff7b80d50a5bfbdb9b926823d8bbc521f606e7b58237cbc1e"
 EXPECTED_UPSTREAM_COMMIT = "1bbb6e5bce56e721ab685af4cd87df21bbff4d35"
@@ -79,7 +81,7 @@ def command(binary: pathlib.Path, *args: str) -> str:
 def _git(source_root: pathlib.Path, *args: str) -> tuple[int, str]:
     result = subprocess.run(
         ["git", "-C", str(source_root), *args], text=True, capture_output=True,
-        timeout=20, check=False,
+        timeout=20, check=False, env=scrubbed_env(),
     )
     return result.returncode, result.stdout.strip()
 
