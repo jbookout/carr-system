@@ -414,10 +414,16 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
   } catch {
     return null;
   }
-  if (!tokens || typeof tokens !== "object") return null;
-  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
-  if (!slug) return null;
-  const sponsoring_human_slug = HERMES_SPONSOR[slug] || null;
+  if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return null;
+  // This is deliberately not a generic machine-token map.  The CoS grant is
+  // bound to one registered runtime and one sponsor; accepting an arbitrary
+  // key here would create the actor before the profile/owner gates can help.
+  const slugs = Object.keys(tokens);
+  if (slugs.length !== 1 || slugs[0] !== "hermes-pilot") return null;
+  const slug = "hermes-pilot";
+  if (!tokens[slug] || tokens[slug] !== token) return null;
+  const sponsoring_human_slug = HERMES_SPONSOR[slug];
+  if (sponsoring_human_slug !== "joe") return null;
   return { slug, display: `Hermes CoS (${slug})`, human: false,
            hermes: true, hermesCos: true, via: "hermes-cos-token", client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };

@@ -40,6 +40,21 @@ test("the CoS map is checked separately and before the plain/projector door", ()
   assert.equal(agentActorForToken("Bearer cos-secret", COS), null);
 });
 
+test("the CoS door rejects every map key except the registered hermes-pilot runtime", () => {
+  for (const slug of ["joe", "dell", "codex", "unknown"]) {
+    const actor = hermesCosActorForToken("Bearer adversarial-secret",
+      JSON.stringify({ [slug]: "adversarial-secret" }));
+    assert.equal(actor, null, `${slug} must not become a CoS actor`);
+    assert.equal(Boolean(actor && profileForActor(actor, new Request("https://x/mcp")) === "hermes-cos"), false);
+    assert.equal(Boolean(actor && allowedIn(profileForActor(actor, new Request("https://x/mcp")), "update-deal", WRITE)), false);
+    assert.deepEqual(permittedActionOwnerSlugs(actor), []);
+  }
+  assert.equal(hermesCosActorForToken("Bearer cos-secret",
+    JSON.stringify({ "hermes-pilot": "cos-secret", joe: "other-secret" })), null,
+  "an otherwise valid map with an unregistered key fails closed");
+  assert.equal(hermesCosActorForToken("Bearer cos-secret", JSON.stringify(["cos-secret"])), null);
+});
+
 test("ordinary Hermes and projector credentials retain their exact existing door", () => {
   const a = hermesActorForTokenMaps("Bearer projector-secret", PLAIN, PROJECTOR);
   assert.equal(a.via, "hermes-token");
