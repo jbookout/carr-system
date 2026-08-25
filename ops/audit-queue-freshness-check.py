@@ -209,7 +209,13 @@ def inventory_errors(repo: str, audit: str | None) -> list[str]:
         return errors + [f"cannot read {os.path.relpath(audit, repo)}: {exc}"]
 
     seen: set[str] = set()
-    duplicates = sorted({rid for rid in audit_ids if rid in seen or seen.add(rid)})
+    duplicate_ids: set[str] = set()
+    for rid in audit_ids:
+        if rid in seen:
+            duplicate_ids.add(rid)
+        else:
+            seen.add(rid)
+    duplicates = sorted(duplicate_ids)
     if duplicates:
         errors.append("audit has duplicate id(s): " + ", ".join(duplicates))
     actual = set(audit_ids)
