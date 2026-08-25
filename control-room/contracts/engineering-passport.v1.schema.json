@@ -13,6 +13,7 @@
     "accepted_plan_revision",
     "plan_digest",
     "slice_plan",
+    "execution_envelopes",
     "slices",
     "receipts",
     "reviewer_facts",
@@ -35,6 +36,13 @@
     },
     "plan_digest": {
       "$ref": "#/$defs/Digest"
+    },
+    "execution_envelopes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/ExecutionEnvelope"
+      }
     },
     "slice_plan": {
       "type": "object",
@@ -308,6 +316,40 @@
         }
       }
     },
+    "ExecutionEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "envelope_id",
+        "work_request_id",
+        "plan_revision",
+        "agent_session",
+        "issued_at",
+        "expires_at",
+        "request",
+        "server_binding",
+        "handoff",
+        "state_binding",
+        "phase_binding",
+        "evaluation_context"
+      ],
+      "properties": {
+        "schema_version": {"const": "execution-envelope.v1"},
+        "envelope_id": {"$ref": "#/$defs/Id"},
+        "work_request_id": {"$ref": "#/$defs/Id"},
+        "plan_revision": {"$ref": "#/$defs/PlanRevision"},
+        "agent_session": {"type": "object"},
+        "issued_at": {"type": "string", "format": "date-time"},
+        "expires_at": {"type": "string", "format": "date-time"},
+        "request": {"type": "object"},
+        "server_binding": {"type": "object"},
+        "handoff": {"type": "object"},
+        "state_binding": {"type": "object"},
+        "phase_binding": {"type": "object"},
+        "evaluation_context": {"type": "object"}
+      }
+    },
     "Evidence": {
       "type": "object",
       "additionalProperties": false,
@@ -492,6 +534,33 @@
     "LearningDisposition": {
       "type": "object",
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "state": {"const": "unresolved"},
+            "route": {"type": "null"}
+          }
+        },
+        {
+          "properties": {
+            "state": {
+              "enum": ["proposed", "rejected", "nothing_durable"]
+            },
+            "route": {
+              "enum": [
+                "regression_test",
+                "gate_or_validator",
+                "decision_record",
+                "skill_or_workflow",
+                "memory_or_rule_candidate",
+                "incident_finding",
+                "speculative_finding",
+                "nothing_durable"
+              ]
+            }
+          }
+        }
+      ],
       "required": [
         "state",
         "route",
@@ -508,15 +577,20 @@
           ]
         },
         "route": {
-          "enum": [
-            "regression_test",
-            "gate_or_validator",
-            "decision_record",
-            "skill_or_workflow",
-            "memory_or_rule_candidate",
-            "incident_finding",
-            "speculative_finding",
-            "nothing_durable"
+          "oneOf": [
+            {
+              "enum": [
+                "regression_test",
+                "gate_or_validator",
+                "decision_record",
+                "skill_or_workflow",
+                "memory_or_rule_candidate",
+                "incident_finding",
+                "speculative_finding",
+                "nothing_durable"
+              ]
+            },
+            {"type": "null"}
           ]
         },
         "evidence_refs": {

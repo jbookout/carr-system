@@ -127,8 +127,12 @@ def _validate_slice(value: Any, label: str = "engineering slice") -> dict[str, A
     checks = _list(row["planned_checks"], label + " planned_checks")
     if not checks:
         raise EngineeringContractError(f"{label} must plan at least one check before execution")
+    check_refs: set[str] = set()
     for index, check in enumerate(checks):
-        _validate_check(check, f"{label} planned_checks[{index}]")
+        validated_check = _validate_check(check, f"{label} planned_checks[{index}]")
+        if validated_check["check_ref"] in check_refs:
+            raise EngineeringContractError(f"{label} has duplicate planned check refs")
+        check_refs.add(validated_check["check_ref"])
     if row["concurrency_posture"] not in {"parallel_safe", "serial_after_dependencies", "exclusive_resource"}:
         raise EngineeringContractError(f"{label} concurrency_posture is invalid")
     _bool(row["manual_qa_required"], label + " manual_qa_required")
@@ -177,6 +181,27 @@ def _validate_plan_envelope_binding(plan: dict[str, Any], envelope: dict[str, An
         raise EngineeringContractError("accepted plan state binding does not match execution envelope")
     if plan["accepted_plan_revision"] != envelope["plan_revision"]:
         raise EngineeringContractError("accepted plan revision does not match execution envelope")
+
+
+def _validate_authoritative_envelopes(plan: dict[str, Any], values: Any) -> dict[str, dict[str, Any]]:
+    """Validate and index server-issued envelopes persisted by a passport."""
+    rows = _list(values, "engineering passport execution_envelopes")
+    result: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(rows):
+        envelope = base.validate_execution_envelope(raw)
+        _validate_plan_envelope_binding(plan, envelope)
+        digest = base.execution_envelope_digest(envelope)
+        if digest in result:
+            raise EngineeringContractError(f"engineering passport duplicates execution envelope digest at index {index}")
+        result[digest] = envelope
+    return result
+
+
+def _receipt_envelope(receipt: dict[str, Any], envelopes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    envelope = envelopes.get(receipt["envelope_digest"])
+    if envelope is None:
+        raise EngineeringContractError("receipt envelope_digest does not resolve to one authoritative envelope")
+    return envelope
 
 
 def _assert_acyclic(slices: Iterable[dict[str, Any]]) -> None:
@@ -463,9 +488,16 @@ def _closure_complete(slices: list[dict[str, Any]], receipts: list[dict[str, Any
     return closure["work"]["state"] == "complete" and closure["proof"]["state"] == "complete" and closure["explanation"]["state"] == "complete" and release_ok and learning_ok
 
 
-def project_engineering_passport(plan: Any, receipts: Iterable[Any], *, reviewer_facts: list[dict[str, Any]] | None = None, qa_facts: list[dict[str, Any]] | None = None, explanation: dict[str, Any] | None = None, release: dict[str, Any] | None = None, learning: dict[str, Any] | None = None, stale_conflict: dict[str, Any] | None = None) -> dict[str, Any]:
+def project_engineering_passport(plan: Any, receipts: Iterable[Any], *, execution_envelopes: Iterable[Any], reviewer_facts: list[dict[str, Any]] | None = None, qa_facts: list[dict[str, Any]] | None = None, explanation: dict[str, Any] | None = None, release: dict[str, Any] | None = None, learning: dict[str, Any] | None = None, stale_conflict: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Project from accepted state plus server-issued envelopes; an empty envelope set is valid only when receipts are empty."""
     accepted = validate_engineering_slice_plan(plan)
-    receipt_rows = [_validate_receipt(item, accepted, None) for item in receipts]
+    envelope_by_digest = _validate_authoritative_envelopes(accepted, list(execution_envelopes))
+    receipt_rows = []
+    for item in receipts:
+        raw = item
+        if not isinstance(raw, dict) or "envelope_digest" not in raw:
+            raise EngineeringContractError("every engineering receipt must resolve an authoritative envelope")
+        receipt_rows.append(_validate_receipt(raw, accepted, _receipt_envelope(raw, envelope_by_digest)))
     if len({row["slice_ref"] for row in receipt_rows}) != len(receipt_rows) or len({row["attempt_id"] for row in receipt_rows}) != len(receipt_rows): raise EngineeringContractError("passport cannot select duplicate receipt or attempt")
     reviewer_facts = reviewer_facts or []; qa_facts = qa_facts or []
     reviewer_by = _validated_reviewers(accepted, receipt_rows, reviewer_facts); qa_by = _qa_facts(accepted, receipt_rows, qa_facts)
@@ -486,20 +518,25 @@ def project_engineering_passport(plan: Any, receipts: Iterable[Any], *, reviewer
         "learning": _learning(learning or {"state": "unresolved", "route": None, "evidence_refs": [], "note": "learning disposition pending"}),
     }
     closure_complete = _closure_complete(slices, receipt_rows, reviewer_by, qa_by, closure, stale_conflict or {"state": "none", "reason": None})
-    projection = {"schema_version": "engineering-passport.v1", "work_request": accepted["work_request"], "accepted_plan_revision": accepted["accepted_plan_revision"], "plan_digest": accepted["plan_digest"], "slice_plan": accepted, "slices": slices, "receipts": receipt_rows, "reviewer_facts": list(reviewer_by.values()), "qa_facts": list(qa_by.values()), "operator_receipt": _derived_operator_receipt(slices, receipt_rows, qa_by), "closure": closure, "closure_state": "complete" if closure_complete else "blocked", "stale_conflict": stale_conflict or {"state": "none", "reason": None}}
+    projection = {"schema_version": "engineering-passport.v1", "work_request": accepted["work_request"], "accepted_plan_revision": accepted["accepted_plan_revision"], "plan_digest": accepted["plan_digest"], "slice_plan": accepted, "execution_envelopes": list(envelope_by_digest.values()), "slices": slices, "receipts": receipt_rows, "reviewer_facts": list(reviewer_by.values()), "qa_facts": list(qa_by.values()), "operator_receipt": _derived_operator_receipt(slices, receipt_rows, qa_by), "closure": closure, "closure_state": "complete" if closure_complete else "blocked", "stale_conflict": stale_conflict or {"state": "none", "reason": None}}
     projection["projection_digest"] = base.canonical_digest(projection)
     return projection
 
 
 def validate_engineering_passport(value: Any) -> dict[str, Any]:
-    fields = {"schema_version", "work_request", "accepted_plan_revision", "plan_digest", "slice_plan", "slices", "receipts", "reviewer_facts", "qa_facts", "operator_receipt", "closure", "closure_state", "stale_conflict", "projection_digest"}
+    fields = {"schema_version", "work_request", "accepted_plan_revision", "plan_digest", "slice_plan", "execution_envelopes", "slices", "receipts", "reviewer_facts", "qa_facts", "operator_receipt", "closure", "closure_state", "stale_conflict", "projection_digest"}
     row = _exact(value, fields, "engineering passport")
     if row["schema_version"] != "engineering-passport.v1": raise EngineeringContractError("unsupported engineering passport schema_version")
     _binding(row["work_request"], "engineering passport work_request"); _plan_ref(row["accepted_plan_revision"], "engineering passport accepted_plan_revision"); _digest(row["plan_digest"], "engineering passport plan_digest"); _digest(row["projection_digest"], "engineering passport projection_digest")
     accepted = validate_engineering_slice_plan(row["slice_plan"])
     if accepted["work_request"] != row["work_request"] or accepted["accepted_plan_revision"] != row["accepted_plan_revision"] or accepted["plan_digest"] != row["plan_digest"]:
         raise EngineeringContractError("engineering passport plan binding does not match")
-    receipt_rows = [_validate_receipt(item, accepted, None) for item in _list(row["receipts"], "engineering passport receipts")]
+    envelope_by_digest = _validate_authoritative_envelopes(accepted, row["execution_envelopes"])
+    receipt_rows = []
+    for item in _list(row["receipts"], "engineering passport receipts"):
+        if not isinstance(item, dict) or "envelope_digest" not in item:
+            raise EngineeringContractError("every engineering receipt must resolve an authoritative envelope")
+        receipt_rows.append(_validate_receipt(item, accepted, _receipt_envelope(item, envelope_by_digest)))
     if len({item["slice_ref"] for item in receipt_rows}) != len(receipt_rows) or len({item["attempt_id"] for item in receipt_rows}) != len(receipt_rows): raise EngineeringContractError("engineering passport receipts are ambiguous")
     reviewer_by = _validated_reviewers(accepted, receipt_rows, _list(row["reviewer_facts"], "engineering passport reviewer_facts"))
     qa_by = _qa_facts(accepted, receipt_rows, _list(row["qa_facts"], "engineering passport qa_facts"))

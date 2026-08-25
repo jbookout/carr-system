@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
+import {compileSchema} from "../../workspace/contracts/schema-validator.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = relative => JSON.parse(fs.readFileSync(path.join(ROOT, relative), "utf8"));
@@ -17,6 +18,14 @@ test("all contract files are valid versioned JSON", () => {
       assert.match(value.status, /^phase[01]_/, file);
     }
   }
+});
+
+test("Engineering Passport schema preserves blocked learning null and envelope authority", () => {
+  const schema = read("contracts/engineering-passport.v1.schema.json");
+  assert.ok(schema.required.includes("execution_envelopes"));
+  const validateLearning = compileSchema(schema, schema.$defs.LearningDisposition);
+  assert.equal(validateLearning({ state: "unresolved", route: null, evidence_refs: [], note: "pending" }).valid, true);
+  assert.equal(validateLearning({ state: "proposed", route: null, evidence_refs: [], note: "invalid terminal omission" }).valid, false);
 });
 
 test("state machines are closed and internally consistent", () => {

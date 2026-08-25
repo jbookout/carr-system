@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { deriveJobPassports, jobPassportStatusLabel, parseJobPassportReceipt } from "../../dealroom/js/job-passport.js";
 
 const fixture = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.observatory-projection.v1.json", import.meta.url)));
+const envelope = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.execution-envelope.v1.json", import.meta.url)));
 const portfolio = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/carr-evaluation-kernel.synthetic.v1.json", import.meta.url)));
 const spatial = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.spatial-surface.v1.json", import.meta.url)));
 const elapsedTelemetry = JSON.parse(fs.readFileSync(new URL("../../control-room/contracts/fixtures/execution-fabric/codex_desktop.elapsed-time.telemetry-measurement.v1.json", import.meta.url)));
@@ -17,12 +18,12 @@ const canonical = (value) => Array.isArray(value) ? `[${value.map(canonical).joi
 const seal = (value) => `sha256:${crypto.createHash("sha256").update(canonical(value)).digest("hex")}`;
 const engineeringFor = (projection = fixture) => {
   const workRequest = { id: projection.work_request_id, state_version: projection.source_state.state_version, canonical_record_digest: projection.source_state.canonical_record_digest };
-  const acceptedPlanRevision = { id: "plan:engineering", revision: 1, digest: projection.source_state.plan_revision_digest };
+  const acceptedPlanRevision = { id: envelope.plan_revision.id, revision: envelope.plan_revision.revision, digest: projection.source_state.plan_revision_digest };
   const evidence = { ref: "evidence:baseline", redaction_class: "redacted_evidence", content_digest: "sha256:" + "a".repeat(64) };
   const slice = { slice_ref: "slice:a", ordinal: 1, objective: "Blocked synthetic slice", definition_of_done: "A typed receipt arrives", dependency_refs: [], declared_resource_refs: ["resource:worktree-a"], declared_component_refs: ["component:execution-fabric"], declared_plan_step_refs: ["step:synthetic-read"], baseline_evidence_refs: [evidence], planned_checks: [{ check_ref: "check:synthetic", failure_condition: "missing evidence", evidence_requirement: "redacted_evidence_required" }], scope_boundary: "synthetic fixture", forbidden_change_refs: ["forbidden:authority"], concurrency_posture: "parallel_safe", manual_qa_required: false, risk_class: "R1", release_requirement: "required" };
   const slicePlan = { schema_version: "engineering-slice-plan.v1", work_request: workRequest, accepted_plan_revision: acceptedPlanRevision, slices: [slice] };
   slicePlan.plan_digest = seal(slicePlan);
-  const passport = { schema_version: "engineering-passport.v1", work_request: workRequest, accepted_plan_revision: acceptedPlanRevision, plan_digest: slicePlan.plan_digest, slice_plan: slicePlan, receipts: [], reviewer_facts: [], qa_facts: [], slices: [{ slice_ref: "slice:a", ordinal: 1, dependency_refs: [], state: "eligible", planned_check_refs: ["check:synthetic"], deviation_refs: [], manual_qa_required: false, release_requirement: "required" }], operator_receipt: { what_changed: [], why: "derived from accepted plan and typed receipts", evidence_refs: [], deviations: [], remaining_risk: ["slice:a"], manual_qa_items: [] }, closure: { work: { state: "unresolved", evidence_refs: [], note: "pending" }, proof: { state: "unresolved", evidence_refs: [], note: "pending" }, explanation: { state: "unresolved", evidence_refs: [], note: "pending" }, release: { state: "unresolved", evidence_refs: [], note: "pending" }, learning: { state: "unresolved", route: null, evidence_refs: [], note: "pending" } }, closure_state: "blocked", stale_conflict: { state: "none", reason: null } };
+  const passport = { schema_version: "engineering-passport.v1", work_request: workRequest, accepted_plan_revision: acceptedPlanRevision, plan_digest: slicePlan.plan_digest, slice_plan: slicePlan, execution_envelopes: [structuredClone(envelope)], receipts: [], reviewer_facts: [], qa_facts: [], slices: [{ slice_ref: "slice:a", ordinal: 1, dependency_refs: [], state: "eligible", planned_check_refs: ["check:synthetic"], deviation_refs: [], manual_qa_required: false, release_requirement: "required" }], operator_receipt: { what_changed: [], why: "derived from accepted plan and typed receipts", evidence_refs: [], deviations: [], remaining_risk: ["slice:a"], manual_qa_items: [] }, closure: { work: { state: "unresolved", evidence_refs: [], note: "pending" }, proof: { state: "unresolved", evidence_refs: [], note: "pending" }, explanation: { state: "unresolved", evidence_refs: [], note: "pending" }, release: { state: "unresolved", evidence_refs: [], note: "pending" }, learning: { state: "unresolved", route: null, evidence_refs: [], note: "pending" } }, closure_state: "blocked", stale_conflict: { state: "none", reason: null } };
   passport.projection_digest = seal(passport);
   return passport;
 };
@@ -150,7 +151,7 @@ test("Engineering Passport binds to exact Observatory state and withholds stale/
   const staleModel = deriveJobPassports([turn(wrap("observatory_projection", newerProjection), 1), turn(wrap("engineering_passport", stale), 2)]);
   assert.equal(staleModel.passports[0].engineering_passport, null);
   assert.ok(staleModel.rejected.some((row) => row.reason === "stale_engineering_passport"));
-  const conflict = engineeringFor(fixture); conflict.work_request.canonical_record_digest = "sha256:" + "d".repeat(64); conflict.slice_plan.work_request.canonical_record_digest = conflict.work_request.canonical_record_digest; conflict.slice_plan.plan_digest = seal({ ...conflict.slice_plan, plan_digest: undefined }); delete conflict.slice_plan.plan_digest; conflict.slice_plan.plan_digest = seal(conflict.slice_plan); conflict.plan_digest = conflict.slice_plan.plan_digest; conflict.projection_digest = seal({ ...conflict, projection_digest: undefined }); delete conflict.projection_digest; conflict.projection_digest = seal(conflict);
+  const conflict = engineeringFor(fixture); conflict.work_request.canonical_record_digest = "sha256:" + "d".repeat(64); conflict.slice_plan.work_request.canonical_record_digest = conflict.work_request.canonical_record_digest; conflict.execution_envelopes[0].state_binding.canonical_record_digest = conflict.work_request.canonical_record_digest; conflict.slice_plan.plan_digest = seal({ ...conflict.slice_plan, plan_digest: undefined }); delete conflict.slice_plan.plan_digest; conflict.slice_plan.plan_digest = seal(conflict.slice_plan); conflict.plan_digest = conflict.slice_plan.plan_digest; conflict.projection_digest = seal({ ...conflict, projection_digest: undefined }); delete conflict.projection_digest; conflict.projection_digest = seal(conflict);
   const conflictModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", matching), 2), turn(wrap("engineering_passport", conflict), 3)]);
   assert.equal(conflictModel.passports[0].engineering_passport, null);
   assert.ok(conflictModel.rejected.some((row) => row.reason === "conflicting_engineering_passport"));
@@ -175,6 +176,14 @@ test("browser refuses forged or malformed Engineering Passports before paint", (
   const digestModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", badDigest), 2)]);
   assert.equal(digestModel.passports[0].engineering_passport, null);
   assert.ok(digestModel.passports[0].attempt_lane, "invalid engineering fact must not remove the prior observatory card");
+
+  const duplicateCheck = engineeringFor(fixture); duplicateCheck.slice_plan.slices[0].planned_checks.push(structuredClone(duplicateCheck.slice_plan.slices[0].planned_checks[0])); delete duplicateCheck.slice_plan.plan_digest; duplicateCheck.slice_plan.plan_digest = seal(duplicateCheck.slice_plan); duplicateCheck.plan_digest = duplicateCheck.slice_plan.plan_digest; delete duplicateCheck.projection_digest; duplicateCheck.projection_digest = seal(duplicateCheck);
+  const duplicateCheckModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", duplicateCheck), 2)]);
+  assert.equal(duplicateCheckModel.passports[0].engineering_passport, null);
+
+  const wrongEnvelope = engineeringFor(fixture); wrongEnvelope.execution_envelopes[0].work_request_id = "wr-other"; delete wrongEnvelope.projection_digest; wrongEnvelope.projection_digest = seal(wrongEnvelope);
+  const wrongEnvelopeModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", wrongEnvelope), 2)]);
+  assert.equal(wrongEnvelopeModel.passports[0].engineering_passport, null);
 });
 
 test("regression guards preserve keyboard drilldown across a poll and a real mobile grid row", () => {
