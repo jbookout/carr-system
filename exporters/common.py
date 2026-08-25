@@ -15,10 +15,13 @@ Credential: CARR_DB_EXPORTER_URL from ~/.config/carr/db.env (carr_exporter
 bundle: export views + export_run + system_config, nothing else).
 """
 
+import errno
 import hashlib
 import json
 import os
 import sys
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,6 +57,9 @@ EXPORT_HOME = Path(os.environ.get("CARR_EXPORT_HOME")
                    or "/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI")
 LIVE = os.environ.get("CARR_EXPORT_LIVE") == "1"
 KEEP_GENERATIONS = 7
+GENERATION_COPY_ATTEMPTS = 3
+GENERATION_COPY_RETRY_ERRNOS = frozenset({errno.EAGAIN, errno.EDEADLK})
+GENERATION_COPY_BACKOFF_SECONDS = (0.05, 0.10)
 
 
 def connect():
@@ -205,50 +211,95 @@ def coverage_note_cell(finding, noun):
             f"Recounted on every export.")
 
 
+def _generation_destinations(gen_dir: Path, final_path: Path, stamp: str):
+    """Yield the bounded same-second name space, oldest-compatible name first."""
+    yield gen_dir / f"{stamp}-{final_path.name}"
+    for sequence in range(1, 100):
+        yield gen_dir / f"{stamp}-{sequence:02d}-{final_path.name}"
+
+
+class _PublishedGenerationCleanupError(RuntimeError):
+    """The generation is durable; cleanup failed and must not trigger a recopy."""
+
+
+def _remove_generation_temporary(temporary: Path) -> None:
+    """Remove a staged file, retrying only the two FileProvider transient errors."""
+    for attempt in range(GENERATION_COPY_ATTEMPTS):
+        try:
+            temporary.unlink(missing_ok=True)
+            return
+        except OSError as error:
+            if error.errno not in GENERATION_COPY_RETRY_ERRNOS:
+                raise
+            if attempt + 1 == GENERATION_COPY_ATTEMPTS:
+                raise
+            time.sleep(GENERATION_COPY_BACKOFF_SECONDS[attempt])
+
+
+def _write_generation_attempt(source: Path, gen_dir: Path, stamp: str) -> Path:
+    """Stage one byte-for-byte generation, then atomically publish without clobber."""
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{stamp}-{source.name}.", dir=gen_dir)
+    temporary = Path(temporary_name)
+    published = None
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(source.read_bytes())
+        # link(2) is the no-clobber publication primitive: EEXIST means another
+        # run won this name after we began staging, so allocate the next name.
+        for destination in _generation_destinations(gen_dir, source, stamp):
+            try:
+                os.link(temporary, destination)
+                published = destination
+                return destination
+            except FileExistsError:
+                continue
+        first = gen_dir / f"{stamp}-{source.name}"
+        raise FileExistsError(errno.EEXIST, "generation-name space exhausted", first)
+    finally:
+        try:
+            _remove_generation_temporary(temporary)
+        except OSError as error:
+            if published is not None:
+                raise _PublishedGenerationCleanupError(
+                    f"generation published at {published}, but staging cleanup failed"
+                ) from error
+            raise
+
+
 def keep_generation(final_path: Path):
-    """Keep a dated copy of the file that is about to be replaced. NEVER RAISES.
+    """Keep an atomic dated copy of the file about to be replaced.
 
-    ON 2026-08-25 THIS FUNCTION TOOK DOWN THE THING IT EXISTS TO PROTECT. The
-    nightly export step wrote zero of its six targets, dying two seconds in on
-    `OSError: [Errno 11] Resource deadlock avoided`. shutil.copy2 routes through
-    macOS fcopyfile, and fcopyfile answers EDEADLK when the source sits on a
-    OneDrive CloudStorage (FileProvider) path — which is where EXPORT_HOME has
-    pointed since Joe's 2026-08-22 ruling. This is called from run_export BEFORE
-    the atomic rename and OUTSIDE its try block, so one failed BACKUP killed the
-    exporter process on its first target and the whole vault went unwritten for
-    the night. Nothing alarmed: the export register's window is 26 hours and the
-    previous good run was still inside it.
+    OneDrive's FileProvider can transiently return EAGAIN/EDEADLK while reading
+    or writing a cloud-backed file.  Retry only those two documented errors,
+    with a short bounded backoff.  All other errors (and an exhausted transient
+    retry budget) escape: a permission, path, or storage failure must be seen by
+    the exporter rather than silently discarding the rollback guarantee.
 
-    The inversion that bug embodied is the rule now: losing a generation copy
-    costs one rollback point, losing the export costs the day. A backup is
-    subordinate to the thing it backs up, always.
-
-    Two changes, both load-bearing:
-      - copy the bytes directly instead of through shutil.copy2/copyfile, so the
-        fcopyfile fast path is never reached on a cloud-synced source. The UTC
-        stamp already in the generation's filename is its provenance, so no
-        copystat call is owed either — and that is one less cloud-path syscall
-        that can refuse at 2am.
-      - swallow and REPORT any OSError, so no failure here can ever abort an
-        export. tools/test-export-keep-generation.py holds both properties.
+    The copy deliberately avoids shutil.copy2/copyfile, whose macOS fcopyfile
+    fast path was the source of the 2026-08-25 EDEADLK.  The timestamp in the
+    generation name is its provenance, so copying source metadata is not part of
+    this contract.
     """
     if not final_path.exists():
         return
-    try:
-        gen_dir = final_path.parent / (final_path.name + ".generations")
-        gen_dir.mkdir(exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        (gen_dir / f"{stamp}-{final_path.name}").write_bytes(final_path.read_bytes())
-        gens = sorted(gen_dir.iterdir())
-        for old in gens[:-KEEP_GENERATIONS]:
-            old.unlink()
-    except OSError as e:
-        # Loud on stderr, which is where the nightly chain captures step output,
-        # so a tree that has silently stopped keeping rollback points is still
-        # readable in out/nightly.log rather than being invisible.
-        print(f"[keep_generation] WARNING: no rollback generation kept for "
-              f"{final_path.name} ({e}) — the export itself continues",
-              file=sys.stderr)
+    gen_dir = final_path.parent / (final_path.name + ".generations")
+    gen_dir.mkdir(exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    for attempt in range(GENERATION_COPY_ATTEMPTS):
+        try:
+            _write_generation_attempt(final_path, gen_dir, stamp)
+            break
+        except OSError as error:
+            if error.errno not in GENERATION_COPY_RETRY_ERRNOS:
+                raise
+            if attempt + 1 == GENERATION_COPY_ATTEMPTS:
+                raise
+            time.sleep(GENERATION_COPY_BACKOFF_SECONDS[attempt])
+
+    gens = sorted(gen_dir.iterdir())
+    for old in gens[:-KEEP_GENERATIONS]:
+        old.unlink()
 
 
 def run_export(target_key, live_rel_path, build_fn, bootstrap=False):

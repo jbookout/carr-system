@@ -1,45 +1,20 @@
 #!/usr/bin/env python3
-"""Prove keep_generation can never abort the export it is protecting.
+"""Focused, synthetic checks for FileProvider-safe export generations.
 
-WHY THIS EXISTS. On 2026-08-25 the nightly export step wrote ZERO of its six
-targets. It died two seconds in, inside keep_generation, on this:
-
-    OSError: [Errno 11] Resource deadlock avoided
-
-shutil.copy2 routes through macOS fcopyfile, and fcopyfile answers EDEADLK when
-the source lives on a OneDrive CloudStorage (FileProvider) path — which is where
-the live vault has been since Joe's 2026-08-22 ruling. keep_generation is called
-from run_export BEFORE the atomic rename and OUTSIDE its try block, so one
-failed BACKUP killed the exporter process on its first target and every vault
-file went unwritten for the night. The export register still read OK, because
-its window is 26 hours and the previous good run was inside it.
-
-The rule is the inversion that bug embodied: losing a generation copy costs one
-rollback point, losing the export costs the day. A backup is subordinate to the
-thing it backs up, always.
-
-Four properties:
-
-  1. KEEPS A COPY      — the generation is byte-identical to the source.
-  2. NO fcopyfile      — shutil.copy2/copyfile are never called, so the cloud
-                         fast path that raised EDEADLK is not reachable at all.
-  3. NEVER RAISES      — a genuinely broken destination is reported and
-                         swallowed; the caller proceeds to write the export.
-  4. PRUNES            — at most KEEP_GENERATIONS copies survive, oldest first.
-
-Read-only: works in a temp dir, touches no vault file and no database.
-Usage:  ./.venv/bin/python tools/test-export-keep-generation.py
+No vault files or database are touched. The test exercises the real helper
+against temporary files and injects only the redacted OneDrive error shape.
 """
 
 import errno
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from exporters.common import KEEP_GENERATIONS, keep_generation  # noqa: E402
+import exporters.common as common  # noqa: E402
 
 fails: list[str] = []
 
@@ -54,89 +29,207 @@ def gen_dir_for(target: Path) -> Path:
     return target.parent / (target.name + ".generations")
 
 
+def generation_files(target: Path) -> list[Path]:
+    directory = gen_dir_for(target)
+    return sorted(path for path in directory.iterdir() if not path.name.startswith(".")) if directory.exists() else []
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
 
-        print("1. keeps a byte-identical copy of the file about to be replaced")
+        print("1. keeps an atomic byte-identical copy without shutil's fcopyfile path")
         target = tmp / "lead-board.md"
         target.write_bytes(b"first generation\n")
-        keep_generation(target)
-        kept = sorted(gen_dir_for(target).iterdir())
-        check("one generation kept", len(kept) == 1, f"found {len(kept)}")
-        if kept:
-            check("copy is byte-identical", kept[0].read_bytes() == b"first generation\n")
-            check("copy is stamped and named after the source",
-                  kept[0].name.endswith("-lead-board.md") and kept[0].name[8] == "T")
-
-        print("2. never routes through fcopyfile — shutil.copy2/copyfile unused")
         exploded = []
 
-        def boom(*a, **k):
-            exploded.append(a)
+        def boom(*args, **kwargs):
+            exploded.append(args)
             raise OSError(errno.EDEADLK, "Resource deadlock avoided")
 
         real_copy2, real_copyfile = shutil.copy2, shutil.copyfile
         shutil.copy2, shutil.copyfile = boom, boom
         try:
-            target2 = tmp / "deal-room.md"
-            target2.write_bytes(b"cloud path payload\n")
-            raised = None
-            try:
-                keep_generation(target2)
-            except BaseException as e:  # noqa: BLE001 — the point is that nothing escapes
-                raised = e
-            check("shutil copy helpers never called", not exploded,
-                  f"called {len(exploded)}x" if exploded else "")
-            check("no exception escaped", raised is None, repr(raised) if raised else "")
-            kept2 = sorted(gen_dir_for(target2).iterdir()) if gen_dir_for(target2).exists() else []
-            check("generation still written without them", len(kept2) == 1,
-                  f"found {len(kept2)}")
+            common.keep_generation(target)
         finally:
             shutil.copy2, shutil.copyfile = real_copy2, real_copyfile
+        kept = generation_files(target)
+        check("shutil copy helpers are never called", not exploded, f"called {len(exploded)}x")
+        check("one generation is kept", len(kept) == 1, f"found {len(kept)}")
+        check("copy is byte-identical", kept and kept[0].read_bytes() == b"first generation\n")
+        check("copy uses the stamped source name", kept and kept[0].name.endswith("-lead-board.md"))
 
-        print("3. a broken destination is swallowed, not raised at the exporter")
-        target3 = tmp / "vendors.md"
-        target3.write_bytes(b"payload\n")
-        # A regular FILE sitting where the .generations DIRECTORY must go: mkdir
-        # raises FileExistsError, which is an OSError, and stands in for every
-        # way a cloud-synced destination can refuse a write at 2am.
-        gen_dir_for(target3).write_bytes(b"not a directory")
-        raised3 = None
+        print("2. EDEADLK retries twice, then publishes one complete generation")
+        deadlock_target = tmp / "deal-room.md"
+        deadlock_target.write_bytes(b"cloud path payload\n")
+        real_read_bytes, real_sleep = Path.read_bytes, common.time.sleep
+        deadlock_reads, sleeps = [], []
+
+        def deadlock_then_read(path):
+            if path == deadlock_target and len(deadlock_reads) < 2:
+                deadlock_reads.append(path)
+                raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+            return real_read_bytes(path)
+
+        Path.read_bytes = deadlock_then_read
+        common.time.sleep = sleeps.append
         try:
-            keep_generation(target3)
-        except BaseException as e:  # noqa: BLE001
-            raised3 = e
-        check("no exception escaped", raised3 is None, repr(raised3) if raised3 else "")
-        check("source file left untouched", target3.read_bytes() == b"payload\n")
+            common.keep_generation(deadlock_target)
+        finally:
+            Path.read_bytes, common.time.sleep = real_read_bytes, real_sleep
+        kept = generation_files(deadlock_target)
+        check("EDEADLK used all required attempts", len(deadlock_reads) == 2,
+              f"failed reads {len(deadlock_reads)}")
+        check("EDEADLK backoff is bounded and ordered",
+              sleeps == list(common.GENERATION_COPY_BACKOFF_SECONDS), repr(sleeps))
+        check("retry leaves one complete generation",
+              len(kept) == 1 and kept[0].read_bytes() == b"cloud path payload\n")
 
-        print("4. a missing source is a no-op, and generations prune to the cap")
-        keep_generation(tmp / "never-existed.md")
-        check("missing source raises nothing and creates nothing",
+        print("3. EAGAIN is transient, but exhaustion remains an error")
+        again_target = tmp / "vendors.md"
+        again_target.write_bytes(b"retry me\n")
+        again_reads, sleeps = [], []
+
+        def always_again(path):
+            if path == again_target:
+                again_reads.append(path)
+                raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+            return real_read_bytes(path)
+
+        Path.read_bytes = always_again
+        common.time.sleep = sleeps.append
+        exhausted = None
+        try:
+            common.keep_generation(again_target)
+        except OSError as error:
+            exhausted = error
+        finally:
+            Path.read_bytes, common.time.sleep = real_read_bytes, real_sleep
+        check("exhausted EAGAIN escapes", exhausted is not None and exhausted.errno == errno.EAGAIN,
+              repr(exhausted))
+        check("exhausted EAGAIN attempts are capped", len(again_reads) == common.GENERATION_COPY_ATTEMPTS,
+              f"attempts {len(again_reads)}")
+        check("exhausted EAGAIN sleeps only between attempts",
+              sleeps == list(common.GENERATION_COPY_BACKOFF_SECONDS), repr(sleeps))
+        check("exhausted retry publishes no partial generation", not generation_files(again_target))
+        check("exhausted retry removes staged files", not list(gen_dir_for(again_target).glob(".*")))
+
+        print("4. permanent copy failures escape without a retry")
+        permanent_target = tmp / "renewal-feed.md"
+        permanent_target.write_bytes(b"do not hide this\n")
+        permanent_reads, sleeps = [], []
+
+        def permission_denied(path):
+            if path == permanent_target:
+                permanent_reads.append(path)
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_read_bytes(path)
+
+        Path.read_bytes = permission_denied
+        common.time.sleep = sleeps.append
+        permanent = None
+        try:
+            common.keep_generation(permanent_target)
+        except OSError as error:
+            permanent = error
+        finally:
+            Path.read_bytes, common.time.sleep = real_read_bytes, real_sleep
+        check("permanent failure escapes", permanent is not None and permanent.errno == errno.EACCES,
+              repr(permanent))
+        check("permanent failure does not retry", len(permanent_reads) == 1 and not sleeps,
+              f"reads={len(permanent_reads)} sleeps={sleeps}")
+        check("permanent failure publishes no generation", not generation_files(permanent_target))
+        check("permanent failure removes its staged file",
+              not list(gen_dir_for(permanent_target).glob(".*")))
+
+        print("5. an existing same-second generation is never overwritten")
+        collision_target = tmp / "client-roster.md"
+        collision_target.write_bytes(b"new rollback point\n")
+        collision_dir = gen_dir_for(collision_target)
+        collision_dir.mkdir()
+        stamp = "20260825T123456Z"
+        original = collision_dir / f"{stamp}-{collision_target.name}"
+        original.write_bytes(b"existing rollback point\n")
+        real_datetime = common.datetime
+
+        class FrozenDatetime:
+            @classmethod
+            def now(cls, tz):
+                return datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
+
+        common.datetime = FrozenDatetime
+        try:
+            common.keep_generation(collision_target)
+        finally:
+            common.datetime = real_datetime
+        kept = generation_files(collision_target)
+        check("existing generation remains unchanged", original.read_bytes() == b"existing rollback point\n")
+        check("collision receives a distinct generation", len(kept) == 2 and
+              any(path.read_bytes() == b"new rollback point\n" for path in kept),
+              repr([path.name for path in kept]))
+        check("temporary staging files are removed", not list(collision_dir.glob(".*")))
+
+        print("6. a concurrent same-second publisher cannot be overwritten")
+        race_target = tmp / "concurrent.md"
+        race_target.write_bytes(b"this run's rollback point\n")
+        race_dir = gen_dir_for(race_target)
+        race_dir.mkdir()
+        race_base = race_dir / f"{stamp}-{race_target.name}"
+        real_link, real_replace = common.os.link, common.os.replace
+        interleaved = []
+
+        def claim_then_link(source, destination):
+            if not interleaved:
+                Path(destination).write_bytes(b"concurrent rollback point\n")
+                interleaved.append(Path(destination))
+            return real_link(source, destination)
+
+        def claim_then_replace(source, destination):
+            # This branch is what the former check-then-replace implementation
+            # called: it creates the competing file, then proves replace clobbers it.
+            if not interleaved:
+                Path(destination).write_bytes(b"concurrent rollback point\n")
+                interleaved.append(Path(destination))
+            return real_replace(source, destination)
+
+        common.datetime = FrozenDatetime
+        common.os.link, common.os.replace = claim_then_link, claim_then_replace
+        try:
+            common.keep_generation(race_target)
+        finally:
+            common.datetime = real_datetime
+            common.os.link, common.os.replace = real_link, real_replace
+        kept = generation_files(race_target)
+        check("interleaving claimed the primary generation name", interleaved == [race_base],
+              repr(interleaved))
+        check("concurrent generation remains unchanged",
+              race_base.read_bytes() == b"concurrent rollback point\n")
+        check("this run publishes under the next atomic name", len(kept) == 2 and
+              any(path != race_base and path.read_bytes() == b"this run's rollback point\n"
+                  for path in kept), repr([path.name for path in kept]))
+        check("race leaves no temporary staging file", not list(race_dir.glob(".*")))
+
+        print("7. missing sources remain a no-op and pruning stays at the cap")
+        common.keep_generation(tmp / "never-existed.md")
+        check("missing source creates nothing",
               not (tmp / "never-existed.md.generations").exists())
 
-        target4 = tmp / "renewal-feed.md"
-        gd = gen_dir_for(target4)
-        gd.mkdir()
-        # Pre-seed more than the cap with lexically ordered stamps, then let one
-        # real call prune. sorted() over the stamped names is oldest-first.
-        for i in range(KEEP_GENERATIONS + 3):
-            (gd / f"202608{10 + i:02d}T000000Z-renewal-feed.md").write_bytes(b"old\n")
-        target4.write_bytes(b"newest\n")
-        keep_generation(target4)
-        survivors = sorted(gd.iterdir())
-        check(f"pruned to the {KEEP_GENERATIONS}-generation cap",
-              len(survivors) == KEEP_GENERATIONS, f"found {len(survivors)}")
-        check("the newest copy survived the prune",
-              any(p.read_bytes() == b"newest\n" for p in survivors))
-        check("the oldest stamp was the one dropped",
-              not (gd / "20260810T000000Z-renewal-feed.md").exists())
+        prune_target = tmp / "prune.md"
+        prune_dir = gen_dir_for(prune_target)
+        prune_dir.mkdir()
+        for index in range(common.KEEP_GENERATIONS + 3):
+            (prune_dir / f"202608{10 + index:02d}T000000Z-prune.md").write_bytes(b"old\n")
+        prune_target.write_bytes(b"newest\n")
+        common.keep_generation(prune_target)
+        kept = generation_files(prune_target)
+        check("prunes to configured cap", len(kept) == common.KEEP_GENERATIONS, f"found {len(kept)}")
+        check("newest generation survives pruning", any(path.read_bytes() == b"newest\n" for path in kept))
 
     print()
     if fails:
         print(f"{len(fails)} FAILED: {', '.join(fails)}")
         return 1
-    print("keep_generation cannot abort the export it protects")
+    print("generation copy retries only transient FileProvider failures without overwriting rollback points")
     return 0
 
 
