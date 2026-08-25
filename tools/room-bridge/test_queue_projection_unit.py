@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -17,7 +19,40 @@ def task(task_id="t_one", status="todo", title="Queue <title>"):
             "model_override": "gpt-5.6-sol"}
 
 
+def test_missing_task_with_temp_sqlite():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "kanban.db"
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+            create table tasks (id text primary key, title text, status text,
+                assignee text, priority integer, created_at integer,
+                started_at integer, completed_at integer, model_override text, body text);
+            create table task_events (id integer primary key, task_id text,
+                kind text, created_at integer);
+            insert into tasks values
+                ('t_live', 'Live task', 'running', 'desk:codex-desk', 2, 100, null, null, 'sol', null);
+            insert into task_events values (1, 't_gone', 'deleted', 200);
+            insert into task_events values (2, 't_live', 'started', 201);
+        """)
+        conn.commit()
+        conn.close()
+        state = {"queue_event_cursor": 0, "queue_projection_digest": None}
+        posted = []
+        queue_projection.project_once(
+            state=state, db_path=path, target_catalog={"sol": {
+                "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}},
+            add_room_turn=lambda **row: posted.append(row))
+        assert [row["msg_id"] for row in posted] == [
+            queue_projection.event_msg_id("carr-build", 1),
+            queue_projection.event_msg_id("carr-build", 2)]
+        first = json.loads(posted[0]["body"])["queue_event"]
+        assert first["card"]["status"] == "missing"
+        assert state["queue_event_cursor"] == 2
+
+
+
 def main():
+    test_missing_task_with_temp_sqlite()
     event = {"id": 41, "task_id": "t_one", "kind": "started", "created_at": 200}
     receipt = queue_projection.receipt_for(event, task(), target_catalog={"sol": {
         "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}}, board="carr-build")
@@ -32,6 +67,20 @@ def main():
     assert record_card["cap"] == "record-write", "yellow work must not project as misleading read-only work"
     assert queue_projection.event_msg_id("carr-build", 41) == queue_projection.event_msg_id("carr-build", 41)
     assert queue_projection.event_msg_id("carr-build", 41) != queue_projection.event_msg_id("carr-build", 42)
+
+    missing = queue_projection.missing_task_receipt(
+        {"id": 43, "task_id": "t_deleted", "kind": "completed", "created_at": 300},
+        board="carr-build")
+    assert missing == {"queue_event": {
+        "v": 1, "board": "carr-build", "event_id": 43,
+        "event": "completed", "task_id": "t_deleted",
+        "card": {"title": "Task unavailable", "target": "unassigned",
+                  "effective_model": None, "status": "missing", "priority": "P2",
+                  "cap": "read", "updated_at": "1970-01-01T00:05:00Z",
+                  "source_seq": None},
+        "summary": "Task record unavailable.",
+        "projected_at": "1970-01-01T00:05:00Z",
+    }}, "missing-task receipts contain only fixed safe fields"
 
     cards = queue_projection.current_cards([task("t_live", "running"), task("t_old", "archived")],
         target_catalog={"sol": {"assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}})
@@ -56,7 +105,12 @@ def main():
 
         def execute(self, sql, _args=()):
             if "from task_events" in sql:
-                return Rows([{"id": 42, "task_id": "t_one", "kind": "started", "created_at": 200}])
+                return Rows([
+                    {"id": 42, "task_id": "t_deleted", "kind": "deleted", "created_at": 200},
+                    {"id": 43, "task_id": "t_one", "kind": "started", "created_at": 201},
+                ])
+            if "where id" in sql.lower():
+                return Rows([] if _args[0] == "t_deleted" else [task()])
             return Rows([task()])
 
     def open_fake_reader(_path: Path) -> Reader:
@@ -83,8 +137,11 @@ def main():
         )
     finally:
         queue_projection.open_reader = original_reader
-    assert seen_ids == [queue_projection.event_msg_id("carr-build", 42)] * 2
-    assert state["queue_event_cursor"] == 42
+    assert seen_ids == [queue_projection.event_msg_id("carr-build", 42),
+                        queue_projection.event_msg_id("carr-build", 42),
+                        queue_projection.event_msg_id("carr-build", 43)]
+    assert state["queue_event_cursor"] == 43
+    assert state["queue_projection_digest"] == queue_projection.event_msg_id("carr-build", 43)
     print("all queue projection unit tests passed")
 
 
