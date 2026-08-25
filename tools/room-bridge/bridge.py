@@ -705,13 +705,15 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
 
     projection_events: list[dict] = []
     if queue_service is not None:
-        state["queue_projection_checked_at"] = now_fn()
+        projection_checked_at = now_fn()
+        state["queue_projection_checked_at"] = projection_checked_at
         try:
             projection_events = queue_projector(
                 state=state, add_room_turn=add_room_turn,
                 target_catalog=queue_service.catalog.get("targets", {}),
+                checked_at=projection_checked_at,
             )
-            state["queue_projection_last_success_at"] = now_fn()
+            state["queue_projection_last_success_at"] = projection_checked_at
             state["queue_projection_error"] = None
         except Exception as exc:  # projection failure must be visible, never a live-looking board
             state["queue_projection_error"] = "queue_projection_failed"

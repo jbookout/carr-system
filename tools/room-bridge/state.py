@@ -74,6 +74,7 @@ def default_state() -> dict:
             "queue_event_cursor": 0, "queue_projection_digest": None,
             "queue_projection_checked_at": None,
             "queue_projection_last_success_at": None,
+            "queue_projection_health_last_posted_at": None,
             "queue_projection_error": None,
             "queue_retry_at": {}, "queue_unavailable_since": {}}
 
@@ -95,6 +96,7 @@ def load_state(path: Path) -> dict:
     data.setdefault("queue_projection_digest", None)
     data.setdefault("queue_projection_checked_at", None)
     data.setdefault("queue_projection_last_success_at", None)
+    data.setdefault("queue_projection_health_last_posted_at", None)
     data.setdefault("queue_projection_error", None)
     unavailable = data.get("queue_unavailable_since")
     if not isinstance(unavailable, dict):

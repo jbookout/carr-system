@@ -40,19 +40,158 @@ def test_missing_task_with_temp_sqlite():
         posted = []
         queue_projection.project_once(
             state=state, db_path=path, target_catalog={"sol": {
-                "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}},
+            "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}},
+            checked_at="1970-01-01T00:00:00Z",
             add_room_turn=lambda **row: posted.append(row))
         assert [row["msg_id"] for row in posted] == [
             queue_projection.event_msg_id("carr-build", 1),
-            queue_projection.event_msg_id("carr-build", 2)]
+            queue_projection.event_msg_id("carr-build", 2),
+            queue_projection.health_msg_id("carr-build", 2, "1970-01-01T00:00:00Z")]
         first = json.loads(posted[0]["body"])["queue_event"]
         assert first["card"]["status"] == "missing"
         assert state["queue_event_cursor"] == 2
+        health = json.loads(posted[-1]["body"])["queue_projection_health"]
+        assert health["event_cursor"] == 2
+        assert health["projection_digest"] == queue_projection.event_msg_id("carr-build", 2)
+
+
+def test_empty_projection_emits_health_without_advancing_cursor():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "kanban.db"
+        conn = sqlite3.connect(path)
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer);")
+        conn.commit(); conn.close()
+        state = {"queue_event_cursor": 0, "queue_projection_digest": None}
+        posted = []
+        queue_projection.project_once(
+            state=state, db_path=path, checked_at="2026-08-24T12:00:00Z",
+            target_catalog={}, add_room_turn=lambda **row: posted.append(row))
+    assert state["queue_event_cursor"] == 0
+    assert state["queue_projection_digest"] is None
+    assert state["queue_projection_health_last_posted_at"] == "2026-08-24T12:00:00Z"
+    assert len(posted) == 1
+    assert json.loads(posted[0]["body"]) == {"queue_projection_health": {
+        "v": 1, "board": "carr-build", "source": "hermes-queue-projector.v1",
+        "status": "ok", "checked_at": "2026-08-24T12:00:00Z", "event_cursor": 0,
+        "projection_digest": None}}
+
+
+def test_health_append_failure_restores_task_cursor_for_safe_replay():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "kanban.db"
+        conn = sqlite3.connect(path)
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer); insert into task_events values (18, 't_gone', 'deleted', 200);")
+        conn.commit(); conn.close()
+        state = {"queue_event_cursor": 17, "queue_projection_digest": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}
+        posted = []
+        def append(**row):
+            posted.append(row)
+            if len(posted) == 2:
+                raise RuntimeError("room unavailable")
+        try:
+            queue_projection.project_once(
+                state=state, db_path=path, checked_at="2026-08-24T12:00:00Z",
+                target_catalog={}, add_room_turn=append)
+        except RuntimeError:
+            pass
+    assert state["queue_event_cursor"] == 17
+    assert state["queue_projection_digest"] == "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    assert state["queue_projection_health_last_posted_at"] is None
+    assert len(posted) == 2
+
+
+def test_incomplete_event_page_does_not_emit_false_green_health():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "kanban.db"
+        conn = sqlite3.connect(path)
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer); insert into task_events values (1, 't_one', 'created', 200); insert into task_events values (2, 't_two', 'created', 201); insert into task_events values (3, 't_three', 'created', 202);")
+        conn.commit(); conn.close()
+        state = {"queue_event_cursor": 0, "queue_projection_digest": None}
+        posted = []
+        queue_projection.project_once(
+            state=state, db_path=path, limit=2, checked_at="2026-08-24T12:00:00Z",
+            target_catalog={}, add_room_turn=lambda **row: posted.append(row))
+    assert state["queue_event_cursor"] == 2
+    assert len(posted) == 2
+    assert all("queue_event" in json.loads(row["body"]) for row in posted)
+
+
+def test_cursor_ahead_of_source_head_suppresses_health():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "kanban.db"
+        conn = sqlite3.connect(path)
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer); insert into task_events values (1, 't_one', 'created', 200);")
+        conn.commit(); conn.close()
+        state = {"queue_event_cursor": 4, "queue_projection_digest": "not-a-real-digest"}
+        posted = []
+        queue_projection.project_once(
+            state=state, db_path=path, checked_at="2026-08-24T12:00:00Z",
+            target_catalog={}, add_room_turn=lambda **row: posted.append(row))
+    assert posted == []
+    assert state["queue_event_cursor"] == 4
+
+
+def test_source_head_advance_suppresses_health():
+    class Rows:
+        def __init__(self, values): self.values = values
+        def fetchall(self): return self.values
+        def fetchone(self): return self.values[0] if self.values else None
+
+    class Reader:
+        def __init__(self): self.head_calls = 0
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, _args=()):
+            if "max(id)" in sql:
+                self.head_calls += 1
+                return Rows([{"head": 1 if self.head_calls == 1 else 2}])
+            if "from task_events" in sql:
+                return Rows([{"id": 1, "task_id": "t_gone", "kind": "created", "created_at": 200}])
+            return Rows([])
+
+    reader = Reader()
+    original_reader = queue_projection.open_reader
+
+    def open_fake_reader(_path: Path) -> Reader:
+        return reader
+
+    queue_projection.open_reader = open_fake_reader
+    try:
+        state = {"queue_event_cursor": 0, "queue_projection_digest": None}
+        posted = []
+        queue_projection.project_once(
+            state=state, checked_at="2026-08-24T12:00:00Z", target_catalog={},
+            add_room_turn=lambda **row: posted.append(row))
+    finally:
+        queue_projection.open_reader = original_reader
+    assert len(posted) == 1 and "queue_event" in json.loads(posted[0]["body"])
+    assert state["queue_event_cursor"] == 1
+
+
+def test_health_throttle_is_persisted_and_replay_safe():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "kanban.db"
+        conn = sqlite3.connect(path)
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer);")
+        conn.commit(); conn.close()
+        state = {"queue_event_cursor": 0, "queue_projection_digest": None}
+        posted = []
+        append = lambda **row: posted.append(row)
+        queue_projection.project_once(state=state, db_path=path, checked_at="2026-08-24T12:00:00Z", target_catalog={}, add_room_turn=append)
+        queue_projection.project_once(state=state, db_path=path, checked_at="2026-08-24T12:00:30Z", target_catalog={}, add_room_turn=append)
+    assert len(posted) == 1
+    assert state["queue_projection_health_last_posted_at"] == "2026-08-24T12:00:00Z"
 
 
 
 def main():
     test_missing_task_with_temp_sqlite()
+    test_empty_projection_emits_health_without_advancing_cursor()
+    test_health_append_failure_restores_task_cursor_for_safe_replay()
+    test_incomplete_event_page_does_not_emit_false_green_health()
+    test_cursor_ahead_of_source_head_suppresses_health()
+    test_source_head_advance_suppresses_health()
+    test_health_throttle_is_persisted_and_replay_safe()
     event = {"id": 41, "task_id": "t_one", "kind": "started", "created_at": 200}
     receipt = queue_projection.receipt_for(event, task(), target_catalog={"sol": {
         "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}}, board="carr-build")
@@ -104,6 +243,8 @@ def main():
             return False
 
         def execute(self, sql, _args=()):
+            if "max(id)" in sql:
+                return Rows([{"head": 43}])
             if "from task_events" in sql:
                 return Rows([
                     {"id": 42, "task_id": "t_deleted", "kind": "deleted", "created_at": 200},
@@ -126,6 +267,7 @@ def main():
                 state=state,
                 add_room_turn=lambda **kwargs: seen_ids.append(kwargs["msg_id"]) or (_ for _ in ()).throw(RuntimeError("crash after receipt")),
                 target_catalog={"sol": {"assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}},
+                checked_at="2026-08-24T12:00:00Z",
             )
         except RuntimeError:
             pass
@@ -134,12 +276,14 @@ def main():
             state=state,
             add_room_turn=lambda **kwargs: seen_ids.append(kwargs["msg_id"]) or {"seq": 1},
             target_catalog={"sol": {"assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}},
+            checked_at="2026-08-24T12:00:00Z",
         )
     finally:
         queue_projection.open_reader = original_reader
     assert seen_ids == [queue_projection.event_msg_id("carr-build", 42),
                         queue_projection.event_msg_id("carr-build", 42),
-                        queue_projection.event_msg_id("carr-build", 43)]
+                        queue_projection.event_msg_id("carr-build", 43),
+                        queue_projection.health_msg_id("carr-build", 43, "2026-08-24T12:00:00Z")]
     assert state["queue_event_cursor"] == 43
     assert state["queue_projection_digest"] == queue_projection.event_msg_id("carr-build", 43)
     print("all queue projection unit tests passed")
