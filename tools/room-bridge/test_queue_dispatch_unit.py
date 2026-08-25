@@ -127,6 +127,14 @@ class FakeAdapter:
         self.calls.append(("block", task_id, reason, kind))
         self.status[task_id] = "blocked"
 
+    def retry_attempt(self, task_id: str, _prefix: str) -> tuple[int, int]:
+        self.calls.append(("retry_attempt", task_id))
+        return (0, 3)
+
+    def reclaim(self, task_id: str, reason: str) -> None:
+        self.calls.append(("reclaim", task_id, reason))
+        self.status[task_id] = "ready"
+
 
 class QueueDispatchTests(unittest.TestCase):
     def test_repository_catalog_keeps_profiles_mapped_and_ox_budget_gated(self):
@@ -257,6 +265,85 @@ class QueueDispatchTests(unittest.TestCase):
             self.assertEqual(block[2], "result_protocol_error")
             self.assertNotIn(raw, json.dumps(adapter.calls))
 
+    def test_quota_failure_reclaims_with_closed_reason_and_bounded_backoff(self):
+        adapter = FakeAdapter([task()])
+        outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", now="2026-08-24T12:00:00+00:00",
+            dispatch_call=lambda _prompt: {"status": "quota_exhausted", "detail": "raw provider reply"},
+        )
+        self.assertEqual(outcome["outcome"], "retry_scheduled")
+        self.assertEqual(outcome["code"], "provider_quota")
+        self.assertEqual(outcome["retry_at"], "2026-08-24T12:00:30+00:00")
+        self.assertIn(("reclaim", "t_queue0001", "queue_transient:provider_quota"), adapter.calls)
+        self.assertFalse(any(call[0] == "block" for call in adapter.calls))
+        self.assertNotIn("raw provider reply", json.dumps(adapter.calls))
+
+    def test_retry_bound_is_canonical_and_nth_failure_blocks(self):
+        adapter = FakeAdapter([task()])
+        adapter.retry_attempt = lambda task_id, _prefix: (2, 3)
+        outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", now="2026-08-24T12:00:00+00:00",
+            dispatch_call=lambda _prompt: {"status": "quota_exhausted"},
+        )
+        self.assertEqual(outcome, {"outcome": "blocked", "task_id": "t_queue0001", "code": "provider_quota"})
+        self.assertIn(("block", "t_queue0001", "provider_quota", "transient"), adapter.calls)
+        self.assertFalse(any(call[0] == "reclaim" for call in adapter.calls))
+
+    def test_missing_canonical_retry_evidence_fails_closed(self):
+        adapter = FakeAdapter([task()])
+        adapter.retry_attempt = lambda _task_id, _prefix: (_ for _ in ()).throw(
+            kanban_adapter.QueueError("queue_unavailable", "Hermes response malformed"))
+        outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", now="2026-08-24T12:00:00+00:00",
+            dispatch_call=lambda _prompt: {"status": "quota_exhausted"},
+        )
+        self.assertEqual(outcome, {"outcome": "blocked", "task_id": "t_queue0001", "code": "queue_unavailable"})
+        self.assertIn(("block", "t_queue0001", "queue_unavailable", "transient"), adapter.calls)
+
+    def test_delayed_retry_does_not_head_of_line_block_later_ready_work(self):
+        delayed = task(task_id="t_queue0001", created_at=1)
+        ready = task(task_id="t_queue0002", created_at=2)
+        adapter = FakeAdapter([delayed, ready])
+        outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", now="2026-08-24T12:00:00+00:00",
+            retry_at={"t_queue0001": "2026-08-24T12:01:00+00:00"},
+            dispatch_call=lambda _prompt: {"status": "completed", "result": result("t_queue0002")},
+        )
+        self.assertEqual(outcome["task_id"], "t_queue0002")
+        self.assertIn(("claim", "t_queue0002"), adapter.calls)
+        self.assertNotIn(("claim", "t_queue0001"), adapter.calls)
+
+    def test_malformed_persisted_retry_time_fails_closed_without_dispatch(self):
+        adapter = FakeAdapter([task()])
+        dispatched = []
+        outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", now="2026-08-24T12:00:00+00:00",
+            retry_at={"t_queue0001": "not-a-time"},
+            dispatch_call=lambda prompt: dispatched.append(prompt) or {"status": "completed", "result": result()},
+        )
+        self.assertEqual(outcome, {"outcome": "blocked", "task_id": "t_queue0001", "code": "queue_unavailable"})
+        self.assertEqual(dispatched, [])
+        self.assertIn(("block", "t_queue0001", "queue_unavailable", "transient"), adapter.calls)
+
+    def test_timeout_uses_the_same_bounded_reclaim_path(self):
+        adapter = FakeAdapter([task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter)
+        pending = {"kanban_task_id": "t_queue0001"}
+        outcome = controller.fail_pending(pending, "desk_result_timeout", now="2026-08-24T12:00:00+00:00")
+        self.assertEqual(outcome["outcome"], "retry_scheduled")
+        self.assertEqual(outcome["code"], "desk_result_timeout")
+        self.assertIn(("reclaim", "t_queue0001", "queue_transient:desk_result_timeout"), adapter.calls)
+
+    def test_nth_timeout_blocks_without_reclaim(self):
+        adapter = FakeAdapter([task()])
+        adapter.retry_attempt = lambda _task_id, _prefix: (2, 3)
+        controller = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter)
+        outcome = controller.fail_pending({"kanban_task_id": "t_queue0001"}, "desk_result_timeout",
+                                          now="2026-08-24T12:00:00+00:00")
+        self.assertEqual(outcome, {"outcome": "blocked", "task_id": "t_queue0001", "code": "desk_result_timeout"})
+        self.assertIn(("block", "t_queue0001", "desk_result_timeout", "transient"), adapter.calls)
+        self.assertFalse(any(call[0] == "reclaim" for call in adapter.calls))
+
     def test_declared_block_never_falls_back_to_another_target(self):
         adapter = FakeAdapter([task()])
         outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
@@ -342,7 +429,7 @@ class QueueDispatchTests(unittest.TestCase):
         )
         failed: list[tuple] = []
         executor = type("Executor", (), {
-            "fail_pending": lambda self, pending, reason: failed.append((pending, reason)) or {
+            "fail_pending": lambda self, pending, reason, **_kwargs: failed.append((pending, reason)) or {
                 "outcome": reason, "task_id": "t_queue0001"
             },
         })()

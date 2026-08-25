@@ -21,6 +21,7 @@ import bridge  # noqa: E402
 import grammar  # noqa: E402
 import kanban_adapter  # noqa: E402
 import queue_grammar  # noqa: E402
+import state as state_mod  # noqa: E402
 
 
 FAILURES: list[str] = []
@@ -140,6 +141,8 @@ def test_adapter_constructs_fixed_canonical_create_and_idempotency():
     assert "--project" in argv and argv[argv.index("--project") + 1] == "carr"
     assert "--idempotency-key" in argv
     assert argv[argv.index("--idempotency-key") + 1] == command["idempotency_key"]
+    assert "--max-retries" in argv
+    assert argv[argv.index("--max-retries") + 1] == "3"
     assert "--parent" in argv and argv[argv.index("--parent") + 1] == "t_parent"
     body = argv[argv.index("--body") + 1]
     assert body.startswith("[CARR_QUEUE_META ") and '"cap":"read"' in body
@@ -165,6 +168,35 @@ def test_manual_create_is_atomically_blocked_before_dispatch_can_see_it():
     adapter.create(command, turn("ignored"), CATALOG["targets"]["joe"])
     argv = seen[0]
     assert argv[argv.index("--initial-status") + 1] == "blocked"
+
+
+def test_adapter_reclaims_only_through_the_supported_hermes_transition():
+    seen = []
+    adapter = kanban_adapter.KanbanAdapter(command_runner=lambda argv: seen.append(argv) or "")
+    adapter.reclaim("t_queue0001", "queue_transient:provider_quota")
+    assert seen == [[
+        "hermes", "kanban", "--board", "carr-build", "reclaim", "t_queue0001",
+        "--reason", "queue_transient:provider_quota",
+    ]]
+
+
+def test_adapter_uses_only_canonical_queue_reclaim_evidence_for_attempts():
+    payload = {
+        "task": {"id": "t_queue0001", "max_retries": 3},
+        "events": [
+            {"kind": "reclaimed", "payload": {"reason": "queue_transient:provider_quota"}},
+            {"kind": "reclaimed", "payload": {"reason": "operator recovery"}},
+        ],
+    }
+    adapter = kanban_adapter.KanbanAdapter(runner=lambda _argv: payload)
+    assert adapter.retry_attempt("t_queue0001") == (1, 3)
+    malformed = kanban_adapter.KanbanAdapter(runner=lambda _argv: {"task": {"max_retries": 3}})
+    try:
+        malformed.retry_attempt("t_queue0001")
+    except kanban_adapter.QueueError as exc:
+        assert exc.code == "queue_unavailable"
+    else:
+        raise AssertionError("missing canonical evidence must fail closed")
 
 
 def test_mutation_guard_idempotency_is_not_optional():
@@ -201,6 +233,35 @@ def test_service_creates_for_every_room_seat_and_keeps_status_bounded():
     status = service.handle(turn("@queue status id=t_queue0001"), room="partner-line")
     rendered = json.dumps(status["receipt"])
     assert "never receipt this" not in rendered and len(rendered) < 1000
+
+
+def test_create_before_receipt_crash_replays_one_immutable_card():
+    """A second ingress after a lost room receipt may only receive Hermes' original card."""
+    class FakeAdapter:
+        def __init__(self):
+            self.calls = []
+            self.created = False
+
+        def create(self, command, incoming, target):
+            self.calls.append((command, incoming, target))
+            first = not self.created
+            self.created = True
+            return {"task_id": "t_queue0001", "created": first}
+
+    adapter = FakeAdapter()
+    service = kanban_adapter.QueueService(catalog=CATALOG, adapter=adapter)
+    incoming = turn("@queue enqueue target=sol cap=read key=crash-safe :: Read only")
+    first = service.handle(incoming, room="partner-line")
+    replay = service.handle(incoming, room="partner-line")
+    assert first["receipt"]["queue_accepted"] == {
+        "source_seq": 12, "source_msg_id": incoming["msg_id"], "task_id": "t_queue0001",
+        "target": "sol", "cap": "read", "idempotency_key": "room:partner-line:crash-safe", "status": "created",
+    }
+    assert replay["receipt"]["queue_accepted"]["task_id"] == "t_queue0001"
+    assert replay["receipt"]["queue_accepted"]["status"] == "duplicate"
+    assert len(adapter.calls) == 2
+    assert adapter.calls[0][0]["idempotency_key"] == adapter.calls[1][0]["idempotency_key"]
+    assert adapter.calls[0][0]["body"] == adapter.calls[1][0]["body"]
 
 
 def test_human_manual_lane_is_canonically_blocked_and_sol_write_never_creates():
@@ -264,6 +325,68 @@ def test_bridge_consumes_queue_before_routing_and_posts_receipt():
     assert posted and posted[0]["kind"] == "receipt"
 
 
+def test_projector_health_is_persisted_and_redacts_failure_detail():
+    """A failed pass must age visibly without leaking its underlying failure."""
+    class FakeQueue:
+        catalog = CATALOG
+
+        def handle(self, _incoming, *, room):
+            assert room == "partner-line"
+            return {"handled": False}
+
+    with tempfile.TemporaryDirectory() as root:
+        state_path = Path(root) / "state.json"
+        bridge.run_once(
+            state_path=state_path,
+            read_room=lambda *_args, **_kwargs: {"turns": []},
+            add_room_turn=lambda **_kwargs: {"seq": 13},
+            registry=type("Registry", (), {"entries": lambda self: {}, "path": Path(root) / "desks.json"})(),
+            queue_service=FakeQueue(),
+            queue_projector=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("provider raw secret")),
+            read_profiles=lambda: [],
+            log=lambda _msg: None,
+        )
+        saved = json.loads(state_path.read_text())
+    assert saved["queue_projection_checked_at"]
+    assert saved["queue_projection_last_success_at"] is None
+    assert saved["queue_projection_error"] == "queue_projection_failed"
+    assert "secret" not in json.dumps(saved)
+
+
+def test_projector_health_records_a_successful_empty_check():
+    class FakeQueue:
+        catalog = CATALOG
+
+        def handle(self, _incoming, *, room):
+            assert room == "partner-line"
+            return {"handled": False}
+
+    with tempfile.TemporaryDirectory() as root:
+        state_path = Path(root) / "state.json"
+        bridge.run_once(
+            state_path=state_path,
+            read_room=lambda *_args, **_kwargs: {"turns": []},
+            add_room_turn=lambda **_kwargs: {"seq": 13},
+            registry=type("Registry", (), {"entries": lambda self: {}, "path": Path(root) / "desks.json"})(),
+            queue_service=FakeQueue(), queue_projector=lambda **_kwargs: [],
+            now_fn=lambda: "2026-08-24T12:00:00+00:00", read_profiles=lambda: [], log=lambda _msg: None,
+        )
+        saved = json.loads(state_path.read_text())
+    assert saved["queue_projection_checked_at"] == "2026-08-24T12:00:00+00:00"
+    assert saved["queue_projection_last_success_at"] == "2026-08-24T12:00:00+00:00"
+    assert saved["queue_projection_error"] is None
+
+
+def test_corrupt_retry_timing_is_migration_safe_and_bounded():
+    with tempfile.TemporaryDirectory() as root:
+        state_path = Path(root) / "state.json"
+        state_path.write_text(json.dumps({"queue_retry_at": ["not", "a", "mapping"]}))
+        assert state_mod.load_state(state_path)["queue_retry_at"] == {}
+        entries = {f"t_{i:08x}": "2026-08-24T12:00:00+00:00" for i in range(state_mod.QUEUE_RETRY_CAP + 1)}
+        state_path.write_text(json.dumps({"queue_retry_at": entries}))
+        assert len(state_mod.load_state(state_path)["queue_retry_at"]) == state_mod.QUEUE_RETRY_CAP
+
+
 def test_mutation_guard_queue_parse_precedes_route_turn():
     """Moving route_turn above queue classification reopens desk injection for malformed commands."""
     source = inspect.getsource(bridge.run_once)
@@ -279,11 +402,17 @@ def main():
     check("adapter fixed canonical create", test_adapter_constructs_fixed_canonical_create_and_idempotency)
     check("catalog explicitly denies unreviewed capability grants", test_catalog_exactly_allowlists_yellow_and_human_capabilities)
     check("manual create is atomically blocked", test_manual_create_is_atomically_blocked_before_dispatch_can_see_it)
+    check("retry reclaim uses only the canonical Hermes transition", test_adapter_reclaims_only_through_the_supported_hermes_transition)
+    check("retry count comes only from canonical Hermes evidence", test_adapter_uses_only_canonical_queue_reclaim_evidence_for_attempts)
     check("all model seats enqueue and status is bounded", test_service_creates_for_every_room_seat_and_keeps_status_bounded)
+    check("create-before-receipt crash replays one immutable card", test_create_before_receipt_crash_replays_one_immutable_card)
     check("manual cards block and Sol refuses writes before create", test_human_manual_lane_is_canonically_blocked_and_sol_write_never_creates)
     check("legacy assignment is deprecation-only", test_legacy_assignment_is_deprecated_without_a_local_log)
     check("mutation guard: idempotency", test_mutation_guard_idempotency_is_not_optional)
     check("queue command is consumed before routing", test_bridge_consumes_queue_before_routing_and_posts_receipt)
+    check("projector health persists a redacted failure", test_projector_health_is_persisted_and_redacts_failure_detail)
+    check("projector health records a successful empty check", test_projector_health_records_a_successful_empty_check)
+    check("retry timing migration is safe and bounded", test_corrupt_retry_timing_is_migration_safe_and_bounded)
     check("mutation guard: consumption order", test_mutation_guard_queue_parse_precedes_route_turn)
     if FAILURES:
         print(f"{len(FAILURES)} queue test(s) failed", file=sys.stderr)
