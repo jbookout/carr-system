@@ -362,27 +362,43 @@ def test_active_self_change_failure_reaches_wrapper_receipt():
 def test_wrong_run_key_cannot_attest_active_self():
     with tempfile.TemporaryDirectory() as tmp:
         b = build(tmp)
-        r, log = run_wrapped_sync(b, tmp, run_key="fleet.wrong")
+        r, log = run_wrapped_sync(
+            b, tmp, run_key="fleet.wrong", command_args=["/usr/bin/true"]
+        )
         assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
         assert "ACTIVE-SELF PROOF REFUSED" in r.stderr, r.stderr
-        assert "stub installer" not in r.stdout, r.stdout
+        assert "supplied child was not executed" in r.stderr, r.stderr
+        assert open(os.path.join(tmp, "launchctl-count")).read().strip() == "1"
         assert "key=fleet.wrong service=fleet-sync child_exit=1 state=failed" in log, log
         assert "recorder_exit=0" in log, log
-    print("PASS  wrong run key fails before install with a durable receipt")
+    print("PASS  wrong run key refuses /usr/bin/true before durable failure receipt")
 
 
 def test_wrong_command_cannot_attest_active_self():
     with tempfile.TemporaryDirectory() as tmp:
         b = build(tmp)
-        r, log = run_wrapped_sync(
-            b, tmp,
-            command_args=["/bin/zsh", os.path.join(b, "bin", "fleet-sync.sh"), "extra"],
-        )
+        r, log = run_wrapped_sync(b, tmp, command_args=["/usr/bin/true"])
         assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
         assert "ACTIVE-SELF PROOF REFUSED" in r.stderr, r.stderr
-        assert "stub installer" not in r.stdout, r.stdout
+        assert "supplied child was not executed" in r.stderr, r.stderr
+        assert open(os.path.join(tmp, "launchctl-count")).read().strip() == "1"
         assert "child_exit=1 state=failed" in log and "recorder_exit=0" in log, log
-    print("PASS  non-canonical fleet command fails before install with a durable receipt")
+    print("PASS  exact-key /usr/bin/true command is refused before durable receipt")
+
+
+def test_refused_wrapper_never_executes_supplied_child():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        marker = os.path.join(tmp, "child-executed")
+        r, log = run_wrapped_sync(
+            b, tmp,
+            command_args=["/bin/zsh", "-c", f"print executed > {marker}"],
+        )
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert not os.path.exists(marker), "refused wrapper executed the supplied child"
+        assert "supplied child was not executed" in r.stderr, r.stderr
+        assert "child_exit=1 state=failed" in log and "recorder_exit=0" in log, log
+    print("PASS  refused active-self wrapper does not execute a marker-writing child")
 
 
 def test_forged_xpc_without_loaded_pid_fails_closed():
@@ -705,6 +721,7 @@ def main():
     test_active_self_change_failure_reaches_wrapper_receipt()
     test_wrong_run_key_cannot_attest_active_self()
     test_wrong_command_cannot_attest_active_self()
+    test_refused_wrapper_never_executes_supplied_child()
     test_forged_xpc_without_loaded_pid_fails_closed()
     test_second_launchctl_mismatch_fails_closed()
     test_non_main_branch_refuses()
@@ -727,7 +744,7 @@ def main():
     test_exact_tree_refuses_rename_old_path_resurrection()
     test_exact_tree_accepts_canonical_rename()
     test_exact_tree_accepts_canonical_new_file_patch()
-    print("31/31 fleet-sync cases passed")
+    print("32/32 fleet-sync cases passed")
     return 0
 
 
