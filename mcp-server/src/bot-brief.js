@@ -42,6 +42,48 @@ function requestedPacks(args) {
   return [...new Set(args.packs.map(pack => pack.trim().toLowerCase()).filter(Boolean))].sort();
 }
 
+function admittedHermesRuntime(raw, { tenant, sponsor, profileKey, profileVersion, profileModel, workRequest, bindingId }) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const expected = {
+    runtime_principal: `runtime:${profileKey}`,
+    agent_principal_id: `agent:${profileKey}`,
+    organization_tenant_id: tenant,
+    sponsoring_human_slug: sponsor,
+    work_request: workRequest,
+    activation_binding_id: bindingId,
+  };
+  const expectedProvider = `provider:${String(profileModel || "").split("/")[0]}`;
+  const expiresAt = Date.parse(String(raw.expires_at || ""));
+  if (raw.status !== "registered" || raw.authorized !== true ||
+      raw.registration_scope !== "execution_envelope" ||
+      raw.surface !== "hermes_desktop" || raw.adapter_id !== "adapter:hermes-desktop" ||
+      raw.adapter_version !== "v1" || raw.provider_id !== expectedProvider ||
+      raw.model_id !== `model:${profileModel}` ||
+      raw.native_session_ref !== `native:profile-${profileKey}` ||
+      raw.capability_profile !== "capability:metadata-only" ||
+      raw.read_only !== true || raw.grants_authority !== false ||
+      raw.device_binding_status !== "not_asserted" ||
+      raw.profile_version !== profileVersion ||
+      !/^envelope:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(raw.runtime_registration_id || "")) ||
+      raw.operator_surface !== "job-passport:context-activation" ||
+      raw.telemetry_ref !== `observatory:activation-reliability:${bindingId}` ||
+      Object.entries(expected).some(([key, value]) => raw[key] !== value) ||
+      !/^sha256:[0-9a-f]{64}$/.test(String(raw.envelope_digest || "")) ||
+      !/^sha256:[0-9a-f]{64}$/.test(String(raw.configuration_fingerprint || "")) ||
+      !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return null;
+  // Return an explicit allowlist rather than forwarding arbitrary JSON from a
+  // database function into the Bot Brief. These are routing/proof facts only.
+  return Object.fromEntries([
+    "status", "authorized", "registration_scope", "runtime_registration_id",
+    "runtime_principal", "agent_principal_id", "organization_tenant_id",
+    "sponsoring_human_slug", "work_request", "activation_binding_id", "profile_version",
+    "native_session_ref", "surface", "adapter_id", "adapter_version",
+    "provider_id", "model_id", "configuration_fingerprint",
+    "capability_profile", "read_only", "grants_authority", "envelope_digest",
+    "expires_at", "operator_surface", "telemetry_ref", "device_binding_status",
+  ].map(key => [key, raw[key]]));
+}
+
 // Hermes consumes the server-issued bundle as a bounded reference list. This
 // helper is intentionally pure so the caller can attach it to the existing
 // bot brief after admission; it never accepts or renders raw context bodies.
@@ -116,6 +158,7 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
           operational_profile: actor?.operational_profile || "full",
           human_only_authority: actor?.human === true,
         };
+        let runtimeRegistration = { status: "not_registered", authorized: false };
         let boundContext = null;
         if (args.work_request) {
           await c.query("select set_config('carr.organization_tenant_id',$1::text,true)", [identity.organization_tenant_id]);
@@ -128,6 +171,28 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
             const { content, ...reference } = item;
             return item.delivery_mode === "on_demand_tool" ? { ...reference, retrieval_tool: "render-context-activation" } : reference;
           }) };
+          if (actor?.hermes === true) {
+            // This is an exact execution admission, not a device enrollment or
+            // a new grant. The authenticated Hermes actor and personal scope
+            // remain intact; the immutable envelope proves only which bot
+            // profile/configuration may consume this accepted-plan packet.
+            const registrationResult = await c.query(
+              "select ops.hermes_runtime_admission_for_brief($1::text,$2::text,$3::text,$4::text,$5::text) as registration /* bot-brief:hermes-runtime-admission */",
+              [actor.slug, profileKey, scope.status === "personal" ? scope.sponsor : null,
+                args.work_request, args.activation_binding_id]);
+            const rawRegistration = registrationResult.rows[0]?.registration;
+            runtimeRegistration = admittedHermesRuntime(rawRegistration, {
+              tenant: identity.organization_tenant_id,
+              sponsor: scope.status === "personal" ? scope.sponsor : null,
+              profileKey, profileVersion: Number(row.version), profileModel: row.current_model,
+              workRequest: args.work_request, bindingId: args.activation_binding_id,
+            });
+            if (!runtimeRegistration)
+              throw new ToolError({ error: "hermes_runtime_registration_refused",
+                reason: rawRegistration?.status === "registered" ? "server_projection_invalid" :
+                  (rawRegistration?.reason || "server_projection_invalid"),
+                hint: "use the authenticated Hermes runtime with the exact unexpired server-issued activation and ExecutionEnvelope" });
+          }
         }
 
         const profile = {
@@ -174,7 +239,7 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
           rule_delivery_mode: deliveryMode,
           requested_packs: packs,
           unknown_packs: unknownPacks,
-          runtime_registration: { status: "not_registered", authorized: false },
+          runtime_registration: runtimeRegistration,
           bound_context: boundContext,
         };
       },
