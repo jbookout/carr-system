@@ -363,10 +363,26 @@ def tier1_age(workdir: str) -> None:
     #    tried first while building this and did NOT interrupt the paused
     #    child; a process-group signal does), sent while the script is
     #    deliberately paused right after writing the identity file ──────────
-    tmp_glob = os.path.join(os.environ.get("TMPDIR", "/tmp"), "carr-key-recovery.*")
+    # A PRIVATE TMPDIR, BECAUSE THE SHARED ONE IS NOT THIS RUN'S TO WATCH.
+    # This globbed the whole of TMPDIR for carr-key-recovery.* and compared a
+    # before-set against an after-set. That is only sound while nothing else on
+    # the machine runs this script — and worktree-per-session is the default
+    # here, so two trees running the suite at once is ordinary. A directory
+    # created by the OTHER run appears in `after`, is absent from `before`, and
+    # this check reports a leaked identity file that never existed. Seen
+    # 2026-08-21: it failed once, then passed clean on a re-run with nothing
+    # changed, which is a race rather than a leak.
+    #
+    # Giving the child its own TMPDIR makes the glob describe exactly one run.
+    # Keep it under this invocation's already-private workdir so every return
+    # and exception path is covered by the outer TemporaryDirectory cleanup.
+    private_tmp = os.path.join(workdir, "interrupt-tmp")
+    os.mkdir(private_tmp, mode=0o700)
+    tmp_glob = os.path.join(private_tmp, "carr-key-recovery.*")
     before = set(glob.glob(tmp_glob))
     ready_file = os.path.join(workdir, "pause-ready")
     env = unreachable_env({
+        "TMPDIR": private_tmp,
         "CARR_KEY_RECOVERY_TEST_SELFTEST": "1",
         "CARR_KEY_RECOVERY_TEST_SELFTEST_TYPED_KEY": secret,
         "CARR_KEY_RECOVERY_TEST_SELFTEST_PUBKEY_FILE": match_pubkey_file,
