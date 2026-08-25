@@ -160,6 +160,8 @@ def _repairs_exact_origin_collision(
         return False
     if TRANSIENT_MEMORY_NEW not in current:
         return False
+    if [name for name in current if name.endswith("_memory_kernel.sql")] != [TRANSIENT_MEMORY_NEW]:
+        return False
     # No unrelated migration from origin/main may disappear in the repair.
     return remote - {TRANSIENT_MEMORY_OLD} <= current
 

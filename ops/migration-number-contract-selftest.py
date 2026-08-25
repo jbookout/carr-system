@@ -237,6 +237,9 @@ def main() -> int:
     assert not next_migration._repairs_exact_origin_collision(
         exact_remote, exact_current, True, False
     )
+    assert not next_migration._repairs_exact_origin_collision(
+        exact_remote, exact_current + ["0300_memory_kernel.sql"], True, True
+    )
 
     # Exercise the actual allocator path with the real migration inventory:
     # red origin/main plus a clean checked tree succeeds and reserves 0298,
