@@ -56,6 +56,13 @@ function digest(value, field, ToolError) {
   if (typeof value !== "string" || !DIGEST.test(value)) error(ToolError, { error: "engineering_digest_invalid", field });
   return value;
 }
+function evidence(value, field, ToolError) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "content_digest,redaction_class,ref") error(ToolError, { error: "engineering_evidence_invalid", field });
+  id(value.ref, `${field}.ref`, ToolError);
+  digest(value.content_digest, `${field}.content_digest`, ToolError);
+  if (!["metadata_only", "redacted_evidence"].includes(value.redaction_class)) error(ToolError, { error: "engineering_evidence_invalid", field });
+  return value;
+}
 function uuid(value, field, ToolError) {
   const result = text(value, field, ToolError);
   if (!UUID.test(result)) error(ToolError, { error: "engineering_uuid_invalid", field });
@@ -68,20 +75,42 @@ function exactAuthorityFree(args, ToolError) {
   if (found.length) error(ToolError, { error: "caller_authority_selector_forbidden", fields: found });
 }
 
-function requirePlan(plan, ToolError) {
+export function requirePlan(plan, ToolError) {
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) error(ToolError, { error: "engineering_slice_plan_invalid" });
+  if (Object.keys(plan).sort().join(",") !== "accepted_plan_revision,plan_digest,schema_version,slices,work_request") error(ToolError, { error: "engineering_slice_plan_unknown_field" });
   for (const key of ["schema_version", "work_request", "accepted_plan_revision", "plan_digest", "slices"])
     if (!(key in plan)) error(ToolError, { error: "engineering_slice_plan_missing_field", field: key });
   if (plan.schema_version !== "engineering-slice-plan.v1") error(ToolError, { error: "engineering_slice_plan_schema_invalid" });
+  const binding = plan.work_request;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding) || Object.keys(binding).sort().join(",") !== "canonical_record_digest,id,state_version")
+    error(ToolError, { error: "engineering_slice_plan_work_binding_invalid" });
+  id(binding.id, "work_request.id", ToolError); digest(binding.canonical_record_digest, "work_request.canonical_record_digest", ToolError);
+  if (!Number.isInteger(binding.state_version) || binding.state_version < 1) error(ToolError, { error: "engineering_slice_plan_state_version_invalid" });
+  const revision = plan.accepted_plan_revision;
+  if (!revision || typeof revision !== "object" || Array.isArray(revision) || Object.keys(revision).sort().join(",") !== "digest,id,revision")
+    error(ToolError, { error: "engineering_slice_plan_revision_invalid" });
+  id(revision.id, "accepted_plan_revision.id", ToolError); digest(revision.digest, "accepted_plan_revision.digest", ToolError);
+  if (!Number.isInteger(revision.revision) || revision.revision < 1) error(ToolError, { error: "engineering_slice_plan_revision_invalid" });
   digest(plan.plan_digest, "plan_digest", ToolError);
   if (!Array.isArray(plan.slices) || plan.slices.length < 1) error(ToolError, { error: "engineering_slice_plan_empty" });
   const refs = new Set();
   for (const slice of plan.slices) {
+    const required = ["baseline_evidence_refs", "concurrency_posture", "declared_component_refs", "declared_plan_step_refs", "declared_resource_refs", "definition_of_done", "dependency_refs", "forbidden_change_refs", "manual_qa_required", "objective", "ordinal", "planned_checks", "release_requirement", "risk_class", "scope_boundary", "slice_ref"];
+    if (!slice || typeof slice !== "object" || Array.isArray(slice) || Object.keys(slice).sort().join(",") !== required.join(",")) error(ToolError, { error: "engineering_slice_schema_invalid", slice_ref: slice?.slice_ref });
     id(slice.slice_ref, "slice_ref", ToolError);
+    if (!Number.isInteger(slice.ordinal) || slice.ordinal < 1 || typeof slice.objective !== "string" || !slice.objective.trim() || typeof slice.definition_of_done !== "string" || !slice.definition_of_done.trim() || typeof slice.scope_boundary !== "string" || !slice.scope_boundary.trim()) error(ToolError, { error: "engineering_slice_fields_invalid", slice_ref: slice.slice_ref });
+    if (!["parallel_safe", "serial_after_dependencies", "exclusive_resource"].includes(slice.concurrency_posture) || !/^R[0-6]$/.test(slice.risk_class) || !["required", "not_required"].includes(slice.release_requirement) || typeof slice.manual_qa_required !== "boolean") error(ToolError, { error: "engineering_slice_enum_invalid", slice_ref: slice.slice_ref });
     if (refs.has(slice.slice_ref)) error(ToolError, { error: "engineering_slice_duplicate", slice_ref: slice.slice_ref });
     refs.add(slice.slice_ref);
     if (!Array.isArray(slice.dependency_refs) || slice.dependency_refs.some(ref => !refs.has(ref) && !plan.slices.some(candidate => candidate.slice_ref === ref)))
       error(ToolError, { error: "engineering_slice_dependency_unknown", slice_ref: slice.slice_ref });
+    for (const field of ["baseline_evidence_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs", "forbidden_change_refs", "dependency_refs"])
+      if (!Array.isArray(slice[field])) error(ToolError, { error: "engineering_slice_array_invalid", field, slice_ref: slice.slice_ref });
+    for (const [index, item] of slice.baseline_evidence_refs.entries()) evidence(item, `baseline_evidence_refs[${index}]`, ToolError);
+    for (const field of ["declared_resource_refs", "declared_component_refs", "declared_plan_step_refs", "forbidden_change_refs", "dependency_refs"])
+      for (const [index, item] of slice[field].entries()) id(item, `${field}[${index}]`, ToolError);
+    const checkRefs = new Set();
+    if (!Array.isArray(slice.planned_checks) || slice.planned_checks.length < 1 || slice.planned_checks.some(check => !check || typeof check !== "object" || Object.keys(check).sort().join(",") !== "check_ref,evidence_requirement,failure_condition" || !id(check.check_ref, "planned_checks.check_ref", ToolError) || checkRefs.has(check.check_ref) || !checkRefs.add(check.check_ref) || typeof check.failure_condition !== "string" || !check.failure_condition.trim() || !["redacted_evidence_required", "metadata_only_sufficient"].includes(check.evidence_requirement))) error(ToolError, { error: "engineering_slice_checks_invalid", slice_ref: slice.slice_ref });
   }
   if (canonicalDigest(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== "plan_digest"))) !== plan.plan_digest)
     error(ToolError, { error: "engineering_slice_plan_digest_mismatch" });
@@ -115,6 +144,15 @@ function sliceFor(plan, sliceRef, ToolError) {
   return row;
 }
 
+function dependenciesSatisfied(facts, plan, slice, ToolError) {
+  const receipts = (facts.receipts || []).map(row => row.receipt || row);
+  const reviews = (facts.reviewer_facts || []).map(row => row.fact || row);
+  const passed = new Set(reviews.filter(review => review.state === "passed" && receipts.some(receipt => receipt.slice_ref === review.slice_ref && receipt.attempt_id === review.attempt_id && receipt.outcome === "claimed_complete")).map(review => review.slice_ref));
+  const missing = (slice.dependency_refs || []).filter(ref => !passed.has(ref));
+  if (missing.length) error(ToolError, { error: "engineering_dependencies_not_verified", slice_ref: slice.slice_ref, missing_dependencies: missing });
+  return true;
+}
+
 function nowIso() { return new Date().toISOString().replace(/\.\d{3}Z$/, "Z"); }
 
 export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, actor }) {
@@ -125,7 +163,7 @@ export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, acto
     schema_version: "execution-envelope.v1",
     envelope_id: `env:${globalThis.crypto.randomUUID()}`,
     work_request_id: source.work.id,
-    plan_revision: { id: `plan:${source.plan.plan_ref}`, revision: Number(source.plan.revision), digest: source.plan.digest },
+    plan_revision: { id: source.plan.plan_ref, revision: Number(source.plan.revision), digest: source.plan.digest },
     agent_session: { id: `session:${sessionId}`, lease_expires_at: expiry },
     issued_at: issue, expires_at: expiry,
     state_binding: {
@@ -177,11 +215,12 @@ export function validateReceiptBinding(receipt, envelope, slice, actor, ToolErro
   return receipt;
 }
 
-function closureProjection(facts, ToolError) {
+export function closureProjection(facts, ToolError) {
   const source = sourceParts(facts.source, ToolError);
   const plan = sourcePlan(facts, source, ToolError);
-  const receipts = facts.receipts || [];
-  const reviews = facts.reviewer_facts || [];
+  const receipts = (facts.receipts || []).map(row => row.receipt || row);
+  const reviews = (facts.reviewer_facts || []).map(row => row.fact || row);
+  const envelopes = (facts.envelopes || []).map(row => row.envelope || row);
   const verified = new Set(reviews.filter(review => review.state === "passed").map(review => review.slice_ref));
   const states = plan.slices.map(slice => {
     const receipt = receipts.find(row => row.slice_ref === slice.slice_ref);
@@ -190,17 +229,38 @@ function closureProjection(facts, ToolError) {
     const state = !receipt ? (dependenciesVerified ? "eligible" : "blocked")
       : review?.state === "passed" && receipt.outcome === "claimed_complete" ? "verified_complete"
         : receipt.outcome === "failed" || receipt.outcome === "reopened" ? "reopened" : "claimed";
-    return { slice_ref: slice.slice_ref, ordinal: slice.ordinal, dependency_refs: slice.dependency_refs || [], state };
+    return { slice_ref: slice.slice_ref, ordinal: slice.ordinal, dependency_refs: slice.dependency_refs || [], state,
+      planned_check_refs: (slice.planned_checks || []).map(check => check.check_ref), deviation_refs: (receipt?.deviations || []).map(deviation => typeof deviation === "string" ? deviation : deviation.ref).filter(Boolean),
+      manual_qa_required: slice.manual_qa_required, release_requirement: slice.release_requirement };
   });
-  const complete = states.every(row => row.state === "verified_complete") && receipts.length === plan.slices.length;
-  return {
-    schema_version: "engineering-passport.v1", work_request: source.work_request,
-    accepted_plan_revision: { id: `plan:${source.plan.plan_ref}`, revision: Number(source.plan.revision), digest: source.plan.digest },
-    plan_digest: plan.plan_digest, slices: states, receipts, reviewer_facts: reviews,
+  const complete = states.every(row => row.state === "verified_complete") && receipts.length >= plan.slices.length;
+  const evidence = receipts.flatMap(receipt => receipt.evidence_refs || []).filter(item => item && typeof item === "object");
+  const unresolved = states.filter(row => row.state !== "verified_complete").map(row => row.slice_ref);
+  const disposition = (state, note) => ({ state, evidence_refs: evidence, note });
+  const projection = {
+    schema_version: "engineering-passport.v1",
+    work_request: { id: source.work.id, state_version: Number(source.work.version), canonical_record_digest: source.work.canonical_record_digest },
+    accepted_plan_revision: { id: source.plan.plan_ref, revision: Number(source.plan.revision), digest: source.plan.digest },
+    plan_digest: plan.plan_digest,
+    slice_plan: plan,
+    execution_envelopes: envelopes,
+    slices: states,
+    receipts,
+    reviewer_facts: reviews,
+    qa_facts: [],
+    operator_receipt: { what_changed: [], why: "derived from the accepted plan and typed execution evidence", evidence_refs: evidence, deviations: [], remaining_risk: unresolved, manual_qa_items: [] },
+    closure: {
+      work: disposition(complete ? "complete" : "unresolved", complete ? "all planned slices have a bound receipt and independent pass" : "one or more planned slices remain unresolved"),
+      proof: disposition(complete ? "complete" : "unresolved", complete ? "all receipts are independently reviewed" : "receipts are executor claims until independently reviewed"),
+      explanation: disposition(complete ? "complete" : "unresolved", "derived from canonical persisted facts"),
+      release: disposition(complete ? "complete" : "unresolved", complete ? "all required slices are verified" : "release remains closed until closure is complete"),
+      learning: { state: "unresolved", route: null, evidence_refs: evidence, note: "learning remains a proposal/disposition seam" },
+    },
     closure_state: complete ? "complete" : "blocked",
-    closure: { work: complete ? "complete" : "unresolved", proof: complete ? "complete" : "unresolved", explanation: "unresolved", release: "unresolved", learning: { state: "unresolved", route: null } },
     stale_conflict: { state: "none", reason: null },
   };
+  projection.projection_digest = canonicalDigest(projection);
+  return projection;
 }
 
 export async function runCodexSlice({ dispatchEnvelope, desk, envelope, task }) {
@@ -225,6 +285,12 @@ export async function admitEngineeringSlice(c, actor, args, ToolError) {
   const source = sourceParts(facts.source, ToolError);
   const plan = sourcePlan(facts, source, ToolError);
   const slice = sliceFor(plan, sliceRef, ToolError);
+  dependenciesSatisfied(facts, plan, slice, ToolError);
+  await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-slice:${source.plan.digest}:${sliceRef}`]);
+  const refreshed = await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRequest]);
+  const refreshedFacts = refreshed.rows[0]?.facts;
+  const refreshedEnvelope = (refreshedFacts?.envelopes || []).find(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id);
+  if (refreshedEnvelope) return { ok: true, replayed: true, envelope: refreshedEnvelope.envelope, envelope_id: refreshedEnvelope.id, job_id: refreshedEnvelope.job_id };
   const existing = (facts.envelopes || []).find(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id);
   if (existing) return { ok: true, replayed: true, envelope: existing.envelope, envelope_id: existing.id, job_id: existing.job_id };
 
@@ -270,7 +336,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError) {
 }
 
 export async function claimEngineeringSlice(c, worker, limit = 1) {
-  const claimed = await c.query("select * from ops.claim_job($1::text,$2::integer,1800)", [worker, limit]);
+  const claimed = await c.query("select * from ops.engineering_claim_slice($1::text,$2::integer,1800)", [worker, limit]);
   const rows = [];
   for (const job of claimed.rows) {
     const bound = await c.query("select * from ops.engineering_execution_envelope where job_id=$1", [job.job_id]);
@@ -298,6 +364,25 @@ export async function submitEngineeringReceipt(c, claimed, receipt, actor, ToolE
   if (receipt.outcome === "claimed_complete") await c.query("select ops.complete_job($1::uuid,$2::uuid,$3::jsonb,$4::text)", [claimed.job_id, claimed.lease_token, JSON.stringify({ engineering_receipt_id: inserted.rows[0].id, receipt_digest: receiptDigest }), `engineering:${inserted.rows[0].id}`]);
   else await c.query("select ops.fail_job($1::uuid,$2::uuid,$3::text,$4::text)", [claimed.job_id, claimed.lease_token, `engineering_${receipt.outcome}`, "typed engineering receipt reported non-complete outcome"]);
   return { ok: true, receipt_id: inserted.rows[0].id, receipt_digest: receiptDigest };
+}
+
+// Dedicated controller entrypoint: claim from the existing job ledger, invoke
+// the fresh-native Codex adapter, then persist its typed claim through the
+// lease-bound receipt function.  The controller supplies the already audited
+// room-bridge dispatcher; no Claude fallback or inherited transcript path is
+// permitted here.
+export async function runEngineeringWorker({ c, worker, actor, desk, dispatchEnvelope, limit = 1, ToolError }) {
+  if (typeof dispatchEnvelope !== "function") throw new Error("engineering worker requires the Codex room-bridge dispatcher");
+  const claims = await claimEngineeringSlice(c, worker, limit);
+  const results = [];
+  for (const claim of claims) {
+    if (claim.definition_key !== "engineering-slice") continue;
+    const task = { ...(claim.payload || {}), job_ref: `job:${claim.job_id}`, attempt_id: `attempt:${claim.attempt}` };
+    const receipt = await runCodexSlice({ dispatchEnvelope, desk, envelope: claim.envelope, task });
+    if (!receipt || typeof receipt !== "object") throw new Error("Codex worker returned no typed receipt");
+    results.push(await submitEngineeringReceipt(c, claim, receipt, actor, ToolError));
+  }
+  return { claimed: claims.length, completed: results.length, results };
 }
 
 export async function recordEngineeringReview(c, actor, args, ToolError) {
