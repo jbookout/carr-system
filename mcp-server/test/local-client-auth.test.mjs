@@ -1,12 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { selectLocalClientCredential } from "../local-client-auth.mjs";
-import { hermesActorForToken } from "../src/identity.js";
+import {
+  LOCAL_CLIENT_PROFILE_NAMES, selectLocalClientCredential, tokenFileSecurityIssue,
+} from "../local-client-auth.mjs";
+import { hermesActorForToken, hermesCosActorForToken } from "../src/identity.js";
 
 const tokenFile = [
   "CARR_MCP_LOCAL_TOKEN=joe-secret",
   "CARR_HERMES_MCP_TOKEN=hermes-secret",
+  "CARR_HERMES_COS_MCP_TOKEN=cos-secret",
 ].join("\n");
 
 test("ordinary calls keep the local-machine credential", () => {
@@ -14,6 +17,7 @@ test("ordinary calls keep the local-machine credential", () => {
   assert.equal(selected.token, "joe-secret");
   assert.equal(selected.profile, "local");
   assert.equal(selected.tokenVariable, "CARR_MCP_LOCAL_TOKEN");
+  assert.equal(selected.workerSecret, "LOCAL_TOKENS");
 });
 
 test("the queue projector selects the separate Hermes credential", () => {
@@ -22,6 +26,7 @@ test("the queue projector selects the separate Hermes credential", () => {
   assert.equal(selected.token, "hermes-secret");
   assert.equal(selected.profile, "hermes-projector");
   assert.equal(selected.tokenVariable, "CARR_HERMES_MCP_TOKEN");
+  assert.equal(selected.workerSecret, "HERMES_TOKENS_EXTRA");
   assert.doesNotMatch(selected.identityNotice, /hermes-secret|joe-secret/);
   const serverActor = hermesActorForToken(
     `Bearer ${selected.token}`, JSON.stringify({ "hermes-pilot": "hermes-secret" }));
@@ -29,6 +34,32 @@ test("the queue projector selects the separate Hermes credential", () => {
     via: serverActor.via, hermes: serverActor.hermes }, {
     slug: "hermes-pilot", sponsor: "joe", via: "hermes-token", hermes: true,
   }, "the selected client credential resolves to exact server-derived reader provenance");
+});
+
+test("the CoS client selects only its distinct credential and Worker secret", () => {
+  const selected = selectLocalClientCredential(
+    { CARR_MCP_CLIENT_PROFILE: "hermes-cos" }, tokenFile);
+  assert.equal(selected.token, "cos-secret");
+  assert.equal(selected.profile, "hermes-cos");
+  assert.equal(selected.tokenVariable, "CARR_HERMES_COS_MCP_TOKEN");
+  assert.equal(selected.workerSecret, "HERMES_COS_TOKENS");
+  assert.doesNotMatch(selected.identityNotice, /cos-secret|hermes-secret|joe-secret/);
+  const serverActor = hermesCosActorForToken(
+    `Bearer ${selected.token}`, JSON.stringify({ "hermes-pilot": "cos-secret" }));
+  assert.deepEqual({ slug: serverActor.slug, sponsor: serverActor.sponsoring_human_slug,
+    via: serverActor.via, hermesCos: serverActor.hermesCos }, {
+    slug: "hermes-pilot", sponsor: "joe", via: "hermes-cos-token", hermesCos: true,
+  });
+});
+
+test("client profiles never borrow another profile's credential", () => {
+  assert.equal(selectLocalClientCredential(
+    { CARR_MCP_CLIENT_PROFILE: "hermes-cos" }, "CARR_HERMES_MCP_TOKEN=projector-only\n").token, "");
+  assert.equal(selectLocalClientCredential(
+    { CARR_MCP_CLIENT_PROFILE: "hermes-projector" }, "CARR_HERMES_COS_MCP_TOKEN=cos-only\n").token, "");
+  assert.equal(selectLocalClientCredential(
+    {}, "CARR_HERMES_COS_MCP_TOKEN=cos-only\n").token, "");
+  assert.deepEqual([...LOCAL_CLIENT_PROFILE_NAMES], ["local", "hermes-projector", "hermes-cos"]);
 });
 
 test("a missing Hermes credential never falls back to joe-local", () => {
@@ -43,4 +74,14 @@ test("unknown client profiles fail closed", () => {
     () => selectLocalClientCredential({ CARR_MCP_CLIENT_PROFILE: "joe" }, tokenFile),
     /unsupported local MCP client profile/,
   );
+});
+
+test("persistent MCP credential files require exact owner-controlled 0600 metadata", () => {
+  const secure = { mode: 0o100600, uid: 501, isFile: true, isSymbolicLink: false };
+  assert.equal(tokenFileSecurityIssue(secure, 501), null);
+  assert.match(tokenFileSecurityIssue({ ...secure, mode: 0o100644 }, 501), /mode must be 600/);
+  assert.match(tokenFileSecurityIssue({ ...secure, mode: 0o100400 }, 501), /mode must be 600/);
+  assert.match(tokenFileSecurityIssue({ ...secure, uid: 502 }, 501), /owned by the current user/);
+  assert.match(tokenFileSecurityIssue({ ...secure, isFile: false }, 501), /regular file/);
+  assert.match(tokenFileSecurityIssue({ ...secure, isSymbolicLink: true }, 501), /symbolic link/);
 });

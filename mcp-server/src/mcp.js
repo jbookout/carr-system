@@ -225,6 +225,17 @@ export const PROFILES = {
     // A runtime-only door: exact queue receipts, fixed provenance, no raw room prose.
     "project-room-queue",
   ]),
+
+  // HERMES CoS (loop #459). This is a separate server-locked capability door,
+  // never a request-side profile override. It inherits the ordinary Hermes
+  // business-write set and adds exactly the two bounded brief/premises verbs.
+  // Keep this explicit rather than spreading the set so a future ordinary
+  // Hermes write cannot silently land in the CoS credential.
+  "hermes-cos": new Set([
+    "log-activity", "stamp-touch", "add-loop", "update-loop",
+    "set-next-action", "complete-action", "add-critical-date", "record-finding",
+    "record-defect", "project-room-queue", "update-deal", "add-premises",
+  ]),
 };
 
 const PROFILE_NOTICE = {
@@ -277,6 +288,13 @@ const PROFILE_NOTICE = {
     "widened by this token under any request. You carry Joe's personal brain and never Dell's. " +
     "File what he tells you to file; for anything outside those nine verbs, say what you would have " +
     "written and hand it back for a human.</notice>",
+  "hermes-cos":
+    "\n\n<notice>This session runs on the HERMES CoS profile: the ordinary Hermes business-write set " +
+    "plus exactly update-deal (deal_type, segment, city and lane only) and add-premises against " +
+    "existing parties only. Its server-issued door cannot be widened by ?profile= or caller fields. " +
+    "It may hand a next action to Joe, its verified sponsor, but never Dell; created_by remains the " +
+    "Hermes runtime. Phase, outcome, close/value, identity, merge, teach, authority-only and send " +
+    "operations remain refused.</notice>",
 };
 
 /** Resolve ?profile= to a name, defaulting to full. An unknown value fails CLOSED to read. */
@@ -303,6 +321,7 @@ function profileFor(request) {
 export function profileForActor(actor, request) {
   if (actor?.probe) return "probe";
   if (actor?.review) return "reviewer";
+  if (actor?.hermesCos === true && actor?.via === "hermes-cos-token") return "hermes-cos";
   if (actor?.hermes) return "hermes";
   return profileFor(request);
 }
@@ -312,6 +331,24 @@ export function allowedIn(profile, name, tool) {
   if (tool.fullOnly) return false;            // sensitive operational reads stay off probe/reviewer/read
   if (!tool.write) return true;              // reads are allowed in every profile
   return PROFILES[profile].has(name);
+}
+
+// update-deal is globally allowed for interactive sessions, including its
+// closed deal_type vocabulary. The CoS door is field-locked separately: one
+// extra field refuses the whole call rather than applying a silent subset.
+export const HERMES_COS_DEAL_FIELDS = Object.freeze(["deal_type", "segment", "city", "lane"]);
+
+export function hermesCosDealFieldRefusal(profile, name, args) {
+  if (profile !== "hermes-cos" || name !== "update-deal") return null;
+  const fields = args?.fields;
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return null;
+  const refused = Object.keys(fields).filter((key) => !HERMES_COS_DEAL_FIELDS.includes(key));
+  return refused.length ? refused : null;
+}
+
+export function hermesCosPremisesRefusal(profile, name, args) {
+  return profile === "hermes-cos" && name === "add-premises" &&
+    Array.isArray(args?.ownership) && args.ownership.some((row) => row && row.new_party);
 }
 
 function toolList(profile = "full") {
@@ -469,6 +506,14 @@ export async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.ownership) && args.ownership.some(o => o && o.new_party))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
       hint: "away mode may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
+  if (hermesCosPremisesRefusal(profile, name, args))
+    throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
+      hint: "the Hermes CoS door may capture premises against existing party refs only; a human session must create a new party first" });
+  const refusedDealFields = hermesCosDealFieldRefusal(profile, name, args);
+  if (refusedDealFields)
+    throw new ToolError({ error: "not_in_profile", verb: "update-deal", profile,
+      refused_fields: refusedDealFields, allowed_fields: HERMES_COS_DEAL_FIELDS,
+      hint: "the Hermes CoS door may correct deal_type and search criteria only; phase, outcome, close/value, identity and narrative fields remain human-owned" });
   // [#214 RED-4, 2026-08-06] The same payload-aware pattern, eleven lines down
   // from its model: log-activity's links[] array runs link-parties' exact INSERT
   // (writeLinks, tools.js), so a profile that refuses link-parties BY NAME could
