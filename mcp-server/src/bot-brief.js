@@ -42,7 +42,7 @@ function requestedPacks(args) {
   return [...new Set(args.packs.map(pack => pack.trim().toLowerCase()).filter(Boolean))].sort();
 }
 
-function admittedHermesRuntime(raw, { tenant, sponsor, profileKey, profileVersion, profileModel, workRequest, bindingId }) {
+async function admittedHermesRuntime(raw, { tenant, sponsor, profileKey, profileVersion, profileModel, workRequest, bindingId }) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const expected = {
     runtime_principal: `runtime:${profileKey}`,
@@ -54,6 +54,20 @@ function admittedHermesRuntime(raw, { tenant, sponsor, profileKey, profileVersio
   };
   const expectedProvider = `provider:${String(profileModel || "").split("/")[0]}`;
   const expiresAt = Date.parse(String(raw.expires_at || ""));
+  const environmentBinding = {
+    provider_ref: raw.environment_provider_ref,
+    provider_version: raw.environment_provider_version,
+    provider_digest: raw.environment_provider_digest,
+    requirement_digest: raw.environment_requirement_digest,
+    configuration_digest: raw.environment_configuration_digest,
+    backend_kind: raw.environment_backend_kind,
+    source_class: raw.environment_source_class,
+    isolation_class: raw.environment_isolation_class,
+    capability_refs: raw.environment_capability_refs,
+    conformance_ref: raw.environment_conformance_ref,
+    conformance_digest: raw.environment_conformance_digest,
+  };
+  const environmentDigest = `sha256:${await digest(environmentBinding)}`;
   if (raw.status !== "registered" || raw.authorized !== true ||
       raw.registration_scope !== "execution_envelope" ||
       raw.surface !== "hermes_desktop" || raw.adapter_id !== "adapter:hermes-desktop" ||
@@ -67,6 +81,17 @@ function admittedHermesRuntime(raw, { tenant, sponsor, profileKey, profileVersio
       !/^envelope:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(raw.runtime_registration_id || "")) ||
       raw.operator_surface !== "job-passport:context-activation" ||
       raw.telemetry_ref !== `observatory:activation-reliability:${bindingId}` ||
+      !/^environment-provider:[a-z][a-z0-9-]*:v[1-9][0-9]*$/.test(String(raw.environment_provider_ref || "")) ||
+      !Number.isInteger(raw.environment_provider_version) || raw.environment_provider_version < 1 ||
+      ![raw.environment_provider_digest, raw.environment_requirement_digest, raw.environment_configuration_digest,
+        raw.environment_conformance_digest, raw.environment_binding_digest].every((value) => /^sha256:[0-9a-f]{64}$/.test(String(value || ""))) ||
+      !["none", "local", "container", "remote", "cloud"].includes(raw.environment_backend_kind) ||
+      !["built_in", "plugin"].includes(raw.environment_source_class) ||
+      !["none", "host_process", "container", "microvm", "remote_host"].includes(raw.environment_isolation_class) ||
+      !Array.isArray(raw.environment_capability_refs) || raw.environment_capability_refs.length === 0 ||
+      raw.environment_capability_refs.some((ref) => !/^[A-Za-z][A-Za-z0-9._:-]{2,127}$/.test(ref)) ||
+      !/^[A-Za-z][A-Za-z0-9._:-]{2,127}$/.test(String(raw.environment_conformance_ref || "")) ||
+      raw.environment_binding_digest !== environmentDigest ||
       Object.entries(expected).some(([key, value]) => raw[key] !== value) ||
       !/^sha256:[0-9a-f]{64}$/.test(String(raw.envelope_digest || "")) ||
       !/^sha256:[0-9a-f]{64}$/.test(String(raw.configuration_fingerprint || "")) ||
@@ -81,6 +106,10 @@ function admittedHermesRuntime(raw, { tenant, sponsor, profileKey, profileVersio
     "provider_id", "model_id", "configuration_fingerprint",
     "capability_profile", "read_only", "grants_authority", "envelope_digest",
     "expires_at", "operator_surface", "telemetry_ref", "device_binding_status",
+    "environment_provider_ref", "environment_provider_version", "environment_provider_digest",
+    "environment_requirement_digest", "environment_configuration_digest", "environment_backend_kind",
+    "environment_source_class", "environment_isolation_class", "environment_capability_refs",
+    "environment_conformance_ref", "environment_conformance_digest", "environment_binding_digest",
   ].map(key => [key, raw[key]]));
 }
 
@@ -181,7 +210,7 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
               [actor.slug, profileKey, scope.status === "personal" ? scope.sponsor : null,
                 args.work_request, args.activation_binding_id]);
             const rawRegistration = registrationResult.rows[0]?.registration;
-            runtimeRegistration = admittedHermesRuntime(rawRegistration, {
+            runtimeRegistration = await admittedHermesRuntime(rawRegistration, {
               tenant: identity.organization_tenant_id,
               sponsor: scope.status === "personal" ? scope.sponsor : null,
               profileKey, profileVersion: Number(row.version), profileModel: row.current_model,

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr-execution-environment-provider-v1",
+  "title": "CARR Execution Environment Provider v1",
+  "contract": "carr-execution-environment-provider-v1",
+  "version": "1.0.0",
+  "status": "phase1_contract_active_with_db_admission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "provider_key", "provider_version", "display_name",
+    "source_class", "backend_kind", "implementation_ref", "implementation_digest",
+    "capability_refs", "operation_refs", "isolation_class", "egress_policy_ref",
+    "secret_policy_ref", "persistence_mode", "resource_policy_ref", "cleanup_policy_ref",
+    "threat_model_ref", "conformance_contract_ref", "conformance_contract_digest",
+    "configuration_schema_digest", "package_provenance", "collision_policy",
+    "contains_secrets", "manifest_digest"
+  ],
+  "properties": {
+    "schema_version": {"const": "execution-environment-provider.v1"},
+    "provider_key": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "provider_version": {"type": "integer", "minimum": 1},
+    "display_name": {"type": "string", "minLength": 1, "maxLength": 80},
+    "source_class": {"enum": ["built_in", "plugin"]},
+    "backend_kind": {"enum": ["none", "local", "container", "remote", "cloud"]},
+    "implementation_ref": {"$ref": "#/$defs/Id"},
+    "implementation_digest": {"$ref": "#/$defs/Digest"},
+    "capability_refs": {"$ref": "#/$defs/Refs"},
+    "operation_refs": {"type": "array", "minItems": 5, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+    "isolation_class": {"enum": ["none", "host_process", "container", "microvm", "remote_host"]},
+    "egress_policy_ref": {"$ref": "#/$defs/Id"},
+    "secret_policy_ref": {"$ref": "#/$defs/Id"},
+    "persistence_mode": {"enum": ["none", "command_scoped", "session_scoped", "durable_workspace"]},
+    "resource_policy_ref": {"$ref": "#/$defs/Id"},
+    "cleanup_policy_ref": {"$ref": "#/$defs/Id"},
+    "threat_model_ref": {"$ref": "#/$defs/Id"},
+    "conformance_contract_ref": {"$ref": "#/$defs/Id"},
+    "conformance_contract_digest": {"$ref": "#/$defs/Digest"},
+    "configuration_schema_digest": {"$ref": "#/$defs/Digest"},
+    "package_provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["package_ref", "package_digest", "signature_ref", "sbom_ref"],
+      "properties": {
+        "package_ref": {"$ref": "#/$defs/Id"},
+        "package_digest": {"$ref": "#/$defs/Digest"},
+        "signature_ref": {"$ref": "#/$defs/Id"},
+        "sbom_ref": {"$ref": "#/$defs/Id"}
+      }
+    },
+    "collision_policy": {"enum": ["protected_builtin", "digest_pinned"]},
+    "contains_secrets": {"const": false},
+    "manifest_digest": {"$ref": "#/$defs/Digest"}
+  },
+  "$defs": {
+    "Id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"},
+    "Digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "Refs": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}}
+  }
+}

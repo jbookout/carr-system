@@ -257,13 +257,16 @@ def recompute_accepted_plan_context(plan: Any, bundle: Any) -> dict[str, Any]:
 ENVELOPE_ACTIVATION_FIELDS = {"bundle_digest", "item_refs", "mode", "retrieval_policy_version"}
 ENVELOPE_RELIABILITY_FIELDS = {"policy_ref", "policy_digest", "risk_class", "mode"}
 RUNTIME_PROFILE_FIELDS = {"ref", "digest", "profile_key", "profile_version", "provider_id", "model_id", "desk", "policy_ref", "policy_digest", "modality", "reasoning_effort_ref", "sampling_profile_ref", "context_budget", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"}
+RUNTIME_ENVIRONMENT_FIELDS = {"environment_provider_ref", "environment_provider_version", "environment_provider_digest", "environment_requirement_digest", "environment_configuration_digest", "environment_backend_kind", "environment_source_class", "environment_isolation_class", "environment_capability_refs", "environment_conformance_ref", "environment_conformance_digest", "environment_binding_digest"}
 TOPOLOGY_FIELDS = {"ref", "digest", "kind", "harness_digest", "parallelism", "code_model_step_refs", "fallback_policy_ref", "stop_condition_refs", "context_refresh_policy_ref", "memory_policy_ref", "sandbox_ref", "guardrail_ref", "threat_model_ref"}
 EVALUATION_PLAN_FIELDS = {"ref", "digest", "lane_ref", "risk_class", "rubric_digest", "case_set_digest", "evaluator_policy_digest", "evaluator_ref", "rubric_ref", "evaluator_version", "evaluator_digest", "required_rungs", "required_deterministic_check_refs", "critical_dimensions", "human_acceptance_required", "outcome_horizon_ref", "outcome_horizon_not_before", "requirements"}
 EVALUATION_REQUIREMENTS_FIELDS = {"required_evaluator_kinds", "minimum_held_out_case_count", "minimum_calibration_ref_count", "maximum_critical_failure_count", "maximum_critical_failure_rate", "confidence_posture", "drift_tolerance", "independent_review_required", "human_acceptance_required", "outcome_horizon_required"}
 
 
 def _validate_runtime_metadata(value: Any) -> dict[str, Any]:
-    row = _exact(value, RUNTIME_PROFILE_FIELDS, "execution runtime_profile")
+    if not isinstance(value, dict) or set(value) - (RUNTIME_PROFILE_FIELDS | RUNTIME_ENVIRONMENT_FIELDS):
+        raise ActivationReliabilityError("execution runtime_profile has unknown fields")
+    row = _exact({key: value[key] for key in RUNTIME_PROFILE_FIELDS}, RUNTIME_PROFILE_FIELDS, "execution runtime_profile")
     for field in ("ref", "profile_key", "provider_id", "policy_ref", "modality", "reasoning_effort_ref", "sampling_profile_ref", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"):
         _id(row[field], f"execution runtime_profile {field}")
     for field in ("model_id", "desk"):
@@ -271,6 +274,21 @@ def _validate_runtime_metadata(value: Any) -> dict[str, Any]:
     _digest(row["digest"], "execution runtime_profile digest"); _digest(row["policy_digest"], "execution runtime_profile policy_digest")
     if not isinstance(row["profile_version"], int) or isinstance(row["profile_version"], bool) or row["profile_version"] < 1: raise ActivationReliabilityError("execution runtime profile_version must be positive")
     if not isinstance(row["context_budget"], int) or isinstance(row["context_budget"], bool) or row["context_budget"] < 1: raise ActivationReliabilityError("execution runtime context_budget must be positive")
+    present = RUNTIME_ENVIRONMENT_FIELDS & set(value)
+    if present and present != RUNTIME_ENVIRONMENT_FIELDS:
+        raise ActivationReliabilityError("execution runtime environment binding must be complete")
+    if present:
+        import execution_environment
+        binding = {
+            "provider_ref": value["environment_provider_ref"], "provider_version": value["environment_provider_version"],
+            "provider_digest": value["environment_provider_digest"], "requirement_digest": value["environment_requirement_digest"],
+            "configuration_digest": value["environment_configuration_digest"], "backend_kind": value["environment_backend_kind"],
+            "source_class": value["environment_source_class"], "isolation_class": value["environment_isolation_class"],
+            "capability_refs": value["environment_capability_refs"], "conformance_ref": value["environment_conformance_ref"],
+            "conformance_digest": value["environment_conformance_digest"], "binding_digest": value["environment_binding_digest"],
+        }
+        execution_environment.validate_environment_binding(binding)
+        row.update({key: value[key] for key in RUNTIME_ENVIRONMENT_FIELDS})
     return row
 
 
@@ -422,6 +440,7 @@ def validate_knowledge_activation(value: Any, bundle: Any | None = None, *, enve
 
 
 RELIABILITY_FIELDS = {"route_digest", "topology_digest", "evaluation_plan_digest", "grounding_sufficiency", "deterministic_checks", "model_judgement", "human_acceptance", "trajectory", "evaluator_results", "corrections", "defects", "incidents", "downstream_outcome", "outcome_horizon", "process_metrics", "eval_candidates", "shadow_comparisons", "learning_disposition", "telemetry", "closure"}
+RELIABILITY_ENVIRONMENT_FIELDS = {"environment_binding_digest", "environment_evidence"}
 GROUNDING_FIELDS = {"state", "evidence_refs", "required_supplied", "required_used", "required_missing", "advisory_supplied", "advisory_used", "freshness_failures", "retrieval_failures"}
 CHECK_FIELDS = {"check_id", "state", "critical", "evidence_refs"}
 JUDGE_FIELDS = {"state", "judge_ref", "evidence_refs"}
@@ -467,7 +486,9 @@ def _validate_evidence_state(row: dict[str, Any], fields: set[str], label: str, 
 
 def validate_reliability(value: Any, *, envelope: Any | None = None, attempt_id: str | None = None) -> dict[str, Any]:
     if not isinstance(value, dict): raise ActivationReliabilityError("receipt reliability must be an object")
-    row = _exact(value, RELIABILITY_FIELDS, "receipt reliability")
+    if set(value) - (RELIABILITY_FIELDS | RELIABILITY_ENVIRONMENT_FIELDS):
+        raise ActivationReliabilityError("receipt reliability has unknown fields")
+    row = _exact({key: value[key] for key in RELIABILITY_FIELDS}, RELIABILITY_FIELDS, "receipt reliability")
     for field in ("route_digest", "topology_digest", "evaluation_plan_digest"):
         _digest(row[field], f"reliability {field}")
     if envelope is not None:
@@ -475,6 +496,26 @@ def validate_reliability(value: Any, *, envelope: Any | None = None, attempt_id:
         for receipt_field, envelope_field in (("route_digest", "runtime_profile"), ("topology_digest", "execution_topology"), ("evaluation_plan_digest", "evaluation_plan")):
             if row[receipt_field] != envelope[envelope_field].get("digest"):
                 raise ActivationReliabilityError(f"reliability {receipt_field} does not bind the server-issued envelope")
+        runtime = envelope.get("runtime_profile", {})
+        has_environment = bool(RUNTIME_ENVIRONMENT_FIELDS & set(runtime))
+        if has_environment:
+            if not RELIABILITY_ENVIRONMENT_FIELDS <= set(value):
+                raise ActivationReliabilityError("environment-bound envelope requires receipt environment evidence")
+            import execution_environment
+            binding = {
+                "provider_ref": runtime["environment_provider_ref"], "provider_version": runtime["environment_provider_version"],
+                "provider_digest": runtime["environment_provider_digest"], "requirement_digest": runtime["environment_requirement_digest"],
+                "configuration_digest": runtime["environment_configuration_digest"], "backend_kind": runtime["environment_backend_kind"],
+                "source_class": runtime["environment_source_class"], "isolation_class": runtime["environment_isolation_class"],
+                "capability_refs": runtime["environment_capability_refs"], "conformance_ref": runtime["environment_conformance_ref"],
+                "conformance_digest": runtime["environment_conformance_digest"], "binding_digest": runtime["environment_binding_digest"],
+            }
+            if value["environment_binding_digest"] != binding["binding_digest"]:
+                raise ActivationReliabilityError("receipt environment binding digest does not bind envelope")
+            execution_environment.validate_environment_evidence(value["environment_evidence"], binding)
+            row.update({key: value[key] for key in RELIABILITY_ENVIRONMENT_FIELDS})
+        elif RELIABILITY_ENVIRONMENT_FIELDS & set(value):
+            raise ActivationReliabilityError("legacy envelope cannot accept environment evidence")
     grounding = _exact(row["grounding_sufficiency"], GROUNDING_FIELDS, "grounding sufficiency")
     if grounding["state"] not in {"sufficient", "insufficient", "unknown"}:
         raise ActivationReliabilityError("grounding sufficiency is invalid")

@@ -181,6 +181,8 @@ testCase("attempt receipt activation facts are redacted and forged nested conten
   const fullReliabilityReceipt = structuredClone(activationReceipt);
   fullReliabilityReceipt.reliability = {
     route_digest: "sha256:" + "1".repeat(64), topology_digest: "sha256:" + "2".repeat(64), evaluation_plan_digest: "sha256:" + "3".repeat(64),
+    environment_binding_digest: "sha256:" + "9".repeat(64),
+    environment_evidence: { binding_digest: "sha256:" + "9".repeat(64), session_ref: "environment-session:one", lease_state: "released", operation_count: 1, policy_refusal_refs: [], security_event_refs: [], cleanup_state: "verified", cleanup_evidence_refs: ["evidence:cleanup"], side_effect_state: "none", resource_usage: { cpu_ms: 1, memory_peak_mb: 1, disk_peak_mb: 0, network_egress_bytes: 0 }, evidence_refs: ["evidence:environment"] },
     grounding_sufficiency: { state: "sufficient", evidence_refs: ["evidence:grounding"], required_supplied: ["rule:scope"], required_used: ["rule:scope"], required_missing: [], advisory_supplied: [], advisory_used: [], freshness_failures: [], retrieval_failures: [] },
     deterministic_checks: [{ check_id: "check:one", state: "passed", critical: true, evidence_refs: ["evidence:one"] }], model_judgement: { state: "pass", judge_ref: "actor:judge", evidence_refs: ["evidence:judge"] }, human_acceptance: { state: "absent", actor_ref: "actor:human", evidence_refs: [], outcome_feedback_ref: null, outcome_feedback_hash: null },
     trajectory: [{ sequence: 1, stage_ref: "stage:one", parent_event_ref: null, decision_class: "decision:one", tool_class: "tool:one", result_state: "succeeded", fallback_state: "not_used", guardrail_state: "clear", latency_ms: 1, evidence_refs: ["evidence:trace"] }],
@@ -198,13 +200,14 @@ testCase("attempt receipt activation facts are redacted and forged nested conten
   exactDbEnvelope.activation_binding = { bundle_digest: "sha256:" + "b".repeat(64), item_refs: ["rule:scope"], mode: "canary", retrieval_policy_version: "v1" };
   exactDbEnvelope.reliability_policy_binding = { policy_ref: "policy:execution-lane-v1", policy_digest: "sha256:" + "c".repeat(64), risk_class: "R2", mode: "canary" };
   exactDbEnvelope.context_activation_ref = "ctx:synthetic";
-  exactDbEnvelope.runtime_profile = { ref: "runtime-profile:builder:v1", digest: "sha256:" + "1".repeat(64), profile_key: "builder", profile_version: 1, provider_id: "provider:openai", model_id: "model:gpt-5", desk: "desk:build", policy_ref: "policy:execution-lane-v1", policy_digest: "sha256:" + "c".repeat(64), modality: "modality:text", reasoning_effort_ref: "reasoning-effort:governed-default", sampling_profile_ref: "sampling:governed-default", context_budget: 8192, cache_policy_ref: "cache:governed-default", knowledge_cutoff_posture: "knowledge-cutoff:provider-declared", tool_calling_mode: "tool-calling:metadata-only" };
-  exactDbEnvelope.execution_topology = { ref: "execution-topology:single-governed-attempt-v1", digest: "sha256:" + "2".repeat(64), kind: "single_agent_loop", harness_digest: "sha256:" + "3".repeat(64), parallelism: "sequential", code_model_step_refs: ["step:model-governed"], fallback_policy_ref: "fallback:stop-and-escalate", stop_condition_refs: ["stop:capability-expired", "stop:critical-failure"], context_refresh_policy_ref: "context-refresh:bound-revisions-only", memory_policy_ref: "memory:context-never-authority", sandbox_ref: "sandbox:metadata-only", guardrail_ref: "guardrail:governed-default", threat_model_ref: "threat-model:governed-default" };
+  exactDbEnvelope.runtime_profile = { ref: "runtime-profile:builder:v1", digest: "sha256:" + "1".repeat(64), profile_key: "builder", profile_version: 1, provider_id: "provider:openai", model_id: "model:gpt-5", desk: "desk:build", policy_ref: "policy:execution-lane-v1", policy_digest: "sha256:" + "c".repeat(64), modality: "modality:text", reasoning_effort_ref: "reasoning-effort:governed-default", sampling_profile_ref: "sampling:governed-default", context_budget: 8192, cache_policy_ref: "cache:governed-default", knowledge_cutoff_posture: "knowledge-cutoff:provider-declared", tool_calling_mode: "tool-calling:metadata-only", environment_provider_ref: "environment-provider:hermes-local:v1", environment_provider_version: 1, environment_provider_digest: "sha256:" + "4".repeat(64), environment_requirement_digest: "sha256:" + "5".repeat(64), environment_configuration_digest: "sha256:" + "6".repeat(64), environment_backend_kind: "local", environment_source_class: "built_in", environment_isolation_class: "host_process", environment_capability_refs: ["environment:exec", "environment:filesystem"], environment_conformance_ref: "conformance-run:hermes-local-v1", environment_conformance_digest: "sha256:" + "7".repeat(64), environment_binding_digest: "sha256:" + "8".repeat(64) };
+  exactDbEnvelope.execution_topology = { ref: "execution-topology:single-governed-attempt-v1", digest: "sha256:" + "2".repeat(64), kind: "single_agent_loop", harness_digest: "sha256:" + "3".repeat(64), parallelism: "sequential", code_model_step_refs: ["step:model-governed"], fallback_policy_ref: "fallback:stop-and-escalate", stop_condition_refs: ["stop:capability-expired", "stop:critical-failure"], context_refresh_policy_ref: "context-refresh:bound-revisions-only", memory_policy_ref: "memory:context-never-authority", sandbox_ref: "environment-provider:hermes-local:v1", guardrail_ref: "guardrail:governed-default", threat_model_ref: "threat-model:governed-default" };
   exactDbEnvelope.evaluation_plan = exactDbIssuedPlan;
   exactDbEnvelopePassport.receipts[0].envelope_digest = seal(exactDbEnvelope);
   delete exactDbEnvelopePassport.projection_digest; exactDbEnvelopePassport.projection_digest = seal(exactDbEnvelopePassport);
   const exactDbEnvelopeModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", exactDbEnvelopePassport), 2)]);
   assert.deepEqual(exactDbEnvelopeModel.passports[0].engineering_passport, exactDbEnvelopePassport, "browser attaches the full SQL-issued activated envelope");
+  assert.equal(exactDbEnvelopeModel.passports[0].engineering_passport.execution_envelopes[0].runtime_profile.environment_provider_ref, "environment-provider:hermes-local:v1");
   assert.ok(!exactDbEnvelopeModel.rejected.some((row) => row.reason === "invalid_engineering_passport"));
   const malformedActivatedEnvelopePassport = structuredClone(exactDbEnvelopePassport);
   delete malformedActivatedEnvelopePassport.execution_envelopes[0].evaluation_plan.required_deterministic_check_refs;
@@ -212,6 +215,10 @@ testCase("attempt receipt activation facts are redacted and forged nested conten
   const malformedActivatedEnvelopeModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", malformedActivatedEnvelopePassport), 2)]);
   assert.equal(malformedActivatedEnvelopeModel.passports[0].engineering_passport, null);
   assert.ok(malformedActivatedEnvelopeModel.rejected.some((row) => row.reason === "invalid_engineering_passport"));
+  const forgedEnvironmentReceipt = structuredClone(fullReliabilityReceipt);
+  forgedEnvironmentReceipt.reliability.environment_evidence.binding_digest = "sha256:" + "0".repeat(64);
+  const forgedEnvironmentModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("attempt_receipt", forgedEnvironmentReceipt), 2)]);
+  assert.equal(forgedEnvironmentModel.passports[0].activation_reliability, null);
   const foreignBinding = structuredClone(activationReceipt); foreignBinding.knowledge_activation.canonical_binding.work_request_id = "wr-foreign";
   const crossWr = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("attempt_receipt", foreignBinding), 2)]);
   assert.equal(crossWr.passports[0].activation_reliability, null);
@@ -340,6 +347,8 @@ testCase("eval ladder binds to the exact visual projection and keeps critical re
   assert.ok(withheld.rejected.some((row) => row.reason === "mismatched_eval_portfolio"));
   assert.match(roomSource, /no aggregate score/);
   assert.match(roomCss, /passport-eval-matrix/);
+  assert.match(roomSource, /Execution environment:/);
+  assert.match(roomSource, /Environment session:/);
 });
 
 testCase("a malformed projection digest is visibly withheld before it can paint", () => {

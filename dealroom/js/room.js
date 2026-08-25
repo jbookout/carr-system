@@ -1570,16 +1570,22 @@ function boot() {
           const route = el("section", "passport-activation-section");
           route.setAttribute("aria-label", "Route and Agent Topology");
           route.appendChild(el("h3", null, "Route & Agent Topology"));
+          const environment = issuedEnvelope?.runtime_profile?.environment_provider_ref
+            ? ` Execution environment: ${humanRef(issuedEnvelope.runtime_profile.environment_provider_ref)} · ${humanRef(issuedEnvelope.runtime_profile.environment_backend_kind)} · ${humanRef(issuedEnvelope.runtime_profile.environment_isolation_class)} · conformance ${humanRef(issuedEnvelope.runtime_profile.environment_conformance_ref)}.`
+            : " Execution environment provider is unavailable for this legacy envelope.";
           route.appendChild(el("p", null, issuedEnvelope?.runtime_profile && issuedEnvelope?.execution_topology && issuedEnvelope?.evaluation_plan
-            ? `Server-issued runtime: ${humanRef(issuedEnvelope.runtime_profile.ref)} · ${humanRef(issuedEnvelope.runtime_profile.model_id)}; topology: ${humanRef(issuedEnvelope.execution_topology.ref)}; evaluation plan: ${humanRef(issuedEnvelope.evaluation_plan.ref)}. Observed staffing: ${humanRef(actual.surface)} · ${humanRef(actual.harness_id)}.`
+            ? `Server-issued runtime: ${humanRef(issuedEnvelope.runtime_profile.ref)} · ${humanRef(issuedEnvelope.runtime_profile.model_id)}; topology: ${humanRef(issuedEnvelope.execution_topology.ref)}; evaluation plan: ${humanRef(issuedEnvelope.evaluation_plan.ref)}.${environment} Observed staffing: ${humanRef(actual.surface)} · ${humanRef(actual.harness_id)}.`
             : `Observed route: ${humanRef(actual.surface)} · ${humanRef(actual.model_id)} · ${humanRef(actual.harness_id)}. Server runtime/topology is withheld until an exact issued envelope is bound.`));
           card.appendChild(route);
 
           const outcome = el("section", "passport-activation-section");
           outcome.setAttribute("aria-label", "Evaluation and Outcome");
           outcome.appendChild(el("h3", null, "Evaluation & Outcome"));
+          const environmentOutcome = reliability?.environment_evidence
+            ? ` Environment session: ${humanRef(reliability.environment_evidence.session_ref)}; lease: ${reliability.environment_evidence.lease_state}; cleanup: ${reliability.environment_evidence.cleanup_state}; side effects: ${reliability.environment_evidence.side_effect_state}; operations: ${reliability.environment_evidence.operation_count}.`
+            : " Environment cleanup evidence unavailable.";
           outcome.appendChild(el("p", null, reliability
-            ? `Grounding: ${reliability.grounding_sufficiency.state}; deterministic checks: ${reliability.deterministic_checks.length}; judge: ${reliability.model_judgement.state}; human outcome: ${reliability.human_acceptance.state}; horizon: ${reliability.outcome_horizon.state}; closure: ${(canonical?.reliability?.state || reliability.closure.state).replace(/_/g, " ")} (${(canonical?.reliability?.reasons || reliability.closure.reasons).join(", ") || "canonical authority evidence required"}).`
+            ? `Grounding: ${reliability.grounding_sufficiency.state}; deterministic checks: ${reliability.deterministic_checks.length}; judge: ${reliability.model_judgement.state}; human outcome: ${reliability.human_acceptance.state}; horizon: ${reliability.outcome_horizon.state}; closure: ${(canonical?.reliability?.state || reliability.closure.state).replace(/_/g, " ")} (${(canonical?.reliability?.reasons || reliability.closure.reasons).join(", ") || "canonical authority evidence required"}).${environmentOutcome}`
             : "No reliability receipt is available; outcome is not promoted."));
           card.appendChild(outcome);
 

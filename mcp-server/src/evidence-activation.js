@@ -23,7 +23,12 @@ export function isAttemptReliabilityVisibilityRefusal(error) {
 }
 const KNOWLEDGE_REQUIRED = new Set(["bundle_digest", "item_dispositions", "closure", "mode", "canonical_binding"]);
 const RELIABILITY_REQUIRED = new Set(["route_digest", "topology_digest", "evaluation_plan_digest", "grounding_sufficiency", "deterministic_checks", "model_judgement", "human_acceptance", "trajectory", "evaluator_results", "corrections", "defects", "incidents", "downstream_outcome", "outcome_horizon", "process_metrics", "eval_candidates", "shadow_comparisons", "learning_disposition", "telemetry", "closure"]);
-const RELIABILITY_ALLOWED = RELIABILITY_REQUIRED;
+const RELIABILITY_ALLOWED = new Set([...RELIABILITY_REQUIRED, "environment_binding_digest", "environment_evidence"]);
+const ENVIRONMENT_CONFORMANCE_FIELDS = new Set([
+  "schema_version", "provider_ref", "manifest_digest", "implementation_digest", "package_digest", "package_revision_ref",
+  "configuration_schema_digest", "contract_ref", "contract_digest", "run_ref", "status",
+  "check_results", "version_ref", "backend_kind", "evidence_refs", "contains_secrets", "run_digest", "observed_at",
+]);
 
 /** The DB read is payload-only; every panel fact uses this one MCP wrapper. */
 export function activationReliabilityWire(payload) {
@@ -69,6 +74,9 @@ export function strictAttemptReceiptShape(receipt) {
   const outcomeFields = new Set(["state", "brokerage_ref", "evidence_refs", "outcome_feedback_ref", "outcome_feedback_hash"]);
   const metricFields = new Set(["latency_ms", "cost_usd", "input_tokens", "output_tokens", "cached_input_tokens", "retry_count", "recovery_count", "context_reconstruction_ms", "human_intervention_count", "security_event_refs"]);
   const canonicalFactFields = new Set(["event_ref", "kind", "evidence_refs", "summary"]);
+  const environmentFields = new Set(["binding_digest", "session_ref", "lease_state", "operation_count", "policy_refusal_refs", "security_event_refs", "cleanup_state", "cleanup_evidence_refs", "side_effect_state", "resource_usage", "evidence_refs"]);
+  const resourceFields = new Set(["cpu_ms", "memory_peak_mb", "disk_peak_mb", "network_egress_bytes"]);
+  const hasEnvironment = Object.hasOwn(reliability, "environment_binding_digest") || Object.hasOwn(reliability, "environment_evidence");
   if (!exactObject(reliability, RELIABILITY_REQUIRED, RELIABILITY_ALLOWED)
     || !DIGEST.test(reliability.route_digest) || !DIGEST.test(reliability.topology_digest) || !DIGEST.test(reliability.evaluation_plan_digest)
     || !exactObject(reliability.grounding_sufficiency, groundingFields) || !["sufficient", "insufficient", "unknown"].includes(reliability.grounding_sufficiency.state)
@@ -79,7 +87,17 @@ export function strictAttemptReceiptShape(receipt) {
     || !exactObject(reliability.downstream_outcome, outcomeFields) || !["observed", "not_observed", "unknown"].includes(reliability.downstream_outcome.state) || !refs(reliability.downstream_outcome.evidence_refs)
     || !exactObject(reliability.outcome_horizon, horizonFields) || !["mature", "immature", "unavailable", "stale", "unknown"].includes(reliability.outcome_horizon.state) || !refs(reliability.outcome_horizon.evidence_refs)
     || !exactObject(reliability.process_metrics, metricFields) || !Object.entries(reliability.process_metrics).every(([key, value]) => key === "cost_usd" ? typeof value === "number" && Number.isFinite(value) && value >= 0 : key === "security_event_refs" ? refs(value) : Number.isInteger(value) && value >= 0)
-    || !exactObject(reliability.closure, new Set(["state", "reasons", "derived_by"])) || reliability.closure.derived_by !== "server" || !["blocked", "insufficient_evidence", "eligible_for_human_review"].includes(reliability.closure.state) || !refs(reliability.closure.reasons)) return false;
+    || !exactObject(reliability.closure, new Set(["state", "reasons", "derived_by"])) || reliability.closure.derived_by !== "server" || !["blocked", "insufficient_evidence", "eligible_for_human_review"].includes(reliability.closure.state) || !refs(reliability.closure.reasons)
+    || (hasEnvironment && (!DIGEST.test(reliability.environment_binding_digest) || !exactObject(reliability.environment_evidence, environmentFields) || reliability.environment_evidence.binding_digest !== reliability.environment_binding_digest
+      || !/^[A-Za-z][A-Za-z0-9._:-]{2,127}$/.test(reliability.environment_evidence.session_ref) || !["active", "released", "expired", "failed", "unknown"].includes(reliability.environment_evidence.lease_state)
+      || !Number.isInteger(reliability.environment_evidence.operation_count) || reliability.environment_evidence.operation_count < 0
+      || !["policy_refusal_refs", "security_event_refs", "cleanup_evidence_refs", "evidence_refs"].every((field) => refs(reliability.environment_evidence[field]))
+      || !["not_required", "pending", "verified", "failed", "unknown"].includes(reliability.environment_evidence.cleanup_state)
+      || (["verified", "failed"].includes(reliability.environment_evidence.cleanup_state) && reliability.environment_evidence.cleanup_evidence_refs.length === 0)
+      || !["none", "attempted", "refused", "observed", "unknown"].includes(reliability.environment_evidence.side_effect_state)
+      || !exactObject(reliability.environment_evidence.resource_usage, resourceFields)
+      || Object.values(reliability.environment_evidence.resource_usage).some((value) => !Number.isInteger(value) || value < 0)
+      || reliability.environment_evidence.evidence_refs.length === 0))) return false;
   if (reliability.deterministic_checks.some((row) => !exactObject(row, new Set(["check_id", "state", "critical", "evidence_refs"])) || !Array.isArray(row.evidence_refs))
     || reliability.trajectory.some((row, index) => !exactObject(row, trajectoryFields) || !Number.isInteger(row.sequence) || row.sequence !== index + 1 || !refs(row.evidence_refs) || (row.parent_event_ref !== null && typeof row.parent_event_ref !== "string") || !Number.isInteger(row.latency_ms) || row.latency_ms < 0)
     || reliability.evaluator_results.some((row) => !exactObject(row, evaluatorFields) || !["deterministic", "judge", "human_acceptance"].includes(row.kind) || !["passed", "failed", "blocked", "unknown", "not_run"].includes(row.status) || !["not_independent", "unknown"].includes(row.independence_state) || !Number.isInteger(row.held_out_case_count) || row.held_out_case_count < 0 || !DIGEST.test(row.evaluator_digest) || !refs(row.check_refs) || !refs(row.dimension_refs) || !refs(row.evidence_refs) || !refs(row.calibration_evidence_refs))) return false;
@@ -94,6 +112,83 @@ export function strictAttemptReceiptShape(receipt) {
 
 export function evidenceActivationTools({ withEnvelope, ToolError }) {
   return {
+    "read-execution-environment-providers": {
+      description: "Read the governed execution-environment provider registry, conformance posture, operator surface, and rollback state. Provider manifests contain no credentials or raw task content.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      handler: async (c) => {
+        const providers = (await c.query("select ops.read_execution_environment_providers() as providers /* read-execution-environment-providers */")).rows[0]?.providers;
+        if (!Array.isArray(providers)) throw new ToolError({ error: "execution_environment_registry_unavailable" });
+        return { ok: true, providers };
+      },
+    },
+    "register-execution-environment-provider": {
+      description: "HUMAN-ONLY: quarantine a digest-pinned execution-environment plugin manifest for conformance testing. Registration grants no authority and never activates the provider.",
+      write: true, humanOnly: true, authorityOnly: true,
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: { manifest: { type: "object" }, idempotency_key: { type: "string" } },
+        required: ["manifest", "idempotency_key"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "register-execution-environment-provider", args, async () => {
+        if (!UUID.test(String(args.idempotency_key || "")) || !args.manifest || typeof args.manifest !== "object" || Array.isArray(args.manifest))
+          throw new ToolError({ error: "execution_environment_manifest_invalid" });
+        const row = (await c.query(
+          "select * from ops.register_execution_environment_provider($1::jsonb,$2::uuid) /* register-execution-environment-provider */",
+          [JSON.stringify(args.manifest), args.idempotency_key],
+        )).rows[0];
+        if (!row) throw new ToolError({ error: "execution_environment_registration_refused" });
+        return { ok: true, provider_ref: row.provider_ref, manifest_digest: row.manifest_digest, state: row.state, replayed: row.replayed };
+      }),
+    },
+    "attest-execution-environment-conformance": {
+      description: "HUMAN-ONLY: append one independently observed, manifest/source/package/configuration-bound conformance result for a registered provider. This does not promote or activate it.",
+      write: true, humanOnly: true, authorityOnly: true,
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          provider_ref: { type: "string" }, observation: { type: "object" }, idempotency_key: { type: "string" },
+        },
+        required: ["provider_ref", "observation", "idempotency_key"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "attest-execution-environment-conformance", args, async () => {
+        const observation = args.observation;
+        if (!UUID.test(String(args.idempotency_key || "")) || !exactObject(observation, ENVIRONMENT_CONFORMANCE_FIELDS)
+          || observation.schema_version !== "execution-environment-conformance.v1" || observation.provider_ref !== args.provider_ref
+          || !DIGEST.test(String(observation.run_digest || "")) || !DIGEST.test(String(observation.manifest_digest || ""))
+          || !DIGEST.test(String(observation.implementation_digest || "")) || !DIGEST.test(String(observation.package_digest || ""))
+          || !DIGEST.test(String(observation.configuration_schema_digest || "")) || !DIGEST.test(String(observation.contract_digest || ""))
+          || !["passed", "failed"].includes(observation.status)
+          || !observation.check_results || typeof observation.check_results !== "object" || Array.isArray(observation.check_results)
+          || !Object.keys(observation.check_results).length || !Object.values(observation.check_results).every((value) => typeof value === "boolean")
+          || !Array.isArray(observation.evidence_refs) || !observation.evidence_refs.length || typeof observation.contains_secrets !== "boolean")
+          throw new ToolError({ error: "execution_environment_conformance_invalid" });
+        const row = (await c.query(
+          "select * from ops.attest_execution_environment_conformance($1::text,$2::jsonb,$3::uuid) /* attest-execution-environment-conformance */",
+          [args.provider_ref, JSON.stringify(observation), args.idempotency_key],
+        )).rows[0];
+        if (!row) throw new ToolError({ error: "execution_environment_conformance_refused" });
+        return { ok: true, conformance_id: row.conformance_id, replayed: row.replayed };
+      }),
+    },
+    "transition-execution-environment-provider": {
+      description: "HUMAN-ONLY: perform one compare-and-set provider lifecycle transition. Activation requires passed conformance; disable is the rollback path; no provider can self-promote.",
+      write: true, humanOnly: true, authorityOnly: true,
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: { provider_ref: { type: "string" }, expected_state: { type: "string" }, target_state: { type: "string" }, evidence_refs: { type: "array", minItems: 1, items: { type: "string" } }, idempotency_key: { type: "string" } },
+        required: ["provider_ref", "expected_state", "target_state", "evidence_refs", "idempotency_key"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "transition-execution-environment-provider", args, async () => {
+        if (!UUID.test(String(args.idempotency_key || "")) || !Array.isArray(args.evidence_refs) || !args.evidence_refs.length)
+          throw new ToolError({ error: "execution_environment_transition_invalid" });
+        const row = (await c.query(
+          "select * from ops.transition_execution_environment_provider($1::text,$2::text,$3::text,$4::jsonb,$5::uuid) /* transition-execution-environment-provider */",
+          [args.provider_ref, args.expected_state, args.target_state, JSON.stringify(args.evidence_refs), args.idempotency_key],
+        )).rows[0];
+        if (!row) throw new ToolError({ error: "execution_environment_transition_refused" });
+        return { ok: true, provider_ref: row.provider_ref, state: row.state, replayed: row.replayed };
+      }),
+    },
     "assign-execution-route": {
       description: "HUMAN-ONLY: record one authority-approved immutable profile/environment/policy route for a ready Work Request. It does not execute work, issue capability, or promote a feature.",
       write: true, humanOnly: true, authorityOnly: true,
