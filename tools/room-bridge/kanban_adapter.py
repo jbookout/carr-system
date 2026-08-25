@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, TypedDict
 
 import queue_grammar
 
@@ -21,6 +21,12 @@ PROJECT = "carr"
 CATALOG_PATH = Path(__file__).with_name("queue-targets.json")
 QUEUE_MAX_RETRIES = 3
 QUEUE_TRANSIENT_PREFIX = "queue_transient:"
+# ``review`` is a terminal Hermes state (the queue dispatcher treats it as
+# terminal too); it must not be re-opened or re-blocked by reconciliation.
+NONTERMINAL_STATUSES = ("triage", "todo", "ready", "scheduled", "running")
+META_PREFIX = "[CARR_QUEUE_META "
+META_FIELDS = {"v", "target", "cap", "source_seq", "source_msg_id", "finish"}
+RECONCILIATION_DIAGNOSTIC_LIMIT = 25
 
 
 class QueueError(RuntimeError):
@@ -28,6 +34,12 @@ class QueueError(RuntimeError):
         super().__init__(reason)
         self.code = code
         self.reason = reason
+
+
+class ReconciliationResult(TypedDict):
+    scanned: int
+    blocked: list[str]
+    diagnostics: list[dict[str, str]]
 
 
 def load_catalog(path: Path = CATALOG_PATH) -> dict:
@@ -135,6 +147,111 @@ class KanbanAdapter:
         if target:
             argv.extend(["--assignee", catalog["targets"][target]["assignee"]])
         return self.runner(argv)
+
+    def list_nonterminal(self, *, assignees: set[str] | None = None) -> List[dict]:
+        """Read every nonterminal card through Hermes' supported adapter seam.
+
+        Hermes can filter by assignee; the bridge applies its explicit
+        nonterminal status set client-side so terminal or statusless rows can
+        never be quarantined accidentally. De-duplicating IDs makes the read
+        safe if Hermes returns overlapping results.
+        """
+        rows: list[dict] = []
+        seen: set[str] = set()
+        if assignees is not None and not assignees:
+            return rows
+        for assignee in sorted(assignees) if assignees is not None else [None]:
+            command = ["hermes", "kanban", "--board", BOARD, "list"]
+            if assignee is not None:
+                command.extend(["--assignee", assignee])
+            command.append("--json")
+            payload = self.runner(command)
+            if not isinstance(payload, list):
+                raise QueueError("queue_unavailable", "Hermes nonterminal list returned an invalid shape")
+            for row in payload:
+                if not isinstance(row, dict):
+                    continue
+                row_status = row.get("status")
+                if not isinstance(row_status, str) or row_status not in NONTERMINAL_STATUSES:
+                    continue
+                task_id = row.get("id") or row.get("task_id")
+                if isinstance(task_id, str) and task_id.startswith("t_") and task_id not in seen:
+                    seen.add(task_id)
+                    rows.append(row)
+        return rows
+
+    @staticmethod
+    def _reconciliation_meta(task: dict) -> tuple[dict | None, str | None]:
+        """Parse only the exact queue envelope, without trusting task prose."""
+        body = task.get("body")
+        if not isinstance(body, str):
+            return None, "metadata_missing"
+        first, separator, _instructions = body.partition("\n")
+        if not separator or not first.startswith(META_PREFIX) or not first.endswith("]"):
+            return None, "metadata_malformed"
+        try:
+            value = json.loads(first[len(META_PREFIX):-1])
+        except (TypeError, json.JSONDecodeError):
+            return None, "metadata_malformed"
+        if not isinstance(value, dict) or set(value) != META_FIELDS:
+            return None, "metadata_malformed"
+        if (value.get("v") != 1 or not isinstance(value.get("target"), str)
+                or not isinstance(value.get("cap"), str)
+                or not isinstance(value.get("source_msg_id"), str)
+                or not value["source_msg_id"]
+                or not isinstance(value.get("source_seq"), int)
+                or isinstance(value["source_seq"], bool) or value["source_seq"] < 0
+                or value.get("finish") not in {"done", "review"}):
+            return None, "metadata_malformed"
+        return value, None
+
+    def reconcile_disabled_targets(self, catalog: dict, *, diagnostic_limit: int = RECONCILIATION_DIAGNOSTIC_LIMIT) -> ReconciliationResult:
+        """Block exact metadata matches for disabled aliases, once per cycle.
+
+        This method intentionally does not use assignee as an identity key.
+        A card is eligible only when its exact CARR_QUEUE_META target matches a
+        disabled catalog alias; all other cards remain untouched.
+        """
+        disabled = {
+            alias: target.get("assignee")
+            for alias, target in catalog.get("targets", {}).items()
+            if isinstance(alias, str) and isinstance(target, dict)
+            and not target.get("enabled") and isinstance(target.get("assignee"), str)
+        }
+        result: ReconciliationResult = {"scanned": 0, "blocked": [], "diagnostics": []}
+        diagnosed: set[str] = set()
+        if not disabled:
+            return result
+        assignees = {
+            assignee for assignee in disabled.values() if isinstance(assignee, str)
+        }
+        for task in self.list_nonterminal(assignees=assignees):
+            result["scanned"] += 1
+            task_id = task.get("id") or task.get("task_id")
+            meta, error = self._reconciliation_meta(task)
+            if error:
+                diagnostic_id = task_id if isinstance(task_id, str) and task_id.startswith("t_") else "unknown"
+                if diagnostic_id not in diagnosed and len(result["diagnostics"]) < diagnostic_limit:
+                    diagnosed.add(diagnostic_id)
+                    result["diagnostics"].append({
+                        "code": "queue_metadata_malformed", "task_id": diagnostic_id,
+                    })
+                continue
+            if meta is None:
+                continue
+            if meta["target"] not in disabled or task.get("assignee") != disabled[meta["target"]]:
+                continue
+            if not isinstance(task_id, str) or not task_id.startswith("t_"):
+                diagnostic_id = task_id if isinstance(task_id, str) and task_id.startswith("t_") else "unknown"
+                if diagnostic_id not in diagnosed and len(result["diagnostics"]) < diagnostic_limit:
+                    diagnosed.add(diagnostic_id)
+                    result["diagnostics"].append({
+                        "code": "queue_task_identity_invalid", "task_id": diagnostic_id,
+                    })
+                continue
+            self.block(task_id, "target_retired")
+            result["blocked"].append(task_id)
+        return result
 
     def ready_for(self, assignee: str) -> List[dict]:
         payload = self.runner([
@@ -292,3 +409,6 @@ class QueueService:
             return {"handled": True, "kind": "rejected", "receipt": {"queue_rejected": {
                 **source, "code": exc.code, "reason": exc.reason, "hint": "Try again after Hermes is available",
             }}}
+
+    def reconcile_disabled_targets(self) -> ReconciliationResult:
+        return self.adapter.reconcile_disabled_targets(self.catalog)

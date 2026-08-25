@@ -73,6 +73,7 @@ import execution_contract  # noqa: E402
 import grammar  # noqa: E402
 import kanban_adapter  # noqa: E402
 import queue_dispatch  # noqa: E402
+import queue_grammar  # noqa: E402
 import queue_projection  # noqa: E402
 import registry_ext  # noqa: E402
 import state as state_mod  # noqa: E402
@@ -85,6 +86,32 @@ DEFAULT_STATE = Path(
 DEFAULT_ROOM = os.environ.get("CARR_ROOM_BRIDGE_ROOM", "partner-line")
 PENDING_TIMEOUT_S = float(os.environ.get("CARR_ROOM_BRIDGE_PENDING_TIMEOUT", "1800"))
 READ_LIMIT = int(os.environ.get("CARR_ROOM_BRIDGE_READ_LIMIT", "50"))
+_RECONCILIATION_CODES = {"queue_metadata_malformed", "queue_task_identity_invalid"}
+
+
+def _validated_reconciliation(value: object) -> kanban_adapter.ReconciliationResult | None:
+    """Accept only bounded, redacted reconciliation facts at the bridge seam."""
+    if not isinstance(value, dict) or set(value) != {"scanned", "blocked", "diagnostics"}:
+        return None
+    scanned = value["scanned"]
+    blocked = value["blocked"]
+    diagnostics = value["diagnostics"]
+    if (not isinstance(scanned, int) or isinstance(scanned, bool) or scanned < 0
+            or not isinstance(blocked, list) or not isinstance(diagnostics, list)
+            or len(diagnostics) > kanban_adapter.RECONCILIATION_DIAGNOSTIC_LIMIT):
+        return None
+    if any(not isinstance(task_id, str) or not queue_grammar.TASK_ID.fullmatch(task_id)
+           for task_id in blocked):
+        return None
+    for diagnostic in diagnostics:
+        if (not isinstance(diagnostic, dict) or set(diagnostic) != {"code", "task_id"}
+                or diagnostic["code"] not in _RECONCILIATION_CODES):
+            return None
+        task_id = diagnostic["task_id"]
+        if task_id != "unknown" and (not isinstance(task_id, str)
+                                      or not queue_grammar.TASK_ID.fullmatch(task_id)):
+            return None
+    return {"scanned": scanned, "blocked": list(blocked), "diagnostics": list(diagnostics)}
 # THE OBSERVATORY HEARTBEAT (Joe's ruling 0892c539). The Model Room panel reads
 # ONLY the room wire — no second API for desk state, no Worker reach into a
 # local file — so the one fact the wire could not otherwise carry, "which desks
@@ -523,6 +550,32 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             assignments.append({"seq": t.get("seq"), "outcome": outcome, "reason": reason})
     state_mod.advance_seq(state, turns)
 
+    # Quarantine cards for disabled catalog targets before any desk can claim
+    # or dispatch a ready card.  This is one bounded canonical read/reconcile
+    # per bridge cycle; Hermes remains the only state mutation authority.
+    queue_reconciliation: kanban_adapter.ReconciliationResult = {
+        "scanned": 0, "blocked": [], "diagnostics": []
+    }
+    errors: list[dict] = []
+    queue_reconciliation_failed = False
+    if queue_executor is not None and (
+            queue_service is None or not hasattr(queue_service, "reconcile_disabled_targets")):
+        queue_reconciliation_failed = True
+        errors = [{"desk": "(queue-reconciler)", "error": "queue_reconciliation_failed",
+                   "detail": "queue reconciliation unavailable"}]
+    elif queue_service is not None:
+        try:
+            queue_reconciliation = queue_service.reconcile_disabled_targets()
+            validated = _validated_reconciliation(queue_reconciliation)
+            if validated is None:
+                raise ValueError("invalid reconciliation result")
+            queue_reconciliation = validated
+        except Exception as exc:  # reconciliation failure must not enable fallback dispatch
+            queue_reconciliation_failed = True
+            queue_reconciliation = {"scanned": 0, "blocked": [], "diagnostics": []}
+            errors = [{"desk": "(queue-reconciler)", "error": "queue_reconciliation_failed",
+                       "detail": "queue reconciliation failed"}]
+
     # SIGN-IN STATE, probed once per cycle for EVERY registered desk — seated or
     # not, since an unseated desk can be signed out too and Joe's panel shows
     # it. Stamped onto the registry so the heartbeat below carries this cycle's
@@ -534,7 +587,6 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         registry_ext.stamp_auth(name, auth=auth_by_desk[name], path=registry.path)
 
     delivered: list[dict] = []
-    errors: list[dict] = []
     for name, entry in desk_entries.items():
         seat = entry.get("room_seat")
         if not seat:
@@ -557,7 +609,8 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         results_path=results_path, add_room_turn=add_room_turn,
                         dispatch_fn=dispatch_fn, desk_state_dir=desk_state_dir,
                     ))
-                elif queue_executor is not None and name in desk_queue_targets:
+                elif (queue_executor is not None and name in desk_queue_targets
+                      and not queue_reconciliation_failed):
                     log_path = desk_state_dir / f"{name}.log"
                     offset = log_path.stat().st_size if log_path.exists() else 0
 
@@ -656,6 +709,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         "heartbeat": heartbeat, "controls": controls, "restarts": restarts,
         "auth": auth_by_desk, "queue": queue_events,
         "queue_projection": projection_events,
+        "queue_reconciliation": queue_reconciliation,
     }
     log(f"room-bridge: {len(turns)} turn(s), {len(delivered)} desk action(s), "
         f"{len(assignments)} assignment event(s), {len(queue_events)} queue event(s), {len(controls)} control(s), "
