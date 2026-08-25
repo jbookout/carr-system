@@ -250,6 +250,25 @@
       ]
     },
     {
+      "key": "calendar-prebrief-joe",
+      "name": "Joe calendar prebrief projection",
+      "purpose": "Runs the sponsor-bound local EventKit prebrief adapter. Its launchd tick may schedule and claim only the existing Joe live jobs lease; activation remains receipt-backed and explicit.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "tools/calendar-prebrief-joe-runtime.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.calendar-prebrief-joe.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 172800,
+          "notes": "The local LaunchAgent wakes every minute, but the receipt-gated runtime schedules weekday work at 06:30 America/Chicago for a 06:45 prebrief target. The daily cadence and weekend-spanning grace make the Mac edge lifecycle visible without treating an installed plist as activation authority. Durable work evidence remains the exact ops.job lease and calendar-prebrief receipts; Joe live activation and the isolated canary retain their existing typed gates."
+        }
+      ]
+    },
+    {
       "key": "carr-local-edge-node",
       "name": "Joe's Mac — local edge node presence",
       "purpose": "The registered fact of this Mac's own presence, per PROP-010 (deterministic recurring work runs from versioned repo code executed by a registered Local Edge Node through launchd). Not a job's business outcome — a heartbeat that this machine is awake, Joe is logged in, and launchd is actually waking its agents. A sleeping, logged-out, FileVault-locked, or otherwise unreachable Mac must read stale or unknown here, never healthy.",
@@ -768,6 +787,7 @@
     { "service": "notes-sweep", "depends_on": "neon-record-layer" },
     { "service": "partner-ping", "depends_on": "neon-record-layer" },
     { "service": "capture-poll", "depends_on": "neon-record-layer" },
+    { "service": "calendar-prebrief-joe", "depends_on": "neon-record-layer", "note": "The local adapter schedules, claims, and completes only the receipt-gated prebrief jobs lease." },
     { "service": "room-bridge", "depends_on": "neon-record-layer", "note": "Every poll cycle reads/writes the partner room through the deployed Worker (tools/call-verb.py) — no direct database connection." },
     { "service": "control-plane-tick", "depends_on": "neon-record-layer", "note": "The ledger is the tick's sole authority and state owner." },
     { "service": "keepalive-probe", "depends_on": "neon-record-layer" },
