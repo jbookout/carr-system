@@ -105,6 +105,7 @@ test("rpcInternalErrorFailureClass: every ToolError-shaped JSON-RPC code is null
 test("policy/admission refusals do not become incidents, while same-verb runtime faults still do", () => {
   const expected = [
     ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged or triaged-to-ready transitions"],
+    ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, or triaged-to-ready transitions"],
     ["activate-context-bundle", "context compilation tenant must match authenticated tenant context"],
     ["issue-execution-envelope", "execution envelope requires an active conformance-passed environment provider binding"],
     ["read-attempt-reliability", "attempt reliability is not visible to tenant"],
@@ -119,6 +120,8 @@ test("policy/admission refusals do not become incidents, while same-verb runtime
   }
 
   const unexpected = [
+    ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape disposition, or triaged-to-ready transitions"],
+    ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, and triaged-to-ready transitions"],
     ["approve-rule", "TypeError: Invalid URL string."],
     ["complete-capability-project", "permission denied for table capability_verification"],
     ["activate-context-bundle", "connection terminated unexpectedly"],

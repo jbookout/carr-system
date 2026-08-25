@@ -99,6 +99,7 @@ export const RPC_INTERNAL_ERROR_CODE = -32603;
 const EXPECTED_POLICY_REFUSALS = Object.freeze({
   "set-work-shape-disposition": [
     /^sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged or triaged-to-ready transitions$/,
+    /^sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, or triaged-to-ready transitions$/,
   ],
   "activate-context-bundle": [
     /^context compilation tenant must match authenticated tenant context$/,
