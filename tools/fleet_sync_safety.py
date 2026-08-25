@@ -80,19 +80,41 @@ def submodule_tree_is_exact_patch(repo: str) -> tuple[bool, str]:
         if expected.returncode != 0 or not expected.stdout.strip():
             return False, "could not materialize expected patched Quill tree"
 
-        # Replace the temporary index's tracked entries with the live worktree.
-        # -u is deliberate: untracked scratch is outside fleet-sync's dirt gate.
-        live = _git_with_index(quill, index, "add", "-u", "--", ".")
-        if live.returncode != 0:
-            return False, "could not stage live tracked Quill tree for comparison"
-        compared = _git_with_index(
-            quill, index, "diff", "--cached", "--quiet", "--no-ext-diff",
-            "--no-textconv", expected.stdout.strip(), "--")
-        if compared.returncode == 0:
+        # Rebuild the live index from RECORDED HEAD, not from the expected tree.
+        # Otherwise a HEAD-tracked path deleted by a patch becomes untracked in
+        # the expected index and its resurrection in the worktree is invisible
+        # to `git add -u`.  Starting from HEAD keeps every deletion/rename source
+        # visible.  Only paths the expected patch tree ADDS are then admitted;
+        # unrelated untracked scratch remains intentionally outside the gate.
+        live_base = _git_with_index(quill, index, "read-tree", "HEAD")
+        if live_base.returncode != 0:
+            return False, "could not rebuild temporary live Quill index"
+        live_tracked = _git_with_index(quill, index, "add", "-u", "--", ".")
+        if live_tracked.returncode != 0:
+            return False, "could not stage live HEAD-tracked Quill paths"
+
+        additions = _git_with_index(
+            quill, index, "diff", "--name-only", "-z", "--diff-filter=A",
+            "HEAD", expected.stdout.strip(), "--")
+        if additions.returncode != 0:
+            return False, "could not enumerate canonical patch-added paths"
+        raw_additions = additions.stdout
+        if raw_additions and not raw_additions.endswith("\0"):
+            return False, "malformed canonical patch-added path list"
+        added_paths = raw_additions[:-1].split("\0") if raw_additions else []
+        if any(not path for path in added_paths):
+            return False, "malformed empty canonical patch-added path"
+        if added_paths:
+            live_added = _git_with_index(quill, index, "add", "--", *added_paths)
+            if live_added.returncode != 0:
+                return False, "could not stage canonical patch-added Quill paths"
+
+        live_tree = _git_with_index(quill, index, "write-tree")
+        if live_tree.returncode != 0 or not live_tree.stdout.strip():
+            return False, "could not materialize live tracked Quill tree"
+        if live_tree.stdout.strip() == expected.stdout.strip():
             return True, "tracked Quill tree exactly equals recorded HEAD plus canonical patches"
-        if compared.returncode == 1:
-            return False, "tracked Quill tree differs from recorded HEAD plus canonical patches"
-        return False, "exact Quill tree comparison failed"
+        return False, "tracked Quill tree differs from recorded HEAD plus canonical patches"
 
 
 def eligible_for_fast_forward(repo: str, incoming: str) -> tuple[bool, str]:

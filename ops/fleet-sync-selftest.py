@@ -175,6 +175,11 @@ def require_exact_refusal(repo, expected_reason="tracked Quill tree differs"):
     assert expected_reason in reason, reason
 
 
+def add_fixture_patch(repo, name, body):
+    patch = os.path.join(repo, "tools", "dictation-rig", "patches", name)
+    open(patch, "w").write(body)
+
+
 def test_dirty_tree_refuses():
     with tempfile.TemporaryDirectory() as tmp:
         b = build(tmp)
@@ -425,6 +430,60 @@ def test_exact_tree_ignores_untracked_submodule_scratch():
     print("PASS  exact Git tree intentionally ignores untracked submodule scratch")
 
 
+def test_exact_tree_refuses_deleted_file_resurrection():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        add_fixture_patch(
+            b, "0002-delete-other.patch",
+            "diff --git a/other.txt b/other.txt\n"
+            "deleted file mode 100644\n"
+            "--- a/other.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-base\n",
+        )
+        assert line_classifier_accepts(quill), "precondition: line-set classifier loses deletion path"
+        require_exact_refusal(b)
+    print("PASS  exact Git tree refuses deleted-file resurrection")
+
+
+def test_exact_tree_refuses_rename_old_path_resurrection():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        add_fixture_patch(
+            b, "0002-rename-other.patch",
+            "diff --git a/other.txt b/renamed.txt\n"
+            "similarity index 100%\n"
+            "rename from other.txt\n"
+            "rename to renamed.txt\n",
+        )
+        open(os.path.join(quill, "renamed.txt"), "w").write("base\n")
+        assert line_classifier_accepts(quill), "precondition: line-set classifier loses rename paths"
+        require_exact_refusal(b)
+    print("PASS  exact Git tree refuses rename old-path resurrection")
+
+
+def test_exact_tree_accepts_canonical_new_file_patch():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        add_fixture_patch(
+            b, "0002-add-generated-source.patch",
+            "diff --git a/new-source.txt b/new-source.txt\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/new-source.txt\n"
+            "@@ -0,0 +1 @@\n"
+            "+canonical addition\n",
+        )
+        open(os.path.join(quill, "new-source.txt"), "w").write("canonical addition\n")
+        exact, reason = submodule_tree_is_exact_patch(b)
+        assert exact, reason
+    print("PASS  exact Git tree accepts canonical patch-added file")
+
+
 def main():
     if not os.path.exists(SCRIPT):
         print(f"fleet-sync-selftest: {SCRIPT} missing", file=sys.stderr)
@@ -448,7 +507,10 @@ def main():
     test_exact_tree_refuses_executable_mode_edit()
     test_exact_tree_refuses_local_submodule_head_mismatch()
     test_exact_tree_ignores_untracked_submodule_scratch()
-    print("19/19 fleet-sync cases passed")
+    test_exact_tree_refuses_deleted_file_resurrection()
+    test_exact_tree_refuses_rename_old_path_resurrection()
+    test_exact_tree_accepts_canonical_new_file_patch()
+    print("22/22 fleet-sync cases passed")
     return 0
 
 
