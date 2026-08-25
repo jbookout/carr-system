@@ -1,4 +1,4 @@
--- 0317_tour_operations_foundation.sql
+-- 0318_tour_operations_foundation.sql
 -- Additive, tenant-safe foundation. Canonical facts are append-only and
 -- client render data is always derived from normalized public assertions.
 
@@ -109,6 +109,13 @@ create table if not exists ops.tour_public_projection_fact (
   foreign key (organization_tenant_id, field_assertion_id) references ops.tour_field_assertion (organization_tenant_id, id),
   check (display_field_key in ('display.name','display.address','suite','property_type','size','asking_economics','availability','parking','access','photos','floor_plan','source_attribution','as_of','caveat'))
 );
+create table if not exists ops.tour_public_projection_seal_receipt (
+  id uuid primary key default gen_random_uuid(), organization_tenant_id text not null, projection_id uuid not null,
+  sealed_at timestamptz not null, sealed_state text not null check (sealed_state in ('approved','published','quarantined','rolled_back')),
+  actor_id text not null, receipt_digest text not null check (receipt_digest ~ '^sha256:[a-f0-9]{64}$'), created_at timestamptz not null default now(),
+  unique (organization_tenant_id, id), unique (organization_tenant_id, projection_id),
+  foreign key (organization_tenant_id, projection_id) references ops.tour_public_projection (organization_tenant_id, id)
+);
 
 create table if not exists ops.tour_cheat_sheet_revision (
   id uuid primary key default gen_random_uuid(), organization_tenant_id text not null, tour_id uuid not null,
@@ -208,7 +215,12 @@ end $$;
 create or replace function ops.tour_projection_fact_guard() returns trigger language plpgsql as $$
 begin
   if tg_op <> 'INSERT' then raise exception 'tour_public_projection_fact is append-only'; end if;
-  if not exists (select 1 from ops.tour_public_projection p join ops.tour_field_assertion a on a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id join ops.tour_rights_receipt r on r.id=a.rights_receipt_id and r.organization_tenant_id=a.organization_tenant_id join ops.tour_property_membership m on m.tour_id=p.tour_id and m.property_id=new.property_id and m.organization_tenant_id=new.organization_tenant_id and m.route_version=p.route_version where p.id=new.projection_id and p.organization_tenant_id=new.organization_tenant_id and new.route_version=p.route_version and a.property_id=new.property_id and a.field_key=new.display_field_key and a.review_state='reviewed' and a.data_classification='public' and a.effective_from <= p.as_of and (a.effective_to is null or a.effective_to > p.as_of) and r.status='active' and r.effective_at <= p.as_of and (r.expires_at is null or r.expires_at > p.as_of) and r.revoked_at is null and r.allowed_use_classes ? 'client_public_display' and (r.allowed_field_classes ? a.field_key or r.allowed_field_classes ? '*') and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= p.as_of) and ops.tour_public_value_safe(a.field_key,a.value)) then raise exception 'projection fact lacks current public assertion, rights, or safe value'; end if;
+  if not exists (select 1 from ops.tour_public_projection p join ops.tour_field_assertion a on a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id join ops.tour_rights_receipt r on r.id=a.rights_receipt_id and r.organization_tenant_id=a.organization_tenant_id join ops.tour_property_membership m on m.tour_id=p.tour_id and m.property_id=new.property_id and m.organization_tenant_id=new.organization_tenant_id and m.route_version=p.route_version where p.id=new.projection_id and p.organization_tenant_id=new.organization_tenant_id and p.status='draft' and not exists (select 1 from ops.tour_public_projection_seal_receipt seal where seal.organization_tenant_id=p.organization_tenant_id and seal.projection_id=p.id) and new.route_version=p.route_version and a.property_id=new.property_id and a.field_key=new.display_field_key and a.review_state='reviewed' and a.data_classification='public' and m.selected_at <= p.as_of and a.effective_from <= p.as_of and (a.effective_to is null or a.effective_to > p.as_of) and r.status='active' and r.effective_at <= p.as_of and (r.expires_at is null or r.expires_at > p.as_of) and r.revoked_at is null and r.allowed_use_classes ? 'client_public_display' and (r.allowed_field_classes ? a.field_key or r.allowed_field_classes ? '*') and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= p.as_of) and ops.tour_public_value_safe(a.field_key,a.value)) then raise exception 'projection fact lacks current public assertion, rights, or safe value'; end if;
+  return new;
+end $$;
+create or replace function ops.tour_membership_seal_guard() returns trigger language plpgsql as $$
+begin
+  if exists (select 1 from ops.tour_public_projection p where p.organization_tenant_id=new.organization_tenant_id and p.tour_id=new.tour_id and p.route_version=new.route_version) then raise exception 'tour route version is sealed by an existing projection'; end if;
   return new;
 end $$;
 create trigger tour_source_evidence_append_only before update or delete on ops.tour_source_evidence for each row execute function ops.tour_reject_mutation();
@@ -220,12 +232,14 @@ create trigger tour_property_membership_append_only before update or delete on o
 create trigger tour_public_projection_append_only before update or delete on ops.tour_public_projection for each row execute function ops.tour_reject_mutation();
 create trigger tour_public_projection_fact_append_only before update or delete on ops.tour_public_projection_fact for each row execute function ops.tour_reject_mutation();
 create trigger tour_share_grant_append_only before update or delete on ops.tour_share_grant for each row execute function ops.tour_reject_mutation();
+create trigger tour_public_projection_seal_receipt_append_only before update or delete on ops.tour_public_projection_seal_receipt for each row execute function ops.tour_reject_mutation();
 create trigger tour_share_grant_revocation_receipt_append_only before update or delete on ops.tour_share_grant_revocation_receipt for each row execute function ops.tour_reject_mutation();
 create trigger tour_fact_conflict_append_only before update or delete on ops.tour_fact_conflict for each row execute function ops.tour_reject_mutation();
 create trigger tour_fact_conflict_participant_append_only before update or delete on ops.tour_fact_conflict_participant for each row execute function ops.tour_reject_mutation();
 create trigger tour_conflict_resolution_receipt_append_only before update or delete on ops.tour_conflict_resolution_receipt for each row execute function ops.tour_reject_mutation();
 create trigger tour_source_rights_guard before insert on ops.tour_source_evidence for each row execute function ops.tour_source_rights_guard();
 create trigger tour_assertion_rights_guard before insert on ops.tour_field_assertion for each row execute function ops.tour_assertion_rights_guard();
+create trigger tour_membership_seal_guard before insert on ops.tour_property_membership for each row execute function ops.tour_membership_seal_guard();
 create trigger tour_projection_fact_guard before insert or update on ops.tour_public_projection_fact for each row execute function ops.tour_projection_fact_guard();
 create trigger tour_rights_lineage_guard before insert on ops.tour_rights_receipt for each row execute function ops.tour_rights_lineage_guard();
 create trigger tour_conflict_participant_guard before insert on ops.tour_fact_conflict_participant for each row execute function ops.tour_conflict_participant_guard();
@@ -259,6 +273,7 @@ begin
     insert into ops.tour_property_membership (id,organization_tenant_id,tour_id,property_id,route_version,route_sequence,route_label,assertion_set_digest) values ('10000000-0000-4000-8000-000000000050','tour-proof','10000000-0000-4000-8000-000000000040','10000000-0000-4000-8000-000000000010',1,1,'A','sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
     insert into ops.tour_public_projection (id,organization_tenant_id,tour_id,projection_version,route_version,as_of,facts_only,projection_digest,status) values ('10000000-0000-4000-8000-000000000060','tour-proof','10000000-0000-4000-8000-000000000040',1,1,now(),true,'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff','draft');
     insert into ops.tour_public_projection_fact (organization_tenant_id,projection_id,property_id,field_assertion_id,route_version,display_field_key) values ('tour-proof','10000000-0000-4000-8000-000000000060','10000000-0000-4000-8000-000000000010','10000000-0000-4000-8000-000000000030',1,'display.name');
+    begin insert into ops.tour_property_membership (organization_tenant_id,tour_id,property_id,route_version,route_sequence,route_label,assertion_set_digest) values ('tour-proof','10000000-0000-4000-8000-000000000040','10000000-0000-4000-8000-000000000011',1,2,'B','sha256:1515151515151515151515151515151515151515151515151515151515151515'); raise exception 'proof expected late membership denial'; exception when raise_exception then if sqlerrm <> 'tour route version is sealed by an existing projection' then raise; end if; end;
     begin
       insert into ops.tour_public_projection_fact (organization_tenant_id,projection_id,property_id,field_assertion_id,route_version,display_field_key) values ('tour-proof','10000000-0000-4000-8000-000000000060','10000000-0000-4000-8000-000000000010','10000000-0000-4000-8000-000000000030',1,'display.address');
       raise exception 'proof expected projection relabel denial';
@@ -274,6 +289,10 @@ begin
     begin update ops.tour_property_membership set route_sequence=2 where id='10000000-0000-4000-8000-000000000050'; raise exception 'proof expected membership rewrite denial'; exception when raise_exception then if sqlerrm <> 'tour_property_membership is append-only' then raise; end if; end;
     begin update ops.tour_public_projection set projection_digest='sha256:abababababababababababababababababababababababababababababababab' where id='10000000-0000-4000-8000-000000000060'; raise exception 'proof expected projection rewrite denial'; exception when raise_exception then if sqlerrm <> 'tour_public_projection is append-only' then raise; end if; end;
     begin update ops.tour_public_projection_fact set display_field_key='display.address' where projection_id='10000000-0000-4000-8000-000000000060'; raise exception 'proof expected projection fact rewrite denial'; exception when raise_exception then if sqlerrm <> 'tour_public_projection_fact is append-only' then raise; end if; end;
+    insert into ops.tour_public_projection_seal_receipt (organization_tenant_id,projection_id,sealed_at,sealed_state,actor_id,receipt_digest) values ('tour-proof','10000000-0000-4000-8000-000000000060',now(),'approved','proof','sha256:1616161616161616161616161616161616161616161616161616161616161616');
+    begin insert into ops.tour_public_projection_fact (organization_tenant_id,projection_id,property_id,field_assertion_id,route_version,display_field_key) values ('tour-proof','10000000-0000-4000-8000-000000000060','10000000-0000-4000-8000-000000000010','10000000-0000-4000-8000-000000000030',1,'display.name'); raise exception 'proof expected sealed projection fact denial'; exception when raise_exception then if sqlerrm <> 'projection fact lacks current public assertion, rights, or safe value' then raise; end if; end;
+    insert into ops.tour_public_projection (id,organization_tenant_id,tour_id,projection_version,route_version,as_of,facts_only,projection_digest,status) values ('10000000-0000-4000-8000-000000000061','tour-proof','10000000-0000-4000-8000-000000000040',2,1,now(),true,'sha256:1717171717171717171717171717171717171717171717171717171717171717','approved');
+    begin insert into ops.tour_public_projection_fact (organization_tenant_id,projection_id,property_id,field_assertion_id,route_version,display_field_key) values ('tour-proof','10000000-0000-4000-8000-000000000061','10000000-0000-4000-8000-000000000010','10000000-0000-4000-8000-000000000030',1,'display.name'); raise exception 'proof expected non-draft projection fact denial'; exception when raise_exception then if sqlerrm <> 'projection fact lacks current public assertion, rights, or safe value' then raise; end if; end;
     insert into ops.tour_fact_conflict (id,organization_tenant_id,property_id,field_key,state) values ('10000000-0000-4000-8000-000000000070','tour-proof','10000000-0000-4000-8000-000000000010','display.name','open');
     begin insert into ops.tour_fact_conflict_participant (organization_tenant_id,conflict_id,field_assertion_id,participant_role) values ('tour-proof','10000000-0000-4000-8000-000000000070','10000000-0000-4000-8000-000000000031','candidate'); raise exception 'proof expected conflict mismatch denial'; exception when raise_exception then if sqlerrm <> 'conflict participant does not match conflict property and field' then raise; end if; end;
     insert into ops.tour_fact_conflict_participant (organization_tenant_id,conflict_id,field_assertion_id,participant_role) values ('tour-proof','10000000-0000-4000-8000-000000000070','10000000-0000-4000-8000-000000000030','candidate');

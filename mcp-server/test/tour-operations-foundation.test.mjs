@@ -8,10 +8,10 @@ const root = path.resolve(import.meta.dirname, "../..");
 const read = file => fs.readFileSync(path.join(root, file), "utf8");
 const contract = JSON.parse(read("workspace/contracts/tour-operations-foundation.v1.json"));
 const fixture = JSON.parse(read("mcp-server/test/fixtures/tour-operations-foundation.v1.json"));
-const migration = read("migrations/0317_tour_operations_foundation.sql");
+const migration = read("migrations/0318_tour_operations_foundation.sql");
 
 test("foundation contract preserves provenance, conflicts, audit, rights versions and tenant integrity", () => {
-  assert.equal(contract.version, "1.3.0");
+  assert.equal(contract.version, "1.4.0");
   for (const field of ["property_id", "field_key", "source_evidence_id", "observed_at", "effective_from", "rights_receipt_id", "confidence", "data_classification"]) assert(contract.canonical_record_policy.required_fact_metadata.includes(field), field);
   for (const entity of ["FactConflict", "AuditEvent", "TourPropertyMembership", "ProjectionFact"]) assert.ok(contract.entities[entity], entity);
   assert.match(contract.entities.RightsReceipt.rule, /immutable versioned.*fail closed/i);
@@ -31,8 +31,14 @@ test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, an
   assert.throws(() => validateProjectionFact(fact, {...assertion, effective_from: "2026-08-26T00:00:00Z"}, membership, projection, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   assert.throws(() => validateProjectionFact(fact, {...assertion, value: {text: "safe", internal_note: "secret"}}, membership, projection, rights), /PUBLIC_VALUE_UNSAFE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, {...projection, as_of: "not-a-date"}, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, {...projection, as_of: null}, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, {...projection, as_of: 0}, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, effective_at: "not-a-date"}), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, effective_at: null}), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, id: "unrelated"}), /PUBLIC_RIGHTS_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, allowed_use_classes: "client_public_display", allowed_field_classes: {"display.name": true}}), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact({...fact, projection_id: "wrong"}, assertion, membership, projection, rights), /PROJECTION_BINDING_REFUSED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, {...membership, tour_id: "wrong"}, projection, rights), /PROJECTION_BINDING_REFUSED/);
 });
 
 test("migration is additive, tenant-qualified, temporal, rights-safe and append-only", () => {
