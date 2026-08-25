@@ -53,12 +53,18 @@ from health_submodule import (  # noqa: E402
 )
 
 SCRIPT = os.path.join(REPO, "bin", "fleet-sync.sh")
+RUN_SCHEDULED = os.path.join(REPO, "bin", "run-scheduled.sh")
 SAFETY = os.path.join(REPO, "tools", "fleet_sync_safety.py")
 HEALTH_SUBMODULE = os.path.join(REPO, "tools", "health_submodule.py")
 ENV = dict(fixture_env(), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 
-STUB = "import sys\nprint('stub installer')\nsys.exit(0)\n"
+STUB = (
+    "import os, sys\n"
+    "print('stub installer active=' + "
+    "os.environ.get('CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL', ''))\n"
+    "sys.exit(0)\n"
+)
 
 
 def git(cwd, *args):
@@ -215,6 +221,53 @@ def test_already_current_is_a_noop():
         assert "already current" in r.stdout, r.stdout
         assert "fast-forwarded" not in r.stdout
     print("PASS  second run is a clean no-op")
+
+
+def test_active_self_contract_reaches_wrapper_receipt():
+    """The fleet child must return so run-scheduled can durably classify it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        shutil.copy(RUN_SCHEDULED, os.path.join(b, "bin", "run-scheduled.sh"))
+        open(os.path.join(b, "tools", "ops-spool.py"), "w").write(
+            "import sys\nprint('stub receipt recorder')\nsys.exit(0)\n"
+        )
+        env = dict(ENV, CARR_RUN_SCHEDULED_STATE_DIR=os.path.join(tmp, "state"))
+        r = subprocess.run([
+            "zsh", os.path.join(b, "bin", "run-scheduled.sh"),
+            "fleet-sync", "fleet.sync", "zsh", os.path.join(b, "bin", "fleet-sync.sh"),
+        ], cwd=b, capture_output=True, text=True, env=env)
+        log = open(os.path.join(b, "out", "run-scheduled.log")).read()
+        assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert "stub installer active=com.carr.fleet-sync" in r.stdout, r.stdout
+        assert "key=fleet.sync service=fleet-sync child_exit=0 state=succeeded" in log, log
+        assert "recorder_exit=0" in log, log
+    print("PASS  active-self install returns through the durable wrapper receipt")
+
+
+def test_active_self_change_failure_reaches_wrapper_receipt():
+    """A refused self-reload is a durable failure, never false success."""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        shutil.copy(RUN_SCHEDULED, os.path.join(b, "bin", "run-scheduled.sh"))
+        open(os.path.join(b, "ops", "config-as-code.py"), "w").write(
+            "import sys\n"
+            "print('SELF-RELOAD REFUSED; run config-as-code externally')\n"
+            "sys.exit(1)\n"
+        )
+        open(os.path.join(b, "tools", "ops-spool.py"), "w").write(
+            "import sys\nprint('stub receipt recorder')\nsys.exit(0)\n"
+        )
+        env = dict(ENV, CARR_RUN_SCHEDULED_STATE_DIR=os.path.join(tmp, "state"))
+        r = subprocess.run([
+            "zsh", os.path.join(b, "bin", "run-scheduled.sh"),
+            "fleet-sync", "fleet.sync", "zsh", os.path.join(b, "bin", "fleet-sync.sh"),
+        ], cwd=b, capture_output=True, text=True, env=env)
+        log = open(os.path.join(b, "out", "run-scheduled.log")).read()
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert "SELF-RELOAD REFUSED" in r.stdout, r.stdout
+        assert "key=fleet.sync service=fleet-sync child_exit=1 state=failed" in log, log
+        assert "--failure-class exit_1" in log and "recorder_exit=0" in log, log
+    print("PASS  refused active-self reload reaches a durable failed receipt")
 
 
 def test_non_main_branch_refuses():
@@ -509,6 +562,8 @@ def main():
     test_dirty_tree_refuses()
     test_clean_tree_fast_forwards()
     test_already_current_is_a_noop()
+    test_active_self_contract_reaches_wrapper_receipt()
+    test_active_self_change_failure_reaches_wrapper_receipt()
     test_non_main_branch_refuses()
     test_untracked_scratch_is_ignored()
     test_expected_quill_patch_allows_unrelated_fast_forward()
@@ -529,7 +584,7 @@ def main():
     test_exact_tree_refuses_rename_old_path_resurrection()
     test_exact_tree_accepts_canonical_rename()
     test_exact_tree_accepts_canonical_new_file_patch()
-    print("23/23 fleet-sync cases passed")
+    print("25/25 fleet-sync cases passed")
     return 0
 
 

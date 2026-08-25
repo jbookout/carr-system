@@ -89,7 +89,8 @@ fi
 # Re-render the installed wiring from whatever the checkout now holds. Idempotent
 # by design and the same installer bin/migrate-dell.sh runs; on an already-correct
 # machine it changes nothing.
-if ! "$PY" "$REPO/ops/config-as-code.py" install --apply </dev/null; then
+if ! CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL=com.carr.fleet-sync \
+    "$PY" "$REPO/ops/config-as-code.py" install --apply </dev/null; then
   print -ru2 -- "fleet-sync: config-as-code install --apply failed"
   exit 1
 fi

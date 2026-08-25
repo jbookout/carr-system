@@ -155,9 +155,9 @@ require(
     and "Claude settings: WILL BE CREATED" in config_as_code,
 )
 require(
-    "LaunchAgent load failure cannot report migration success",
-    "launchd_load_failures.append" in config_as_code
-    and "ERROR: LaunchAgent load failed" in config_as_code,
+    "LaunchAgent install or reload failure cannot report migration success",
+    "launchd_activation_failures.append" in config_as_code
+    and "ERROR: LaunchAgent install/reload failed" in config_as_code,
 )
 require(
     "migration dry run propagates installer failure",
