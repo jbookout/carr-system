@@ -10,13 +10,6 @@
       "reopen_when": "the hook leg is either restored on a SessionStart surface that still exists (ops/config/hooks.json is the one the repository manages) or retired deliberately, with the two surviving surfaces named as what replaces it."
     },
     {
-      "lane": "launchd",
-      "entry": "ops/launchd/com.carr.fleet-sync.plist",
-      "marked_on": "2026-08-23",
-      "reason": "The council's second named seed. No service in ops/config/services.json declares fleet-sync, so it cannot appear in ops-record health at all: its failure state is not `unknown`, it is unrepresentable. tools/scheduler-truth.py reports the same job from the machine side as INSTALLED, NOT LOADED and SCHEDULED, UNREGISTERED — the plist is in ~/Library/LaunchAgents, launchctl has the label disabled, and nothing has ever fast-forwarded this checkout on a schedule.",
-      "reopen_when": "fleet-sync is declared as a service in ops/config/services.json and bootstrapped, or the plist and bin/fleet-sync.sh are retired together. Declaring it also needs its ops.service row, which is why this is not a one-file edit."
-    },
-    {
       "lane": "installer",
       "entry": "bin/install-calendar-prebrief-joe.sh",
       "marked_on": "2026-08-23",

@@ -36,6 +36,8 @@ EX_CONFIG=78
 
 REPO="${0:A:h:h}"
 cd "$REPO" || { print -ru2 -- "fleet-sync: cannot enter $REPO"; exit 1 }
+PY="$REPO/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
 
 # Canonical checkout only. --git-common-dir differs from --git-dir inside a
 # worktree, which is the cheapest reliable test.
@@ -65,10 +67,9 @@ if [ "$local_sha" = "$remote_sha" ]; then
 else
   # Tracked changes only. Untracked scratch is a session's business, not this
   # job's, and refusing on it would mean this never runs on a working machine.
-  dirty="$(git status --porcelain --untracked-files=no)"
-  if [ -n "$dirty" ]; then
+  if ! dirt_reason="$("$PY" "$REPO/tools/fleet_sync_safety.py" "$REPO" origin/main)"; then
     print -r -- "fleet-sync: SKIP — local changes present, refusing to fast-forward over them:"
-    print -r -- "$dirty" | sed 's/^/    /'
+    print -r -- "    $dirt_reason"
     exit $EX_CONFIG
   fi
 
@@ -88,8 +89,6 @@ fi
 # Re-render the installed wiring from whatever the checkout now holds. Idempotent
 # by design and the same installer bin/migrate-dell.sh runs; on an already-correct
 # machine it changes nothing.
-PY="$REPO/.venv/bin/python"
-[ -x "$PY" ] || PY=python3
 if ! "$PY" "$REPO/ops/config-as-code.py" install --apply </dev/null; then
   print -ru2 -- "fleet-sync: config-as-code install --apply failed"
   exit 1

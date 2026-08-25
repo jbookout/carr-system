@@ -4,11 +4,11 @@ written before the check itself (rule e65efc68).
 
 WHAT THE CHECK IS FOR. The 2026-08-23 completion-integrity council's fix D: a
 declared control that no live execution path references is not "built", it is a
-file. hooks/ledger-boundary-sweep.py has sat in the tree since 2026-08-06 with
-its own documentation saying "WRITTEN BUT REGISTERED NOWHERE"; ops/launchd
-carries a fleet-sync definition no service declares. Both passed every gate this
-repository owns, because every one of them asks whether a thing EXISTS and none
-asks whether anything CALLS it.
+file. hooks/ledger-boundary-sweep.py sat in the tree since 2026-08-06 with its
+own documentation saying "WRITTEN BUT REGISTERED NOWHERE"; ops/launchd carried
+a fleet-sync definition no service declared until the recovery registration.
+Both passed every gate at discovery because every one asked whether a thing
+EXISTS and none asked whether anything CALLS it.
 
 WHAT THIS SUITE IS FOR, and why it is not the same question. Every case below
 runs against a synthetic fixture tree, so it measures THE CHECK and says nothing

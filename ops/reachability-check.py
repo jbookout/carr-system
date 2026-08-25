@@ -17,9 +17,11 @@ So these sat in the tree, green, for weeks:
                                    nothing. It is hashed in gate-baseline.json
                                    and named by the enforcement map, both of
                                    which made it look covered.
-  ops/launchd/com.carr.fleet-sync  A plist no service in services.json declares,
-                                   so no health row can ever mention it. Its
-                                   failure is not `unknown`, it is unrepresentable.
+  ops/launchd/com.carr.fleet-sync  At discovery, a plist no service in
+                                   services.json declared, so no health row could
+                                   mention it. The recovery registration closed
+                                   this seed; the generic fixture keeps the class
+                                   under test.
   tools/sync-rule-admission.py     Until PR #529 its only caller was CI, against
                                    the disposable database CI stands up. CI proved
                                    the manifest and the schema agreed; nothing
