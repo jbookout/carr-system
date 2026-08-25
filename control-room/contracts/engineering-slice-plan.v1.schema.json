@@ -204,6 +204,8 @@
         "planned_checks": {
           "type": "array",
           "minItems": 1,
+          "uniqueItems": true,
+          "x-carr-unique-by": "check_ref",
           "items": {
             "$ref": "#/$defs/Check"
           }

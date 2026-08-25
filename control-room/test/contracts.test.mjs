@@ -28,6 +28,13 @@ test("Engineering Passport schema preserves blocked learning null and envelope a
   assert.equal(validateLearning({ state: "proposed", route: null, evidence_refs: [], note: "invalid terminal omission" }).valid, false);
 });
 
+test("schema compiler enforces keyed CARR uniqueness beyond uniqueItems", () => {
+  const validate = compileSchema({ type: "array", uniqueItems: true, "x-carr-unique-by": "check_ref", items: { type: "object" } });
+  assert.equal(validate([{ check_ref: "check:a", failure_condition: "one" }, { check_ref: "check:a", failure_condition: "different" }]).valid, false);
+  assert.equal(validate([{ check_ref: "check:a" }, { check_ref: "check:b" }]).valid, true);
+  assert.throws(() => compileSchema({ type: "array", "x-carr-unique-by": "" }), /x-carr-unique-by/);
+});
+
 test("state machines are closed and internally consistent", () => {
   const contract = read("contracts/state-machines.v1.json");
   for (const [name, machine] of Object.entries(contract.machines)) {

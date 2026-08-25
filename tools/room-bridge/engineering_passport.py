@@ -204,6 +204,16 @@ def _receipt_envelope(receipt: dict[str, Any], envelopes: dict[str, dict[str, An
     return envelope
 
 
+def _assert_envelope_retention(receipts: list[dict[str, Any]], envelopes: dict[str, dict[str, Any]]) -> None:
+    receipt_digests = [receipt["envelope_digest"] for receipt in receipts]
+    if not receipts:
+        if envelopes:
+            raise EngineeringContractError("a pre-execution passport cannot retain unreferenced execution envelopes")
+        return
+    if set(receipt_digests) != set(envelopes) or len(set(receipt_digests)) == 0:
+        raise EngineeringContractError("persisted execution envelopes must exactly equal receipt envelope digests")
+
+
 def _assert_acyclic(slices: Iterable[dict[str, Any]]) -> None:
     graph = {row["slice_ref"]: set(row["dependency_refs"]) for row in slices}
     visiting: set[str] = set(); visited: set[str] = set()
@@ -226,7 +236,7 @@ RECEIPT_FIELDS = {
 }
 
 
-def _validate_receipt(value: Any, plan: dict[str, Any], envelope: dict[str, Any] | None) -> dict[str, Any]:
+def _validate_receipt(value: Any, plan: dict[str, Any], envelope: dict[str, Any]) -> dict[str, Any]:
     row = _exact(value, RECEIPT_FIELDS, "engineering slice receipt")
     if row["schema_version"] != "engineering-slice-receipt.v1":
         raise EngineeringContractError("unsupported engineering slice receipt schema_version")
@@ -303,15 +313,14 @@ def _validate_receipt(value: Any, plan: dict[str, Any], envelope: dict[str, Any]
     if claim["claim_state"] != "executor_claim": raise EngineeringContractError("executor claim state is invalid")
     _str(claim["claimed_by"], "executor claim claimed_by", identifier=True); _str(claim["claimed_at"], "executor claim claimed_at")
     if row["independent_verification_required"] is not True: raise EngineeringContractError("engineering receipt requires independent verification")
-    if envelope is not None:
-        bound = base.validate_execution_envelope(envelope)
-        _validate_plan_envelope_binding(plan, bound)
-        if row["envelope_digest"] != base.execution_envelope_digest(bound): raise EngineeringContractError("receipt does not bind exact execution envelope")
+    bound = base.validate_execution_envelope(envelope)
+    _validate_plan_envelope_binding(plan, bound)
+    if row["envelope_digest"] != base.execution_envelope_digest(bound): raise EngineeringContractError("receipt does not bind exact execution envelope")
     return row
 
 
-def validate_engineering_slice_receipt(receipt: Any, plan: Any, envelope: Any | None = None) -> dict[str, Any]:
-    return _validate_receipt(receipt, validate_engineering_slice_plan(plan), envelope)
+def validate_engineering_slice_receipt(receipt: Any, plan: Any, envelope: Any) -> dict[str, Any]:
+    return _validate_receipt(receipt, validate_engineering_slice_plan(plan), base.validate_execution_envelope(envelope))
 
 
 def build_engineering_slice_packet(envelope: Any, plan: Any, slice_ref: str) -> dict[str, Any]:
@@ -407,9 +416,15 @@ def _validated_reviewers(plan: dict[str, Any], receipts: list[dict[str, Any]], r
     return result
 
 
-def eligible_slices(plan: Any, receipts: Iterable[Any] = (), reviewer_facts: Iterable[dict[str, Any]] = ()) -> list[str]:
+def eligible_slices(plan: Any, receipts: Iterable[Any] = (), reviewer_facts: Iterable[dict[str, Any]] = (), *, execution_envelopes: Iterable[Any]) -> list[str]:
     accepted = validate_engineering_slice_plan(plan)
-    receipt_rows = [_validate_receipt(item, accepted, None) for item in receipts]
+    envelope_by_digest = _validate_authoritative_envelopes(accepted, list(execution_envelopes))
+    receipt_rows = []
+    for item in receipts:
+        if not isinstance(item, dict) or "envelope_digest" not in item:
+            raise EngineeringContractError("every eligibility receipt must resolve an authoritative envelope")
+        receipt_rows.append(_validate_receipt(item, accepted, _receipt_envelope(item, envelope_by_digest)))
+    _assert_envelope_retention(receipt_rows, envelope_by_digest)
     if len({row["slice_ref"] for row in receipt_rows}) != len(receipt_rows) or len({row["attempt_id"] for row in receipt_rows}) != len(receipt_rows):
         raise EngineeringContractError("duplicate slice or attempt receipt is ambiguous")
     receipts_by_slice = {row["slice_ref"]: row for row in receipt_rows}
@@ -498,6 +513,7 @@ def project_engineering_passport(plan: Any, receipts: Iterable[Any], *, executio
         if not isinstance(raw, dict) or "envelope_digest" not in raw:
             raise EngineeringContractError("every engineering receipt must resolve an authoritative envelope")
         receipt_rows.append(_validate_receipt(raw, accepted, _receipt_envelope(raw, envelope_by_digest)))
+    _assert_envelope_retention(receipt_rows, envelope_by_digest)
     if len({row["slice_ref"] for row in receipt_rows}) != len(receipt_rows) or len({row["attempt_id"] for row in receipt_rows}) != len(receipt_rows): raise EngineeringContractError("passport cannot select duplicate receipt or attempt")
     reviewer_facts = reviewer_facts or []; qa_facts = qa_facts or []
     reviewer_by = _validated_reviewers(accepted, receipt_rows, reviewer_facts); qa_by = _qa_facts(accepted, receipt_rows, qa_facts)
@@ -505,7 +521,7 @@ def project_engineering_passport(plan: Any, receipts: Iterable[Any], *, executio
     for row in sorted(accepted["slices"], key=lambda item: item["ordinal"]):
         receipt = next((item for item in receipt_rows if item["slice_ref"] == row["slice_ref"]), None)
         review = reviewer_by.get(row["slice_ref"]); qa = qa_by.get(row["slice_ref"])
-        if receipt is None: state = "eligible" if row["slice_ref"] in eligible_slices(accepted, receipt_rows, reviewer_facts) else "blocked"
+        if receipt is None: state = "eligible" if row["slice_ref"] in eligible_slices(accepted, receipt_rows, reviewer_facts, execution_envelopes=list(envelope_by_digest.values())) else "blocked"
         elif review and review["state"] == "passed" and (not row["manual_qa_required"] or (qa and qa["state"] == "passed")): state = "verified_complete"
         elif receipt["outcome"] in {"failed", "reopened"} or (qa and qa["state"] == "failed"): state = "reopened"
         else: state = "claimed"
@@ -537,6 +553,7 @@ def validate_engineering_passport(value: Any) -> dict[str, Any]:
         if not isinstance(item, dict) or "envelope_digest" not in item:
             raise EngineeringContractError("every engineering receipt must resolve an authoritative envelope")
         receipt_rows.append(_validate_receipt(item, accepted, _receipt_envelope(item, envelope_by_digest)))
+    _assert_envelope_retention(receipt_rows, envelope_by_digest)
     if len({item["slice_ref"] for item in receipt_rows}) != len(receipt_rows) or len({item["attempt_id"] for item in receipt_rows}) != len(receipt_rows): raise EngineeringContractError("engineering passport receipts are ambiguous")
     reviewer_by = _validated_reviewers(accepted, receipt_rows, _list(row["reviewer_facts"], "engineering passport reviewer_facts"))
     qa_by = _qa_facts(accepted, receipt_rows, _list(row["qa_facts"], "engineering passport qa_facts"))
@@ -552,7 +569,7 @@ def validate_engineering_passport(value: Any) -> dict[str, Any]:
         projected_refs.append(projected["slice_ref"]); projected_ordinals.append(projected["ordinal"])
     if projected_refs != expected_order or projected_ordinals != [item["ordinal"] for item in sorted(accepted["slices"], key=lambda item: item["ordinal"])]:
         raise EngineeringContractError("engineering passport slice coverage or order is not exact")
-    expected_eligible = set(eligible_slices(accepted, receipt_rows, list(reviewer_by.values())))
+    expected_eligible = set(eligible_slices(accepted, receipt_rows, list(reviewer_by.values()), execution_envelopes=list(envelope_by_digest.values())))
     receipt_by_slice = {item["slice_ref"]: item for item in receipt_rows}
     for projected in projected_slices:
         state = _exact(projected, {"slice_ref", "ordinal", "dependency_refs", "state", "planned_check_refs", "deviation_refs", "manual_qa_required", "release_requirement"}, "engineering passport slice state")

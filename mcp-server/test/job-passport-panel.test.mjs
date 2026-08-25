@@ -23,7 +23,9 @@ const engineeringFor = (projection = fixture) => {
   const slice = { slice_ref: "slice:a", ordinal: 1, objective: "Blocked synthetic slice", definition_of_done: "A typed receipt arrives", dependency_refs: [], declared_resource_refs: ["resource:worktree-a"], declared_component_refs: ["component:execution-fabric"], declared_plan_step_refs: ["step:synthetic-read"], baseline_evidence_refs: [evidence], planned_checks: [{ check_ref: "check:synthetic", failure_condition: "missing evidence", evidence_requirement: "redacted_evidence_required" }], scope_boundary: "synthetic fixture", forbidden_change_refs: ["forbidden:authority"], concurrency_posture: "parallel_safe", manual_qa_required: false, risk_class: "R1", release_requirement: "required" };
   const slicePlan = { schema_version: "engineering-slice-plan.v1", work_request: workRequest, accepted_plan_revision: acceptedPlanRevision, slices: [slice] };
   slicePlan.plan_digest = seal(slicePlan);
-  const passport = { schema_version: "engineering-passport.v1", work_request: workRequest, accepted_plan_revision: acceptedPlanRevision, plan_digest: slicePlan.plan_digest, slice_plan: slicePlan, execution_envelopes: [structuredClone(envelope)], receipts: [], reviewer_facts: [], qa_facts: [], slices: [{ slice_ref: "slice:a", ordinal: 1, dependency_refs: [], state: "eligible", planned_check_refs: ["check:synthetic"], deviation_refs: [], manual_qa_required: false, release_requirement: "required" }], operator_receipt: { what_changed: [], why: "derived from accepted plan and typed receipts", evidence_refs: [], deviations: [], remaining_risk: ["slice:a"], manual_qa_items: [] }, closure: { work: { state: "unresolved", evidence_refs: [], note: "pending" }, proof: { state: "unresolved", evidence_refs: [], note: "pending" }, explanation: { state: "unresolved", evidence_refs: [], note: "pending" }, release: { state: "unresolved", evidence_refs: [], note: "pending" }, learning: { state: "unresolved", route: null, evidence_refs: [], note: "pending" } }, closure_state: "blocked", stale_conflict: { state: "none", reason: null } };
+  const receiptEvidence = { ref: "evidence:receipt", redaction_class: "redacted_evidence", content_digest: "sha256:" + "a".repeat(64) };
+  const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: seal(envelope), attempt_id: "attempt:a", slice_ref: "slice:a", plan_digest: slicePlan.plan_digest, attribution: { actor_ref: "actor:codex", session_ref: "session:fresh", adapter_ref: "adapter:codex" }, planned_resource_refs: ["resource:worktree-a"], actual_resource_refs: ["resource:worktree-a"], planned_component_refs: ["component:execution-fabric"], actual_component_refs: ["component:execution-fabric"], checks: [{ check_ref: "check:synthetic", state: "passed", evidence_refs: [receiptEvidence] }], outcome: "claimed_complete", artifact_refs: ["artifact:a"], evidence_refs: [receiptEvidence], deviations: [], source_evidence: { worktree_ref: "worktree:isolated", branch_ref: "branch:engineering-passport", source_sha: "0e7279b4", evidence_refs: [receiptEvidence] }, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false, reconstruction_free: true, remediation_action: null }, executor_claim: { claim_state: "executor_claim", claimed_by: "actor:codex", claimed_at: "2026-08-24T12:15:00Z" }, independent_verification_required: true };
+  const passport = { schema_version: "engineering-passport.v1", work_request: workRequest, accepted_plan_revision: acceptedPlanRevision, plan_digest: slicePlan.plan_digest, slice_plan: slicePlan, execution_envelopes: [structuredClone(envelope)], receipts: [receipt], reviewer_facts: [], qa_facts: [], slices: [{ slice_ref: "slice:a", ordinal: 1, dependency_refs: [], state: "claimed", planned_check_refs: ["check:synthetic"], deviation_refs: [], manual_qa_required: false, release_requirement: "required" }], operator_receipt: { what_changed: [], why: "derived from accepted plan and typed receipts", evidence_refs: [receiptEvidence], deviations: [], remaining_risk: ["slice:a"], manual_qa_items: [] }, closure: { work: { state: "unresolved", evidence_refs: [], note: "pending" }, proof: { state: "unresolved", evidence_refs: [], note: "pending" }, explanation: { state: "unresolved", evidence_refs: [], note: "pending" }, release: { state: "unresolved", evidence_refs: [], note: "pending" }, learning: { state: "unresolved", route: null, evidence_refs: [], note: "pending" } }, closure_state: "blocked", stale_conflict: { state: "none", reason: null } };
   passport.projection_digest = seal(passport);
   return passport;
 };
@@ -151,7 +153,7 @@ test("Engineering Passport binds to exact Observatory state and withholds stale/
   const staleModel = deriveJobPassports([turn(wrap("observatory_projection", newerProjection), 1), turn(wrap("engineering_passport", stale), 2)]);
   assert.equal(staleModel.passports[0].engineering_passport, null);
   assert.ok(staleModel.rejected.some((row) => row.reason === "stale_engineering_passport"));
-  const conflict = engineeringFor(fixture); conflict.work_request.canonical_record_digest = "sha256:" + "d".repeat(64); conflict.slice_plan.work_request.canonical_record_digest = conflict.work_request.canonical_record_digest; conflict.execution_envelopes[0].state_binding.canonical_record_digest = conflict.work_request.canonical_record_digest; conflict.slice_plan.plan_digest = seal({ ...conflict.slice_plan, plan_digest: undefined }); delete conflict.slice_plan.plan_digest; conflict.slice_plan.plan_digest = seal(conflict.slice_plan); conflict.plan_digest = conflict.slice_plan.plan_digest; conflict.projection_digest = seal({ ...conflict, projection_digest: undefined }); delete conflict.projection_digest; conflict.projection_digest = seal(conflict);
+  const conflict = engineeringFor(fixture); conflict.work_request.canonical_record_digest = "sha256:" + "d".repeat(64); conflict.slice_plan.work_request.canonical_record_digest = conflict.work_request.canonical_record_digest; conflict.execution_envelopes[0].state_binding.canonical_record_digest = conflict.work_request.canonical_record_digest; conflict.receipts[0].envelope_digest = seal(conflict.execution_envelopes[0]); conflict.slice_plan.plan_digest = seal({ ...conflict.slice_plan, plan_digest: undefined }); delete conflict.slice_plan.plan_digest; conflict.slice_plan.plan_digest = seal(conflict.slice_plan); conflict.plan_digest = conflict.slice_plan.plan_digest; conflict.receipts[0].plan_digest = conflict.plan_digest; delete conflict.projection_digest; conflict.projection_digest = seal(conflict);
   const conflictModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", matching), 2), turn(wrap("engineering_passport", conflict), 3)]);
   assert.equal(conflictModel.passports[0].engineering_passport, null);
   assert.ok(conflictModel.rejected.some((row) => row.reason === "conflicting_engineering_passport"));
@@ -184,6 +186,30 @@ test("browser refuses forged or malformed Engineering Passports before paint", (
   const wrongEnvelope = engineeringFor(fixture); wrongEnvelope.execution_envelopes[0].work_request_id = "wr-other"; delete wrongEnvelope.projection_digest; wrongEnvelope.projection_digest = seal(wrongEnvelope);
   const wrongEnvelopeModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", wrongEnvelope), 2)]);
   assert.equal(wrongEnvelopeModel.passports[0].engineering_passport, null);
+
+  const unreferencedEnvelope = engineeringFor(fixture); const extraEnvelope = structuredClone(unreferencedEnvelope.execution_envelopes[0]); extraEnvelope.envelope_id = "env-synthetic-extra"; unreferencedEnvelope.execution_envelopes.push(extraEnvelope); unreferencedEnvelope.projection_digest = seal(unreferencedEnvelope);
+  const unreferencedModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", unreferencedEnvelope), 2)]);
+  assert.equal(unreferencedModel.passports[0].engineering_passport, null);
+});
+
+test("browser mirrors strict ExecutionEnvelope authority invariants without throwing", () => {
+  const mutations = [
+    (passport) => { passport.execution_envelopes[0].server_binding.authority.read_only = false; },
+    (passport) => { passport.execution_envelopes[0].server_binding.identity.client_mutable = true; },
+    (passport) => { passport.execution_envelopes[0].server_binding.authority.derived_by = "client_claim"; },
+    (passport) => { passport.execution_envelopes[0].request.allowed_actions = ["write_file"]; },
+    (passport) => { passport.execution_envelopes[0].handoff.capability_inherited = true; },
+    (passport) => { passport.execution_envelopes[0].state_binding.compare_and_swap_required = false; },
+    (passport) => { passport.execution_envelopes[0].phase_binding.switch_conditions = ["phase_boundary"]; },
+    (passport) => { passport.execution_envelopes[0].evaluation_context.experiment_arm = "forged_arm"; },
+  ];
+  for (const mutate of mutations) {
+    const forged = engineeringFor(fixture); mutate(forged); forged.projection_digest = seal(forged);
+    assert.doesNotThrow(() => {
+      const model = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", forged), 2)]);
+      assert.equal(model.passports[0].engineering_passport, null);
+    });
+  }
 });
 
 test("regression guards preserve keyboard drilldown across a poll and a real mobile grid row", () => {
