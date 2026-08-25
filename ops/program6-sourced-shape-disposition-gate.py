@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# doctrine: runbook
 # ci: db-gate
 """Rollback-only acceptance gate for Program 6 sourced shape disposition."""
 
