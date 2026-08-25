@@ -208,12 +208,12 @@ def main() -> int:
                 counts = audit.counts(cur)
             except psycopg.errors.InsufficientPrivilege as exc:
                 print("rule-delivery-shadow-watch: the jobs role cannot read the delivery "
-                      f"tags — migration 0288 may not be applied here ({exc})",
+                      f"tags — migration 0291 may not be applied here ({exc})",
                       file=sys.stderr)
                 return 1
             except psycopg.errors.UndefinedTable:
                 print("rule-delivery-shadow-watch: the delivery tables are absent — "
-                      "migration 0288 has not been applied here", file=sys.stderr)
+                      "migration 0291 has not been applied here", file=sys.stderr)
                 return 1
 
     if args.json:

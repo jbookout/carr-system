@@ -119,9 +119,24 @@ check("a clean fresh week prints the turn count and zero misses",
 check("and it does not claim to have counted turns it never saw",
       "with a pack signal" in rendered(fresh), rendered(fresh))
 
+# ── delivery scope is part of the production acceptance signal ─────────────
+audit = watch.load_audit()
+clean_counts = {
+    "total": 4, "untagged": 0, "orphaned": 0, "layer0": 1,
+    "layer0_shared": 1, "layer0_shared_cap": 35, "control": 1, "pack": 2,
+    "packs": 1, "wildcarded": 0, "packless": 0, "emptypack": 0,
+    "scope_mismatch": 0, "mode": "shadow",
+}
+check("a scope-clean delivery audit can pass", audit.failing(clean_counts) is False)
+bad_scope = {**clean_counts, "scope_mismatch": 1}
+check("one personal-scope mismatch fails the delivery audit",
+      audit.failing(bad_scope) is True)
+check("the rendered audit names the scope mismatch",
+      "scope_mismatch=1" in audit.render(bad_scope), audit.render(bad_scope))
+
 if FAILURES:
     print("rule-delivery-shadow-watch-selftest: FAIL", file=sys.stderr)
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-delivery-shadow-watch-selftest: 17 cases passed")
+print("rule-delivery-shadow-watch-selftest: 20 cases passed")
