@@ -64,12 +64,17 @@ import json
 from pathlib import Path
 
 DELIVERED_CAP = 4000  # per desk; oldest dropped first — a dedup memory, not an audit log
+QUEUE_RETRY_CAP = 400  # timing hints only; canonical attempt evidence remains in Hermes
 
 
 def default_state() -> dict:
     return {"last_seq": 0, "desks": {}, "last_heartbeat_at": None,
             "control_logins": {}, "awaiting_login": {},
-            "queue_event_cursor": 0, "queue_projection_digest": None}
+            "queue_event_cursor": 0, "queue_projection_digest": None,
+            "queue_projection_checked_at": None,
+            "queue_projection_last_success_at": None,
+            "queue_projection_error": None,
+            "queue_retry_at": {}}
 
 
 def load_state(path: Path) -> dict:
@@ -87,7 +92,34 @@ def load_state(path: Path) -> dict:
     data.setdefault("awaiting_login", {})
     data.setdefault("queue_event_cursor", 0)
     data.setdefault("queue_projection_digest", None)
+    data.setdefault("queue_projection_checked_at", None)
+    data.setdefault("queue_projection_last_success_at", None)
+    data.setdefault("queue_projection_error", None)
+    retry_at = data.get("queue_retry_at")
+    if not isinstance(retry_at, dict):
+        retry_at = {}
+    data["queue_retry_at"] = {
+        task_id: due for task_id, due in retry_at.items()
+        if isinstance(task_id, str) and task_id.startswith("t_")
+        and isinstance(due, str) and len(due) <= 64
+    }
+    while len(data["queue_retry_at"]) > QUEUE_RETRY_CAP:
+        data["queue_retry_at"].pop(next(iter(data["queue_retry_at"])))
     return data
+
+
+def set_queue_retry_at(state: dict, task_id: str, retry_at: str) -> None:
+    scheduled = state.setdefault("queue_retry_at", {})
+    if not isinstance(scheduled, dict):
+        state["queue_retry_at"] = scheduled = {}
+    scheduled[task_id] = retry_at
+    while len(scheduled) > QUEUE_RETRY_CAP:
+        scheduled.pop(next(iter(scheduled)))
+
+
+def clear_queue_retry_at(state: dict, task_id: str | None) -> None:
+    if isinstance(task_id, str):
+        state["queue_retry_at"].pop(task_id, None)
 
 
 def get_heartbeat_at(state: dict) -> str | None:

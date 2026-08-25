@@ -19,6 +19,8 @@ import queue_grammar
 BOARD = "carr-build"
 PROJECT = "carr"
 CATALOG_PATH = Path(__file__).with_name("queue-targets.json")
+QUEUE_MAX_RETRIES = 3
+QUEUE_TRANSIENT_PREFIX = "queue_transient:"
 
 
 class QueueError(RuntimeError):
@@ -105,6 +107,7 @@ class KanbanAdapter:
             "hermes", "kanban", "--board", BOARD, "create", "--project", PROJECT,
             "--assignee", target["assignee"], "--priority", str(command["priority"]),
             "--max-runtime", command["runtime"], "--idempotency-key", command["idempotency_key"],
+            "--max-retries", str(QUEUE_MAX_RETRIES),
             "--created-by", str(turn.get("seat") or "room"), "--body", task_body,
         ]
         if command.get("after"):
@@ -146,6 +149,39 @@ class KanbanAdapter:
         self.command_runner([
             "hermes", "kanban", "--board", BOARD, "claim", task_id, "--ttl", "900",
         ])
+
+    def reclaim(self, task_id: str, reason: str) -> None:
+        """Release a just-claimed retryable task through Hermes' recovery API."""
+        self.command_runner([
+            "hermes", "kanban", "--board", BOARD, "reclaim", task_id,
+            "--reason", reason,
+        ])
+
+    def retry_attempt(self, task_id: str, prefix: str = QUEUE_TRANSIENT_PREFIX) -> tuple[int, int]:
+        """Read the durable queue-specific failure count and its card bound.
+
+        The bridge never owns an attempt counter.  Hermes' reclaim events are
+        the durable evidence; the closed reason prefix keeps unrelated manual
+        recoveries out of this queue policy.
+        """
+        payload = self.show(task_id)
+        task = payload.get("task") if isinstance(payload, dict) else None
+        events = payload.get("events") if isinstance(payload, dict) else None
+        limit = task.get("max_retries") if isinstance(task, dict) else None
+        if (not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
+                or not isinstance(events, list)):
+            raise QueueError("queue_unavailable", "Hermes retry evidence is unavailable")
+        attempts = 0
+        for event in events:
+            if not isinstance(event, dict) or event.get("kind") != "reclaimed":
+                continue
+            payload_value = event.get("payload")
+            if not isinstance(payload_value, dict):
+                raise QueueError("queue_unavailable", "Hermes retry evidence is invalid")
+            reason = payload_value.get("reason")
+            if isinstance(reason, str) and reason.startswith(prefix):
+                attempts += 1
+        return attempts, limit
 
     def comment(self, task_id: str, summary: str) -> None:
         self.command_runner([

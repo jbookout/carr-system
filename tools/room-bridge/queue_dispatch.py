@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 
@@ -31,6 +32,14 @@ RESULT_FIELDS = {"v", "task_id", "outcome", "summary"}
 RECORD_WRITE_EVIDENCE_FIELDS = {"mcp_verb", "record_id", "readback_verb", "readback_record_id"}
 TERMINAL_STATES = {"done", "review", "blocked", "archived"}
 MCP_VERB = re.compile(r"^[a-z][a-z0-9-]{0,79}$")
+QUEUE_TRANSIENT_PREFIX = "queue_transient:"
+RETRY_BASE_SECONDS = 30
+RETRY_MAX_SECONDS = 300
+RETRYABLE_DISPATCH_STATUSES = {
+    "quota_exhausted": "provider_quota",
+    "timed_out": "provider_unavailable",
+    "failed": "provider_unavailable",
+}
 
 
 class QueueDispatchError(ValueError):
@@ -39,6 +48,22 @@ class QueueDispatchError(ValueError):
 
 class RecordWriteEvidenceMissing(QueueDispatchError):
     pass
+
+
+def _now(now: str | None = None) -> datetime:
+    value = datetime.fromisoformat(now) if now else datetime.now(timezone.utc)
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _retry_at(*, attempt: int, now: str | None) -> str:
+    delay = min(RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)), RETRY_MAX_SECONDS)
+    return (_now(now) + timedelta(seconds=delay)).isoformat(timespec="seconds")
+
+
+def _dispatch_failure_code(value: object) -> str:
+    if isinstance(value, str) and value in RETRYABLE_DISPATCH_STATUSES:
+        return RETRYABLE_DISPATCH_STATUSES[value]
+    return "provider_unavailable"
 
 
 def validate_execution_catalog(catalog: dict) -> dict:
@@ -179,8 +204,30 @@ class QueueDeskExecutor:
             "return outcome=blocked with code=capability_escalation_required." + evidence
         )
 
+    def _retry_or_block(self, task_id: str, code: str, *, now: str | None) -> dict:
+        """Use only Hermes evidence for the finite recovery bound."""
+        try:
+            attempts, limit = self.adapter.retry_attempt(task_id, QUEUE_TRANSIENT_PREFIX)
+            if (not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0
+                    or not isinstance(limit, int) or isinstance(limit, bool) or limit < 1):
+                raise QueueDispatchError("canonical retry evidence is invalid")
+        except Exception:
+            self.adapter.block(task_id, "queue_unavailable", kind="transient")
+            return {"outcome": "blocked", "task_id": task_id, "code": "queue_unavailable"}
+        if attempts + 1 >= limit:
+            self.adapter.block(task_id, code, kind="transient")
+            return {"outcome": "blocked", "task_id": task_id, "code": code}
+        try:
+            self.adapter.reclaim(task_id, f"{QUEUE_TRANSIENT_PREFIX}{code}")
+        except Exception:
+            self.adapter.block(task_id, "queue_unavailable", kind="transient")
+            return {"outcome": "blocked", "task_id": task_id, "code": "queue_unavailable"}
+        return {"outcome": "retry_scheduled", "task_id": task_id, "code": code,
+                "retry_at": _retry_at(attempt=attempts + 1, now=now)}
+
     def start(self, target_alias: str, *, dispatch_call: Callable[[str], dict],
-              desk_busy: bool = False) -> dict:
+              desk_busy: bool = False, retry_at: dict[str, str] | None = None,
+              now: str | None = None) -> dict:
         target = self._target(target_alias)
         if target is None or target.get("adapter") != "desk" or not target.get("enabled"):
             return {"outcome": "not_desk_target", "target": target_alias}
@@ -196,7 +243,31 @@ class QueueDeskExecutor:
             candidates.append((int(row.get("created_at") or 0), parsed["task_id"], parsed))
         if not candidates:
             return {"outcome": "idle", "target": target_alias}
-        _created, task_id, parsed = min(candidates)
+        current_time = _now(now)
+        ready_candidates = []
+        delayed_candidates = []
+        for candidate in candidates:
+            scheduled_at = (retry_at or {}).get(candidate[1])
+            if scheduled_at is None:
+                ready_candidates.append(candidate)
+                continue
+            if not isinstance(scheduled_at, str):
+                self.adapter.block(candidate[1], "queue_unavailable", kind="transient")
+                return {"outcome": "blocked", "task_id": candidate[1], "code": "queue_unavailable"}
+            try:
+                due = _now(scheduled_at)
+            except (TypeError, ValueError):
+                self.adapter.block(candidate[1], "queue_unavailable", kind="transient")
+                return {"outcome": "blocked", "task_id": candidate[1], "code": "queue_unavailable"}
+            if due > current_time:
+                delayed_candidates.append((due, candidate, scheduled_at))
+            else:
+                ready_candidates.append(candidate)
+        if not ready_candidates:
+            due, candidate, scheduled_at = min(delayed_candidates)
+            return {"outcome": "retry_wait", "task_id": candidate[1], "target": target_alias,
+                    "retry_at": scheduled_at}
+        _created, task_id, parsed = min(ready_candidates)
 
         # The canonical claim is the race boundary. No dispatch happens first.
         try:
@@ -207,11 +278,15 @@ class QueueDeskExecutor:
             return {"outcome": "claim_not_acquired", "task_id": task_id, "target": target_alias}
         try:
             row = dispatch_call(self._prompt(parsed))
-        except Exception:  # dispatch details may contain provider output; never persist them here
-            # If Hermes itself is unavailable and this transition cannot land,
-            # its canonical claim lease remains the bounded recovery path.
-            self.adapter.block(task_id, "dispatch_failed", kind="transient")
-            return {"outcome": "dispatch_failed", "task_id": task_id, "target": target_alias}
+        except Exception as exc:  # dispatch details may contain provider output; never persist them here
+            error_code = getattr(exc, "code", None)
+            if error_code == "queue_unavailable":
+                code = "queue_unavailable"
+            elif isinstance(error_code, str):
+                code = "desk_unavailable"
+            else:
+                code = "provider_unavailable"
+            return self._retry_or_block(task_id, code, now=now)
 
         status = row.get("status") if isinstance(row, dict) else None
         if status == "delivered":
@@ -226,9 +301,7 @@ class QueueDeskExecutor:
                 },
             }
         if status != "completed":
-            safe_status = status if isinstance(status, str) and status else "unknown"
-            self.adapter.block(task_id, f"dispatch_failed:{safe_status}", kind="transient")
-            return {"outcome": "dispatch_failed", "task_id": task_id, "target": target_alias}
+            return self._retry_or_block(task_id, _dispatch_failure_code(status), now=now)
         raw_result = row.get("result")
         return self.finish_pending(
             {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
@@ -277,13 +350,12 @@ class QueueDeskExecutor:
         self.adapter.complete(task_id, summary, metadata)
         return {"outcome": "done", "task_id": task_id}
 
-    def fail_pending(self, pending: dict, reason: str) -> dict:
+    def fail_pending(self, pending: dict, reason: str, *, now: str | None = None) -> dict:
         task_id = pending.get("kanban_task_id")
         if not isinstance(task_id, str) or not task_id.startswith("t_"):
             raise QueueDispatchError("pending queue task identity is invalid")
         current = _task_status(self.adapter.show(task_id))
         if current in TERMINAL_STATES:
             return {"outcome": "already_terminal", "task_id": task_id}
-        safe_reason = reason if reason in {"desk_result_timeout", "dispatch_failed"} else "dispatch_failed"
-        self.adapter.block(task_id, safe_reason, kind="transient")
-        return {"outcome": safe_reason, "task_id": task_id}
+        safe_reason = "desk_result_timeout" if reason == "desk_result_timeout" else "provider_unavailable"
+        return self._retry_or_block(task_id, safe_reason, now=now)

@@ -235,7 +235,11 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
         if pending.get("origin_kind") == "queue":
             if queue_executor is None:
                 return {"desk": name, "outcome": "queue_executor_unavailable"}
-            terminal = queue_executor.fail_pending(pending, "desk_result_timeout")
+            terminal = queue_executor.fail_pending(pending, "desk_result_timeout", now=now)
+            if terminal.get("outcome") == "retry_scheduled":
+                state_mod.set_queue_retry_at(state, terminal["task_id"], terminal["retry_at"])
+            else:
+                state_mod.clear_queue_retry_at(state, terminal.get("task_id"))
             state_mod.clear_pending(state, name)
             return {"desk": name, **terminal}
         add_room_turn(
@@ -437,6 +441,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              queue_service: kanban_adapter.QueueService | None = None,
              queue_executor: queue_dispatch.QueueDeskExecutor | None = None,
              queue_projector=queue_projection.project_once,
+             now_fn=_now,
              log=print) -> dict:
     registry = registry or desks.Registry()
     results_path = Path(results_path or dispatch.DEFAULT_RESULTS)
@@ -539,6 +544,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                 name, seat, state, add_room_turn=add_room_turn,
                 log_path=desk_state_dir / f"{name}.log",
                 pending_timeout_s=pending_timeout_s,
+                now=now_fn(),
                 queue_executor=queue_executor,
             )
             if pending_outcome:
@@ -562,7 +568,13 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                     queue_outcome = queue_executor.start(
                         desk_queue_targets[name], dispatch_call=dispatch_queue,
                         desk_busy=state_mod.has_queued(state, name),
+                        retry_at=state["queue_retry_at"], now=now_fn(),
                     )
+                    if queue_outcome.get("outcome") == "retry_scheduled":
+                        state_mod.set_queue_retry_at(
+                            state, queue_outcome["task_id"], queue_outcome["retry_at"])
+                    elif queue_outcome.get("outcome") not in {"retry_wait", "idle"}:
+                        state_mod.clear_queue_retry_at(state, queue_outcome.get("task_id"))
                     pending = queue_outcome.get("pending")
                     if isinstance(pending, dict):
                         state_mod.set_pending(
@@ -597,13 +609,18 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
 
     projection_events: list[dict] = []
     if queue_service is not None:
+        state["queue_projection_checked_at"] = now_fn()
         try:
             projection_events = queue_projector(
                 state=state, add_room_turn=add_room_turn,
                 target_catalog=queue_service.catalog.get("targets", {}),
             )
+            state["queue_projection_last_success_at"] = now_fn()
+            state["queue_projection_error"] = None
         except Exception as exc:  # projection failure must be visible, never a live-looking board
-            errors.append({"desk": "(queue-projector)", "error": "queue_projection_failed", "detail": str(exc)[:500]})
+            state["queue_projection_error"] = "queue_projection_failed"
+            errors.append({"desk": "(queue-projector)", "error": "queue_projection_failed",
+                           "detail": "queue projector failed"})
 
     # Read the registry back AFTER the heartbeat stamps above, so the roster the
     # observatory sees carries this cycle's own liveness rather than the values
