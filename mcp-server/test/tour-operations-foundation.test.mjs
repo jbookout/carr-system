@@ -11,7 +11,7 @@ const fixture = JSON.parse(read("mcp-server/test/fixtures/tour-operations-founda
 const migration = read("migrations/0317_tour_operations_foundation.sql");
 
 test("foundation contract preserves provenance, conflicts, audit, rights versions and tenant integrity", () => {
-  assert.equal(contract.version, "1.1.0");
+  assert.equal(contract.version, "1.2.0");
   for (const field of ["property_id", "field_key", "source_evidence_id", "observed_at", "effective_from", "rights_receipt_id", "confidence", "data_classification"]) assert(contract.canonical_record_policy.required_fact_metadata.includes(field), field);
   for (const entity of ["FactConflict", "AuditEvent", "TourPropertyMembership", "ProjectionFact"]) assert.ok(contract.entities[entity], entity);
   assert.match(contract.entities.RightsReceipt.rule, /immutable versioned.*fail closed/i);
@@ -23,6 +23,7 @@ test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, an
   const { projection_fact: fact, field_assertion: assertion, membership } = fixture;
   assert.equal(validateProjectionFact(fact, assertion, membership), true);
   assert.throws(() => validateProjectionFact({...fact, display_field_key: "internal_note"}, assertion, membership), /PUBLIC_FIELD_NOT_ALLOWLISTED/);
+  assert.throws(() => validateProjectionFact({...fact, display_field_key: "display.address"}, assertion, membership), /PUBLIC_FIELD_RELABEL_REFUSED/);
   assert.throws(() => validateProjectionFact({...fact, organization_tenant_id: "other"}, assertion, membership), /TENANT_SCOPE_REFUSED/);
   assert.throws(() => validateProjectionFact(fact, {...assertion, review_state: "unreviewed"}, membership), /PUBLIC_ASSERTION_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, {...assertion, data_classification: "internal"}, membership), /PUBLIC_ASSERTION_REQUIRED/);
