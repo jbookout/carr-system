@@ -481,10 +481,10 @@ function agentActorFor(request, env) {
 // job (agentActorForToken, extended rather than duplicated — see its own
 // comment); nothing about it lives in this file.
 //
-// EVERY VERB EXCEPT humanOnly FALLS OUT OF EXISTING MECHANISMS, ON PURPOSE.
-// No profile lock here (unlike probe/reviewer): full parity minus humanOnly
-// IS the grant, exactly like the agent-token door above, because human:false
-// makes tools.js's `if (tool.humanOnly && !actor.human) throw ...` refuse
+// EVERY VERB EXCEPT partner-authority FALLS OUT OF EXISTING MECHANISMS, ON PURPOSE.
+// No profile lock here (unlike probe/reviewer): full parity minus partner authority
+// IS the grant, exactly like the agent-token door above, because joe-local and
+// dell-local are not approved native Codex/Claude runtime identities and therefore refuse
 // teach / retire-rule / confirm-merge / reassign-deal / new-deal / … by
 // construction — never a list this file has to maintain. A credential sitting
 // in a 600 file on a Mac must not be able to teach a rule that binds both
@@ -497,8 +497,7 @@ function agentActorFor(request, env) {
 // HUMAN actor, which is exactly what carried the humanOnly verbs on a
 // credential in a config file. This one resolves to human:false with a
 // server-derived sponsor, which is a different, narrower shape — sponsored
-// but never human — and the humanOnly gate answers to `actor.human`, not to
-// whether a sponsor exists.
+// but never eligible for partner authority merely because a sponsor exists.
 //
 // The machine's actor row (kind='automation') must exist before any write verb
 // runs, exactly like every other machine actor above. Joe's runbook is

@@ -22,6 +22,8 @@ import { evidenceActivationTools } from "./evidence-activation.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
+export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
 
@@ -4199,7 +4201,7 @@ export const TOOLS = {
         throw new ToolError({ error: "suppression_clear_required",
           hint: "moving a do_not_contact lead requires the same explicit human correction to set suppressed=false" });
       }
-      if (current.suppressed && nextSuppressed === false && !actor.human) {
+      if (current.suppressed && nextSuppressed === false && !canExercisePartnerAuthority(actor)) {
         throw new ToolError({ error: "suppression_clear_requires_human",
           hint: "a standing suppression instruction may be cleared only by an authenticated human" });
       }
@@ -7214,6 +7216,12 @@ const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
   "write", "writes_records", "calls_models", "call_models",
 ]);
 
+// Partner-authority operations are performed through agent sessions in normal
+// use.  The server already resolves and audits the sponsor separately from the
+// runtime actor; do not force a second interactive OAuth seat after that exact
+// identity binding exists.  Keep the delegation deliberately closed to the two
+// native implementation agents.  Local tokens, reviewers, probes, Hermes, Grok,
+// and unsponsored runtimes remain outside this boundary.
 export function assertNoCallerAuthorityFields(args) {
   if (args && typeof args === "object" && !Array.isArray(args) &&
       Object.keys(args).some((key) => RESERVED_AUTHORITY_ARGUMENT_FIELDS.has(key)))
@@ -7231,20 +7239,13 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
   // Phase 1, 2026-08-13 (decision 97e76a2f): the hint now names the remedy,
-  // not just the refusal. Every non-human door (probe/reviewer/agent-token,
-  // and — since this same day — the LOCAL_TOKENS machine door local-verb.mjs
-  // now uses) refuses here identically, actor.human being the only switch;
-  // this is the one message all of them show. A credential in a config file
-  // must never be able to teach a rule, retire one, confirm a merge, or
-  // reassign a deal — that refusal is a feature. The one deliberate exception
-  // is a receipted local break-glass act (mcp-server/local-verb.mjs), which
-  // still authenticates as a human via ~/.config/carr/local-actor.json, so it
-  // is named too.
-  if (tool.humanOnly && !actor.human)
+  // not just the refusal. The server admits a verified partner or a sponsored
+  // native Codex/Claude actor. Probe, reviewer, local-token, other-model, and
+  // unsponsored doors refuse identically; caller fields cannot select the
+  // sponsor. The local break-glass route remains separately receipted.
+  if (tool.humanOnly && !canExercisePartnerAuthority(actor))
     throw new ToolError({ error: "human_only",
-      hint: "this verb never accepts automation — reconnect through the interactive OAuth " +
-            "connector (Joe's or Dell's own Claude session), or, if there is truly no interactive " +
-            "session available, use a receipted local break-glass act (see mcp-server/local-verb.mjs)" });
+      hint: "this verb requires Joe or Dell, or a server-verified Codex/Claude session sponsored by one of them; caller fields can never select the sponsor" });
   // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
   // coerceArgsToSchema above for what this fixes and why it is here rather than
   // in the seventeen handlers that would otherwise each need to remember. It
@@ -7862,7 +7863,8 @@ Object.assign(TOOLS, {
       accept: { type: "boolean" }, note: { type: "string" },
     }, required: ["idempotency_key", "candidate_id", "accept"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "resolve-post-call-candidate", args, async () => {
-      if (!actor.human) throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
+      if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_only",
+        hint: "this verb requires a partner or a server-verified Codex/Claude session sponsored by one" });
       if (typeof args.accept !== "boolean") throw new ToolError({ error: "accept_required" });
       const found = await c.query(
         `select id,kind,deal_id,assignee_slug,action_description,due_on,recipient_party_id,

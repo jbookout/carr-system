@@ -130,6 +130,26 @@ def replacement_cannot_inherit_capability():
     expect_refusal(lambda: contract.validate_replacement_envelope(previous, replacement), "cannot inherit")
 
 
+def server_issued_repository_write_capability_is_closed_and_bounded():
+    value = envelope()
+    value["request"]["allowed_actions"] = list(contract.ENGINEERING_REPOSITORY_ACTIONS)
+    value["server_binding"]["authority"].update({
+        "capability_profile": "capability:engineering-repository-write",
+        "capability_grant_ref": "grant:engineering-codex-repository-v1",
+        "read_only": False,
+    })
+    contract.validate_execution_envelope(value)
+    widened = copy.deepcopy(value)
+    widened["request"]["allowed_actions"].append("repository:merge")
+    expect_refusal(lambda: contract.validate_execution_envelope(widened), "allowed action")
+    mismatched = copy.deepcopy(value)
+    mismatched["server_binding"]["authority"]["read_only"] = True
+    expect_refusal(lambda: contract.validate_execution_envelope(mismatched), "read-only authority")
+    mismatched = copy.deepcopy(value)
+    mismatched["request"]["allowed_actions"] = []
+    expect_refusal(lambda: contract.validate_execution_envelope(mismatched), "write authority")
+
+
 def state_binding_requires_compare_and_swap_and_handoff_checkpoint():
     value = envelope()
     assert value["state_binding"]["state_version"] == 1
@@ -591,6 +611,7 @@ if __name__ == "__main__":
         ("canonical digest is deterministic", digest_is_canonical_and_deterministic),
         ("receipt for another envelope is refused", different_envelope_receipt_is_refused),
         ("handoff replacement cannot inherit capability", replacement_cannot_inherit_capability),
+        ("server-issued repository write capability is closed and bounded", server_issued_repository_write_capability_is_closed_and_bounded),
         ("state binding requires CAS and verified handoff checkpoint", state_binding_requires_compare_and_swap_and_handoff_checkpoint),
         ("receipts are claims and carry reset-tax metrics", receipts_are_claims_not_canonical_promotion_and_measure_reset_tax),
         ("phase binding preserves native sessions", phase_binding_preserves_native_sessions_and_reserves_evaluation_arms),

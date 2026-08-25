@@ -41,6 +41,13 @@ test("server builds a fresh Codex envelope and receipt binding rejects wrong att
   assert.equal(envelope.server_binding.adapter.surface, "codex_desktop");
   assert.equal(envelope.plan_revision.id, source.plan.plan_ref);
   assert.equal(envelope.handoff.capability_inherited, false);
+  assert.equal(envelope.server_binding.authority.read_only, false);
+  assert.equal(envelope.server_binding.authority.capability_profile, "capability:engineering-repository-write");
+  assert.deepEqual(envelope.request.allowed_actions, [
+    "repository:create-worktree", "repository:create-branch", "repository:write-declared-scope",
+    "repository:run-checks", "repository:commit", "repository:push-branch", "repository:open-pr",
+  ]);
+  assert.ok(!envelope.request.allowed_actions.some(action => /merge|deploy|production|review/.test(action)));
   const receipt = {
     schema_version: "engineering-slice-receipt.v1", envelope_digest: digest(envelope),
     attempt_id: "attempt:1", slice_ref: slice.slice_ref, plan_digest: plan.plan_digest,
@@ -158,6 +165,69 @@ test("successful admission persists its event through the injected writer", asyn
   assert.equal(result.envelope_id, envelopeId);
   assert.equal(events.length, 1);
   assert.equal(events[0][2], "admit-engineering-slice");
+});
+
+test("admission replaces a stale read-only envelope with a new immutable generation", async () => {
+  const item = {
+    slice_ref: "slice:one", ordinal: 1, objective: "Do the bounded work", definition_of_done: "A typed receipt exists",
+    dependency_refs: [], declared_resource_refs: [], declared_component_refs: [], declared_plan_step_refs: [],
+    baseline_evidence_refs: [], planned_checks: [{ check_ref: "check:one", failure_condition: "missing", evidence_requirement: "metadata_only_sufficient" }],
+    scope_boundary: "one bounded slice", forbidden_change_refs: [], concurrency_posture: "parallel_safe", manual_qa_required: false,
+    risk_class: "R1", release_requirement: "required",
+  };
+  const typedPlan = { schema_version: "engineering-slice-plan.v1", work_request: { id: source.work.id, state_version: 3, canonical_record_digest: source.work.canonical_record_digest }, accepted_plan_revision: { id: source.plan.plan_ref, revision: 2, digest: source.plan.digest }, slices: [item] };
+  typedPlan.plan_digest = digest(typedPlan);
+  const priorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const priorSession = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const legacy = buildCodexEnvelope({ source, plan: typedPlan, slice: item,
+    jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", sessionId: priorSession, actor });
+  legacy.request.allowed_actions = [];
+  legacy.server_binding.authority.capability_profile = "capability:engineering-read-only";
+  legacy.server_binding.authority.capability_grant_ref = "grant:engineering-read-only-v1";
+  legacy.server_binding.authority.read_only = true;
+  legacy.expires_at = "2026-08-24T00:00:00Z";
+  legacy.agent_session.lease_expires_at = legacy.expires_at;
+  const facts = {
+    source: { work_request: source.work, accepted_plan: source.plan },
+    slice_plans: [{ accepted_plan_id: source.plan.record_id, accepted_plan_hash: source.plan.digest, plan: typedPlan }],
+    envelopes: [{ id: priorId, job_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      accepted_plan_id: source.plan.record_id, slice_ref: item.slice_ref,
+      created_at: "2026-08-24T00:00:00Z", envelope: legacy }],
+    receipts: [], reviewer_facts: [],
+  };
+  const newSession = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const newJob = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const newEnvelopeId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  let insertParams;
+  let enqueueParams;
+  const c = { query: async (sql, params = []) => {
+    if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
+    if (sql.includes("update ops.capability_agent_session")) return { rows: [] };
+    if (sql.includes("insert into ops.capability_agent_session"))
+      return { rows: [{ id: newSession, executor_actor_id: actor.id, state: "active" }] };
+    if (sql.includes("select id, executor_actor_id")) return { rows: [] };
+    if (sql.includes("from actor")) return { rows: [{ id: actor.id, slug: actor.slug }] };
+    if (sql.includes("engineering_enqueue_slice_job")) { enqueueParams = params; return { rows: [{ id: newJob }] }; }
+    if (sql.includes("insert into ops.engineering_execution_envelope")) {
+      insertParams = params;
+      return { rows: [{ id: newEnvelopeId }] };
+    }
+    return { rows: [] };
+  } };
+  const result = await admitEngineeringSlice(c, actor, {
+    idempotency_key: "12121212-1212-4212-8212-121212121212",
+    work_request: source.work.ref,
+    slice_ref: item.slice_ref,
+  }, Error, async () => {});
+  assert.equal(result.replayed, false);
+  assert.equal(result.supersedes_envelope_id, priorId);
+  assert.equal(enqueueParams[4], 2);
+  assert.equal(insertParams[11], priorId);
+  const replacement = JSON.parse(insertParams[8]);
+  assert.equal(replacement.handoff.mode, "replacement");
+  assert.equal(replacement.handoff.replaces_agent_session_id, `session:${priorSession}`);
+  assert.equal(replacement.handoff.capability_inherited, false);
+  assert.equal(replacement.server_binding.authority.read_only, false);
 });
 
 test("successful independent review persists its event through the injected writer", async () => {

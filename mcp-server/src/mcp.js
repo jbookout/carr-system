@@ -13,6 +13,7 @@
 
 import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
+import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 
@@ -382,11 +383,15 @@ export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
 // login identities. The unscoped value is deliberately Joe-only: letting a
 // Dell-attributed call fall back to a Joe login would make the application actor
 // and database principal disagree, bypassing DB-enforced Joe-only operations.
-export function authorityDsnForActor(env, actor) {
-  if (!actor?.human || !["joe", "dell"].includes(actor.slug)) return null;
+export function authorityDsnForActor(env, runtimeActor) {
+  const partner = partnerAuthoritySlugForActor(runtimeActor);
+  if (!partner) return null;
+  // Preserve the provisioning contract's actor-shaped binding while selecting
+  // the server-derived sponsor, never the runtime agent or caller input.
+  const actor = { slug: partner };
   const scoped = env?.[`CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL`];
   if (scoped) return scoped;
-  return actor.slug === "joe" ? env?.CARR_DB_AUTHORITY_URL || null : null;
+  return partner === "joe" ? env?.CARR_DB_AUTHORITY_URL || null : null;
 }
 
 // Exported for deterministic no-network identity-gate tests. It remains the
@@ -453,7 +458,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
       hint: "this session is scoped; report what you would have done and let an interactive partner session do it" });
   if (tool.authorityOnly && !authorityDsnForActor(env, actor))
     throw new ToolError({ error: "authority_connection_unavailable",
-      hint: "this human-only authority operation requires the actor's partner-scoped authority URL; Joe may use the single-seat CARR_DB_AUTHORITY_URL fallback, while Dell requires CARR_DB_AUTHORITY_DELL_URL. Routine writer credentials cannot perform it" });
+      hint: "this partner-authority operation requires a verified Joe/Dell principal or sponsored Codex/Claude identity plus the sponsor-scoped authority database binding" });
   // Payload-aware profile guard (2026-08-05). Name-level gating cannot see that
   // add-premises' ownership[].new_party path CREATES a party row — the exact act
   // the away profile's own charter excludes (asserting a new identity while the

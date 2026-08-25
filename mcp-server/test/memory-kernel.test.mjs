@@ -175,6 +175,18 @@ test("authority aliases are rejected before envelope/DB and nonhuman direct writ
   assert.equal(queries, 0);
 });
 
+test("a server-verified sponsored Codex session crosses the direct memory transition gate", async () => {
+  let queries = 0;
+  const client = { query: async () => { queries++; return { rows: [] }; } };
+  await assert.rejects(() => STRICT_TOOLS["promote-memory"].handler(client, {
+    id: "runtime", slug: "codex", human: false, via: "oauth-google",
+    sponsoring_human_slug: "joe", sponsor_required: true,
+  }, {
+    idempotency_key: KEY, memory_id: MEMORY_ID, base_version: 1, reason: "verified",
+  }), error => error.payload?.error === "memory_version_conflict_or_not_candidate");
+  assert.ok(queries > 0, "sponsored Codex passed partner authority and reached the scoped mutation");
+});
+
 test("sponsor failures are typed and happen before any query", async () => {
   let queries = 0;
   const client = { query: async () => { queries++; return { rows: [] }; } };
