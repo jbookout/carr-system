@@ -106,6 +106,9 @@ const EXPECTED_POLICY_REFUSALS = Object.freeze({
   "issue-execution-envelope": [
     /^execution envelope requires an active conformance-passed environment provider binding$/,
   ],
+  "read-attempt-reliability": [
+    /^attempt reliability is not visible to tenant$/,
+  ],
   "approve-rule": [
     /^rule approval refused: exact enforcement is not installed; missing\s+\S/,
     /^exact registered controls must be implemented before approval$/,

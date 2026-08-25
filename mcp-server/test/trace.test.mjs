@@ -107,6 +107,7 @@ test("policy/admission refusals do not become incidents, while same-verb runtime
     ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged or triaged-to-ready transitions"],
     ["activate-context-bundle", "context compilation tenant must match authenticated tenant context"],
     ["issue-execution-envelope", "execution envelope requires an active conformance-passed environment provider binding"],
+    ["read-attempt-reliability", "attempt reliability is not visible to tenant"],
     ["approve-rule", "rule approval refused: exact enforcement is not installed; missing {delegation_names_model_and_effort}"],
     ["approve-rule", "exact registered controls must be implemented before approval"],
   ];
@@ -121,6 +122,13 @@ test("policy/admission refusals do not become incidents, while same-verb runtime
     ["approve-rule", "TypeError: Invalid URL string."],
     ["complete-capability-project", "permission denied for table capability_verification"],
     ["activate-context-bundle", "connection terminated unexpectedly"],
+    ["activate-context-bundle", "attempt reliability is not visible to tenant"],
+    ["read-attempt-reliability", "attempt reliability is not visible to tenant for attempt 123"],
+    ["read-attempt-reliability", "attempt reliability is not visible to tenant\npermission denied for table attempt"],
+    ["read-attempt-reliability", "permission denied for table attempt_reliability"],
+    ["read-attempt-reliability", "relation attempt_reliability does not exist"],
+    ["read-attempt-reliability", "malformed attempt id: expected UUID"],
+    ["read-attempt-reliability", "missing attempt id"],
     ["approve-rule", "rule approval refused: exact enforcement is not installed; missing"],
   ];
   for (const [verb, message] of unexpected) {
