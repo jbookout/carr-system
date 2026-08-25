@@ -21,7 +21,8 @@ import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { stripDealPlaceholders } from "./dealroom.js";
-import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
+         personalScopeForActor } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
@@ -3150,35 +3151,52 @@ export const TOOLS = {
 
   "set-next-action": {
     write: true,
-    description: "Set YOUR one open ball on a subject (replaces your previous open one; Dell's stays untouched — one ball per person per subject). Say whose turn it is and by when. Writes next_action (owner, due_on); set hold_until to keep a dated row from surfacing in today-triage.",
+    description: "Set ONE open ball on a subject (replaces that owner's previous open one; the other partner's stays untouched). Defaults to your ball. Only the server-issued Hermes CoS door may name its Joe sponsor as owner; created_by remains the runtime.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, ref: { type: "string" },
-      description: { type: "string" }, due_on: { type: "string", description: "YYYY-MM-DD, optional" } },
+      description: { type: "string" }, due_on: { type: "string", description: "YYYY-MM-DD, optional" },
+      owner: { type: "string", description: "optional server-derived owner; only the caller or a Hermes CoS runtime's Joe sponsor" } },
       required: ["idempotency_key","ref","description"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-next-action", args, async () => {
       const s = await resolveSubject(c, args.ref);
+      const permitted = permittedActionOwnerSlugs(actor);
+      const ownerSlug = args.owner === undefined || args.owner === null || args.owner === ""
+        ? actor.slug : String(args.owner).trim().toLowerCase();
+      if (!permitted.includes(ownerSlug))
+        throw new ToolError({ error: "owner_not_permitted", owner: ownerSlug, permitted,
+          hint: "a ball may be set for yourself; only the Hermes CoS door may hand one to its verified Joe sponsor, never Dell" });
+      let ownerId = actor.id;
+      if (ownerSlug !== actor.slug) {
+        const owner = await c.query("select id from actor where slug=$1", [ownerSlug]);
+        if (!owner.rows.length) throw new ToolError({ error: "actor_not_provisioned", slug: ownerSlug,
+          hint: "the selected owner has no actor row" });
+        ownerId = owner.rows[0].id;
+      }
       // [amendment 8] Replacing an unfinished ball used to record the old one as
       // 'done'. It wasn't done — it was superseded. No-fabrication applies to
       // metadata too, and 'done' would inflate any completion measure built on this.
       await c.query(
-        `update next_action set status='dropped', updated_by=$1 where subject_type=$2 and subject_id=$3
-         and owner_id=$1 and status='open'`, [actor.id, s.type, s.id]);
+        `update next_action set status='dropped', updated_by=$4 where subject_type=$2 and subject_id=$3
+         and owner_id=$1 and status='open'`, [ownerId, s.type, s.id, actor.id]);
       const droppedPostCall = s.type === "deal" ? (await c.query(
         `update capture_post_call_action
             set status='dropped',updated_at=now(),completed_at=null
           where deal_id=$1 and owner_id=$2 and status='open'
           returning id,description /* capture:replace-post-call-actions */`,
-        [s.id, actor.id])).rows : [];
+        [s.id, ownerId])).rows : [];
       const r = await c.query(
         `insert into next_action (subject_type, subject_id, owner_id, due_on, description, created_by)
-         values ($1,$2,$3,$4,$5,$3) returning id`, [s.type, s.id, actor.id, args.due_on || null, args.description]);
+         values ($1,$2,$3,$4,$5,$6) returning id`,
+        [s.type, s.id, ownerId, args.due_on || null, args.description, actor.id]);
       await writeEvent(c, actor, "set-next-action", s.type, s.id,
         { old: droppedPostCall.length ? { post_call_actions: droppedPostCall.map(x =>
             ({ id: x.id, description: x.description, status: "open" })) } : null,
-          new: { next_action: args.description, due: args.due_on,
+          new: { summary: `ball → ${ownerSlug}: ${args.description}`,
+            next_action: args.description, due: args.due_on, owner: ownerSlug,
+            set_by: actor.slug,
             dropped_post_call_action_ids: droppedPostCall.map(x => x.id) },
           idempotency_key: args.idempotency_key });
-      return { ok: true, next_action_id: r.rows[0].id, subject: s,
+      return { ok: true, next_action_id: r.rows[0].id, subject: s, owner: ownerSlug,
         dropped_post_call_action_ids: droppedPostCall.map(x => x.id) };
     }),
   },
@@ -3334,11 +3352,11 @@ export const TOOLS = {
 
   "update-deal": {
     write: true,
-    description: "Field-level change to a deal (phase, segment, outcome, notes_path, salesforce_id). Requires base_version from a fresh read; a conflict means someone else wrote — ask the human, never retry blind. Phase must be an existing slug (list: pending/research/site_selection/negotiation/closing/closed + imported). salesforce_id is the reconciliation key back to the system of record and was NULL on all 40 deals as of 2026-08-02, which forced salesforce-diff to match on name — the matching that mis-filed thirteen deals in the first place; fill it during the Salesforce read. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
+    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a conflict means someone else wrote — ask the human, never retry blind. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
-      fields: { type: "object", description: "subset of: phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
+      fields: { type: "object", description: "subset of: deal_type, phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
       required: ["idempotency_key","deal","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-deal", args, async () => {
       const s = await resolveSubject(c, args.deal);
@@ -3347,7 +3365,7 @@ export const TOOLS = {
       // city and lane joined the list in 0074, when they stopped being source_row
       // passthrough and became real columns. Before that they were unsettable,
       // which is why salesforce-diff could only ever REPORT a city move.
-      const allowed = ["phase","segment","outcome","closed_on","won_value","notes_path",
+      const allowed = ["deal_type","phase","segment","outcome","closed_on","won_value","notes_path",
                        "salesforce_id","city","lane"];
       if ("client_id" in args.fields) throw new ToolError({ error: "use_reassign_deal",
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });

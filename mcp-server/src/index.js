@@ -80,7 +80,8 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken, hermesActorForTokenMaps } from "./identity.js";
+import { actorFromProps, agentActorForToken, hermesActorForTokenMaps,
+         hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
@@ -407,6 +408,13 @@ function hermesActorFor(request, env) {
     env.HERMES_TOKENS, env.HERMES_TOKENS_EXTRA);
 }
 
+// The CoS capability is a separate server-controlled secret map. Check it
+// first so a credential explicitly provisioned for the bounded grant cannot
+// fall through to the ordinary Hermes/projector profile.
+function hermesCosActorFor(request, env) {
+  return hermesCosActorForToken(request.headers.get("authorization"), env.HERMES_COS_TOKENS);
+}
+
 // ---------- agent tokens (outside-model CLIs at full scope, loop #227/#239) ----------
 //
 // WHY A THIRD DOOR. Codex reaches this Worker over OAuth and, since the loop
@@ -612,6 +620,8 @@ async function routeRequest(request, env, ctx) {
     if (probeActor) return dispatch(request, env, ctx, probeActor);
     const reviewActor = reviewActorFor(request, env);
     if (reviewActor) return dispatch(request, env, ctx, reviewActor);
+    const hermesCosActor = hermesCosActorFor(request, env);
+    if (hermesCosActor) return dispatch(request, env, ctx, hermesCosActor);
     const hermesActor = hermesActorFor(request, env);
     if (hermesActor) return dispatch(request, env, ctx, hermesActor);
     const agentActor = agentActorFor(request, env);

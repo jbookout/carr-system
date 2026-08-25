@@ -59,6 +59,12 @@
 #                         HERMES_TOKENS just to add this client: secret values
 #                         cannot be read back, so replacement could invalidate
 #                         the existing Hermes runtime.
+#   HERMES_COS_TOKENS — separate JSON map for the server-locked Hermes
+#                       chief-of-staff door, e.g. { "hermes-pilot": "<token>" }.
+#                       This map is checked before HERMES_TOKENS and selects only
+#                       the `hermes-cos` profile (ordinary Hermes/projector
+#                       credentials remain on their existing profile). Joe
+#                       provisions the secret value; it never appears here.
 #   (PARTNER_TOKENS     — RETIRED 2026-08-03. Was an interim per-partner bearer
 #                         for /mcp during the OAuth rollout. Both partners are on
 #                         provider-issued tokens; the secret is deleted and the
