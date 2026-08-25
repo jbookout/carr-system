@@ -244,6 +244,15 @@ DEFINITION_ONLY = {
     ),
 }
 
+# A LaunchAgent that invokes this installer cannot unload its own label and
+# still return to bin/run-scheduled.sh: launchd terminates the wrapper process
+# tree, so the run never reaches its durable receipt.  The caller may identify
+# exactly that one active label.  Every other plist retains the ordinary
+# unload/load convergence below.  If the active plist changed, install fails
+# closed without writing a misleading new body over the still-old loaded job;
+# an external installer is the named remedy.  If unchanged, it remains loaded.
+ACTIVE_LAUNCHD_LABEL_ENV = "CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL"
+
 
 # Claude scheduled-task definitions are not merely configuration files: their
 # presence asks a local AI client to perform work later.  Every tracked task is
@@ -887,6 +896,47 @@ def cmd_pull(apply):
     return 0
 
 
+def install_launchd_plist(filename, dest, body, body_matches):
+    """Render and load one plist without letting an active job unload itself.
+
+    Returns ``loaded``, ``kept``, or ``failed``.  A changed active plist cannot
+    be rendered honestly without also reloading it, and reloading it here kills
+    the receipt wrapper.  That case therefore leaves the destination untouched
+    and fails with the exact external-install remedy.
+    """
+    try:
+        label = plistlib.loads(body.encode("utf-8")).get("Label", "")
+    except (AttributeError, plistlib.InvalidFileException, ValueError):
+        label = ""
+    active_label = os.environ.get(ACTIVE_LAUNCHD_LABEL_ENV, "").strip()
+    is_active_self = bool(label and active_label == label)
+
+    if is_active_self:
+        if body_matches:
+            print(f"      kept loaded (active installer job {label}; body unchanged)")
+            return "kept"
+        print(f"      SELF-RELOAD REFUSED ({filename}: active installer job {label}; "
+              "destination left unchanged so loaded and installed state cannot diverge)")
+        print("      remedy: run `python3 ops/config-as-code.py install --apply` "
+              "from an external process")
+        return "failed"
+
+    if not body_matches:
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    subprocess.run(["launchctl", "unload", "-w", dest],
+                   capture_output=True, check=False)
+    r = subprocess.run(["launchctl", "load", "-w", dest],
+                       capture_output=True, text=True, check=False)
+    if r.returncode == 0:
+        print("      loaded")
+        return "loaded"
+    print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
+          f"— migration will remain incomplete")
+    return "failed"
+
+
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
     settings_existed = os.path.exists(SETTINGS)
@@ -1019,7 +1069,7 @@ def cmd_install(apply):
         print("  SKIP  scheduled tasks (secondary machines install none; no approved "
               "secondary task scope is configured)")
 
-    launchd_load_failures = []
+    launchd_activation_failures = []
     if apply:
         os.makedirs(LAUNCHD_SRC, exist_ok=True)
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
@@ -1050,9 +1100,6 @@ def cmd_install(apply):
         else:
             print(f"  {'WRITE' if apply else 'would write'}  {dest}")
         if apply:
-            if not body_matches:
-                with open(dest, "w", encoding="utf-8") as fh:
-                    fh.write(body)
             # Load it, do not print a command for a human to paste (rule
             # e313a3ca). Writing the plist and stopping leaves the job on disk
             # and dead: on a fresh machine that means the nightly never runs,
@@ -1060,16 +1107,9 @@ def cmd_install(apply):
             # migration and then never refreshed as clients are added. unload
             # is expected to fail when the job was never loaded; that is not
             # an error, which is why only the load result is reported.
-            subprocess.run(["launchctl", "unload", "-w", dest],
-                           capture_output=True, check=False)
-            r = subprocess.run(["launchctl", "load", "-w", dest],
-                               capture_output=True, text=True, check=False)
-            if r.returncode == 0:
-                print("      loaded")
-            else:
-                print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
-                      f"— migration will remain incomplete")
-                launchd_load_failures.append(f)
+            outcome = install_launchd_plist(f, dest, body, body_matches)
+            if outcome == "failed":
+                launchd_activation_failures.append(f)
 
     # Git hooks. Added 2026-08-03, when Dell was granted WRITE and it turned out
     # branch protection is unavailable on a private free-plan repo — so the pull
@@ -1187,8 +1227,9 @@ def cmd_install(apply):
     # running five sessions. The opposite is true: an install takes effect
     # everywhere immediately. Rule 97326357 — a claim about a surface becomes
     # doctrine only after a live test from that surface.
-    if launchd_load_failures:
-        print("ERROR: LaunchAgent load failed for: " + ", ".join(launchd_load_failures))
+    if launchd_activation_failures:
+        print("ERROR: LaunchAgent install/reload failed for: "
+              + ", ".join(launchd_activation_failures))
         return 1
     backup_note = ", ".join(written_backups) if written_backups else "none; new files"
     if codex_state == "absent":

@@ -53,12 +53,19 @@ from health_submodule import (  # noqa: E402
 )
 
 SCRIPT = os.path.join(REPO, "bin", "fleet-sync.sh")
+RUN_SCHEDULED = os.path.join(REPO, "bin", "run-scheduled.sh")
 SAFETY = os.path.join(REPO, "tools", "fleet_sync_safety.py")
 HEALTH_SUBMODULE = os.path.join(REPO, "tools", "health_submodule.py")
 ENV = dict(fixture_env(), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 
-STUB = "import sys\nprint('stub installer')\nsys.exit(0)\n"
+STUB = (
+    "import os, sys\n"
+    "print('stub installer active=' + "
+    "os.environ.get('CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL', '') + "
+    "' xpc=' + os.environ.get('XPC_SERVICE_NAME', ''))\n"
+    "sys.exit(0)\n"
+)
 
 
 def git(cwd, *args):
@@ -68,9 +75,83 @@ def git(cwd, *args):
     return r.stdout.strip()
 
 
-def run_sync(clone):
+def run_sync(clone, extra_env=None):
+    env = dict(ENV)
+    env.update(extra_env or {})
     return subprocess.run(["zsh", os.path.join(clone, "bin", "fleet-sync.sh")],
-                          cwd=clone, capture_output=True, text=True, env=ENV)
+                          cwd=clone, capture_output=True, text=True, env=env)
+
+
+def launchctl_fixture_env(tmp, matches=True, mismatch_on_second=False):
+    """A launchctl that binds its first caller PID as the loaded job PID."""
+    stubs = os.path.join(tmp, "launchctl-stubs")
+    os.makedirs(stubs, exist_ok=True)
+    pid_file = os.path.join(tmp, "loaded-fleet.pid")
+    count_file = os.path.join(tmp, "launchctl-count")
+    launchctl = os.path.join(stubs, "launchctl")
+    open(launchctl, "w").write(
+        "#!/bin/zsh\n"
+        "[ \"${1:-}\" = print ] || exit 64\n"
+        "count=0\n"
+        "[ -f \"$CARR_TEST_LAUNCHCTL_COUNT_FILE\" ] && "
+        "count=\"$(cat \"$CARR_TEST_LAUNCHCTL_COUNT_FILE\")\"\n"
+        "count=$((count + 1))\n"
+        "print -r -- \"$count\" > \"$CARR_TEST_LAUNCHCTL_COUNT_FILE\"\n"
+        "if [ -f \"$CARR_TEST_FLEET_PID_FILE\" ]; then\n"
+        "  pid=\"$(cat \"$CARR_TEST_FLEET_PID_FILE\")\"\n"
+        "else\n"
+        "  candidate=$PPID\n"
+        "  pid=$candidate\n"
+        "  while [ \"$candidate\" -gt 1 ] 2>/dev/null; do\n"
+        "    command=\"$(ps -o command= -p $candidate)\"\n"
+        "    if [[ \"$command\" = *run-scheduled.sh* ]]; then\n"
+        "      pid=$candidate\n"
+        "      break\n"
+        "    fi\n"
+        "    candidate=\"$(ps -o ppid= -p $candidate | tr -d ' ')\"\n"
+        "  done\n"
+        "  print -r -- \"$pid\" > \"$CARR_TEST_FLEET_PID_FILE\"\n"
+        "fi\n"
+        "[ \"${CARR_TEST_FLEET_PID_MATCH:-1}\" = 1 ] || pid=$((pid + 100000))\n"
+        "if [ \"${CARR_TEST_MISMATCH_ON_SECOND:-0}\" = 1 ] && [ \"$count\" -gt 1 ]; then\n"
+        "  pid=$((pid + 200000))\n"
+        "fi\n"
+        "print -r -- \"gui/501/com.carr.fleet-sync = {\"\n"
+        "print -r -- \"    pid = $pid\"\n"
+        "print -r -- \"}\"\n"
+    )
+    os.chmod(launchctl, 0o755)
+    return dict(
+        ENV,
+        PATH=stubs + os.pathsep + ENV.get("PATH", ""),
+        CARR_TEST_FLEET_PID_FILE=pid_file,
+        CARR_TEST_LAUNCHCTL_COUNT_FILE=count_file,
+        CARR_TEST_FLEET_PID_MATCH="1" if matches else "0",
+        CARR_TEST_MISMATCH_ON_SECOND="1" if mismatch_on_second else "0",
+        CARR_RUN_SCHEDULED_STATE_DIR=os.path.join(tmp, "state"),
+        XPC_SERVICE_NAME="com.carr.fleet-sync",
+    )
+
+
+def run_wrapped_sync(clone, tmp, run_key="fleet.sync", command_args=None,
+                     launchctl_matches=True, mismatch_on_second=False):
+    shutil.copy(RUN_SCHEDULED, os.path.join(clone, "bin", "run-scheduled.sh"))
+    open(os.path.join(clone, "tools", "ops-spool.py"), "w").write(
+        "import sys\nprint('stub receipt recorder')\nsys.exit(0)\n"
+    )
+    command_args = command_args or [
+        "/bin/zsh", os.path.join(clone, "bin", "fleet-sync.sh")
+    ]
+    env = launchctl_fixture_env(
+        tmp, matches=launchctl_matches, mismatch_on_second=mismatch_on_second
+    )
+    result = subprocess.run([
+        "/bin/zsh", os.path.join(clone, "bin", "run-scheduled.sh"),
+        "fleet-sync", run_key, *command_args,
+    ], cwd=clone, capture_output=True, text=True, env=env)
+    log_path = os.path.join(clone, "out", "run-scheduled.log")
+    log = open(log_path).read() if os.path.exists(log_path) else ""
+    return result, log
 
 
 def build(tmp):
@@ -202,6 +283,8 @@ def test_clean_tree_fast_forwards():
         assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}"
         assert "fast-forwarded" in r.stdout, r.stdout
         assert "stub installer" in r.stdout, "must re-render wiring after pulling"
+        assert "stub installer active= xpc=" in r.stdout, \
+            "a manual run must remain an external installer: " + repr(r.stdout)
         assert behind(b) == 0
     print("PASS  clean tree fast-forwards, then re-renders the wiring")
 
@@ -215,6 +298,129 @@ def test_already_current_is_a_noop():
         assert "already current" in r.stdout, r.stdout
         assert "fast-forwarded" not in r.stdout
     print("PASS  second run is a clean no-op")
+
+
+def test_non_fleet_xpc_identity_stays_external():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        r = run_sync(b, {"XPC_SERVICE_NAME": "com.carr.some-other-job",
+                         "CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL": "stale-value"})
+        assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert "stub installer active= xpc=" in r.stdout, r.stdout
+        assert "active=com.carr.fleet-sync" not in r.stdout, r.stdout
+    print("PASS  non-fleet XPC identity cannot claim the active-self exemption")
+
+
+def test_direct_handoff_injection_fails_closed():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        env = launchctl_fixture_env(tmp, matches=False)
+        env.update({
+            "CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM": "1",
+            "CARR_RUN_SCHEDULED_XPC_SERVICE_NAME": "com.carr.fleet-sync",
+            "CARR_RUN_SCHEDULED_LAUNCHD_PID": str(os.getpid()),
+            "CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL": "stale-value",
+        })
+        r = run_sync(b, env)
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert "ACTIVE-SELF PROOF REFUSED" in r.stderr, r.stderr
+        assert "stub installer" not in r.stdout, r.stdout
+    print("PASS  direct ambient handoff injection fails closed before install")
+
+
+def test_active_self_contract_reaches_wrapper_receipt():
+    """The fleet child must return so run-scheduled can durably classify it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        r, log = run_wrapped_sync(b, tmp)
+        assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert "stub installer active=com.carr.fleet-sync" in r.stdout, r.stdout
+        assert "key=fleet.sync service=fleet-sync child_exit=0 state=succeeded" in log, log
+        assert "recorder_exit=0" in log, log
+    print("PASS  active-self install returns through the durable wrapper receipt")
+
+
+def test_active_self_change_failure_reaches_wrapper_receipt():
+    """A refused self-reload is a durable failure, never false success."""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        open(os.path.join(b, "ops", "config-as-code.py"), "w").write(
+            "import os, sys\n"
+            "print('SELF-RELOAD REFUSED; run config-as-code externally; active=' + "
+            "os.environ.get('CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL', ''))\n"
+            "sys.exit(1)\n"
+        )
+        r, log = run_wrapped_sync(b, tmp)
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert "SELF-RELOAD REFUSED" in r.stdout, r.stdout
+        assert "active=com.carr.fleet-sync" in r.stdout, r.stdout
+        assert "key=fleet.sync service=fleet-sync child_exit=1 state=failed" in log, log
+        assert "--failure-class exit_1" in log and "recorder_exit=0" in log, log
+    print("PASS  refused active-self reload reaches a durable failed receipt")
+
+
+def test_wrong_run_key_cannot_attest_active_self():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        r, log = run_wrapped_sync(
+            b, tmp, run_key="fleet.wrong", command_args=["/usr/bin/true"]
+        )
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert "ACTIVE-SELF PROOF REFUSED" in r.stderr, r.stderr
+        assert "supplied child was not executed" in r.stderr, r.stderr
+        assert open(os.path.join(tmp, "launchctl-count")).read().strip() == "1"
+        assert "key=fleet.wrong service=fleet-sync child_exit=1 state=failed" in log, log
+        assert "recorder_exit=0" in log, log
+    print("PASS  wrong run key refuses /usr/bin/true before durable failure receipt")
+
+
+def test_wrong_command_cannot_attest_active_self():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        r, log = run_wrapped_sync(b, tmp, command_args=["/usr/bin/true"])
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert "ACTIVE-SELF PROOF REFUSED" in r.stderr, r.stderr
+        assert "supplied child was not executed" in r.stderr, r.stderr
+        assert open(os.path.join(tmp, "launchctl-count")).read().strip() == "1"
+        assert "child_exit=1 state=failed" in log and "recorder_exit=0" in log, log
+    print("PASS  exact-key /usr/bin/true command is refused before durable receipt")
+
+
+def test_refused_wrapper_never_executes_supplied_child():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        marker = os.path.join(tmp, "child-executed")
+        r, log = run_wrapped_sync(
+            b, tmp,
+            command_args=["/bin/zsh", "-c", f"print executed > {marker}"],
+        )
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert not os.path.exists(marker), "refused wrapper executed the supplied child"
+        assert "supplied child was not executed" in r.stderr, r.stderr
+        assert "child_exit=1 state=failed" in log and "recorder_exit=0" in log, log
+    print("PASS  refused active-self wrapper does not execute a marker-writing child")
+
+
+def test_forged_xpc_without_loaded_pid_fails_closed():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        r, log = run_wrapped_sync(b, tmp, launchctl_matches=False)
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert "ACTIVE-SELF PROOF REFUSED" in r.stderr, r.stderr
+        assert "stub installer" not in r.stdout, r.stdout
+        assert "child_exit=1 state=failed" in log and "recorder_exit=0" in log, log
+    print("PASS  forged XPC identity without loaded wrapper PID fails closed")
+
+
+def test_second_launchctl_mismatch_fails_closed():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        r, log = run_wrapped_sync(b, tmp, mismatch_on_second=True)
+        assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
+        assert "ACTIVE-SELF PROOF REFUSED" in r.stderr, r.stderr
+        assert "stub installer" not in r.stdout, r.stdout
+        assert "child_exit=1 state=failed" in log and "recorder_exit=0" in log, log
+    print("PASS  second launchctl mismatch fails closed with durable receipt")
 
 
 def test_non_main_branch_refuses():
@@ -509,6 +715,15 @@ def main():
     test_dirty_tree_refuses()
     test_clean_tree_fast_forwards()
     test_already_current_is_a_noop()
+    test_non_fleet_xpc_identity_stays_external()
+    test_direct_handoff_injection_fails_closed()
+    test_active_self_contract_reaches_wrapper_receipt()
+    test_active_self_change_failure_reaches_wrapper_receipt()
+    test_wrong_run_key_cannot_attest_active_self()
+    test_wrong_command_cannot_attest_active_self()
+    test_refused_wrapper_never_executes_supplied_child()
+    test_forged_xpc_without_loaded_pid_fails_closed()
+    test_second_launchctl_mismatch_fails_closed()
     test_non_main_branch_refuses()
     test_untracked_scratch_is_ignored()
     test_expected_quill_patch_allows_unrelated_fast_forward()
@@ -529,7 +744,7 @@ def main():
     test_exact_tree_refuses_rename_old_path_resurrection()
     test_exact_tree_accepts_canonical_rename()
     test_exact_tree_accepts_canonical_new_file_patch()
-    print("23/23 fleet-sync cases passed")
+    print("32/32 fleet-sync cases passed")
     return 0
 
 
