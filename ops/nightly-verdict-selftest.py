@@ -21,12 +21,26 @@ CASES = {
         ("===== nightly chain OK =====", True),
     "surrounding whitespace is ignored":
         ("  \t===== nightly chain OK =====  \n", True),
-    "timestamped success banner is not a verdict":
-        ("2026-08-25T07:00:00Z  ===== nightly chain OK =====", None),
+    "real say output is a success verdict":
+        ("2026-08-25T07:00:00Z  ===== nightly chain OK =====\n", True),
     "prefixed success banner is not a verdict":
         ("prefix ===== nightly chain OK =====", None),
+    "timezone-offset timestamp is not the producer envelope":
+        ("2026-08-25T07:00:00+00:00  ===== nightly chain OK =====", None),
+    "calendar-invalid timestamp is rejected":
+        ("2026-02-30T07:00:00Z  ===== nightly chain OK =====", None),
+    "malformed timestamp is rejected":
+        ("2026-8-25T07:00:00Z  ===== nightly chain OK =====", None),
+    "one separator space is rejected":
+        ("2026-08-25T07:00:00Z ===== nightly chain OK =====", None),
+    "three separator spaces are rejected":
+        ("2026-08-25T07:00:00Z   ===== nightly chain OK =====", None),
     "suffixed success banner is not a verdict":
         ("===== nightly chain OK ===== suffix", None),
+    "timestamped banner with a suffix is rejected":
+        ("2026-08-25T07:00:00Z  ===== nightly chain OK ===== suffix", None),
+    "timestamped banner with trailing space is rejected":
+        ("2026-08-25T07:00:00Z  ===== nightly chain OK ===== \n", None),
     "embedded success banner is not a verdict":
         ("before ===== nightly chain OK ===== after", None),
     "healthchecks whole-chain ping is not a verdict":
@@ -63,5 +77,9 @@ if 'elif "chain OK" in _ln' in source:
     raise AssertionError("health-check parser regressed to loose chain OK matching")
 passed += 1
 print(f"ok {passed:02d} - health-check has no loose chain OK match")
+if "_done.append((_outcome, _pending, _blocked, _tombs))" not in source:
+    raise AssertionError("health-check lost the four-field verdict/tombstone tuple")
+passed += 1
+print(f"ok {passed:02d} - health-check preserves verdict/tombstone attribution")
 
-print(f"nightly-verdict-selftest: {passed}/{len(CASES) + 2} passed")
+print(f"nightly-verdict-selftest: {passed}/{len(CASES) + 3} passed")
