@@ -100,6 +100,10 @@ WRAPPER_EXEMPT = {
     "control-plane-tick": "jobs-role ledger adapter — durable work state is the "
                           "idempotent enqueue; run-scheduled.sh would require a "
                           "broader writer credential",
+    "calendar-prebrief-joe": "receipt-gated jobs adapter — its exact ops.job "
+                              "lease and calendar-prebrief receipts are the "
+                              "durable result; wrapping it would add the broad "
+                              "ops.run writer without improving that evidence",
 }
 
 # A plist that is deliberately NOT installed here. Without this, the reconciliation

@@ -17,13 +17,6 @@
       "reopen_when": "fleet-sync is declared as a service in ops/config/services.json and bootstrapped, or the plist and bin/fleet-sync.sh are retired together. Declaring it also needs its ops.service row, which is why this is not a one-file edit."
     },
     {
-      "lane": "launchd",
-      "entry": "ops/launchd/com.carr.calendar-prebrief-joe.plist",
-      "marked_on": "2026-08-23",
-      "reason": "Found by this check's first run and independently by tools/scheduler-truth.py, which names it SCHEDULED, UNREGISTERED. Unlike fleet-sync this job is LOADED and running on Joe's Mac right now, which makes it the worse of the two: live work whose health no row can express. Not fixed here because ops/config/services.json and ops.service are kept exactly in step (38 declarations, 38 rows) and adding a declaration without its row trades this gap for a drift failure on every other branch.",
-      "reopen_when": "the service is declared in ops/config/services.json and its ops.service row lands in the same change."
-    },
-    {
       "lane": "installer",
       "entry": "bin/install-calendar-prebrief-joe.sh",
       "marked_on": "2026-08-23",
