@@ -18262,6 +18262,23 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
                 END AS slice_limit
            FROM thursday_enrichment
           WHERE (thursday_enrichment.rn = 1)
+        ), sizing AS (
+         SELECT w.job_id,
+            w.scheduled_for,
+            w.mode,
+            w.subjects_processed,
+            w.slice_limit,
+            'receipt_bound'::text AS sizing_state
+           FROM weekly w
+        UNION ALL
+         SELECT NULL::uuid AS uuid,
+            NULL::timestamp with time zone AS timestamptz,
+            NULL::text AS text,
+            NULL::integer AS int4,
+            NULL::integer AS int4,
+            'receipt_missing'::text AS text
+          WHERE (NOT (EXISTS ( SELECT 1
+                   FROM weekly)))
         ), raw AS (
          SELECT 'client'::text AS subject_type,
             c.id AS subject_id,
@@ -18296,13 +18313,21 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
     'unverified'::text AS verification,
     r.priority,
     'canonical_counterparty'::text AS source_class,
-    w.slice_limit,
-    w.subjects_processed AS enrichment_subject_count,
-    w.scheduled_for AS enrichment_scheduled_for,
-    w.mode AS enrichment_mode
+    s.slice_limit,
+    s.subjects_processed AS enrichment_subject_count,
+    s.scheduled_for AS enrichment_scheduled_for,
+    s.mode AS enrichment_mode,
+    s.sizing_state
    FROM (ranked r
-     CROSS JOIN weekly w)
-  WHERE (r.priority <= w.slice_limit);
+     CROSS JOIN sizing s)
+  WHERE ((s.slice_limit IS NULL) OR (r.priority <= s.slice_limit));
+
+
+--
+-- Name: VIEW v_control_plane_deal_history_queue; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_control_plane_deal_history_queue IS 'Deal-history research queue. receipt_missing keeps an unverified backlog visible when no typed Thursday completion receipt exists, but supplies no execution cap or receipt metadata. receipt_bound rows carry the exact 15/25 cap and receipt evidence required by the execution collector.';
 
 
 --
@@ -32386,6 +32411,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0302_release_schema_provenance_collation.sql	cf506e6ad95333590ddc440e2ec23ad285d23b0f11e3e1a2a7ed5abda6f9d312	2026-08-25 09:20:44.021878+00
 0303_evidence_activation_reliability.sql	4c44113279c9afb0c50cbeda8fd9b70376ebcd9756c1b4abaab7e50ef0744f6d	2026-08-25 09:20:44.463242+00
 0304_hermes_runtime_admission.sql	7a424204f01af73bd98e7c01e9f48a8efd531d088a2e4198e05337ea565b9abe	2026-08-25 11:43:10.83544+00
+0305_deal_history_queue_receipt_missing_visibility.sql	1099b02cfcd47812feaca5b18747190be5e730faf0abb81e0eea3604cda800e4	2026-08-25 13:47:29.212984+00
 \.
 
 
