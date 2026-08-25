@@ -1,9 +1,10 @@
 {
-  "fixture": "tour-operations-foundation.v1",
   "synthetic": true,
-  "property": {"property_id": "11111111-1111-4111-8111-111111111111", "organization_tenant_id": "carr-internal", "canonical_name": "Synthetic Medical Office", "canonical_address": "100 Example Way, Pensacola, FL", "property_status": "active"},
-  "rights_receipt": {"rights_receipt_id": "22222222-2222-4222-8222-222222222222", "provider": "county-property-appraiser", "status": "active", "storage_class": "permanent_authorized"},
-  "source_evidence": {"source_evidence_id": "33333333-3333-4333-8333-333333333333", "stable_locator": "https://example.invalid/source/1", "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "rights_receipt_id": "22222222-2222-4222-8222-222222222222", "data_classification": "public"},
-  "field_assertion": {"field_assertion_id": "44444444-4444-4444-8444-444444444444", "property_id": "11111111-1111-4111-8111-111111111111", "field_key": "size.square_feet", "value": {"value": 4200, "unit": "square_feet"}, "source_evidence_id": "33333333-3333-4333-8333-333333333333", "rights_receipt_id": "22222222-2222-4222-8222-222222222222", "observed_at": "2026-08-25T12:00:00Z", "effective_from": "2026-08-01T00:00:00Z", "confidence": "high", "data_classification": "public", "review_state": "reviewed"},
-  "public_projection": {"projection_id": "55555555-5555-4555-8555-555555555555", "tour_id": "66666666-6666-4666-8666-666666666666", "projection_version": 1, "facts_only": true, "property_count": 1, "render_payload": {"properties": [{"property_id": "11111111-1111-4111-8111-111111111111", "canonical_name": "Synthetic Medical Office"}]}, "status": "approved"}
+  "tenant": "carr-internal",
+  "property": {"id": "11111111-1111-4111-8111-111111111111", "organization_tenant_id": "carr-internal"},
+  "rights_receipt": {"id": "22222222-2222-4222-8222-222222222222", "organization_tenant_id": "carr-internal", "receipt_version": 1, "receipt_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "allowed_field_classes": ["display.name", "display.address"], "allowed_use_classes": ["source_intake", "canonical_fact"]},
+  "source_evidence": {"id": "33333333-3333-4333-8333-333333333333", "organization_tenant_id": "carr-internal", "rights_receipt_id": "22222222-2222-4222-8222-222222222222"},
+  "field_assertion": {"id": "44444444-4444-4444-8444-444444444444", "organization_tenant_id": "carr-internal", "property_id": "11111111-1111-4111-8111-111111111111", "field_key": "display.name", "source_evidence_id": "33333333-3333-4333-8333-333333333333", "rights_receipt_id": "22222222-2222-4222-8222-222222222222", "review_state": "reviewed", "data_classification": "public"},
+  "membership": {"id": "55555555-5555-4555-8555-555555555555", "organization_tenant_id": "carr-internal", "tour_id": "66666666-6666-4666-8666-666666666666", "property_id": "11111111-1111-4111-8111-111111111111", "route_version": 1},
+  "projection_fact": {"organization_tenant_id": "carr-internal", "projection_id": "77777777-7777-4777-8777-777777777777", "property_id": "11111111-1111-4111-8111-111111111111", "field_assertion_id": "44444444-4444-4444-8444-444444444444", "route_version": 1, "display_field_key": "display.name"}
 }
