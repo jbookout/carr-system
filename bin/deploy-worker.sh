@@ -1321,16 +1321,62 @@ if [ "$TARGET_ENV" = "staging" ]; then
   STAGING_RECEIPT="$(mktemp "${TMPDIR:-/tmp}/carr-staging-release.XXXXXX")"
   chmod 600 "$STAGING_RECEIPT"
   STAGING_OK=0
+  # Cloudflare's staging route can continue serving the prior immutable Worker
+  # briefly after Wrangler returns. Attempt 9625fafe proved the old three-read
+  # window was too short: the provider version was created with the exact
+  # prepared tag, but all three /release reads still saw the prior tag and the
+  # typed recovery stopped at VERIFYING. Retry the same typed readback inside a
+  # fixed 60-second wall-clock budget. The only ambient controls are bounded
+  # below, and cannot turn a readback into an unbounded wait.
+  STAGING_READBACK_DEADLINE_SECONDS=60
+  STAGING_READBACK_CURL_MAX_SECONDS=15
+  STAGING_READBACK_ATTEMPTS="${CARR_STAGING_READBACK_ATTEMPTS:-12}"
+  STAGING_READBACK_SLEEP_SECONDS="${CARR_STAGING_READBACK_SLEEP_SECONDS:-5}"
+  case "$STAGING_READBACK_ATTEMPTS" in
+    ''|*[!0-9]*|0) fail "staging readback attempts must be a positive integer" ;;
+  esac
+  case "$STAGING_READBACK_SLEEP_SECONDS" in
+    ''|*[!0-9]*|0) fail "staging readback sleep must be a positive integer" ;;
+  esac
+  [ "$STAGING_READBACK_ATTEMPTS" -gt 0 ] \
+    || fail "staging readback attempts must be a positive integer"
+  [ "$STAGING_READBACK_SLEEP_SECONDS" -gt 0 ] \
+    || fail "staging readback sleep must be a positive integer"
+  [ "$STAGING_READBACK_ATTEMPTS" -le 12 ] \
+    || fail "staging readback attempts exceed the 12-attempt safety bound"
+  [ "$STAGING_READBACK_SLEEP_SECONDS" -le 5 ] \
+    || fail "staging readback sleep exceeds the 5-second safety bound"
+  STAGING_READBACK_STARTED_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
+  STAGING_READBACK_DEADLINE_MS=$((STAGING_READBACK_STARTED_MS + STAGING_READBACK_DEADLINE_SECONDS * 1000))
+  STAGING_READBACK_ATTEMPT=0
   record_staging_receipt() {
     record_staging_receipt_file "$STAGING_RECEIPT" >/dev/null
   }
-  for _ in 1 2 3; do
-    if [ -n "$STAGING_HOST" ] && curl --fail --silent --show-error --max-time 30 --max-filesize 65536 \
+  while [ "$STAGING_READBACK_ATTEMPT" -lt "$STAGING_READBACK_ATTEMPTS" ]; do
+    STAGING_READBACK_NOW_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
+    STAGING_READBACK_REMAINING_MS=$((STAGING_READBACK_DEADLINE_MS - STAGING_READBACK_NOW_MS))
+    [ "$STAGING_READBACK_REMAINING_MS" -gt 0 ] || break
+    STAGING_READBACK_ATTEMPT=$((STAGING_READBACK_ATTEMPT + 1))
+    STAGING_READBACK_CURL_MAX_MS=$((STAGING_READBACK_CURL_MAX_SECONDS * 1000))
+    [ "$STAGING_READBACK_CURL_MAX_MS" -le "$STAGING_READBACK_REMAINING_MS" ] || \
+      STAGING_READBACK_CURL_MAX_MS="$STAGING_READBACK_REMAINING_MS"
+    STAGING_READBACK_CURL_MAX="$("$PY" -c 'import sys; print(f"{int(sys.argv[1]) / 1000:.3f}")' "$STAGING_READBACK_CURL_MAX_MS")"
+    if [ -n "$STAGING_HOST" ] && curl --fail --silent --show-error --max-time "$STAGING_READBACK_CURL_MAX" --max-filesize 65536 \
          "https://$STAGING_HOST/release" > "$STAGING_RECEIPT" 2>/dev/null && \
        record_staging_receipt; then
       STAGING_OK=1; break
     fi
-    sleep 5
+    STAGING_READBACK_NOW_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
+    STAGING_READBACK_REMAINING_MS=$((STAGING_READBACK_DEADLINE_MS - STAGING_READBACK_NOW_MS))
+    if [ "$STAGING_READBACK_REMAINING_MS" -gt 0 ] && \
+       [ "$STAGING_READBACK_ATTEMPT" -lt "$STAGING_READBACK_ATTEMPTS" ]; then
+      STAGING_READBACK_SLEEP_MS=$((STAGING_READBACK_SLEEP_SECONDS * 1000))
+      [ "$STAGING_READBACK_SLEEP_MS" -le "$STAGING_READBACK_REMAINING_MS" ] || \
+        STAGING_READBACK_SLEEP_MS="$STAGING_READBACK_REMAINING_MS"
+      STAGING_READBACK_SLEEP="$("$PY" -c 'import sys; print(f"{int(sys.argv[1]) / 1000:.3f}")' "$STAGING_READBACK_SLEEP_MS")"
+      echo "  staging readback attempt $STAGING_READBACK_ATTEMPT of $STAGING_READBACK_ATTEMPTS did not yet observe the exact typed identity; waiting ${STAGING_READBACK_SLEEP}s"
+      sleep "$STAGING_READBACK_SLEEP"
+    fi
   done
   rm -f "$STAGING_RECEIPT"
   STAGING_RECEIPT=""

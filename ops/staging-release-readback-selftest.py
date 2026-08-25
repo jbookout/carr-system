@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import types
@@ -81,6 +82,103 @@ raise SystemExit(0)
         done = subprocess.run(["sh", str(script)], capture_output=True, text=True, env=env)
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         return done.returncode, calls
+
+
+def wrapper_readback_retry(*, curl_failures: int, verify_ok: bool,
+                           attempts: str = "12", sleep_seconds: str = "5") \
+        -> tuple[int, list[str], list[str], str]:
+    """Execute the wrapper's exact bounded retry block with fake provider calls."""
+    deploy = (ROOT / "bin" / "deploy-worker.sh").read_text(encoding="utf-8")
+    start = deploy.index("  STAGING_READBACK_DEADLINE_SECONDS=60")
+    end = deploy.index('\n  rm -f "$STAGING_RECEIPT"', start)
+    retry_block = deploy[start:end]
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        fake_bin = tmp / "bin"
+        fake_bin.mkdir()
+        curl_log = tmp / "curl.log"
+        sleep_log = tmp / "sleep.log"
+        clock = tmp / "clock"
+        curl_count = tmp / "curl.count"
+        clock.write_text("0", encoding="utf-8")
+        curl_count.write_text("0", encoding="utf-8")
+        fake_py = fake_bin / "python"
+        fake_py.write_text("""#!/bin/sh
+if [ "$1" != "-c" ]; then exit 64; fi
+case "$2" in
+  *monotonic_ns*) cat "$CLOCK_FILE" ;;
+  *sys.argv*)
+    ms="$3"
+    whole=$((ms / 1000))
+    frac=$((ms % 1000))
+    printf '%s.%03d\\n' "$whole" "$frac"
+    ;;
+  *) exit 64 ;;
+esac
+""", encoding="utf-8")
+        fake_py.chmod(0o755)
+        fake_curl = fake_bin / "curl"
+        fake_curl.write_text("""#!/bin/sh
+count=$(cat "$CURL_COUNT_FILE")
+count=$((count + 1))
+printf '%s\\n' "$*" >> "$CURL_LOG_FILE"
+printf '%s\\n' "$count" > "$CURL_COUNT_FILE"
+max_time=0
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--max-time" ]; then max_time="$2"; shift 2; continue; fi
+  shift
+done
+max_ms=$(printf '%s' "$max_time" | awk '{printf "%d", $1 * 1000}')
+advance=11000
+[ "$advance" -le "$max_ms" ] || advance="$max_ms"
+now=$(cat "$CLOCK_FILE")
+printf '%s\\n' "$((now + advance))" > "$CLOCK_FILE"
+if [ "$count" -le "$CURL_FAILURES" ]; then exit 22; fi
+printf '{}'
+""", encoding="utf-8")
+        fake_curl.chmod(0o755)
+        fake_sleep = fake_bin / "sleep"
+        fake_sleep.write_text("""#!/bin/sh
+printf '%s\\n' "$1" >> "$SLEEP_LOG_FILE"
+advance=$(printf '%s' "$1" | awk '{printf "%d", $1 * 1000}')
+now=$(cat "$CLOCK_FILE")
+printf '%s\\n' "$((now + advance))" > "$CLOCK_FILE"
+""", encoding="utf-8")
+        fake_sleep.chmod(0o755)
+        receipt = tmp / "release.json"
+        receipt.write_text("{}", encoding="utf-8")
+        script = tmp / "run.sh"
+        script.write_text(
+            "#!/bin/sh\nset -eu\n"
+            "fail() { echo \"REFUSED: $1\" >&2; exit 64; }\n"
+            f"PY={shlex.quote(str(fake_py))}\n"
+            "STAGING_HOST=staging.example\n"
+            f"STAGING_RECEIPT={shlex.quote(str(receipt))}\n"
+            "STAGING_OK=0\n"
+            "record_staging_receipt_file() { [ \"${VERIFY_OK:-0}\" = 1 ]; }\n"
+            + retry_block + "\n"
+            "if [ \"$STAGING_OK\" = 1 ]; then exit 0; fi\n"
+            "echo 'staging /release identity was not durably verified; recording VERIFYING only.' >&2\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "CLOCK_FILE": str(clock),
+            "CURL_COUNT_FILE": str(curl_count),
+            "CURL_LOG_FILE": str(curl_log),
+            "CURL_FAILURES": str(curl_failures),
+            "SLEEP_LOG_FILE": str(sleep_log),
+            "VERIFY_OK": "1" if verify_ok else "0",
+            "CARR_STAGING_READBACK_ATTEMPTS": attempts,
+            "CARR_STAGING_READBACK_SLEEP_SECONDS": sleep_seconds,
+        }
+        done = subprocess.run(["sh", str(script)], capture_output=True, text=True, env=env)
+        curls = curl_log.read_text(encoding="utf-8").splitlines() if curl_log.exists() else []
+        sleeps = sleep_log.read_text(encoding="utf-8").splitlines() if sleep_log.exists() else []
+        return done.returncode, curls, sleeps, done.stderr
 
 
 sha = "a" * 40
@@ -409,6 +507,16 @@ for marker in (
     "staging-provider-version",
 ):
     assert marker in wrapper, marker
+assert "STAGING_READBACK_DEADLINE_SECONDS=60" in wrapper
+assert "STAGING_READBACK_CURL_MAX_SECONDS=15" in wrapper
+assert 'STAGING_READBACK_ATTEMPTS="${CARR_STAGING_READBACK_ATTEMPTS:-12}"' in wrapper
+assert 'STAGING_READBACK_SLEEP_SECONDS="${CARR_STAGING_READBACK_SLEEP_SECONDS:-5}"' in wrapper
+assert "STAGING_READBACK_CURL_MAX=\"$($PY -c" not in wrapper
+assert "--max-time \"$STAGING_READBACK_CURL_MAX\"" in wrapper
+assert "exceed the 12-attempt safety bound" in wrapper
+assert "exceeds the 5-second safety bound" in wrapper
+assert 'STAGING_READBACK_ATTEMPT=0' in wrapper
+assert 'staging /release identity was not durably verified; recording VERIFYING only.' in wrapper
 assert "sed -nE 's/^DEALROOM_HOST" not in wrapper
 resume_slice = wrapper[wrapper.index("staging_attempt()"):
                        wrapper.index("# Production promotion is not verified")]
@@ -421,5 +529,39 @@ assert "--from-disposable-local" in snapshot
 assert "^postgres://carr_ci@127\\.0\\.0\\.1:" in snapshot
 assert "steep-field-48688294" in snapshot  # normal Production path is preserved
 assert "PGOPTIONS='-c timezone=UTC'" in snapshot
+
+# The wrapper's retry path is executed with fake provider calls. This proves
+# the typed readback can settle after transient propagation, that the deadline
+# clamps both curl and sleep, and that an invalid ambient control refuses before
+# any provider/readback call. Persistent disagreement remains VERIFYING.
+success_rc, success_curls, success_sleeps, success_stderr = wrapper_readback_retry(
+    curl_failures=2, verify_ok=True)
+assert success_rc == 0, success_stderr
+assert len(success_curls) == 3, success_curls
+assert all(line.split()[line.split().index("--max-time") + 1] == "15.000"
+           for line in success_curls)
+assert success_sleeps == ["5.000", "5.000"], success_sleeps
+
+stuck_rc, stuck_curls, stuck_sleeps, stuck_stderr = wrapper_readback_retry(
+    curl_failures=99, verify_ok=False)
+assert stuck_rc == 1 and "VERIFYING" in stuck_stderr, stuck_stderr
+assert len(stuck_curls) == 4, stuck_curls
+assert stuck_curls[-1].split()[stuck_curls[-1].split().index("--max-time") + 1] == "12.000"
+assert stuck_sleeps == ["5.000", "5.000", "5.000", "1.000"], stuck_sleeps
+
+invalid_rc, invalid_curls, invalid_sleeps, invalid_stderr = wrapper_readback_retry(
+    curl_failures=0, verify_ok=True, attempts="13")
+assert invalid_rc == 64 and "12-attempt safety bound" in invalid_stderr, invalid_stderr
+assert invalid_curls == [] and invalid_sleeps == [], (invalid_curls, invalid_sleeps)
+
+zero_attempt_rc, zero_attempt_curls, zero_attempt_sleeps, zero_attempt_stderr = wrapper_readback_retry(
+    curl_failures=0, verify_ok=True, attempts="00")
+assert zero_attempt_rc == 64 and "positive integer" in zero_attempt_stderr, zero_attempt_stderr
+assert zero_attempt_curls == [] and zero_attempt_sleeps == [], (zero_attempt_curls, zero_attempt_sleeps)
+
+zero_sleep_rc, zero_sleep_curls, zero_sleep_sleeps, zero_sleep_stderr = wrapper_readback_retry(
+    curl_failures=0, verify_ok=True, sleep_seconds="00")
+assert zero_sleep_rc == 64 and "positive integer" in zero_sleep_stderr, zero_sleep_stderr
+assert zero_sleep_curls == [] and zero_sleep_sleeps == [], (zero_sleep_curls, zero_sleep_sleeps)
 
 print("staging release readback selftest: typed, bounded, server-derived contract is closed")
