@@ -212,6 +212,37 @@ test("browser mirrors strict ExecutionEnvelope authority invariants without thro
   }
 });
 
+test("browser rejects Python-invalid whitespace and identifier values", () => {
+  const mutations = [
+    (passport) => { passport.execution_envelopes[0].state_binding.accepted_resource_revisions[0].resource_ref = "   "; },
+    (passport) => { passport.execution_envelopes[0].state_binding.accepted_resource_revisions[0].revision_ref = "revision with spaces"; },
+    (passport) => { passport.execution_envelopes[0].server_binding.adapter.adapter_version = "   "; },
+    (passport) => { passport.receipts[0].source_evidence.source_sha = "   "; },
+  ];
+  for (const mutate of mutations) {
+    const forged = engineeringFor(fixture); mutate(forged); forged.projection_digest = seal(forged);
+    assert.doesNotThrow(() => {
+      const model = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", forged), 2)]);
+      assert.equal(model.passports[0].engineering_passport, null);
+    });
+  }
+});
+
+test("browser accepts reordered binding keys but rejects semantic mismatches", () => {
+  const reordered = engineeringFor(fixture);
+  reordered.work_request = { canonical_record_digest: reordered.work_request.canonical_record_digest, id: reordered.work_request.id, state_version: reordered.work_request.state_version };
+  reordered.slice_plan.work_request = { state_version: reordered.work_request.state_version, id: reordered.work_request.id, canonical_record_digest: reordered.work_request.canonical_record_digest };
+  reordered.accepted_plan_revision = { digest: reordered.accepted_plan_revision.digest, revision: reordered.accepted_plan_revision.revision, id: reordered.accepted_plan_revision.id };
+  reordered.slice_plan.accepted_plan_revision = { revision: reordered.accepted_plan_revision.revision, id: reordered.accepted_plan_revision.id, digest: reordered.accepted_plan_revision.digest };
+  reordered.execution_envelopes[0].plan_revision = { digest: reordered.execution_envelopes[0].plan_revision.digest, id: reordered.execution_envelopes[0].plan_revision.id, revision: reordered.execution_envelopes[0].plan_revision.revision };
+  delete reordered.projection_digest; reordered.projection_digest = seal(reordered);
+  const accepted = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", reordered), 2)]);
+  assert.ok(accepted.passports[0].engineering_passport);
+  const mismatch = structuredClone(reordered); mismatch.slice_plan.work_request.id = "wr-other"; delete mismatch.projection_digest; mismatch.projection_digest = seal(mismatch);
+  const refused = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", mismatch), 2)]);
+  assert.equal(refused.passports[0].engineering_passport, null);
+});
+
 test("regression guards preserve keyboard drilldown across a poll and a real mobile grid row", () => {
   assert.match(roomSource, /card\.dataset\.detailOpen = "true"/);
   assert.match(roomSource, /detail\.open = card\.dataset\.detailOpen === "true"/);

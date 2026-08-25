@@ -29,10 +29,19 @@ test("Engineering Passport schema preserves blocked learning null and envelope a
 });
 
 test("schema compiler enforces keyed CARR uniqueness beyond uniqueItems", () => {
-  const validate = compileSchema({ type: "array", uniqueItems: true, "x-carr-unique-by": "check_ref", items: { type: "object" } });
+  const validate = compileSchema({ type: "array", uniqueItems: true, "x-carr-unique-by": "check_ref", items: { type: "object", properties: { check_ref: { type: "string" }, failure_condition: { type: "string" } } } });
   assert.equal(validate([{ check_ref: "check:a", failure_condition: "one" }, { check_ref: "check:a", failure_condition: "different" }]).valid, false);
   assert.equal(validate([{ check_ref: "check:a" }, { check_ref: "check:b" }]).valid, true);
   assert.throws(() => compileSchema({ type: "array", "x-carr-unique-by": "" }), /x-carr-unique-by/);
+  assert.throws(() => compileSchema({ type: "array", "x-carr-unique-by": "   ", items: { type: "object", properties: { check_ref: { type: "string" } } } }), /x-carr-unique-by/);
+  assert.throws(() => compileSchema({ type: "array", "x-carr-unique-by": "check_ref", items: { type: "object", properties: { other: { type: "string" } } } }), /declares/);
+  const scalar = compileSchema({ type: "array", "x-carr-unique-by": "check_ref", items: { type: "object", properties: { check_ref: { type: ["string", "number", "boolean"] } } } });
+  assert.equal(scalar([{ check_ref: "check:a" }, { check_ref: "check:b" }]).valid, true);
+  assert.equal(scalar([{ other: "check:a" }]).valid, false);
+  assert.equal(scalar([{ check_ref: { nested: true } }, { check_ref: { nested: true } }]).valid, false);
+  assert.equal(scalar([{ check_ref: ["a"] }]).valid, false);
+  assert.equal(scalar([{ check_ref: null }]).valid, false);
+  assert.equal(scalar([{ check_ref: { b: 1, a: 2 } }, { check_ref: { a: 2, b: 1 } }]).valid, false);
 });
 
 test("state machines are closed and internally consistent", () => {

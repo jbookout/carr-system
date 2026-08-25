@@ -190,6 +190,9 @@ def _validate_authoritative_envelopes(plan: dict[str, Any], values: Any) -> dict
     for index, raw in enumerate(rows):
         envelope = base.validate_execution_envelope(raw)
         _validate_plan_envelope_binding(plan, envelope)
+        for revision in envelope["state_binding"]["accepted_resource_revisions"]:
+            _str(revision["resource_ref"], "accepted resource revision resource_ref", identifier=True)
+            _str(revision["revision_ref"], "accepted resource revision revision_ref", identifier=True)
         digest = base.execution_envelope_digest(envelope)
         if digest in result:
             raise EngineeringContractError(f"engineering passport duplicates execution envelope digest at index {index}")
