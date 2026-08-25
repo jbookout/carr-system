@@ -3865,6 +3865,65 @@ end $_$;
 
 
 --
+-- Name: engineering_enqueue_slice_job(text, text, text, text, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare row ops.job%rowtype;
+        facts jsonb;
+        job_key text;
+begin
+  if btrim(p_work_request) = '' or btrim(p_slice_ref) = ''
+     or p_plan_digest !~ '^sha256:[0-9a-f]{64}$'
+     or btrim(p_idempotency_key) = '' or p_generation < 1 then
+    raise exception 'engineering job admission fields are invalid';
+  end if;
+  job_key := 'engineering-slice:' || p_plan_digest || ':' || p_work_request || ':' ||
+             p_slice_ref || ':generation:' || p_generation;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-slice:' || p_plan_digest || ':' || p_slice_ref, 0));
+  facts := ops.engineering_passport_facts(p_work_request);
+  if not exists (
+    select 1
+      from jsonb_array_elements(coalesce(facts->'slice_plans','[]'::jsonb)) sp,
+           jsonb_array_elements(coalesce(sp->'plan'->'slices','[]'::jsonb)) s
+     where sp->>'plan_digest' = p_plan_digest and s->>'slice_ref' = p_slice_ref
+  ) then
+    raise exception 'engineering slice is not registered for the exact plan';
+  end if;
+  if exists (
+    select 1
+      from jsonb_array_elements(coalesce(facts->'slice_plans','[]'::jsonb)) sp,
+           jsonb_array_elements(coalesce(sp->'plan'->'slices','[]'::jsonb)) s,
+           jsonb_array_elements_text(coalesce(s->'dependency_refs','[]'::jsonb)) dep
+     where s->>'slice_ref' = p_slice_ref
+       and not exists (
+         select 1
+           from jsonb_array_elements(coalesce(facts->'receipts','[]'::jsonb)) r,
+                jsonb_array_elements(coalesce(facts->'reviewer_facts','[]'::jsonb)) v
+          where r->>'slice_ref' = dep and r->>'outcome' = 'claimed_complete'
+            and v->>'slice_ref' = dep
+            and v->'fact'->>'attempt_id' = r->>'attempt_id'
+            and v->>'state' = 'passed'
+       )
+  ) then
+    raise exception 'engineering slice dependencies are not independently verified';
+  end if;
+  select * into row from ops.job where idempotency_key=job_key;
+  if row.id is not null then return row; end if;
+  select * into row from ops.enqueue_job(
+    'engineering-slice', 1, now(),
+    jsonb_build_object('work_request',p_work_request,'slice_ref',p_slice_ref,
+                       'plan_digest',p_plan_digest,'generation',p_generation),
+    job_key, 'shadow');
+  return row;
+end $_$;
+
+
+--
 -- Name: engineering_passport_facts(text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -4268,6 +4327,51 @@ begin
   values (j.id,j.attempt,j.definition_key,j.definition_version,j.mode,p_cache_key,observed_kind)
   on conflict (job_id,attempt,cache_key,observation_kind) do nothing;
   return query select observed_kind,case when observed_kind='hit' then c.proposal else null end;
+end $$;
+
+
+--
+-- Name: guard_engineering_envelope_supersession(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.guard_engineering_envelope_supersession() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare prior ops.engineering_execution_envelope%rowtype;
+        prior_count integer;
+begin
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:' || new.slice_plan_id::text || ':' || new.slice_ref, 0));
+  select count(*) into prior_count
+    from ops.engineering_execution_envelope
+   where slice_plan_id=new.slice_plan_id and slice_ref=new.slice_ref;
+  if prior_count=0 then
+    if new.supersedes_envelope_id is not null then
+      raise exception 'first engineering envelope cannot supersede another envelope';
+    end if;
+    return new;
+  end if;
+  if new.supersedes_envelope_id is null then
+    raise exception 'later engineering envelope must name its immutable predecessor';
+  end if;
+  select * into prior from ops.engineering_execution_envelope
+   where id=new.supersedes_envelope_id for key share;
+  if not found or prior.slice_plan_id<>new.slice_plan_id or prior.slice_ref<>new.slice_ref
+     or prior.accepted_plan_id<>new.accepted_plan_id or prior.work_request_id<>new.work_request_id then
+    raise exception 'engineering envelope predecessor is outside the exact slice binding';
+  end if;
+  if exists (select 1 from ops.engineering_execution_envelope
+              where supersedes_envelope_id=prior.id) then
+    raise exception 'engineering envelope predecessor already has a successor';
+  end if;
+  if prior.expires_at>now()
+     and coalesce((prior.envelope->'server_binding'->'authority'->>'read_only')::boolean,true)=false
+     and not exists (select 1 from ops.engineering_slice_receipt r
+                      where r.envelope_id=prior.id and r.outcome in ('failed','blocked','reopened')) then
+    raise exception 'current executable engineering envelope cannot be superseded';
+  end if;
+  return new;
 end $$;
 
 
@@ -11935,8 +12039,11 @@ CREATE TABLE ops.engineering_execution_envelope (
     issued_at timestamp with time zone NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    supersedes_envelope_id uuid,
+    supersession_reason text,
     CONSTRAINT engineering_envelope_expiry_after_issue CHECK ((expires_at > issued_at)),
     CONSTRAINT engineering_envelope_slice_plan_matches CHECK (((regexp_replace((envelope ->> 'work_request_id'::text), '^wr:'::text, ''::text) = (work_request_id)::text) AND (((envelope -> 'state_binding'::text) ->> 'state_version'::text) = (state_version)::text) AND (((envelope -> 'state_binding'::text) ->> 'canonical_record_digest'::text) = canonical_record_digest))),
+    CONSTRAINT engineering_envelope_supersession_travels_together CHECK ((((supersedes_envelope_id IS NULL) = (supersession_reason IS NULL)) AND ((supersession_reason IS NULL) OR (btrim(supersession_reason) <> ''::text)))),
     CONSTRAINT engineering_execution_envelope_canonical_record_digest_check CHECK ((canonical_record_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT engineering_execution_envelope_envelope_check CHECK ((jsonb_typeof(envelope) = 'object'::text)),
     CONSTRAINT engineering_execution_envelope_envelope_digest_check CHECK ((envelope_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
@@ -23701,14 +23808,6 @@ ALTER TABLE ONLY ops.engineering_execution_envelope
 
 
 --
--- Name: engineering_execution_envelope engineering_execution_envelope_slice_plan_id_slice_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.engineering_execution_envelope
-    ADD CONSTRAINT engineering_execution_envelope_slice_plan_id_slice_ref_key UNIQUE (slice_plan_id, slice_ref);
-
-
---
 -- Name: engineering_reviewer_fact engineering_reviewer_fact_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -26977,6 +27076,20 @@ CREATE INDEX deployment_release_idx ON ops.deployment USING btree (release_id);
 
 
 --
+-- Name: engineering_envelope_one_successor; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX engineering_envelope_one_successor ON ops.engineering_execution_envelope USING btree (supersedes_envelope_id) WHERE (supersedes_envelope_id IS NOT NULL);
+
+
+--
+-- Name: engineering_envelope_session_attempt; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX engineering_envelope_session_attempt ON ops.engineering_execution_envelope USING btree (slice_plan_id, slice_ref, agent_session_id);
+
+
+--
 -- Name: engineering_envelope_work_request_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -28229,6 +28342,13 @@ CREATE TRIGGER deployment_requires_a_live_approval BEFORE INSERT OR UPDATE ON op
 --
 
 CREATE TRIGGER device_evidence_receipt_append_only BEFORE DELETE OR UPDATE ON ops.device_evidence_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: engineering_execution_envelope engineering_envelope_supersession_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER engineering_envelope_supersession_guard BEFORE INSERT ON ops.engineering_execution_envelope FOR EACH ROW EXECUTE FUNCTION ops.guard_engineering_envelope_supersession();
 
 
 --
@@ -29529,6 +29649,14 @@ ALTER TABLE ONLY ops.engineering_execution_envelope
 
 ALTER TABLE ONLY ops.engineering_execution_envelope
     ADD CONSTRAINT engineering_execution_envelope_slice_plan_id_fkey FOREIGN KEY (slice_plan_id) REFERENCES ops.engineering_slice_plan(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: engineering_execution_envelope engineering_execution_envelope_supersedes_envelope_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.engineering_execution_envelope
+    ADD CONSTRAINT engineering_execution_envelope_supersedes_envelope_id_fkey FOREIGN KEY (supersedes_envelope_id) REFERENCES ops.engineering_execution_envelope(id) ON DELETE RESTRICT;
 
 
 --
@@ -33067,6 +33195,8 @@ revoke all on function ops.current_sourced_work_requests(p_organization_tenant_i
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
+revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text) from public;
+revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) from public;
 revoke all on function ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text) from public;
 revoke all on function ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) from public;
 revoke all on function ops.fence_definition_jobs(p_definition_key text, p_definition_version integer) from public;
@@ -33851,8 +33981,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
@@ -33884,7 +34014,7 @@ grant execute on function ops.engineering_admission_source(p_work_request text) 
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_reader;
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_writer;
 grant execute on function ops.engineering_claim_slice(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
-grant execute on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text) to carr_writer;
+grant execute on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) to carr_writer;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_jobs;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_reader;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_writer;
@@ -33943,8 +34073,8 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -34276,6 +34406,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0308_calendar_prebrief_service_health.sql	d4339ed5e43218806c0366adb5c19cb66c2cf8f51e3ce4622fa786448b49ef6c	2026-08-25 16:03:16.887415+00
 0309_governed_execution_environment_providers.sql	e2d738f00ef8e2cbce8d77ad2f6fb5596dc1951de7f0e918a927ccc25b32eb47	2026-08-25 16:19:58.553035+00
 0310_engineering_execution_fabric.sql	f321288d38550d5d82598d6c335690d54c2c3acbb035c339387fe3f128a69e55	2026-08-25 16:46:49.704808+00
+0311_sponsored_engineering_executor_authority.sql	c465664010c578da8201a536887e0bf2a21f7573d5706ff62e943b460b3992c5	2026-08-25 19:06:06.825594+00
 \.
 
 
