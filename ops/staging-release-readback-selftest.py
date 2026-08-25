@@ -372,6 +372,13 @@ assert "create or replace function ops.prepare_staging_restore_only_attempt" in 
 assert "+\\.sql$'" in repair_migration
 assert "+\\\\.sql$'" not in repair_migration
 
+uuid_repair = (ROOT / "migrations" / "0297_restore_only_provider_uuid_repair.sql").read_text()
+assert "create or replace function ops.prepare_staging_restore_only_attempt" in uuid_repair
+assert "provider_version_id !~ '^[0-9a-f]{8}" in uuid_repair
+assert "target_provider_version:=current_release.provider_version_id::uuid" in uuid_repair
+assert uuid_repair.count("target_provider_version") >= 4
+assert "migration 0295" not in uuid_repair.lower()
+
 completion_grant = (ROOT / "migrations" / "0215_program5_completion_hash_grant.sql").read_text()
 assert "grant execute on function ops.program5_migration_set_sha256(text[]) to carr_jobs" in completion_grant
 for role in ("public", "carr_reader", "carr_writer", "carr_authority"):

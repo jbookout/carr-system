@@ -86,10 +86,12 @@
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORKER_DIR="$REPO/mcp-server"
-# Set again after argument parsing when a non-production env is chosen, so a
-# staging deploy can never overwrite the baseline production is measured against.
-WRANGLER="$WORKER_DIR/node_modules/.bin/wrangler"
+# Policy, writers and runtime dependencies always resolve from this current
+# wrapper root. A typed recovery can select only a detached, exact source root
+# for Worker/assets; it never gets to execute that revision's wrapper or tools.
+SOURCE_ROOT="$REPO"
+WORKER_DIR="$SOURCE_ROOT/mcp-server"
+WRANGLER="$REPO/mcp-server/node_modules/.bin/wrangler"
 # Same resolution ops/ci.sh and bin/worktree.sh use: prefer the repo venv, fall
 # back to whatever python3 is on PATH. The release preflight below needs it.
 PY="$REPO/.venv/bin/python"
@@ -110,6 +112,7 @@ RECOVERY_ATTEMPT_ID=""
 RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
 STAGING_RECEIPT_KEY=""
+EXACT_SOURCE_ROOT=""
 # Filled only from the exact immutable release manifest after preflight.
 EXPECTED_PROGRAM6_ACTIONS=""
 while [ "$#" -gt 0 ]; do
@@ -152,6 +155,10 @@ while [ "$#" -gt 0 ]; do
     --staging-receipt-idempotency-key)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --staging-receipt-idempotency-key needs a UUID" >&2; exit 64; }
       STAGING_RECEIPT_KEY="$2"; shift ;;
+    --internal-exact-source-root)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --internal-exact-source-root needs a path" >&2; exit 64; }
+      [ -z "$EXACT_SOURCE_ROOT" ] || { echo "deploy-worker: --internal-exact-source-root may appear once" >&2; exit 64; }
+      EXACT_SOURCE_ROOT="$2"; shift ;;
     --upload-version)
       [ "$VERSION_MODE" = "ordinary" ] \
         || { echo "deploy-worker: --upload-version and --promote-version are mutually exclusive" >&2; exit 64; }
@@ -191,6 +198,15 @@ case "$RECOVERY_STEP" in
     ;;
   *) fail "--recovery-step must be standalone|current_before|prior|current_after|restore_only." ;;
 esac
+if [ -n "$EXACT_SOURCE_ROOT" ]; then
+  [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "staging" ] \
+    && [ "$RECOVERY_STEP" != "standalone" ] && [ -n "$PINNED_RELEASE" ] \
+    || fail "an exact source root is internal to a typed staging recovery step."
+  SOURCE_ROOT="$("$PY" "$REPO/tools/validate-exact-recovery-source.py" \
+    --root "$EXACT_SOURCE_ROOT" --sha "$PINNED_RELEASE")" \
+    || fail "the internal exact source root is not the bound clean detached source."
+  WORKER_DIR="$SOURCE_ROOT/mcp-server"
+fi
 if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "production" ]; then
   fail "Production source deploy is disabled. Upload an immutable candidate with
   --upload-version, bind that provider version to an approved release, then use
@@ -221,22 +237,22 @@ if [ "$VERSION_MODE" = "promote" ]; then
   echo "  OK  immutable provider promotion — source checkout and build preflights are skipped"
   echo "      release truth below supplies the SHA bound to $PROVIDER_VERSION_ID"
 else
-git fetch origin main --quiet 2>/dev/null || fail "could not reach origin to verify main."
+git -C "$REPO" fetch origin main --quiet 2>/dev/null || fail "could not reach origin to verify main."
 
-HEAD_SHA="$(git rev-parse HEAD)"
-MAIN_SHA="$(git rev-parse origin/main)"
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+HEAD_SHA="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+MAIN_SHA="$(git -C "$SOURCE_ROOT" rev-parse origin/main)"
+BRANCH="$(git -C "$SOURCE_ROOT" rev-parse --abbrev-ref HEAD)"
 
 if [ -n "$PINNED_RELEASE" ]; then
   [ "${#PINNED_RELEASE}" -eq 40 ] \
     || fail "--release-sha must be the full immutable 40-character commit SHA."
-  PINNED_SHA="$(git rev-parse --verify "${PINNED_RELEASE}^{commit}" 2>/dev/null)" \
+  PINNED_SHA="$(git -C "$SOURCE_ROOT" rev-parse --verify "${PINNED_RELEASE}^{commit}" 2>/dev/null)" \
     || fail "approved release SHA does not resolve to a commit."
   [ "$PINNED_RELEASE" = "$PINNED_SHA" ] \
     || fail "--release-sha must be the exact canonical full SHA, not an abbreviation or tag."
   [ "$HEAD_SHA" = "$PINNED_SHA" ] \
     || fail "checkout HEAD does not equal the approved release SHA."
-  git merge-base --is-ancestor "$PINNED_SHA" origin/main \
+  git -C "$SOURCE_ROOT" merge-base --is-ancestor "$PINNED_SHA" origin/main \
     || fail "approved release SHA is not an ancestor of fetched origin/main."
   echo "  OK  pinned approved release: $PINNED_SHA (ancestor of origin/main $MAIN_SHA)"
 elif [ "$TARGET_ENV" != "production" ]; then
@@ -248,8 +264,8 @@ elif [ "$TARGET_ENV" != "production" ]; then
   echo "  OK  env=$TARGET_ENV — branch check skipped on purpose (staging exists to run unmerged code)"
   echo "      shipping $BRANCH @ $HEAD_SHA"
 elif [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
-  BEHIND="$(git rev-list --count "HEAD..origin/main")"
-  AHEAD="$(git rev-list --count "origin/main..HEAD")"
+  BEHIND="$(git -C "$SOURCE_ROOT" rev-list --count "HEAD..origin/main")"
+  AHEAD="$(git -C "$SOURCE_ROOT" rev-list --count "origin/main..HEAD")"
   fail "this checkout is not origin/main.
   branch:  $BRANCH
   HEAD:    $HEAD_SHA
@@ -276,7 +292,7 @@ fi
 # until the file is committed. It is a guard artifact and never ships to the
 # Worker. The postflight still tells you to commit it, because an uncommitted
 # baseline protects only this checkout.
-DIRTY_LIST="$(git status --porcelain -- mcp-server/ dealroom/ \
+DIRTY_LIST="$(git -C "$SOURCE_ROOT" status --porcelain -- mcp-server/ dealroom/ \
   | grep -v 'mcp-server/node_modules' \
   | grep -v 'mcp-server/.last-deployed-verb-count' || true)"
 DIRTY="$(printf '%s' "$DIRTY_LIST" | grep -c . || true)"

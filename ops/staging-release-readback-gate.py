@@ -199,6 +199,15 @@ def claim_sql() -> str:
     return "select ops.claim_staging_deployment_attempt(%s::uuid)"
 
 
+def restore_prepare_sql() -> str:
+    return """select ops.prepare_staging_restore_only_attempt(
+      %s::uuid,%s::uuid,%s,%s,%s::uuid,%s)"""
+
+
+def restore_prepare_params(fixture: dict, attempt: uuid.UUID, idem: uuid.UUID) -> tuple:
+    return (idem, attempt, fixture["current_key"], fixture["prior_key"], attempt, CURRENT_SHA)
+
+
 def record_params(fixture: dict, attempt: uuid.UUID, step: str, idem: uuid.UUID,
                   version: uuid.UUID, *, verb_count: int = 211,
                   program6_actions_enabled: bool = False) -> tuple:
@@ -360,6 +369,19 @@ def main() -> int:
         cur.execute("reset role")
 
         authority(cur,"carr_jobs")
+        restore_attempt = uuid.uuid4(); restore_idem = uuid.uuid4()
+        cur.execute(restore_prepare_sql(), restore_prepare_params(fixture, restore_attempt, restore_idem))
+        restore_prepared = one(cur)[0]
+        cur.execute("select target_provider_version_id::text from ops.staging_restore_only_attempt where idempotency_key=%s",
+                    (restore_idem,))
+        check("restore-only prepare explicitly casts text provider version into UUID evidence",
+              restore_prepared["state"] == "prepared" and one(cur)[0] == CURRENT_PROVIDER_VERSION)
+        cur.execute(restore_prepare_sql(), restore_prepare_params(fixture, restore_attempt, restore_idem))
+        restore_replay = one(cur)[0]
+        cur.execute("select ops.claim_staging_restore_only_attempt(%s::uuid)", (restore_idem,))
+        restore_claim = one(cur)[0]
+        check("restore-only UUID preparation replays and claims through the jobs writer",
+              restore_replay["replayed"] is True and restore_claim["mutation_allowed"] is True)
         results = []
         for step, idem, version in zip(("current_before","prior","current_after"),ids,versions):
             prepare_and_claim(cur,fixture,attempt,step,idem)
