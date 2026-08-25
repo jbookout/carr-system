@@ -119,3 +119,30 @@ test("malformed provider lifecycle inputs refuse before touching the database", 
   );
   assert.equal(calls.length, 0);
 });
+
+test("context activation installs the derived tenant before compiling the accepted bundle", async () => {
+  const bundle = { schema_version: "context-bundle.v1", bundle_digest: `sha256:${"b".repeat(64)}` };
+  const { tools, client, calls } = allTools((sql, params) => {
+    if (/activate-context-bundle:tenant/.test(sql)) return { rows: [] };
+    if (/compile_context_bundle/.test(sql)) {
+      assert.match(calls[0].sql, /set_config\('carr\.organization_tenant_id'/);
+      assert.deepEqual(calls[0].params, ["carr-internal"]);
+      assert.deepEqual(params, ["WR-000007", "PLAN-1befe10dc250-v1", "carr-internal"]);
+      return { rows: [{ bundle }] };
+    }
+    if (/activate_context_bundle/.test(sql)) {
+      return { rows: [{ binding_id: "ctx-0123456789abcdef", bundle_digest: bundle.bundle_digest, replayed: false }] };
+    }
+    throw new Error(`unexpected query: ${sql}`);
+  });
+
+  const response = await tools["activate-context-bundle"].handler(client, actor, {
+    human_ref: "WR-000007",
+    plan_ref: "PLAN-1befe10dc250-v1",
+    idempotency_key: "428e0608-69c7-469d-8562-d702cd1853cd",
+  });
+
+  assert.equal(response.result.binding_id, "ctx-0123456789abcdef");
+  assert.equal(response.result.replayed, false);
+  assert.equal(calls.length, 3);
+});
