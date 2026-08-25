@@ -188,8 +188,15 @@ def card(folder, p):
                f'{f"<div class=mini><h4>About the property</h4><ul>{about}</ul></div>" if about else ""}'
                f'{f"<div class=mini><h4>Confirm before signing</h4><ul>{conf}</ul></div>" if conf else ""}'
                f'</div>')
+    # The badge, the heading, the address and the photograph are one thing: the point
+    # where the client recognises which option they are looking at. Printed, they were
+    # four siblings that could be split apart, and the round number badge is absolutely
+    # positioned, so a card starting in the last inch of a sheet left an orange crescent
+    # alone at the bottom with its heading overleaf. Wrapping them lets print keep the
+    # opening whole with one rule. On screen the wrapper changes nothing.
     return f'''
     <section class="card">
+      <div class="copen">
       <div class="cnum">{e(p["n"])}</div>
       <div class="chead"><div>
         <h3 class="paddr">{e(p["addr"])}</h3>{ctr}
@@ -197,6 +204,7 @@ def card(folder, p):
       </div></div>
       {address_line(p)}
       {media(folder, p)}
+      </div>
       <p class="pcopy">{e(p["copy"])}</p>
       <div class="factgrid">{facts(p.get("facts", []))}</div>
       {two}

@@ -205,3 +205,65 @@ footer{background:var(--navy);color:#fff;padding:26px 44px 30px;margin-top:34px}
   header{padding-left:44px;padding-right:44px}
   main{padding-left:44px;padding-right:44px}
 }
+
+/* ---- fill the sheet, 2026-08-25 ----
+   Same principle as the block above, applied to everything still treated as atomic.
+   The About and Confirm columns, the notes box and the ruled lines were each jumping
+   whole when they would not fit, which is where the remaining white came from. Protect
+   the list item, the single ruled line, the photograph. Let their containers flow. */
+@media print{
+  .twocol,.mini,.notebox{break-inside:auto;page-break-inside:auto}
+  .mini li,.noteline{break-inside:avoid;page-break-inside:avoid}
+  .mini h4,.notebox h4{break-after:avoid;page-break-after:avoid}
+  .pcopy,.mini li{orphans:2;widows:2}
+  .card{margin:12px 0;padding:18px 20px 16px}
+  .hero.fw{height:180px}
+  h2{margin-top:26px}
+}
+
+/* ---- the PDF is the HTML, sliced, 2026-08-25 ----
+   Dell: "the html is perfect so model that in the pdf." So print stops inventing a
+   layout and simply flows the screen document onto sheets. The only things held
+   together are the ones a break would visibly damage: a photograph, a table row, one
+   fact cell, and a card's opening.
+
+   The opening is why .copen exists. The round number badge is absolutely positioned
+   against the card, so a card beginning in the last inch of a sheet printed an orange
+   crescent alone at the bottom with its address overleaf. Badge, heading, address and
+   photograph now move as one block, so a card either starts properly or starts on the
+   next sheet.
+
+   Tried and rejected, twice, on measurements: forcing one option per sheet. With the
+   original tall cards it gave 23 pages at 59% blank, and after the cards were shortened
+   it still gave 22 at 51%, against 18 at 37% for letting them flow. It is the obvious
+   idea and it loses both times, which is why it is written down here rather than left
+   for someone to try a third time. */
+@media print{
+  .copen{break-inside:avoid;page-break-inside:avoid}
+}
+
+@media print{
+  /* .copen alone did not kill the orphan crescent: the badge is positioned against
+     the CARD, so the card still began at the foot of the sheet to hold it while the
+     opening moved over. In print the badge joins the flow inside .copen instead, so
+     it physically cannot be left behind. */
+  .cnum{position:static;box-shadow:none;margin:0 0 10px}
+  .chead{margin-top:0}
+}
+
+@media print{
+  /* Chrome will not fragment a CSS grid container across sheets. break-inside:auto is
+     honoured by the spec and ignored in practice, so a fact grid that did not fit was
+     still moving whole and leaving the bottom half of a card empty. Printed, the grid
+     becomes inline-blocks, which do fragment, and the 1px rules are drawn as borders
+     instead of as container colour showing through gaps. Two columns at print size,
+     matching the packet Dell approved on 2026-08-18. */
+  .factgrid{display:block;background:#fff;border:1px solid var(--line);border-radius:8px;
+            overflow:visible;font-size:0;margin-bottom:14px}
+  .f{display:inline-block;width:50%;vertical-align:top;box-sizing:border-box;
+     font-size:13.5px;padding:8px 11px;border-top:1px solid var(--line);
+     border-right:1px solid var(--line)}
+  .f:nth-child(2n){border-right:none}
+  .f:nth-child(1),.f:nth-child(2){border-top:none}
+  .fk,.fv{display:block}
+}
