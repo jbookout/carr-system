@@ -535,7 +535,7 @@ def main() -> int:
             local_conformance = local_provider["conformance"]
             if (
                 local_provider.get("manifest_digest") != "sha256:9f1ac4e93a50163aef414f4084046e3e0740332e15c59baca0ef8ed289fcd6c8"
-                or local_conformance.get("run_digest") != "sha256:c3b30e6504179d82e0bce658d0165549a9732ac4c5b888b3ec620b706ad9236b"
+                or local_conformance.get("run_digest") != "sha256:d9f3f6e889f7630b0f503db4fee66acc96fc21c30b9b7110e484c85910731333"
                 or local_conformance.get("implementation_digest") != "sha256:7d680c252bedc88ff7b80d50a5bfbdb9b926823d8bbc521f606e7b58237cbc1e"
                 or local_conformance.get("manifest_digest") != local_provider.get("manifest_digest")
             ):

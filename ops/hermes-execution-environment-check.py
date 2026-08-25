@@ -118,6 +118,8 @@ def check(
     expected_rc, resolved_expected = _git(source_root, "rev-parse", f"{expected_upstream_commit}^{{commit}}")
     ancestor_rc, _ = _git(source_root, "merge-base", "--is-ancestor", expected_upstream_commit, "HEAD")
     shallow_rc, shallow_value = _git(source_root, "rev-parse", "--is-shallow-repository")
+    tree_rc, tree_status = _git(source_root, "status", "--porcelain=v1", "--untracked-files=all")
+    package_tree_clean = tree_rc == 0 and tree_status == ""
     version_value = version_match.group(0) if version_match is not None else ""
     package_provenance_exact = (
         head_rc == 0 and head_commit == expected_local_head
@@ -125,6 +127,7 @@ def check(
         and (ancestor_rc == 0 or (shallow_rc == 0 and shallow_value == "true"))
         and f"upstream {expected_upstream_commit[:8]}" in version_value
         and f"local {expected_local_head[:8]}" in version_value
+        and package_tree_clean
     )
     observed_package_digest = (
         expected_manifest["package_provenance"]["package_digest"]
@@ -132,8 +135,9 @@ def check(
         else _sha_text("hermes-head:" + (head_commit if head_rc == 0 else "unavailable"))
     )
     checks = {
-        "check:hermes-version-exact": bool(version_match and version_match.group(0).startswith(f"Hermes Agent v{expected_version}")),
+        "check:hermes-version-exact": bool(version_match and re.match(rf"^Hermes Agent v{re.escape(expected_version)}(?:\s|\()", version_match.group(0))),
         "check:package-provenance-exact": package_provenance_exact,
+        "check:package-tree-clean": package_tree_clean,
         "check:terminal-backend-local": backend == "local",
         "check:local-environment-present": "class LocalEnvironment" in local_text,
         "check:base-environment-contract-present": "class BaseEnvironment" in base_text,

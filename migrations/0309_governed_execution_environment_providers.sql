@@ -303,6 +303,7 @@ begin
       'check:implementation-digest-exact',true,
       'check:local-environment-present',true,
       'check:package-provenance-exact',true,
+      'check:package-tree-clean',true,
       'check:source-secret-scan',true,
       'check:terminal-backend-local',true),
     'version_ref','Hermes Agent v0.20.5 (2026.8.19) · upstream 1bbb6e5b · local 706f33d4 (+1 carried commit)',

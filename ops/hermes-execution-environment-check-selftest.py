@@ -88,6 +88,18 @@ def main() -> int:
         binary, source, commit = fake_tree(pathlib.Path(temporary))
         local_source = source / "tools" / "environments" / "local.py"
         expected = "sha256:" + hashlib.sha256(local_source.read_bytes()).hexdigest()
+        (source / "tools" / "environments" / "base.py").write_text(
+            "class BaseEnvironment:\n    def execute(self): raise RuntimeError('drift')\n",
+            encoding="utf-8",
+        )
+        dirty_package = MODULE.check(binary, source, expected_implementation_digest=expected, expected_upstream_commit=commit, expected_local_head=commit)
+        assert dirty_package["status"] == "failed"
+        assert dirty_package["check_results"]["check:package-tree-clean"] is False
+        assert dirty_package["check_results"]["check:package-provenance-exact"] is False
+    with tempfile.TemporaryDirectory() as temporary:
+        binary, source, commit = fake_tree(pathlib.Path(temporary))
+        local_source = source / "tools" / "environments" / "local.py"
+        expected = "sha256:" + hashlib.sha256(local_source.read_bytes()).hexdigest()
         with local_source.open("a", encoding="utf-8") as handle:
             handle.write("\napi_key = 'fixture-secret-material'\n")
         leaked = MODULE.check(binary, source, expected_implementation_digest=expected, expected_upstream_commit=commit, expected_local_head=commit)
@@ -95,13 +107,13 @@ def main() -> int:
         assert leaked["contains_secrets"] is True
         assert leaked["check_results"]["check:source-secret-scan"] is False
     with tempfile.TemporaryDirectory() as temporary:
-        binary, source, commit = fake_tree(pathlib.Path(temporary), version="99.99.99")
+        binary, source, commit = fake_tree(pathlib.Path(temporary), version="0.20.50")
         local_source = source / "tools" / "environments" / "local.py"
         expected = "sha256:" + hashlib.sha256(local_source.read_bytes()).hexdigest()
         unrelated = MODULE.check(binary, source, expected_implementation_digest=expected, expected_upstream_commit=commit, expected_local_head=commit)
         assert unrelated["status"] == "failed"
         assert unrelated["check_results"]["check:hermes-version-exact"] is False
-    print("hermes-execution-environment-check selftest: 5 passed")
+    print("hermes-execution-environment-check selftest: 6 passed")
     return 0
 
 
