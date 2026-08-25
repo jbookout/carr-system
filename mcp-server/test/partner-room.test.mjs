@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 
 import { readFile } from "node:fs/promises";
 import { TOOLS } from "../src/tools.js";
-import { readRoomQueue } from "../src/partner-room.js";
+import { readRoomQueue, queueProjectionHealthFromTurn } from "../src/partner-room.js";
 
 // ── actors ──────────────────────────────────────────────────────────────────
 // Shapes mirror identity.js: a direct human partner, the two sponsored local
@@ -268,4 +268,70 @@ test("read-room-queue: accepts only the exact state-complete projector receipt a
   assert.equal(out.events[0].task_id, "t_one"); assert.equal(out.events[0].card.status, "running");
   assert.equal(out.live, true);
   assert.match(db.reads.at(-1)[0], /partner-line/);
+});
+
+test("read-room-queue: an attributable idle health receipt keeps an empty projection live", async () => {
+  const body = JSON.stringify({ queue_projection_health: {
+    v: 1, board: "carr-build", source: "hermes-queue-projector.v1", status: "ok",
+    checked_at: "2026-08-24T18:00:00Z", event_cursor: 42, projection_digest: MSG,
+  } });
+  const health = { seq: 5, room_id: "partner-line", at: "2026-08-24T18:00:00Z",
+    sponsor: "joe", seat: "hermes", kind: "receipt", msg_id: "health-1", body,
+    origin_channel: "mcp", origin_actor: "hermes-pilot" };
+  assert.equal(queueProjectionHealthFromTurn(health).event_cursor, 42);
+  const out = await readRoomQueue(new RoomFake({ rows: [health] }), {}, {
+    now: Date.parse("2026-08-24T18:00:30Z"),
+  });
+  assert.deepEqual(out.events, []);
+  assert.equal(out.projected_at, "2026-08-24T18:00:00Z");
+  assert.equal(out.live, true);
+});
+
+test("read-room-queue: health cannot be spoofed or report an incomplete pass", async () => {
+  const body = JSON.stringify({ queue_projection_health: {
+    v: 1, board: "carr-build", source: "hermes-queue-projector.v1", status: "ok",
+    checked_at: "2026-08-24T18:00:00Z", event_cursor: 42, projection_digest: MSG,
+  } });
+  const spoof = { seq: 5, room_id: "partner-line", at: "2026-08-24T18:00:00Z",
+    sponsor: "joe", seat: "hermes", kind: "receipt", msg_id: "health-2", body,
+    origin_channel: "mcp", origin_actor: "joe" };
+  assert.equal(queueProjectionHealthFromTurn(spoof), null);
+  const out = await readRoomQueue(new RoomFake({ rows: [spoof] }), {}, {
+    now: Date.parse("2026-08-24T18:00:30Z"),
+  });
+  assert.equal(out.projected_at, null);
+  assert.equal(out.live, false);
+});
+
+test("read-room-queue: health validation rejects future, non-UTC, and cursor-inconsistent markers", async () => {
+  const valid = (changes = {}) => ({
+    v: 1, board: "carr-build", source: "hermes-queue-projector.v1", status: "ok",
+    checked_at: "2026-08-24T18:00:00Z", event_cursor: 42, projection_digest: MSG, ...changes,
+  });
+  const base = { seq: 5, room_id: "partner-line", at: "2026-08-24T18:00:30Z",
+    sponsor: "joe", seat: "hermes", kind: "receipt", msg_id: "health-3",
+    origin_channel: "mcp", origin_actor: "hermes-pilot" };
+  for (const health of [
+    valid({ checked_at: "2026-08-24T18:01:00Z" }),
+    valid({ checked_at: "2026-08-24T18:00:00-04:00" }),
+    valid({ event_cursor: 0 }),
+    valid({ event_cursor: 42, projection_digest: null }),
+    valid({ board: "other-board" }),
+    valid({ v: 2 }),
+  ]) {
+    assert.equal(queueProjectionHealthFromTurn({ ...base, body: JSON.stringify({ queue_projection_health: health }) }), null);
+  }
+});
+
+test("read-room-queue: liveness uses the server append time, not a stale body clock", async () => {
+  const health = { v: 1, board: "carr-build", source: "hermes-queue-projector.v1", status: "ok",
+    checked_at: "2026-08-24T17:59:00Z", event_cursor: 42, projection_digest: MSG };
+  const row = { seq: 5, room_id: "partner-line", at: "2026-08-24T18:00:00Z",
+    sponsor: "joe", seat: "hermes", kind: "receipt", msg_id: "health-4",
+    body: JSON.stringify({ queue_projection_health: health }), origin_channel: "mcp", origin_actor: "hermes-pilot" };
+  const out = await readRoomQueue(new RoomFake({ rows: [row] }), {}, {
+    now: Date.parse("2026-08-24T18:01:30Z"),
+  });
+  assert.equal(out.live, true);
+  assert.equal(out.projected_at, "2026-08-24T18:00:00Z");
 });

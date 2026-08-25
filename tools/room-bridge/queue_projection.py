@@ -19,11 +19,70 @@ BOARD = "carr-build"
 DB_PATH = Path(os.environ.get("CARR_HERMES_KANBAN_DB",
     Path.home() / ".hermes" / "kanban" / "boards" / BOARD / "kanban.db"))
 EVENT_NAMESPACE = uuid.UUID("42f7b149-34a7-512d-bad1-b9ad6f35d4c4")
+HEALTH_NAMESPACE = uuid.UUID("f67c8b09-9f57-5d3a-9b11-33b468cb7ad9")
 EVENT_LIMIT = 200
+HEALTH_INTERVAL_S = 60
 
 
 def event_msg_id(board: str, event_id: int) -> str:
     return str(uuid.uuid5(EVENT_NAMESPACE, f"{board}:{event_id}"))
+
+
+def _health_window(checked_at: str) -> str:
+    stamp = datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+    return stamp.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def health_msg_id(board: str, cursor: int, checked_at: str) -> str:
+    """Return the deterministic id for one successful projector check.
+
+    The timestamp is the check's observed UTC time, not a task event time.  A
+    replay of the same cycle therefore deduplicates through the room append
+    door, while a later cycle gets a fresh freshness marker.
+    """
+    return str(uuid.uuid5(HEALTH_NAMESPACE,
+                           f"{board}:projection-health:{cursor}:{_health_window(checked_at)}"))
+
+
+def _health_due(last_posted_at: object, checked_at: str) -> bool:
+    if last_posted_at is None:
+        return True
+    if not isinstance(last_posted_at, str):
+        return False
+    try:
+        elapsed = (datetime.fromisoformat(checked_at.replace("Z", "+00:00")) -
+                   datetime.fromisoformat(last_posted_at.replace("Z", "+00:00"))).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return elapsed >= HEALTH_INTERVAL_S
+
+
+def projection_health_receipt(*, checked_at: str, cursor: int,
+                              projection_digest: str | None,
+                              board: str = BOARD) -> dict:
+    """Build the redacted, task-free receipt for a successful empty-or-full pass."""
+    if not isinstance(checked_at, str) or not (checked_at.endswith("Z") or checked_at.endswith("+00:00")):
+        raise ValueError("projection check time must be UTC")
+    try:
+        datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("projection check time must be ISO-8601") from exc
+    if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+        raise ValueError("projection cursor must be a non-negative integer")
+    if projection_digest is not None and not isinstance(projection_digest, str):
+        raise ValueError("projection digest must be a string or null")
+    if (cursor == 0) != (projection_digest is None):
+        raise ValueError("projection digest must be null iff cursor is zero")
+    if projection_digest is not None:
+        try:
+            uuid.UUID(projection_digest)
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("projection digest must be a UUID") from exc
+    return {"queue_projection_health": {
+        "v": 1, "board": board, "source": "hermes-queue-projector.v1",
+        "status": "ok", "checked_at": checked_at, "event_cursor": cursor,
+        "projection_digest": projection_digest,
+    }}
 
 
 def _as_int(value: object) -> int:
@@ -163,23 +222,54 @@ def open_reader(path: Path = DB_PATH) -> sqlite3.Connection:
 
 
 def project_once(*, state: dict, add_room_turn, target_catalog: dict,
-                 db_path: Path = DB_PATH, board: str = BOARD, limit: int = EVENT_LIMIT) -> list[dict]:
+                 db_path: Path = DB_PATH, board: str = BOARD, limit: int = EVENT_LIMIT,
+                 checked_at: str | None = None) -> list[dict]:
     cursor = int(state.get("queue_event_cursor", 0) or 0)
+    original_cursor = cursor
+    original_digest = state.get("queue_projection_digest")
+    original_health_posted_at = state.get("queue_projection_health_last_posted_at")
     projected: list[dict] = []
-    with open_reader(db_path) as conn:
-        events = conn.execute(
-            "select id, task_id, kind, created_at from task_events where id > ? order by id asc limit ?",
-            (cursor, limit)).fetchall()
-        for event_row in events:
-            event = dict(event_row)
-            task_row = conn.execute("select * from tasks where id=?", (event["task_id"],)).fetchone()
-            receipt = (missing_task_receipt(event, board=board) if task_row is None else
-                       receipt_for(event, dict(task_row), target_catalog=target_catalog, board=board))
-            add_room_turn(body=json.dumps(receipt, separators=(",", ":")), seat="hermes",
-                          kind="receipt", msg_id=event_msg_id(board, event["id"]))
-            # Only a successful, idempotent room append makes this event safe to
-            # advance; an exception intentionally leaves it for the next cycle.
-            state["queue_event_cursor"] = event["id"]
-            state["queue_projection_digest"] = event_msg_id(board, event["id"])
-            projected.append(receipt)
+    try:
+        with open_reader(db_path) as conn:
+            source_head = int(conn.execute(
+                "select coalesce(max(id), 0) as head from task_events").fetchone()["head"] or 0)
+            events = conn.execute(
+                "select id, task_id, kind, created_at from task_events where id > ? order by id asc limit ?",
+                (cursor, limit + 1)).fetchall()
+            complete = len(events) <= limit and cursor <= source_head
+            for event_row in events[:limit]:
+                event = dict(event_row)
+                task_row = conn.execute("select * from tasks where id=?", (event["task_id"],)).fetchone()
+                receipt = (missing_task_receipt(event, board=board) if task_row is None else
+                           receipt_for(event, dict(task_row), target_catalog=target_catalog, board=board))
+                add_room_turn(body=json.dumps(receipt, separators=(",", ":")), seat="hermes",
+                              kind="receipt", msg_id=event_msg_id(board, event["id"]))
+                # Only a successful, idempotent room append makes this event safe to
+                # advance; an exception intentionally leaves it for the next cycle.
+                state["queue_event_cursor"] = event["id"]
+                state["queue_projection_digest"] = event_msg_id(board, event["id"])
+                projected.append(receipt)
+            # This is deliberately a separate receipt: it carries no task/card
+            # data and never advances the Hermes task-event cursor.  It is emitted
+            # only after every task event in this pass has been durably appended;
+            # any append failure or incomplete page leaves the cycle unhealthy.
+            end_head = int(conn.execute(
+                "select coalesce(max(id), 0) as head from task_events").fetchone()["head"] or 0)
+            complete = complete and source_head == end_head and int(state.get("queue_event_cursor", cursor) or 0) == end_head
+            stamp = checked_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            if complete and _health_due(state.get("queue_projection_health_last_posted_at"), stamp):
+                health = projection_health_receipt(
+                    checked_at=stamp, cursor=int(state.get("queue_event_cursor", cursor) or 0),
+                    projection_digest=state.get("queue_projection_digest"), board=board)
+                add_room_turn(body=json.dumps(health, separators=(",", ":")), seat="hermes",
+                              kind="receipt", msg_id=health_msg_id(board, int(state.get("queue_event_cursor", cursor) or 0), stamp))
+                state["queue_projection_health_last_posted_at"] = stamp
+    except Exception:
+        # If the health marker did not land, do not persist a cursor that claims
+        # the same cycle was complete. Replaying already-appended task receipts
+        # is safe because their message ids are deterministic and append-only.
+        state["queue_event_cursor"] = original_cursor
+        state["queue_projection_digest"] = original_digest
+        state["queue_projection_health_last_posted_at"] = original_health_posted_at
+        raise
     return projected
