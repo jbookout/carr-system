@@ -745,6 +745,9 @@ def job_passport_wire_receipt(kind: str, payload: Any) -> dict[str, Any]:
     if kind == "telemetry_measurement":
         from spatial_surface import validate_telemetry_measurement
         validators["telemetry_measurement"] = validate_telemetry_measurement
+    if kind == "engineering_passport":
+        from engineering_passport import validate_engineering_passport
+        validators["engineering_passport"] = validate_engineering_passport
     if kind not in validators:
         raise ContractError("job passport wire kind is invalid")
     value = validators[kind](payload)

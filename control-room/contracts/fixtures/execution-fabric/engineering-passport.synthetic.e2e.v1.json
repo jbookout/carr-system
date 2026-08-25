@@ -1,0 +1,14 @@
+{
+  "fixture_version": "engineering-passport.synthetic.e2e.v1",
+  "data_class": "synthetic_only",
+  "plan_ref": "engineering-passport.synthetic.plan.v1.json",
+  "scenario": "A and B are independent; C waits for both",
+  "slices": [
+    {"slice_ref":"slice:a","dependency_refs":[],"attempt_id":"attempt:a","outcome":"claimed_complete","review":{"reviewer_ref":"reviewer:independent","state":"passed"}},
+    {"slice_ref":"slice:b","dependency_refs":[],"attempt_id":"attempt:b","outcome":"claimed_complete","review":{"reviewer_ref":"reviewer:independent","state":"passed","deviation_ref":"deviation:scope"}},
+    {"slice_ref":"slice:c","dependency_refs":["slice:a","slice:b"],"attempt_id":"attempt:c","outcome":"claimed_complete","review":{"reviewer_ref":"reviewer:independent","state":"passed"},"manual_qa":{"state":"passed","evidence_ref":"evidence:qa"},"release":{"state":"released","evidence_ref":"evidence:release"}}
+  ],
+  "deviation": {"deviation_ref":"deviation:scope","category":"discovered-constraint","plan_revision_required":false,"reviewed":true},
+  "learning": {"state":"proposed","route":"regression_test","promotion_performed":false},
+  "closure": {"work":"complete","proof":"complete","explanation":"complete","release":"released","learning":"proposed"}
+}

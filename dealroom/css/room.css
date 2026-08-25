@@ -284,6 +284,10 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .passport-detail { border-top: 1px solid var(--line); padding-top: 6px; }
 .passport-detail summary { cursor: pointer; color: var(--text); font-size: 11px; }
 .passport-detail-list { margin: 6px 0 0; padding-left: 17px; color: var(--muted); font-size: 10px; }
+.passport-engineering { border-top: 1px solid var(--line); margin-top: 7px; padding-top: 7px; }
+.passport-engineering-title { margin: 0; font-family: var(--display); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; }
+.passport-engineering-slices, .passport-engineering-closure { margin: 5px 0; padding-left: 17px; color: var(--muted); font-size: 10px; }
+.passport-engineering-deviations, .passport-engineering-receipt, .passport-engineering-conflict { margin: 4px 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
 .stage-svg {
   display: block; width: 100%; height: 100%;
   transform: perspective(900px)
