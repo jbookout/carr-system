@@ -153,8 +153,13 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
            select organization_tenant_id,$2,$3,context,scope,owner_actor_id,$4,confidence,id,coalesce(lineage_root_id,id)
              from memory_item where id=$1 returning id, kind, statement, context, scope, owner_actor_id, status, confidence, version, predecessor_id`,
           [args.memory_id, old.kind, text, actor.id]);
-        await writeEvent(c, actor, "correct-memory", "memory_item", args.memory_id, { old: { statement: "preserved_in_prior_revision", status: old.status }, new: { successor_id: successor.rows[0].id, reason: args.reason }, cause: "human_correction", idempotency_key: args.idempotency_key });
-        return { ok: true, memory: successor.rows[0], predecessor_id: args.memory_id };
+        const correctionEvidence = await c.query(
+          `insert into memory_evidence (memory_id, source_type, source_ref, observation, observed_by_actor_id, provenance)
+           values ($1,'human_correction',$2,$3,$4,$5) returning id`,
+          [successor.rows[0].id, args.memory_id, args.reason, actor.id,
+           JSON.stringify({ predecessor_id: args.memory_id, predecessor_version: old.version })]);
+        await writeEvent(c, actor, "correct-memory", "memory_item", args.memory_id, { old: { statement: "preserved_in_prior_revision", status: old.status }, new: { successor_id: successor.rows[0].id, reason: args.reason, evidence_id: correctionEvidence.rows[0]?.id }, cause: "human_correction", idempotency_key: args.idempotency_key });
+        return { ok: true, memory: successor.rows[0], predecessor_id: args.memory_id, evidence_id: correctionEvidence.rows[0]?.id };
       }),
     },
 
