@@ -325,6 +325,57 @@ def test_bridge_consumes_queue_before_routing_and_posts_receipt():
     assert posted and posted[0]["kind"] == "receipt"
 
 
+def test_bridge_reconciliation_failure_fails_closed_before_queue_dispatch():
+    class FakeQueue:
+        catalog = {"targets": {"sol": {"enabled": True, "adapter": "desk", "desk": "codex-desk"}}}
+        def reconcile_disabled_targets(self):
+            raise RuntimeError("raw provider secret")
+
+    class FakeExecutor:
+        catalog = FakeQueue.catalog
+        def start(self, **_kwargs):
+            raise AssertionError("queue dispatch must be fenced")
+
+    registry = type("Registry", (), {
+        "entries": lambda self: {"codex-desk": {"room_seat": "sol"}},
+        "path": Path("/tmp/nonexistent-desks.json"),
+    })()
+    with tempfile.TemporaryDirectory() as root:
+        summary = bridge.run_once(
+            state_path=Path(root) / "state.json", read_room=lambda *_a, **_k: {"turns": []},
+            add_room_turn=lambda **_k: {"seq": 1}, registry=registry,
+            queue_service=FakeQueue(), queue_executor=FakeExecutor(), queue_projector=lambda **_k: [],
+            probe_auth=lambda _entry: False, read_profiles=lambda: [], log=lambda _msg: None,
+        )
+    assert summary["queue_reconciliation"] == {"scanned": 0, "blocked": [], "diagnostics": []}
+    assert summary["errors"] == [{"desk": "(queue-reconciler)", "error": "queue_reconciliation_failed",
+                                   "detail": "queue reconciliation failed"}]
+
+
+def test_bridge_invalid_reconciliation_shape_fails_closed():
+    class FakeQueue:
+        catalog = {"targets": {"sol": {"enabled": True, "adapter": "desk", "desk": "codex-desk"}}}
+        def reconcile_disabled_targets(self):
+            return {"scanned": 0, "blocked": [],
+                    "diagnostics": [{"code": "queue_metadata_malformed", "task_id": "raw-secret"}]}
+
+    class FakeExecutor:
+        catalog = FakeQueue.catalog
+        def start(self, **_kwargs):
+            raise AssertionError("invalid reconciliation must fence dispatch")
+
+    registry = type("Registry", (), {"entries": lambda self: {"codex-desk": {"room_seat": "sol"}},
+                                      "path": Path("/tmp/nonexistent-desks.json")})()
+    with tempfile.TemporaryDirectory() as root:
+        summary = bridge.run_once(state_path=Path(root) / "state.json",
+            read_room=lambda *_a, **_k: {"turns": []}, add_room_turn=lambda **_k: {"seq": 1},
+            registry=registry, queue_service=FakeQueue(), queue_executor=FakeExecutor(),
+            queue_projector=lambda **_k: [], probe_auth=lambda _entry: False,
+            read_profiles=lambda: [], log=lambda _msg: None)
+    assert summary["errors"][0]["error"] == "queue_reconciliation_failed"
+    assert "raw-secret" not in json.dumps(summary)
+
+
 def test_projector_health_is_persisted_and_redacts_failure_detail():
     """A failed pass must age visibly without leaking its underlying failure."""
     class FakeQueue:
@@ -393,6 +444,64 @@ def test_mutation_guard_queue_parse_precedes_route_turn():
     assert source.index("queue_service.handle") < source.index("state_mod.route_turn")
 
 
+def test_disabled_target_reconciliation_is_exact_and_terminal_safe():
+    def body(target, *, finish="done", valid=True):
+        if not valid:
+            return "ordinary prose with no envelope"
+        meta = {"v": 1, "target": target, "cap": "read", "source_seq": 1,
+                "source_msg_id": "msg-1", "finish": finish}
+        return "[CARR_QUEUE_META " + json.dumps(meta, separators=(",", ":")) + "]\nwork"
+
+    rows = [
+        {"id": "t_retired01", "status": "ready", "assignee": "builder", "body": body("ox-alpha")},
+        {"id": "t_cross_b", "status": "ready", "assignee": "builder", "body": body("retired-b")},
+        {"id": "t_cross_a", "status": "ready", "assignee": "reviewer", "body": body("ox-alpha")},
+        {"id": "t_retired_b", "status": "ready", "assignee": "reviewer", "body": body("retired-b")},
+        {"id": "t_review01", "status": "review", "assignee": "builder", "body": body("ox-alpha")},
+        {"id": "t_other01", "status": "ready", "assignee": "builder", "body": body("grok")},
+        {"id": "t_statusless", "assignee": "builder", "body": body("ox-alpha")},
+        {"id": "t_bad01", "status": "ready", "assignee": "builder", "body": body("ox-alpha", valid=False)},
+    ]
+    calls = []
+    adapter = kanban_adapter.KanbanAdapter(
+        runner=lambda argv: calls.append(argv) or rows,
+        command_runner=lambda argv: calls.append(argv) or "",
+    )
+    result = adapter.reconcile_disabled_targets({"v": 1, "targets": {
+        "ox-alpha": {"enabled": False, "assignee": "builder"},
+        "retired-b": {"enabled": False, "assignee": "reviewer"},
+        "grok": {"enabled": True, "assignee": "builder"},
+    }})
+    assert result["blocked"] == ["t_retired01", "t_retired_b"]
+    assert result["diagnostics"] == [{"code": "queue_metadata_malformed", "task_id": "t_bad01"}]
+    reads = [call for call in calls if call[4:6] == ["list", "--assignee"]]
+    assert len(reads) == 2 and all(read[-1] == "--json" for read in reads)
+
+
+def test_disabled_target_reconciliation_is_idempotent_and_mutation_narrow():
+    meta = {"v": 1, "target": "ox-alpha", "cap": "read", "source_seq": 1,
+            "source_msg_id": "msg-1", "finish": "done"}
+    active = {"id": "t_retired02", "status": "ready", "assignee": "builder",
+              "body": "[CARR_QUEUE_META " + json.dumps(meta) + "]\nwork"}
+    state = {"blocked": False}
+    calls = []
+
+    def runner(argv):
+        calls.append(argv)
+        return [] if state["blocked"] else [active]
+
+    def mutate(argv):
+        calls.append(argv)
+        state["blocked"] = True
+
+    adapter = kanban_adapter.KanbanAdapter(runner=runner, command_runner=mutate)
+    catalog = {"v": 1, "targets": {"ox-alpha": {"enabled": False, "assignee": "builder"}}}
+    assert adapter.reconcile_disabled_targets(catalog)["blocked"] == ["t_retired02"]
+    assert adapter.reconcile_disabled_targets(catalog)["blocked"] == []
+    assert [call[4] for call in calls if len(call) > 4] == ["list", "block", "list"]
+    assert all("claim" not in call and "reassign" not in call and "unblock" not in call for call in calls)
+
+
 def main():
     check("strict enqueue grammar and bounds", test_strict_enqueue_and_bounds)
     check("shared key and delivery idempotency", test_shared_key_converges_and_source_id_deduplicates)
@@ -410,10 +519,14 @@ def main():
     check("legacy assignment is deprecation-only", test_legacy_assignment_is_deprecated_without_a_local_log)
     check("mutation guard: idempotency", test_mutation_guard_idempotency_is_not_optional)
     check("queue command is consumed before routing", test_bridge_consumes_queue_before_routing_and_posts_receipt)
+    check("reconciliation failure fences queue dispatch", test_bridge_reconciliation_failure_fails_closed_before_queue_dispatch)
+    check("invalid reconciliation shape fences queue dispatch", test_bridge_invalid_reconciliation_shape_fails_closed)
     check("projector health persists a redacted failure", test_projector_health_is_persisted_and_redacts_failure_detail)
     check("projector health records a successful empty check", test_projector_health_records_a_successful_empty_check)
     check("retry timing migration is safe and bounded", test_corrupt_retry_timing_is_migration_safe_and_bounded)
     check("mutation guard: consumption order", test_mutation_guard_queue_parse_precedes_route_turn)
+    check("disabled target reconciliation is exact and terminal-safe", test_disabled_target_reconciliation_is_exact_and_terminal_safe)
+    check("disabled target reconciliation is idempotent and mutation-narrow", test_disabled_target_reconciliation_is_idempotent_and_mutation_narrow)
     if FAILURES:
         print(f"{len(FAILURES)} queue test(s) failed", file=sys.stderr)
         return 1
