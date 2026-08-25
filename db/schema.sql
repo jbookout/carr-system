@@ -270,6 +270,9 @@ declare
   p ops.sourced_work_request_plan%rowtype;
   ar ops.sourced_work_request_plan_acceptance_receipt%rowtype;
   canonical_preimage jsonb; canonical_hash text; fixed_surface text; rationale text;
+  preserve_shape boolean := false;
+  applied_disposition text; applied_fixed_surface text; applied_rationale text;
+  applied_actor_id uuid; applied_at timestamptz;
 begin
   if p_idempotency_key is null or p_base_version is null or p_base_version < 1
      or coalesce(p_plan_hash,'') !~ '^sha256:[0-9a-f]{64}$' then
@@ -278,9 +281,7 @@ begin
   actor_slug := ops.authority_actor_slug();
   select x.* into a from public.actor x
    where x.slug = actor_slug and x.active and x.kind = 'human' for share;
-  if not found then
-    raise exception 'authority session user is not an active human actor';
-  end if;
+  if not found then raise exception 'authority session user is not an active human actor'; end if;
 
   perform pg_advisory_xact_lock(hashtextextended('program6-plan-acceptance:' || p_idempotency_key, 0));
   select x.* into ar from ops.sourced_work_request_plan_acceptance_receipt x
@@ -289,12 +290,19 @@ begin
     select x.* into p from ops.sourced_work_request_plan x where x.id = ar.plan_id for share;
     select x.* into w from ops.work_request x where x.id = ar.work_request_id for share;
     if not found or w.ref is distinct from p_work_request
-       or ar.base_version is distinct from p_base_version
-       or ar.plan_hash is distinct from p_plan_hash
-       or ar.accepted_by_actor_id is distinct from a.id
-       or p.id is distinct from ar.plan_id or p.plan_hash is distinct from ar.plan_hash
-       or w.state is distinct from 'ready' or w.version is distinct from ar.result_version
-       or w.shape_fixed_surface_ref is distinct from ar.shape_fixed_surface_ref then
+       or ar.base_version is distinct from p_base_version or ar.plan_hash is distinct from p_plan_hash
+       or ar.accepted_by_actor_id is distinct from a.id or p.id is distinct from ar.plan_id
+       or p.plan_hash is distinct from ar.plan_hash or w.state is distinct from 'ready'
+       or w.version is distinct from ar.result_version
+       or not exists (
+         select 1 from ops.sourced_work_request_plan_shape_binding_receipt b
+          where b.plan_acceptance_receipt_id = ar.id and b.work_request_id = w.id
+            and (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+                is not distinct from (b.disposition,b.fixed_surface_ref,b.rationale,b.decided_by_actor_id,b.decided_at)
+         union all
+         select 1 where not exists (select 1 from ops.sourced_work_request_plan_shape_binding_receipt b where b.plan_acceptance_receipt_id = ar.id)
+           and w.shape_disposition = 'not_required' and w.shape_fixed_surface_ref is not distinct from ar.shape_fixed_surface_ref
+       ) then
       raise exception 'idempotency key already names a different sourced plan acceptance';
     end if;
     return query select w.id,w.ref,w.state,w.version,p.id,p.plan_ref,p.plan_hash,
@@ -306,76 +314,86 @@ begin
   if not found then raise exception 'exact sourced Work Request not found'; end if;
   select x.* into p from ops.sourced_work_request_plan x
    where x.work_request_id = w.id and x.plan_hash = p_plan_hash for share;
-  if not found or w.state is distinct from 'triaged'
-     or w.version is distinct from p_base_version
-     or p.work_request_version is distinct from p_base_version
-     or w.capture_idempotency_key is null
-     or (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,
-         w.shape_decided_by_actor_id,w.shape_decided_at)
-        is distinct from (null::text,null::text,null::text,null::uuid,null::timestamptz)
-     or exists (select 1 from ops.work_shape_revision sr where sr.work_request_id = w.id) then
-    raise exception 'exact unshaped triaged sourced plan/version required';
+  if not found or w.state is distinct from 'triaged' or w.version is distinct from p_base_version
+     or p.work_request_version is distinct from p_base_version or w.capture_idempotency_key is null then
+    raise exception 'exact current triaged sourced plan/version required';
   end if;
-  perform 1 from public.doctrine_document d
-    join public.doctrine_section s on s.document_id = d.id
+
+  if (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+       is not distinct from (null::text,null::text,null::text,null::uuid,null::timestamptz)
+     and not exists (select 1 from ops.work_shape_revision sr where sr.work_request_id = w.id) then
+    preserve_shape := false;
+  elsif w.shape_disposition = 'required' and w.shape_fixed_surface_ref is null
+     and w.shape_rationale is not null and btrim(w.shape_rationale) <> ''
+     and w.shape_decided_by_actor_id is not null and w.shape_decided_at is not null
+     and exists (select 1 from ops.sourced_work_request_shape_disposition_receipt r
+                  where r.work_request_id=w.id and r.result_version=w.version
+                    and (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+                        is not distinct from (r.disposition,r.fixed_surface_ref,r.rationale,r.decided_by_actor_id,r.decided_at))
+     and (select sr.work_request_version from ops.work_shape_revision sr
+            where sr.work_request_id = w.id order by sr.version desc limit 1) = w.version then
+    preserve_shape := true;
+  elsif w.shape_disposition = 'not_required' and w.shape_fixed_surface_ref is not null
+     and btrim(w.shape_fixed_surface_ref) <> '' and w.shape_rationale is not null
+     and btrim(w.shape_rationale) <> '' and w.shape_decided_by_actor_id is not null
+     and w.shape_decided_at is not null
+     and exists (select 1 from ops.sourced_work_request_shape_disposition_receipt r
+                  where r.work_request_id=w.id and r.result_version=w.version
+                    and (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+                        is not distinct from (r.disposition,r.fixed_surface_ref,r.rationale,r.decided_by_actor_id,r.decided_at))
+     and not exists (select 1 from ops.work_shape_revision sr where sr.work_request_id = w.id) then
+    preserve_shape := true;
+  else
+    raise exception 'sourced ready-plan requires either an exact unshaped request or one current receipt-backed shape disposition';
+  end if;
+
+  perform 1 from public.doctrine_document d join public.doctrine_section s on s.document_id = d.id
     join public.doctrine_revision r on r.id = s.current_revision_id and r.section_id = s.id
-    where d.slug = 'runbook' and d.visibility = 'shared' and s.status = 'active'
-      and s.id = p.runbook_section_id and r.id = p.runbook_revision_id
-      and r.content_hash = p.runbook_content_hash
-      and ('doctrine:' || d.slug || '#' || s.section_key) = p.runbook_ref
-      and encode(public.digest(r.plain_text,'sha256'),'hex') = r.content_hash
-      and r.body = jsonb_build_object('text',r.plain_text)
-    for share of d, s, r;
-  if not found then
-    raise exception 'accepted sourced plan runbook is no longer current';
-  end if;
-  perform 1
-    from public.doctrine_document source_document
-    join public.doctrine_section source_section on source_section.document_id = source_document.id
-    join public.doctrine_revision source_revision
-      on source_revision.id = source_section.current_revision_id
-     and source_revision.section_id = source_section.id
+   where d.slug = 'runbook' and d.visibility = 'shared' and s.status = 'active'
+     and s.id = p.runbook_section_id and r.id = p.runbook_revision_id and r.content_hash = p.runbook_content_hash
+     and ('doctrine:' || d.slug || '#' || s.section_key) = p.runbook_ref
+     and encode(public.digest(r.plain_text,'sha256'),'hex') = r.content_hash and r.body = jsonb_build_object('text',r.plain_text)
+   for share of d,s,r;
+  if not found then raise exception 'accepted sourced plan runbook is no longer current'; end if;
+  perform 1 from public.doctrine_document source_document join public.doctrine_section source_section on source_section.document_id = source_document.id
+    join public.doctrine_revision source_revision on source_revision.id = source_section.current_revision_id and source_revision.section_id = source_section.id
    where source_document.visibility = 'shared' and source_section.status = 'active'
-     and source_section.id = w.doctrine_section_id
-     and source_revision.id = w.doctrine_revision_id
+     and source_section.id = w.doctrine_section_id and source_revision.id = w.doctrine_revision_id
      and source_revision.content_hash ~ '^[0-9a-f]{64}$'
      and encode(public.digest(source_revision.plain_text,'sha256'),'hex') = source_revision.content_hash
      and source_revision.body = jsonb_build_object('text',source_revision.plain_text)
-   for share of source_document, source_section, source_revision;
-  if not found then
-    raise exception 'accepted sourced plan source evidence is no longer current';
-  end if;
+   for share of source_document,source_section,source_revision;
+  if not found then raise exception 'accepted sourced plan source evidence is no longer current'; end if;
 
-  canonical_preimage := ops.sourced_work_request_plan_preimage(
-    w.id,p.scope_summary,p.runbook_ref,p.runbook_section_id,p.runbook_revision_id,
-    p.runbook_content_hash,p.dependency_refs,p.recovery_ref,p.observability_ref,p.caps);
+  canonical_preimage := ops.sourced_work_request_plan_preimage(w.id,p.scope_summary,p.runbook_ref,p.runbook_section_id,p.runbook_revision_id,p.runbook_content_hash,p.dependency_refs,p.recovery_ref,p.observability_ref,p.caps);
   canonical_hash := ops.sourced_work_request_plan_digest(canonical_preimage);
-  if canonical_preimage is distinct from p.preimage
-     or canonical_hash is distinct from p.plan_hash
-     or canonical_hash is distinct from p_plan_hash then
+  if canonical_preimage is distinct from p.preimage or canonical_hash is distinct from p.plan_hash or canonical_hash is distinct from p_plan_hash then
     raise exception 'sourced plan preimage is stale or does not match its exact hash';
   end if;
 
   fixed_surface := 'sourced-plan:' || p.plan_ref || '#' || p.plan_hash;
-  rationale := 'Accepted immutable plan ' || p.plan_ref || ' for ' || p.runbook_ref ||
-               ' at sha256:' || p.runbook_content_hash;
+  rationale := 'Accepted immutable plan ' || p.plan_ref || ' for ' || p.runbook_ref || ' at sha256:' || p.runbook_content_hash;
   insert into ops.sourced_work_request_plan_acceptance_receipt
-    (work_request_id,plan_id,idempotency_key,base_version,plan_hash,
-     accepted_by_actor_id,result_version,shape_fixed_surface_ref,shape_rationale)
-  values
-    (w.id,p.id,p_idempotency_key,p_base_version,p_plan_hash,a.id,w.version + 1,
-     fixed_surface,rationale)
+    (work_request_id,plan_id,idempotency_key,base_version,plan_hash,accepted_by_actor_id,result_version,shape_fixed_surface_ref,shape_rationale)
+  values (w.id,p.id,p_idempotency_key,p_base_version,p_plan_hash,a.id,w.version + 1,fixed_surface,rationale)
   returning * into ar;
 
-  update ops.work_request x
-     set state = 'ready', version = ar.result_version, updated_at = now(),
-         shape_disposition = 'not_required',
-         shape_fixed_surface_ref = ar.shape_fixed_surface_ref,
-         shape_rationale = ar.shape_rationale,
-         shape_decided_by_actor_id = a.id,
-         shape_decided_at = ar.accepted_at
-   where x.id = w.id;
-  select x.* into w from ops.work_request x where x.id = w.id;
+  if preserve_shape then
+    insert into ops.sourced_work_request_plan_shape_binding_receipt
+      (plan_acceptance_receipt_id,work_request_id,disposition,fixed_surface_ref,rationale,decided_by_actor_id,decided_at)
+    values (ar.id,w.id,w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at);
+    applied_disposition := w.shape_disposition; applied_fixed_surface := w.shape_fixed_surface_ref;
+    applied_rationale := w.shape_rationale; applied_actor_id := w.shape_decided_by_actor_id; applied_at := w.shape_decided_at;
+  else
+    applied_disposition := 'not_required'; applied_fixed_surface := ar.shape_fixed_surface_ref;
+    applied_rationale := ar.shape_rationale; applied_actor_id := a.id; applied_at := ar.accepted_at;
+  end if;
+
+  update ops.work_request x set state='ready',version=ar.result_version,updated_at=now(),
+    shape_disposition=applied_disposition,shape_fixed_surface_ref=applied_fixed_surface,
+    shape_rationale=applied_rationale,shape_decided_by_actor_id=applied_actor_id,shape_decided_at=applied_at
+   where x.id=w.id;
+  select x.* into w from ops.work_request x where x.id=w.id;
   return query select w.id,w.ref,w.state,w.version,p.id,p.plan_ref,p.plan_hash,
     a.slug,ar.accepted_at,w.shape_disposition,w.shape_fixed_surface_ref,false;
 end;
@@ -1750,8 +1768,8 @@ SET default_table_access_method = heap;
 
 CREATE TABLE ops.job (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    definition_key text CONSTRAINT job_definition_key_not_null1 NOT NULL,
-    definition_version integer CONSTRAINT job_definition_version_not_null1 NOT NULL,
+    definition_key text NOT NULL,
+    definition_version integer NOT NULL,
     correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
     idempotency_key text NOT NULL,
     scheduled_for timestamp with time zone NOT NULL,
@@ -4024,7 +4042,7 @@ CREATE TABLE ops.calendar_prebrief_canary_receipt (
     snapshot_at timestamp with time zone NOT NULL,
     allowlist_revision_id uuid NOT NULL,
     source_attestation_id uuid NOT NULL,
-    canonical_event_digest text CONSTRAINT calendar_prebrief_canary_receip_canonical_event_digest_not_null NOT NULL,
+    canonical_event_digest text NOT NULL,
     event_count integer NOT NULL,
     captured_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT calendar_prebrief_canary_receipt_attempt_check CHECK ((attempt > 0)),
@@ -4132,13 +4150,13 @@ CREATE TABLE ops.calendar_prebrief_projection_receipt (
     attempt integer NOT NULL,
     sponsor text NOT NULL,
     snapshot_at timestamp with time zone NOT NULL,
-    allowlist_revision_id uuid CONSTRAINT calendar_prebrief_projection_rec_allowlist_revision_id_not_null NOT NULL,
+    allowlist_revision_id uuid NOT NULL,
     allowlist_digest text NOT NULL,
     snapshot_digest text NOT NULL,
     event_count integer NOT NULL,
     participant_count integer NOT NULL,
     captured_at timestamp with time zone DEFAULT now() NOT NULL,
-    source_attestation_id uuid CONSTRAINT calendar_prebrief_projection_rec_source_attestation_id_not_null NOT NULL,
+    source_attestation_id uuid NOT NULL,
     CONSTRAINT calendar_prebrief_projection_receipt_allowlist_digest_check CHECK ((allowlist_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT calendar_prebrief_projection_receipt_attempt_check CHECK ((attempt > 0)),
     CONSTRAINT calendar_prebrief_projection_receipt_event_count_check CHECK ((event_count >= 0)),
@@ -5244,140 +5262,99 @@ CREATE FUNCTION ops.propose_sourced_work_request_plan(p_work_request text, p_bas
     SET search_path TO 'pg_catalog', 'ops'
     AS $_$
 declare
-  w ops.work_request%rowtype;
-  p ops.sourced_work_request_plan%rowtype;
+  w ops.work_request%rowtype; p ops.sourced_work_request_plan%rowtype;
   rb_section_id uuid; rb_revision_id uuid; rb_content_hash text;
-  normalized_scope text; normalized_runbook text;
-  normalized_recovery text; normalized_observability text;
+  normalized_scope text; normalized_runbook text; normalized_recovery text; normalized_observability text;
   next_plan_version integer; canonical_preimage jsonb; canonical_hash text;
 begin
-  normalized_scope := btrim(p_scope_summary);
-  normalized_runbook := btrim(p_runbook_ref);
-  normalized_recovery := btrim(p_recovery_ref);
-  normalized_observability := btrim(p_observability_ref);
+  normalized_scope := btrim(p_scope_summary); normalized_runbook := btrim(p_runbook_ref);
+  normalized_recovery := btrim(p_recovery_ref); normalized_observability := btrim(p_observability_ref);
   if p_idempotency_key is null or p_base_version is null or p_base_version < 1
-     or coalesce(normalized_scope, '') = '' or char_length(normalized_scope) > 1000
-     or coalesce(normalized_runbook, '') !~ '^doctrine:runbook#[a-z0-9][a-z0-9-]*$'
-     or coalesce(normalized_recovery, '') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
-     or char_length(normalized_recovery) > 300
-     or coalesce(normalized_observability, '') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
-     or char_length(normalized_observability) > 300 then
+     or coalesce(normalized_scope,'') = '' or char_length(normalized_scope) > 1000
+     or coalesce(normalized_runbook,'') !~ '^doctrine:runbook#[a-z0-9][a-z0-9-]*$'
+     or coalesce(normalized_recovery,'') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$' or char_length(normalized_recovery) > 300
+     or coalesce(normalized_observability,'') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$' or char_length(normalized_observability) > 300 then
     raise exception 'invalid bounded sourced plan';
   end if;
-  if jsonb_typeof(p_dependency_refs) is distinct from 'array'
-     or jsonb_array_length(p_dependency_refs) > 12
-     or exists (select 1 from jsonb_array_elements(p_dependency_refs) v
-                 where jsonb_typeof(v) <> 'string'
-                    or v #>> '{}' !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
-                    or char_length(v #>> '{}') > 300)
-     or exists (select v #>> '{}' from jsonb_array_elements(p_dependency_refs) v
-                 group by v #>> '{}' having count(*) > 1) then
+  if jsonb_typeof(p_dependency_refs) is distinct from 'array' or jsonb_array_length(p_dependency_refs) > 12
+     or exists (select 1 from jsonb_array_elements(p_dependency_refs) v where jsonb_typeof(v) <> 'string' or v #>> '{}' !~ '^safe:[a-z0-9][a-z0-9:_./-]*$' or char_length(v #>> '{}') > 300)
+     or exists (select v #>> '{}' from jsonb_array_elements(p_dependency_refs) v group by v #>> '{}' having count(*) > 1) then
     raise exception 'invalid bounded sourced plan dependency references';
   end if;
   if jsonb_typeof(p_caps) is distinct from 'object'
-     or (select array_agg(k order by k) from jsonb_object_keys(p_caps) k)
-        is distinct from array['max_duration_minutes','max_steps']::text[]
-     or coalesce(p_caps->>'max_steps','') !~ '^[0-9]+$'
-     or coalesce(p_caps->>'max_duration_minutes','') !~ '^[0-9]+$' then
-    raise exception 'invalid bounded sourced plan caps';
-  end if;
-  if (p_caps->>'max_steps')::integer not between 1 and 20
-     or (p_caps->>'max_duration_minutes')::integer not between 1 and 120 then
+     or (select array_agg(k order by k) from jsonb_object_keys(p_caps) k) is distinct from array['max_duration_minutes','max_steps']::text[]
+     or coalesce(p_caps->>'max_steps','') !~ '^[0-9]+$' or coalesce(p_caps->>'max_duration_minutes','') !~ '^[0-9]+$'
+     or (p_caps->>'max_steps')::integer not between 1 and 20 or (p_caps->>'max_duration_minutes')::integer not between 1 and 120 then
     raise exception 'invalid bounded sourced plan caps';
   end if;
 
   perform pg_advisory_xact_lock(hashtextextended('program6-plan-proposal:' || p_idempotency_key, 0));
-  select x.* into p from ops.sourced_work_request_plan x
-   where x.idempotency_key = p_idempotency_key for share;
+  select x.* into p from ops.sourced_work_request_plan x where x.idempotency_key=p_idempotency_key for share;
   if found then
-    select x.* into w from ops.work_request x where x.id = p.work_request_id for share;
-    if not found or w.ref is distinct from p_work_request
-       or p.work_request_version is distinct from p_base_version
-       or p.scope_summary is distinct from normalized_scope
-       or p.runbook_ref is distinct from normalized_runbook
-       or p.dependency_refs is distinct from p_dependency_refs
-       or p.recovery_ref is distinct from normalized_recovery
-       or p.observability_ref is distinct from normalized_observability
-       or p.caps is distinct from p_caps then
+    select x.* into w from ops.work_request x where x.id=p.work_request_id for share;
+    if not found or w.ref is distinct from p_work_request or p.work_request_version is distinct from p_base_version
+       or p.scope_summary is distinct from normalized_scope or p.runbook_ref is distinct from normalized_runbook
+       or p.dependency_refs is distinct from p_dependency_refs or p.recovery_ref is distinct from normalized_recovery
+       or p.observability_ref is distinct from normalized_observability or p.caps is distinct from p_caps then
       raise exception 'idempotency key already names a different sourced plan proposal';
     end if;
-    return query select p.id, p.plan_ref, p.plan_hash, w.id, w.ref, 'triaged'::text,
-      p.work_request_version, p.runbook_ref, p.runbook_revision_id,
-      'sha256:' || p.runbook_content_hash, p.scope_summary, true;
+    return query select p.id,p.plan_ref,p.plan_hash,w.id,w.ref,'triaged'::text,p.work_request_version,
+      p.runbook_ref,p.runbook_revision_id,'sha256:' || p.runbook_content_hash,p.scope_summary,true;
     return;
   end if;
 
-  select x.* into w from ops.work_request x where x.ref = p_work_request for update;
-  if not found or w.state is distinct from 'triaged'
-     or w.version is distinct from p_base_version
-     or w.capture_idempotency_key is null
-     or w.organization_tenant_id is distinct from 'carr-internal'
-     or (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,
-         w.shape_decided_by_actor_id,w.shape_decided_at)
-        is distinct from (null::text,null::text,null::text,null::uuid,null::timestamptz)
-     or exists (select 1 from ops.work_shape_revision sr where sr.work_request_id = w.id) then
-    raise exception 'exact unshaped triaged sourced Work Request required';
+  select x.* into w from ops.work_request x where x.ref=p_work_request for update;
+  if not found or w.state is distinct from 'triaged' or w.version is distinct from p_base_version
+     or w.capture_idempotency_key is null or w.organization_tenant_id is distinct from 'carr-internal' then
+    raise exception 'exact current triaged sourced Work Request required';
+  end if;
+  if not (
+    ((w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+       is not distinct from (null::text,null::text,null::text,null::uuid,null::timestamptz)
+      and not exists (select 1 from ops.work_shape_revision sr where sr.work_request_id=w.id))
+    or
+    (w.shape_disposition='required' and w.shape_fixed_surface_ref is null and w.shape_rationale is not null and btrim(w.shape_rationale) <> ''
+      and exists (select 1 from ops.sourced_work_request_shape_disposition_receipt r where r.work_request_id=w.id and r.result_version=w.version
+                    and (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+                        is not distinct from (r.disposition,r.fixed_surface_ref,r.rationale,r.decided_by_actor_id,r.decided_at))
+      and (select sr.work_request_version from ops.work_shape_revision sr where sr.work_request_id=w.id order by sr.version desc limit 1)=w.version)
+    or
+    (w.shape_disposition='not_required' and w.shape_fixed_surface_ref is not null and btrim(w.shape_fixed_surface_ref) <> ''
+      and w.shape_rationale is not null and btrim(w.shape_rationale) <> ''
+      and exists (select 1 from ops.sourced_work_request_shape_disposition_receipt r where r.work_request_id=w.id and r.result_version=w.version
+                    and (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+                        is not distinct from (r.disposition,r.fixed_surface_ref,r.rationale,r.decided_by_actor_id,r.decided_at))
+      and not exists (select 1 from ops.work_shape_revision sr where sr.work_request_id=w.id))
+  ) then
+    raise exception 'exact unshaped or current receipt-backed shaped triaged sourced Work Request required';
   end if;
 
-  perform 1
-    from public.doctrine_document source_document
-    join public.doctrine_section source_section on source_section.document_id = source_document.id
-    join public.doctrine_revision source_revision
-      on source_revision.id = source_section.current_revision_id
-     and source_revision.section_id = source_section.id
-   where source_document.visibility = 'shared' and source_section.status = 'active'
-     and source_section.id = w.doctrine_section_id
-     and source_revision.id = w.doctrine_revision_id
-     and source_revision.content_hash ~ '^[0-9a-f]{64}$'
-     and encode(public.digest(source_revision.plain_text,'sha256'),'hex') = source_revision.content_hash
-     and source_revision.body = jsonb_build_object('text',source_revision.plain_text)
-   for share of source_document, source_section, source_revision;
-  if not found then
-    raise exception 'sourced Work Request evidence is no longer exact, current, active, and shared';
-  end if;
-
-  select s.id, r.id, r.content_hash
-    into rb_section_id, rb_revision_id, rb_content_hash
-    from public.doctrine_document d
-    join public.doctrine_section s on s.document_id = d.id
-    join public.doctrine_revision r on r.id = s.current_revision_id and r.section_id = s.id
-   where d.slug = 'runbook' and d.visibility = 'shared' and s.status = 'active'
-     and ('doctrine:' || d.slug || '#' || s.section_key) = normalized_runbook
-     and r.content_hash ~ '^[0-9a-f]{64}$'
-     and encode(public.digest(r.plain_text,'sha256'),'hex') = r.content_hash
-     and r.body = jsonb_build_object('text',r.plain_text)
-   for share of d, s, r;
-  if not found then
-    raise exception 'runbook must be an exact current active shared doctrine revision';
-  end if;
-
-  select coalesce(max(x.plan_version),0) + 1 into next_plan_version
-    from ops.sourced_work_request_plan x where x.work_request_id = w.id;
-  canonical_preimage := ops.sourced_work_request_plan_preimage(
-    w.id, normalized_scope, normalized_runbook, rb_section_id, rb_revision_id,
-    rb_content_hash, p_dependency_refs, normalized_recovery,
-    normalized_observability, p_caps);
+  perform 1 from public.doctrine_document source_document join public.doctrine_section source_section on source_section.document_id=source_document.id
+    join public.doctrine_revision source_revision on source_revision.id=source_section.current_revision_id and source_revision.section_id=source_section.id
+   where source_document.visibility='shared' and source_section.status='active' and source_section.id=w.doctrine_section_id
+     and source_revision.id=w.doctrine_revision_id and source_revision.content_hash ~ '^[0-9a-f]{64}$'
+     and encode(public.digest(source_revision.plain_text,'sha256'),'hex')=source_revision.content_hash
+     and source_revision.body=jsonb_build_object('text',source_revision.plain_text)
+   for share of source_document,source_section,source_revision;
+  if not found then raise exception 'sourced Work Request evidence is no longer exact, current, active, and shared'; end if;
+  select s.id,r.id,r.content_hash into rb_section_id,rb_revision_id,rb_content_hash
+    from public.doctrine_document d join public.doctrine_section s on s.document_id=d.id
+    join public.doctrine_revision r on r.id=s.current_revision_id and r.section_id=s.id
+   where d.slug='runbook' and d.visibility='shared' and s.status='active'
+     and ('doctrine:' || d.slug || '#' || s.section_key)=normalized_runbook and r.content_hash ~ '^[0-9a-f]{64}$'
+     and encode(public.digest(r.plain_text,'sha256'),'hex')=r.content_hash and r.body=jsonb_build_object('text',r.plain_text)
+   for share of d,s,r;
+  if not found then raise exception 'runbook must be an exact current active shared doctrine revision'; end if;
+  select coalesce(max(x.plan_version),0)+1 into next_plan_version from ops.sourced_work_request_plan x where x.work_request_id=w.id;
+  canonical_preimage := ops.sourced_work_request_plan_preimage(w.id,normalized_scope,normalized_runbook,rb_section_id,rb_revision_id,rb_content_hash,p_dependency_refs,normalized_recovery,normalized_observability,p_caps);
   canonical_hash := ops.sourced_work_request_plan_digest(canonical_preimage);
-  if exists (select 1 from ops.sourced_work_request_plan x
-              where x.work_request_id = w.id and x.plan_hash = canonical_hash) then
+  if exists (select 1 from ops.sourced_work_request_plan x where x.work_request_id=w.id and x.plan_hash=canonical_hash) then
     raise exception 'the exact sourced plan already exists under a different idempotency key';
   end if;
-
-  insert into ops.sourced_work_request_plan
-    (work_request_id,plan_version,idempotency_key,work_request_version,preimage,
-     scope_summary,runbook_ref,runbook_section_id,runbook_revision_id,
-     runbook_content_hash,dependency_refs,recovery_ref,observability_ref,caps,
-     plan_hash,plan_ref)
-  values
-    (w.id,next_plan_version,p_idempotency_key,w.version,canonical_preimage,
-     normalized_scope,normalized_runbook,rb_section_id,rb_revision_id,
-     rb_content_hash,p_dependency_refs,normalized_recovery,normalized_observability,
-     p_caps,canonical_hash,
-     'PLAN-' || substr(canonical_hash,8,12) || '-v' || next_plan_version)
+  insert into ops.sourced_work_request_plan (work_request_id,plan_version,idempotency_key,work_request_version,preimage,scope_summary,runbook_ref,runbook_section_id,runbook_revision_id,runbook_content_hash,dependency_refs,recovery_ref,observability_ref,caps,plan_hash,plan_ref)
+  values (w.id,next_plan_version,p_idempotency_key,w.version,canonical_preimage,normalized_scope,normalized_runbook,rb_section_id,rb_revision_id,rb_content_hash,p_dependency_refs,normalized_recovery,normalized_observability,p_caps,canonical_hash,'PLAN-' || substr(canonical_hash,8,12) || '-v' || next_plan_version)
   returning * into p;
-  return query select p.id, p.plan_ref, p.plan_hash, w.id, w.ref, w.state,
-    w.version, p.runbook_ref, p.runbook_revision_id,
-    'sha256:' || p.runbook_content_hash, p.scope_summary, false;
+  return query select p.id,p.plan_ref,p.plan_hash,w.id,w.ref,w.state,w.version,p.runbook_ref,p.runbook_revision_id,'sha256:' || p.runbook_content_hash,p.scope_summary,false;
 end;
 $_$;
 
@@ -5731,22 +5708,22 @@ CREATE TABLE ops.calendar_prebrief_source_attestation_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     job_id uuid NOT NULL,
     attempt integer NOT NULL,
-    lease_token uuid CONSTRAINT calendar_prebrief_source_attestation_recei_lease_token_not_null NOT NULL,
+    lease_token uuid NOT NULL,
     sponsor text NOT NULL,
-    attestor_identity text CONSTRAINT calendar_prebrief_source_attestation_attestor_identity_not_null NOT NULL,
+    attestor_identity text NOT NULL,
     mode text NOT NULL,
-    destination text CONSTRAINT calendar_prebrief_source_attestation_recei_destination_not_null NOT NULL,
-    snapshot_at timestamp with time zone CONSTRAINT calendar_prebrief_source_attestation_recei_snapshot_at_not_null NOT NULL,
-    allowlist_revision_id uuid CONSTRAINT calendar_prebrief_source_attesta_allowlist_revision_id_not_null NOT NULL,
-    capture_challenge_id uuid CONSTRAINT calendar_prebrief_source_attestat_capture_challenge_id_not_null NOT NULL,
-    allowlist_digest text CONSTRAINT calendar_prebrief_source_attestation__allowlist_digest_not_null NOT NULL,
-    observed_calendar_keys text[] CONSTRAINT calendar_prebrief_source_attest_observed_calendar_keys_not_null NOT NULL,
-    event_count integer CONSTRAINT calendar_prebrief_source_attestation_recei_event_count_not_null NOT NULL,
-    canonical_event_digest text CONSTRAINT calendar_prebrief_source_attest_canonical_event_digest_not_null NOT NULL,
-    collector_key_fingerprint text CONSTRAINT calendar_prebrief_source_att_collector_key_fingerprint_not_null NOT NULL,
-    signature_sha256 text CONSTRAINT calendar_prebrief_source_attestation__signature_sha256_not_null NOT NULL,
-    collector_version text CONSTRAINT calendar_prebrief_source_attestation_collector_version_not_null NOT NULL,
-    attested_at timestamp with time zone DEFAULT now() CONSTRAINT calendar_prebrief_source_attestation_recei_attested_at_not_null NOT NULL,
+    destination text NOT NULL,
+    snapshot_at timestamp with time zone NOT NULL,
+    allowlist_revision_id uuid NOT NULL,
+    capture_challenge_id uuid NOT NULL,
+    allowlist_digest text NOT NULL,
+    observed_calendar_keys text[] NOT NULL,
+    event_count integer NOT NULL,
+    canonical_event_digest text NOT NULL,
+    collector_key_fingerprint text NOT NULL,
+    signature_sha256 text NOT NULL,
+    collector_version text NOT NULL,
+    attested_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT calendar_prebrief_source_attest_collector_key_fingerprint_check CHECK ((collector_key_fingerprint ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT calendar_prebrief_source_attestati_canonical_event_digest_check CHECK ((canonical_event_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT calendar_prebrief_source_attestation_re_attestor_identity_check CHECK ((attestor_identity = ANY (ARRAY['carr_calendar_prebrief_attestor_joe'::text, 'carr_calendar_prebrief_attestor_dell'::text]))),
@@ -6265,7 +6242,7 @@ CREATE TABLE ops.nightly_availability_canary_receipt (
     job_id uuid NOT NULL,
     attempt integer NOT NULL,
     source_snapshot_id uuid NOT NULL,
-    source_snapshot_digest text CONSTRAINT nightly_availability_canary_rec_source_snapshot_digest_not_null NOT NULL,
+    source_snapshot_digest text NOT NULL,
     availability_count integer NOT NULL,
     open_search_count integer NOT NULL,
     match_count integer NOT NULL,
@@ -7216,12 +7193,12 @@ end $$;
 --
 
 CREATE TABLE public.candidate_pool (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT prospect_pool_id_not_null NOT NULL,
-    source text CONSTRAINT prospect_pool_source_not_null NOT NULL,
-    source_key text CONSTRAINT prospect_pool_source_key_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source text NOT NULL,
+    source_key text NOT NULL,
     source_seq integer,
-    source_row jsonb CONSTRAINT prospect_pool_source_row_not_null NOT NULL,
-    name text CONSTRAINT prospect_pool_name_not_null NOT NULL,
+    source_row jsonb NOT NULL,
+    name text NOT NULL,
     org_name text,
     vertical text,
     address text,
@@ -7236,19 +7213,19 @@ CREATE TABLE public.candidate_pool (
     score_basis text,
     est_lease_event date,
     est_basis text,
-    status text DEFAULT 'pool'::text CONSTRAINT prospect_pool_status_not_null NOT NULL,
+    status text DEFAULT 'pool'::text NOT NULL,
     promoted_lead_id uuid,
     dup_tier text,
     dup_subject_type text,
     dup_subject_id uuid,
     dup_ref text,
     dup_basis text,
-    dup_do_not_contact boolean DEFAULT false CONSTRAINT prospect_pool_dup_do_not_contact_not_null NOT NULL,
-    version integer DEFAULT 1 CONSTRAINT prospect_pool_version_not_null NOT NULL,
-    created_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_created_at_not_null NOT NULL,
-    created_by uuid CONSTRAINT prospect_pool_created_by_not_null NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_updated_at_not_null NOT NULL,
-    updated_by uuid CONSTRAINT prospect_pool_updated_by_not_null NOT NULL,
+    dup_do_not_contact boolean DEFAULT false NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by uuid NOT NULL,
     declined_at timestamp with time zone,
     declined_by uuid,
     decline_reason text,
@@ -7311,7 +7288,7 @@ CREATE TABLE ops.calendar_prebrief_allowlist_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     sponsor text NOT NULL,
     calendar_keys text[] NOT NULL,
-    configuration_digest text CONSTRAINT calendar_prebrief_allowlist_recei_configuration_digest_not_null NOT NULL,
+    configuration_digest text NOT NULL,
     configured_at timestamp with time zone DEFAULT now() NOT NULL,
     configured_by text NOT NULL,
     CONSTRAINT calendar_prebrief_allowlist_receipt_calendar_keys_check CHECK ((cardinality(calendar_keys) > 0)),
@@ -7974,6 +7951,102 @@ $$;
 
 
 --
+-- Name: set_sourced_work_request_shape_disposition(text, integer, text, text, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) RETURNS TABLE(work_request_id uuid, ref text, state text, version integer, shape_disposition text, shape_fixed_surface_ref text, shape_rationale text, shape_decided_by_actor_id uuid, shape_decided_at timestamp with time zone, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+declare
+  w ops.work_request%rowtype;
+  receipt ops.sourced_work_request_shape_disposition_receipt%rowtype;
+  actor public.actor%rowtype;
+  normalized_fixed_surface text := nullif(btrim(coalesce(p_fixed_surface_ref,'')), '');
+  normalized_rationale text := nullif(btrim(coalesce(p_rationale,'')), '');
+begin
+  if coalesce(btrim(p_work_request),'') !~ '^WR-[0-9]{1,12}$'
+     or p_base_version is null or p_base_version < 1
+     or p_disposition not in ('required','not_required')
+     or normalized_rationale is null
+     or p_decided_by_actor_id is null
+     or p_idempotency_key is null
+     or (p_disposition = 'required' and normalized_fixed_surface is not null)
+     or (p_disposition = 'not_required' and normalized_fixed_surface is null) then
+    raise exception 'sourced shape disposition requires exact Work Request/base version, closed disposition, exact fixed surface rule, rationale, active actor, and UUID idempotency key';
+  end if;
+
+  select a.* into actor from public.actor a
+   where a.id = p_decided_by_actor_id and a.active
+   for share;
+  if not found then
+    raise exception 'sourced shape disposition actor is not active';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('program6-sourced-shape-disposition:' || p_idempotency_key, 0));
+  select r.* into receipt
+    from ops.sourced_work_request_shape_disposition_receipt r
+   where r.idempotency_key = p_idempotency_key
+   for share;
+  if found then
+    select x.* into w from ops.work_request x where x.id = receipt.work_request_id for share;
+    if not found
+       or w.ref is distinct from p_work_request
+       or receipt.base_version is distinct from p_base_version
+       or receipt.disposition is distinct from p_disposition
+       or receipt.fixed_surface_ref is distinct from normalized_fixed_surface
+       or receipt.rationale is distinct from normalized_rationale
+       or receipt.decided_by_actor_id is distinct from p_decided_by_actor_id
+       or w.state is distinct from 'triaged'
+       or w.version is distinct from receipt.result_version
+       or (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+          is distinct from
+          (receipt.disposition,receipt.fixed_surface_ref,receipt.rationale,receipt.decided_by_actor_id,receipt.decided_at) then
+      raise exception 'idempotency key already names a different sourced shape disposition';
+    end if;
+    return query select w.id,w.ref,w.state,w.version,w.shape_disposition,w.shape_fixed_surface_ref,
+      w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at,true;
+    return;
+  end if;
+
+  select x.* into w from ops.work_request x
+   where x.ref = p_work_request
+   for update;
+  if not found
+     or w.capture_idempotency_key is null
+     or w.organization_tenant_id is distinct from 'carr-internal'
+     or w.state is distinct from 'triaged'
+     or w.version is distinct from p_base_version
+     or w.program_key is not null or w.program_ordinal is not null
+     or (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+        is distinct from (null::text,null::text,null::text,null::uuid,null::timestamptz)
+     or exists (select 1 from ops.work_shape_revision sr where sr.work_request_id = w.id) then
+    raise exception 'only the exact current unshaped triaged sourced Work Request may record a shape disposition';
+  end if;
+
+  insert into ops.sourced_work_request_shape_disposition_receipt
+    (work_request_id,idempotency_key,base_version,result_version,disposition,fixed_surface_ref,rationale,decided_by_actor_id)
+  values
+    (w.id,p_idempotency_key,p_base_version,w.version + 1,p_disposition,normalized_fixed_surface,normalized_rationale,p_decided_by_actor_id)
+  returning * into receipt;
+
+  update ops.work_request x
+     set shape_disposition = receipt.disposition,
+         shape_fixed_surface_ref = receipt.fixed_surface_ref,
+         shape_rationale = receipt.rationale,
+         shape_decided_by_actor_id = receipt.decided_by_actor_id,
+         shape_decided_at = receipt.decided_at,
+         version = receipt.result_version,
+         updated_at = now()
+   where x.id = w.id;
+  select x.* into w from ops.work_request x where x.id = w.id;
+  return query select w.id,w.ref,w.state,w.version,w.shape_disposition,w.shape_fixed_surface_ref,
+    w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at,false;
+end;
+$_$;
+
+
+--
 -- Name: settle_job_cost(uuid, uuid, uuid, integer, integer, numeric); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -8053,10 +8126,24 @@ begin
      and exists (
        select 1 from ops.work_request_triage_receipt r
         where r.work_request_id = old.id and r.base_version = old.version
-          and r.result_version = new.version
-          and r.classification = new.triage_classification
-          and r.triaged_by_actor_id = new.triaged_by_actor_id
-          and r.triaged_at = new.triaged_at
+          and r.result_version = new.version and r.classification = new.triage_classification
+          and r.triaged_by_actor_id = new.triaged_by_actor_id and r.triaged_at = new.triaged_at
+     ) then
+    return new;
+  end if;
+
+  if old.state = 'triaged'
+     and new.state = 'triaged'
+     and new.version = old.version + 1
+     and (to_jsonb(new) - array['shape_disposition','shape_fixed_surface_ref','shape_rationale','shape_decided_by_actor_id','shape_decided_at','version','updated_at'])
+           is not distinct from
+         (to_jsonb(old) - array['shape_disposition','shape_fixed_surface_ref','shape_rationale','shape_decided_by_actor_id','shape_decided_at','version','updated_at'])
+     and exists (
+       select 1 from ops.sourced_work_request_shape_disposition_receipt r
+        where r.work_request_id = old.id and r.base_version = old.version and r.result_version = new.version
+          and (new.shape_disposition,new.shape_fixed_surface_ref,new.shape_rationale,new.shape_decided_by_actor_id,new.shape_decided_at)
+             is not distinct from
+             (r.disposition,r.fixed_surface_ref,r.rationale,r.decided_by_actor_id,r.decided_at)
      ) then
     return new;
   end if;
@@ -8071,20 +8158,31 @@ begin
        select 1
          from ops.sourced_work_request_plan_acceptance_receipt ar
          join ops.sourced_work_request_plan p on p.id = ar.plan_id
+         left join ops.sourced_work_request_plan_shape_binding_receipt b
+           on b.plan_acceptance_receipt_id = ar.id
         where ar.work_request_id = old.id and ar.base_version = old.version
           and ar.result_version = new.version and ar.plan_hash = p.plan_hash
-          and new.shape_disposition = 'not_required'
-          and new.shape_fixed_surface_ref = ar.shape_fixed_surface_ref
-          and new.shape_fixed_surface_ref = ('sourced-plan:' || p.plan_ref || '#' || p.plan_hash)
-          and new.shape_rationale = ar.shape_rationale
-          and new.shape_rationale = ('Accepted immutable plan ' || p.plan_ref || ' for ' || p.runbook_ref || ' at sha256:' || p.runbook_content_hash)
-          and new.shape_decided_by_actor_id = ar.accepted_by_actor_id
-          and new.shape_decided_at = ar.accepted_at
+          and (
+            (b.id is null
+             and new.shape_disposition = 'not_required'
+             and new.shape_fixed_surface_ref = ar.shape_fixed_surface_ref
+             and new.shape_fixed_surface_ref = ('sourced-plan:' || p.plan_ref || '#' || p.plan_hash)
+             and new.shape_rationale = ar.shape_rationale
+             and new.shape_rationale = ('Accepted immutable plan ' || p.plan_ref || ' for ' || p.runbook_ref || ' at sha256:' || p.runbook_content_hash)
+             and new.shape_decided_by_actor_id = ar.accepted_by_actor_id
+             and new.shape_decided_at = ar.accepted_at)
+            or
+            (b.id is not null
+             and b.work_request_id = old.id
+             and (new.shape_disposition,new.shape_fixed_surface_ref,new.shape_rationale,new.shape_decided_by_actor_id,new.shape_decided_at)
+                 is not distinct from
+                 (b.disposition,b.fixed_surface_ref,b.rationale,b.decided_by_actor_id,b.decided_at))
+          )
      ) then
     return new;
   end if;
 
-  raise exception 'sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged or triaged-to-ready transitions';
+  raise exception 'sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, or triaged-to-ready transitions';
 end;
 $$;
 
@@ -8196,6 +8294,20 @@ with base as (
       from jsonb_array_elements(compiler_items) with ordinality as x(value,ordinal)),
     'base_plan_digest','sha256:'||encode(public.digest(ops.guidance_import_canonical_json(preimage),'sha256'),'hex')
   ), 'context_activation_items',compiler_items) from item;
+$$;
+
+
+--
+-- Name: sourced_work_shape_receipts_are_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.sourced_work_shape_receipts_are_immutable() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+begin
+  raise exception 'sourced Work Request shape receipts are append-only';
+end;
 $$;
 
 
@@ -10386,7 +10498,7 @@ CREATE TABLE ops.accepted_eval_golden_membership (
 
 CREATE TABLE ops.activation_reliability_telemetry (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    organization_tenant_id text CONSTRAINT activation_reliability_telemetr_organization_tenant_id_not_null NOT NULL,
+    organization_tenant_id text NOT NULL,
     attempt_receipt_id uuid NOT NULL,
     signal_id text NOT NULL,
     trigger_ref text NOT NULL,
@@ -10430,26 +10542,26 @@ CREATE TABLE ops.attempt_receipt (
 
 CREATE TABLE ops.attempt_receipt_evaluation_attestation (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    organization_tenant_id text CONSTRAINT attempt_receipt_evaluation_atte_organization_tenant_id_not_null NOT NULL,
-    attempt_receipt_id uuid CONSTRAINT attempt_receipt_evaluation_attestat_attempt_receipt_id_not_null NOT NULL,
+    organization_tenant_id text NOT NULL,
+    attempt_receipt_id uuid NOT NULL,
     evaluator_kind text NOT NULL,
     check_ref text DEFAULT ''::text NOT NULL,
     dimension_refs jsonb NOT NULL,
-    evaluator_policy_digest text CONSTRAINT attempt_receipt_evaluation_att_evaluator_policy_digest_not_null NOT NULL,
+    evaluator_policy_digest text NOT NULL,
     evaluator_ref text DEFAULT 'evaluator:unspecified'::text NOT NULL,
     rubric_ref text DEFAULT 'rubric:unspecified'::text NOT NULL,
-    evaluator_version text DEFAULT 'version:unspecified'::text CONSTRAINT attempt_receipt_evaluation_attestati_evaluator_version_not_null NOT NULL,
-    evaluator_digest text DEFAULT 'sha256:0000000000000000000000000000000000000000000000000000000000000000'::text CONSTRAINT attempt_receipt_evaluation_attestatio_evaluator_digest_not_null NOT NULL,
+    evaluator_version text DEFAULT 'version:unspecified'::text NOT NULL,
+    evaluator_digest text DEFAULT 'sha256:0000000000000000000000000000000000000000000000000000000000000000'::text NOT NULL,
     confidence text DEFAULT 'unknown'::text NOT NULL,
-    held_out_case_count integer DEFAULT 0 CONSTRAINT attempt_receipt_evaluation_attesta_held_out_case_count_not_null NOT NULL,
-    calibration_refs jsonb DEFAULT '[]'::jsonb CONSTRAINT attempt_receipt_evaluation_attestatio_calibration_refs_not_null NOT NULL,
+    held_out_case_count integer DEFAULT 0 NOT NULL,
+    calibration_refs jsonb DEFAULT '[]'::jsonb NOT NULL,
     lower_bound_ref text,
     outcome_feedback_ref text,
     outcome_feedback_hash text,
     status text NOT NULL,
     independent boolean DEFAULT false NOT NULL,
     evidence_refs jsonb NOT NULL,
-    attested_by_actor_id uuid CONSTRAINT attempt_receipt_evaluation_attest_attested_by_actor_id_not_null NOT NULL,
+    attested_by_actor_id uuid NOT NULL,
     idempotency_key uuid NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT attempt_receipt_evaluation_attest_evaluator_policy_digest_check CHECK ((evaluator_policy_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
@@ -10516,7 +10628,7 @@ CREATE TABLE ops.calendar_canary_source_snapshot (
 CREATE TABLE ops.calendar_prebrief_allowed_calendar (
     sponsor text NOT NULL,
     calendar_keys text[] NOT NULL,
-    configuration_digest text CONSTRAINT calendar_prebrief_allowed_calenda_configuration_digest_not_null NOT NULL,
+    configuration_digest text NOT NULL,
     active_revision_id uuid NOT NULL,
     configured_at timestamp with time zone DEFAULT now() NOT NULL,
     configured_by text NOT NULL,
@@ -10562,7 +10674,7 @@ CREATE TABLE ops.calendar_prebrief_capture_challenge (
     scheduled_for timestamp with time zone NOT NULL,
     window_starts_at timestamp with time zone NOT NULL,
     window_ends_at timestamp with time zone NOT NULL,
-    allowlist_revision_id uuid CONSTRAINT calendar_prebrief_capture_challe_allowlist_revision_id_not_null NOT NULL,
+    allowlist_revision_id uuid NOT NULL,
     allowlist_digest text NOT NULL,
     calendar_keys text[] NOT NULL,
     issued_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -10592,7 +10704,7 @@ CREATE TABLE ops.calendar_prebrief_projection_event (
     title character varying(240) NOT NULL,
     location character varying(240),
     snapshot_at timestamp with time zone NOT NULL,
-    allowlist_revision_id uuid CONSTRAINT calendar_prebrief_projection_eve_allowlist_revision_id_not_null NOT NULL,
+    allowlist_revision_id uuid NOT NULL,
     captured_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT calendar_prebrief_projection_event_calendar_key_check CHECK ((calendar_key ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT calendar_prebrief_projection_event_check CHECK ((ends_at > starts_at)),
@@ -10612,7 +10724,7 @@ CREATE TABLE ops.calendar_prebrief_projection_participant (
     party_id uuid NOT NULL,
     subject_type text NOT NULL,
     subject_id uuid NOT NULL,
-    participant_ref text CONSTRAINT calendar_prebrief_projection_participa_participant_ref_not_null NOT NULL,
+    participant_ref text NOT NULL,
     captured_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT calendar_prebrief_projection_participant_participant_ref_check CHECK ((participant_ref ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'::text)),
     CONSTRAINT calendar_prebrief_projection_participant_subject_type_check CHECK ((subject_type = ANY (ARRAY['lead'::text, 'client'::text, 'vendor'::text, 'party'::text])))
@@ -10626,10 +10738,10 @@ CREATE TABLE ops.calendar_prebrief_projection_participant (
 CREATE TABLE ops.calendar_prebrief_runtime_activation_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     sponsor text NOT NULL,
-    app_evidence_digest text CONSTRAINT calendar_prebrief_runtime_activati_app_evidence_digest_not_null NOT NULL,
-    allowlist_revision_id uuid CONSTRAINT calendar_prebrief_runtime_activa_allowlist_revision_id_not_null NOT NULL,
-    activated_by text CONSTRAINT calendar_prebrief_runtime_activation_rece_activated_by_not_null NOT NULL,
-    activated_at timestamp with time zone DEFAULT now() CONSTRAINT calendar_prebrief_runtime_activation_rece_activated_at_not_null NOT NULL,
+    app_evidence_digest text NOT NULL,
+    allowlist_revision_id uuid NOT NULL,
+    activated_by text NOT NULL,
+    activated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT calendar_prebrief_runtime_activation__app_evidence_digest_check CHECK ((app_evidence_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT calendar_prebrief_runtime_activation_receipt_activated_by_check CHECK ((activated_by = 'joe'::text)),
     CONSTRAINT calendar_prebrief_runtime_activation_receipt_sponsor_check CHECK ((sponsor = 'joe'::text))
@@ -11610,8 +11722,8 @@ CREATE TABLE ops.job_receipt (
 --
 
 CREATE TABLE ops.legacy_prior_staging_readback_allowlist (
-    idempotency_key uuid CONSTRAINT legacy_prior_staging_readback_allowlis_idempotency_key_not_null NOT NULL,
-    deployment_attempt_id uuid CONSTRAINT legacy_prior_staging_readback_al_deployment_attempt_id_not_null NOT NULL,
+    idempotency_key uuid NOT NULL,
+    deployment_attempt_id uuid NOT NULL,
     captured_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
 );
 
@@ -11743,11 +11855,11 @@ CREATE TABLE ops.nightly_availability_canary_source_snapshot (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     job_id uuid NOT NULL,
     attempt integer NOT NULL,
-    workflow_version integer CONSTRAINT nightly_availability_canary_source_sn_workflow_version_not_null NOT NULL,
+    workflow_version integer NOT NULL,
     snapshot jsonb NOT NULL,
-    snapshot_digest text CONSTRAINT nightly_availability_canary_source_sna_snapshot_digest_not_null NOT NULL,
-    availability_count integer CONSTRAINT nightly_availability_canary_source__availability_count_not_null NOT NULL,
-    open_search_count integer CONSTRAINT nightly_availability_canary_source_s_open_search_count_not_null NOT NULL,
+    snapshot_digest text NOT NULL,
+    availability_count integer NOT NULL,
+    open_search_count integer NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT nightly_availability_canary_source_sna_availability_count_check CHECK ((availability_count >= 0)),
     CONSTRAINT nightly_availability_canary_source_snap_open_search_count_check CHECK ((open_search_count >= 0)),
@@ -11791,13 +11903,13 @@ CREATE TABLE ops.npi_device_evidence_receipt (
 
 CREATE TABLE ops.program6_browser_action_challenge_redemption (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token_digest text CONSTRAINT program6_browser_action_challenge_redempt_token_digest_not_null NOT NULL,
-    session_digest text CONSTRAINT program6_browser_action_challenge_redem_session_digest_not_null NOT NULL,
+    token_digest text NOT NULL,
+    session_digest text NOT NULL,
     action text NOT NULL,
-    material_digest text CONSTRAINT program6_browser_action_challenge_rede_material_digest_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT program6_browser_action_challenge_rede_idempotency_key_not_null NOT NULL,
-    redeemed_by_actor_id uuid CONSTRAINT program6_browser_action_challenge_redeemed_by_actor_id_not_null NOT NULL,
-    redeemed_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT program6_browser_action_challenge_redempti_redeemed_at_not_null NOT NULL,
+    material_digest text NOT NULL,
+    idempotency_key uuid NOT NULL,
+    redeemed_by_actor_id uuid NOT NULL,
+    redeemed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT program6_browser_action_challenge_redempt_material_digest_check CHECK ((material_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redempti_session_digest_check CHECK ((session_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redemption_action_check CHECK ((action = ANY (ARRAY['accept-ready-plan'::text, 'accept-outcome-feedback'::text]))),
@@ -12494,19 +12606,19 @@ CREATE TABLE ops.sourced_work_request_outcome_feedback (
     work_request_id uuid NOT NULL,
     feedback_version integer NOT NULL,
     idempotency_key uuid NOT NULL,
-    work_request_version integer CONSTRAINT sourced_work_request_outcome_feed_work_request_version_not_null NOT NULL,
+    work_request_version integer NOT NULL,
     plan_id uuid NOT NULL,
-    plan_acceptance_receipt_id uuid CONSTRAINT sourced_work_request_outcom_plan_acceptance_receipt_id_not_null NOT NULL,
+    plan_acceptance_receipt_id uuid NOT NULL,
     preimage jsonb NOT NULL,
-    criterion_results jsonb CONSTRAINT sourced_work_request_outcome_feedbac_criterion_results_not_null NOT NULL,
+    criterion_results jsonb NOT NULL,
     evidence_refs jsonb NOT NULL,
     outcome text NOT NULL,
     blocker_code text NOT NULL,
     result_summary text NOT NULL,
     observed_minutes integer NOT NULL,
-    interaction_surface text CONSTRAINT sourced_work_request_outcome_feedb_interaction_surface_not_null NOT NULL,
-    heavy_session_used boolean CONSTRAINT sourced_work_request_outcome_feedba_heavy_session_used_not_null NOT NULL,
-    manual_context_transfers integer CONSTRAINT sourced_work_request_outcome__manual_context_transfers_not_null NOT NULL,
+    interaction_surface text NOT NULL,
+    heavy_session_used boolean NOT NULL,
+    manual_context_transfers integer NOT NULL,
     feedback_hash text NOT NULL,
     feedback_ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -12538,15 +12650,15 @@ COMMENT ON TABLE ops.sourced_work_request_outcome_feedback IS 'Append-only bound
 --
 
 CREATE TABLE ops.sourced_work_request_outcome_feedback_acceptance_receipt (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT sourced_work_request_outcome_feedback_acceptance_re_id_not_null NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_outcome_feedback__work_request_id_not_null NOT NULL,
-    feedback_id uuid CONSTRAINT sourced_work_request_outcome_feedback_acce_feedback_id_not_null NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_outcome_feedback__idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_outcome_feedback_acc_base_version_not_null NOT NULL,
-    feedback_hash text CONSTRAINT sourced_work_request_outcome_feedback_ac_feedback_hash_not_null NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_outcome_feed_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT sourced_work_request_outcome_feedback_acce_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_outcome_feedback_a_result_version_not_null NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    feedback_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
+    feedback_hash text NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    result_version integer NOT NULL,
     CONSTRAINT sourced_work_request_outcome_feedback_acce_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_outcome_feedback_accep_feedback_hash_check CHECK ((feedback_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT sourced_work_request_outcome_feedback_accept_base_version_check CHECK ((base_version > 0))
@@ -12611,16 +12723,16 @@ COMMENT ON TABLE ops.sourced_work_request_plan IS 'Append-only Program 6 plan pr
 
 CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid CONSTRAINT sourced_work_request_plan_acceptance_r_work_request_id_not_null NOT NULL,
+    work_request_id uuid NOT NULL,
     plan_id uuid NOT NULL,
-    idempotency_key uuid CONSTRAINT sourced_work_request_plan_acceptance_r_idempotency_key_not_null NOT NULL,
-    base_version integer CONSTRAINT sourced_work_request_plan_acceptance_rece_base_version_not_null NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
     plan_hash text NOT NULL,
-    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_plan_accepta_accepted_by_actor_id_not_null NOT NULL,
-    accepted_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_plan_acceptance_recei_accepted_at_not_null NOT NULL,
-    result_version integer CONSTRAINT sourced_work_request_plan_acceptance_re_result_version_not_null NOT NULL,
-    shape_fixed_surface_ref text CONSTRAINT sourced_work_request_plan_acce_shape_fixed_surface_ref_not_null NOT NULL,
-    shape_rationale text CONSTRAINT sourced_work_request_plan_acceptance_r_shape_rationale_not_null NOT NULL,
+    accepted_by_actor_id uuid NOT NULL,
+    accepted_at timestamp with time zone DEFAULT now() NOT NULL,
+    result_version integer NOT NULL,
+    shape_fixed_surface_ref text NOT NULL,
+    shape_rationale text NOT NULL,
     CONSTRAINT sourced_work_request_plan_acceptance_recei_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_base_version_check CHECK ((base_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_plan_hash_check CHECK ((plan_hash ~ '^sha256:[0-9a-f]{64}$'::text))
@@ -12632,6 +12744,63 @@ CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
 --
 
 COMMENT ON TABLE ops.sourced_work_request_plan_acceptance_receipt IS 'Private human-authority receipt for the sole Program 6 triaged-to-ready transition. It grants no dispatch or execution authority.';
+
+
+--
+-- Name: sourced_work_request_plan_shape_binding_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.sourced_work_request_plan_shape_binding_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    plan_acceptance_receipt_id uuid NOT NULL,
+    work_request_id uuid NOT NULL,
+    disposition text NOT NULL,
+    fixed_surface_ref text,
+    rationale text NOT NULL,
+    decided_by_actor_id uuid NOT NULL,
+    decided_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sourced_work_request_plan_shape_binding_recei_disposition_check CHECK ((disposition = ANY (ARRAY['required'::text, 'not_required'::text]))),
+    CONSTRAINT sourced_work_request_plan_shape_binding_receipt_check CHECK ((((disposition = 'required'::text) AND (fixed_surface_ref IS NULL)) OR ((disposition = 'not_required'::text) AND (fixed_surface_ref IS NOT NULL) AND (btrim(fixed_surface_ref) <> ''::text)))),
+    CONSTRAINT sourced_work_request_plan_shape_binding_receipt_rationale_check CHECK ((btrim(rationale) <> ''::text))
+);
+
+
+--
+-- Name: TABLE sourced_work_request_plan_shape_binding_receipt; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.sourced_work_request_plan_shape_binding_receipt IS 'Append-only binding that tells a sourced ready-plan receipt to preserve an already receipt-backed shape disposition. Absent only for the legacy unshaped path, whose plan receipt itself supplies not_required.';
+
+
+--
+-- Name: sourced_work_request_shape_disposition_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.sourced_work_request_shape_disposition_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
+    result_version integer NOT NULL,
+    disposition text NOT NULL,
+    fixed_surface_ref text,
+    rationale text NOT NULL,
+    decided_by_actor_id uuid NOT NULL,
+    decided_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sourced_work_request_shape_disposition_rec_result_version_check CHECK ((result_version > 0)),
+    CONSTRAINT sourced_work_request_shape_disposition_recei_base_version_check CHECK ((base_version > 0)),
+    CONSTRAINT sourced_work_request_shape_disposition_receip_disposition_check CHECK ((disposition = ANY (ARRAY['required'::text, 'not_required'::text]))),
+    CONSTRAINT sourced_work_request_shape_disposition_receipt_check CHECK ((((disposition = 'required'::text) AND (fixed_surface_ref IS NULL)) OR ((disposition = 'not_required'::text) AND (fixed_surface_ref IS NOT NULL) AND (btrim(fixed_surface_ref) <> ''::text)))),
+    CONSTRAINT sourced_work_request_shape_disposition_receipt_rationale_check CHECK ((btrim(rationale) <> ''::text))
+);
+
+
+--
+-- Name: TABLE sourced_work_request_shape_disposition_receipt; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.sourced_work_request_shape_disposition_receipt IS 'Append-only exact receipt for the sole sourced triaged shape-disposition mutation. It is neither a plan acceptance nor a lifecycle transition.';
 
 
 --
@@ -12652,11 +12821,11 @@ CREATE TABLE ops.staging_deployment_attempt (
     git_sha text NOT NULL,
     provider text NOT NULL,
     expected_provider_tag text NOT NULL,
-    declared_migration_set_sha256 text CONSTRAINT staging_deployment_attempt_declared_migration_set_sha2_not_null NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
     declared_migration_count integer NOT NULL,
-    declared_schema_highest_migration text CONSTRAINT staging_deployment_attempt_declared_schema_highest_mig_not_null NOT NULL,
-    declared_schema_applied_count integer CONSTRAINT staging_deployment_attempt_declared_schema_applied_cou_not_null NOT NULL,
-    declared_schema_ledger_sha256 text CONSTRAINT staging_deployment_attempt_declared_schema_ledger_sha2_not_null NOT NULL,
+    declared_schema_highest_migration text NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
     prepared_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     writer_session_user text NOT NULL,
     CONSTRAINT staging_attempt_recovery_shape CHECK ((((recovery_step = 'standalone'::text) AND (recovery_attempt_id IS NULL) AND (prior_release_id IS NULL)) OR ((recovery_step <> 'standalone'::text) AND (recovery_attempt_id IS NOT NULL) AND (prior_release_id IS NOT NULL) AND (correlation_id = recovery_attempt_id)))),
@@ -12698,17 +12867,17 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     prior_release_id uuid NOT NULL,
     service_id uuid NOT NULL,
     environment text NOT NULL,
-    current_before_receipt_id uuid CONSTRAINT staging_recovery_rehearsal_b_current_before_receipt_id_not_null NOT NULL,
-    prior_after_rollback_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__prior_after_rollback_recei_not_null NOT NULL,
-    current_after_restore_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__current_after_restore_rece_not_null NOT NULL,
+    current_before_receipt_id uuid NOT NULL,
+    prior_after_rollback_receipt_id uuid NOT NULL,
+    current_after_restore_receipt_id uuid NOT NULL,
     recovery_strategy text NOT NULL,
     recovery_plan_ref text NOT NULL,
     plan_hash text NOT NULL,
-    declared_migration_set_sha256 text CONSTRAINT staging_recovery_rehearsal__declared_migration_set_sha_not_null NOT NULL,
-    declared_migration_count integer CONSTRAINT staging_recovery_rehearsal_bu_declared_migration_count_not_null NOT NULL,
-    declared_schema_highest_migration text CONSTRAINT staging_recovery_rehearsal__declared_schema_highest_mi_not_null NOT NULL,
-    declared_schema_applied_count integer CONSTRAINT staging_recovery_rehearsal__declared_schema_applied_co_not_null NOT NULL,
-    declared_schema_ledger_sha256 text CONSTRAINT staging_recovery_rehearsal__declared_schema_ledger_sha_not_null NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_count integer NOT NULL,
+    declared_schema_highest_migration text NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
     bundle_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
     completed_at timestamp with time zone NOT NULL,
@@ -12775,12 +12944,12 @@ CREATE TABLE ops.staging_release_readback_receipt (
     provider_version_id uuid NOT NULL,
     provider_tag text NOT NULL,
     verb_count integer NOT NULL,
-    schema_highest_migration text CONSTRAINT staging_release_readback_rece_schema_highest_migration_not_null NOT NULL,
+    schema_highest_migration text NOT NULL,
     schema_applied_count integer NOT NULL,
-    declared_migration_set_sha256 text CONSTRAINT staging_release_readback_re_declared_migration_set_sha_not_null NOT NULL,
-    declared_migration_count integer CONSTRAINT staging_release_readback_rece_declared_migration_count_not_null NOT NULL,
-    declared_schema_applied_count integer CONSTRAINT staging_release_readback_re_declared_schema_applied_co_not_null NOT NULL,
-    declared_schema_ledger_sha256 text CONSTRAINT staging_release_readback_re_declared_schema_ledger_sha_not_null NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_count integer NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
     doctrine_generation bigint NOT NULL,
     projection_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
@@ -12830,16 +12999,16 @@ CREATE TABLE ops.staging_restore_only_attempt (
     environment text NOT NULL,
     git_sha text NOT NULL,
     provider text NOT NULL,
-    target_provider_version_id uuid CONSTRAINT staging_restore_only_attemp_target_provider_version_id_not_null NOT NULL,
+    target_provider_version_id uuid NOT NULL,
     recovery_strategy text NOT NULL,
     rollback_plan_ref text NOT NULL,
     plan_hash text NOT NULL,
     expected_provider_tag text NOT NULL,
-    declared_migration_set_sha256 text CONSTRAINT staging_restore_only_attemp_declared_migration_set_sha_not_null NOT NULL,
+    declared_migration_set_sha256 text NOT NULL,
     declared_migration_count integer NOT NULL,
-    declared_schema_highest_migration text CONSTRAINT staging_restore_only_attemp_declared_schema_highest_mi_not_null NOT NULL,
-    declared_schema_applied_count integer CONSTRAINT staging_restore_only_attemp_declared_schema_applied_co_not_null NOT NULL,
-    declared_schema_ledger_sha256 text CONSTRAINT staging_restore_only_attemp_declared_schema_ledger_sha_not_null NOT NULL,
+    declared_schema_highest_migration text NOT NULL,
+    declared_schema_applied_count integer NOT NULL,
+    declared_schema_ledger_sha256 text NOT NULL,
     writer_session_user text DEFAULT SESSION_USER NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT staging_restore_only_attempt_check CHECK ((correlation_id = recovery_attempt_id)),
@@ -17965,16 +18134,16 @@ CREATE VIEW public.v_capture_coverage AS
            FROM public.deal d
           WHERE ((d.outcome IS NULL) AND (d.phase <> 'closed'::text))
         UNION ALL
-         SELECT 'client'::text,
+         SELECT 'client'::text AS text,
             c.id
            FROM public.client c
           WHERE (c.merged_into IS NULL)
         UNION ALL
-         SELECT 'lead'::text,
+         SELECT 'lead'::text AS text,
             l.id
            FROM public.lead l
         UNION ALL
-         SELECT 'vendor'::text,
+         SELECT 'vendor'::text AS text,
             v.id
            FROM public.vendor v
         )
@@ -20165,7 +20334,7 @@ CREATE VIEW public.v_export_dossier_analysis AS
           WHERE (c.notes_path IS NOT NULL)
         UNION ALL
          SELECT l.id,
-            'lead'::text,
+            'lead'::text AS text,
             ('DNA/Clients/prospects/'::text || regexp_replace(l.notes_path, '^.*/'::text, ''::text))
            FROM public.lead l
           WHERE (l.notes_path IS NOT NULL)
@@ -23621,6 +23790,22 @@ ALTER TABLE ONLY ops.sourced_work_request_plan
 
 
 --
+-- Name: sourced_work_request_plan_shape_binding_receipt sourced_work_request_plan_shape__plan_acceptance_receipt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_plan_shape_binding_receipt
+    ADD CONSTRAINT sourced_work_request_plan_shape__plan_acceptance_receipt_id_key UNIQUE (plan_acceptance_receipt_id);
+
+
+--
+-- Name: sourced_work_request_plan_shape_binding_receipt sourced_work_request_plan_shape_binding_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_plan_shape_binding_receipt
+    ADD CONSTRAINT sourced_work_request_plan_shape_binding_receipt_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: sourced_work_request_plan sourced_work_request_plan_work_request_id_plan_hash_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -23634,6 +23819,30 @@ ALTER TABLE ONLY ops.sourced_work_request_plan
 
 ALTER TABLE ONLY ops.sourced_work_request_plan
     ADD CONSTRAINT sourced_work_request_plan_work_request_id_plan_version_key UNIQUE (work_request_id, plan_version);
+
+
+--
+-- Name: sourced_work_request_shape_disposition_receipt sourced_work_request_shape_disposition_rece_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_shape_disposition_receipt
+    ADD CONSTRAINT sourced_work_request_shape_disposition_rece_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: sourced_work_request_shape_disposition_receipt sourced_work_request_shape_disposition_rece_work_request_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_shape_disposition_receipt
+    ADD CONSTRAINT sourced_work_request_shape_disposition_rece_work_request_id_key UNIQUE (work_request_id);
+
+
+--
+-- Name: sourced_work_request_shape_disposition_receipt sourced_work_request_shape_disposition_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_shape_disposition_receipt
+    ADD CONSTRAINT sourced_work_request_shape_disposition_receipt_pkey PRIMARY KEY (id);
 
 
 --
@@ -23953,7 +24162,7 @@ ALTER TABLE ONLY ops.work_request
 --
 
 ALTER TABLE ops.work_request
-    ADD CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((capture_idempotency_key IS NOT NULL) AND (organization_tenant_id = 'carr-internal'::text) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = 'triaged'::text) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)) OR ((state = 'ready'::text) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL) AND (shape_disposition = 'not_required'::text) AND (shape_fixed_surface_ref ~ '^sourced-plan:PLAN-[0-9a-f]{12}-v[1-9][0-9]*#sha256:[0-9a-f]{64}$'::text) AND (shape_rationale ~ '^Accepted immutable plan PLAN-[0-9a-f]{12}-v[1-9][0-9]* for doctrine:runbook#[a-z0-9][a-z0-9-]* at sha256:[0-9a-f]{64}$'::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)))))) NOT VALID;
+    ADD CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((capture_idempotency_key IS NOT NULL) AND (organization_tenant_id = 'carr-internal'::text) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)))))) NOT VALID;
 
 
 --
@@ -27112,6 +27321,20 @@ CREATE TRIGGER sourced_work_request_plan_immutable BEFORE DELETE OR UPDATE ON op
 
 
 --
+-- Name: sourced_work_request_plan_shape_binding_receipt sourced_work_request_plan_shape_binding_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER sourced_work_request_plan_shape_binding_immutable BEFORE DELETE OR UPDATE ON ops.sourced_work_request_plan_shape_binding_receipt FOR EACH ROW EXECUTE FUNCTION ops.sourced_work_shape_receipts_are_immutable();
+
+
+--
+-- Name: sourced_work_request_shape_disposition_receipt sourced_work_request_shape_disposition_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER sourced_work_request_shape_disposition_immutable BEFORE DELETE OR UPDATE ON ops.sourced_work_request_shape_disposition_receipt FOR EACH ROW EXECUTE FUNCTION ops.sourced_work_shape_receipts_are_immutable();
+
+
+--
 -- Name: staging_deployment_attempt staging_deployment_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28793,11 +29016,51 @@ ALTER TABLE ONLY ops.sourced_work_request_plan
 
 
 --
+-- Name: sourced_work_request_plan_shape_binding_receipt sourced_work_request_plan_shape_bindin_decided_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_plan_shape_binding_receipt
+    ADD CONSTRAINT sourced_work_request_plan_shape_bindin_decided_by_actor_id_fkey FOREIGN KEY (decided_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: sourced_work_request_plan_shape_binding_receipt sourced_work_request_plan_shape_binding_re_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_plan_shape_binding_receipt
+    ADD CONSTRAINT sourced_work_request_plan_shape_binding_re_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: sourced_work_request_plan_shape_binding_receipt sourced_work_request_plan_shape_plan_acceptance_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_plan_shape_binding_receipt
+    ADD CONSTRAINT sourced_work_request_plan_shape_plan_acceptance_receipt_id_fkey FOREIGN KEY (plan_acceptance_receipt_id) REFERENCES ops.sourced_work_request_plan_acceptance_receipt(id);
+
+
+--
 -- Name: sourced_work_request_plan sourced_work_request_plan_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
 ALTER TABLE ONLY ops.sourced_work_request_plan
     ADD CONSTRAINT sourced_work_request_plan_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: sourced_work_request_shape_disposition_receipt sourced_work_request_shape_disposition_decided_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_shape_disposition_receipt
+    ADD CONSTRAINT sourced_work_request_shape_disposition_decided_by_actor_id_fkey FOREIGN KEY (decided_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: sourced_work_request_shape_disposition_receipt sourced_work_request_shape_disposition_rec_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.sourced_work_request_shape_disposition_receipt
+    ADD CONSTRAINT sourced_work_request_shape_disposition_rec_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
 
 
 --
@@ -31312,6 +31575,7 @@ revoke all on function ops.schedule_calendar_prebrief_joe_live_job() from public
 revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) from public;
 revoke all on function ops.select_provider_routes(p_requested text[]) from public;
+revoke all on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_preimage(p_work_request_id uuid, p_plan_id uuid, p_plan_acceptance_receipt_id uuid, p_criterion_results jsonb, p_evidence_refs jsonb, p_outcome text, p_blocker_code text, p_result_summary text, p_observed_minutes integer, p_interaction_surface text, p_heavy_session_used boolean, p_manual_context_transfers integer) from public;
@@ -32010,8 +32274,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
@@ -32087,8 +32351,8 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -32110,6 +32374,7 @@ grant execute on function ops.rule_pack_index() to carr_writer;
 grant execute on function ops.schedule_calendar_prebrief_joe_live_job() to carr_jobs;
 grant execute on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) to carr_renewal_source_attestors;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
+grant execute on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
@@ -32412,6 +32677,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0303_evidence_activation_reliability.sql	4c44113279c9afb0c50cbeda8fd9b70376ebcd9756c1b4abaab7e50ef0744f6d	2026-08-25 09:20:44.463242+00
 0304_hermes_runtime_admission.sql	7a424204f01af73bd98e7c01e9f48a8efd531d088a2e4198e05337ea565b9abe	2026-08-25 11:43:10.83544+00
 0305_deal_history_queue_receipt_missing_visibility.sql	1099b02cfcd47812feaca5b18747190be5e730faf0abb81e0eea3604cda800e4	2026-08-25 13:47:29.212984+00
+0306_sourced_work_shape_disposition.sql	9a205a2c8c2ca50b61d5ee60b8883c0ff66a8138691d822faaf7ce4295ffb7af	2026-08-25 14:10:03.21064+00
 \.
 
 
