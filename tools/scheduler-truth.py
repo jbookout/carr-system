@@ -221,7 +221,7 @@ def main() -> int:
         print("Scheduler truth — five sources, one table\n")
         print(f"  ops/launchd/            {len(repo):>3} plist(s) in the repo")
         print(f"  ~/Library/LaunchAgents  {len(inst):>3} plist(s) installed")
-        print(f"  launchctl list          {'  ?' if live is None else f'{len(live):>3}'}"
+        print(f"  launchctl print         {'  ?' if live is None else f'{len(live):>3}'}"
               f" com.carr.* job(s) loaded")
         print(f"  services.json           {len(declared):>3} service(s) declared"
               f" ({len(launchd_declared)} of them launchd)")
