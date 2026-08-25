@@ -69,24 +69,6 @@
         "Whether the tour starts from Crestview",
         "The drive order in this packet assumes it does. If you are coming from somewhere else the sequence changes, and so does the day."
       ]
-    ],
-    "declined_and_why": [
-      [
-        "2820 US Highway 98 West, Suite 1, Santa Rosa Beach",
-        "3,220 SF at $23 to $24 a foot plus $5.00 operating expenses. The best value on paper at roughly $28 all in, and the size lands on target with no demising. It is a cold shell, so the entire build-out is yours to fund, and dental use still has to be confirmed under the retail zoning."
-      ],
-      [
-        "142 John Galt Road, Suite A, Santa Rosa Beach",
-        "3,000 SF at $22.00 a foot, finished last year and available now, which is rare in this corridor. It is a metal building with two roll-up doors in a commerce park, and a patient pulling into that lot would not assume they had arrived at a dental office."
-      ],
-      [
-        "Mack Bayou Center, Santa Rosa Beach",
-        "3,256 SF at $45.00 a foot, $12,210 a month. The most expensive space reviewed, by a wide margin and roughly double several options on your tour. It is also a three-storey building with availability on the first and third floors, and only the ground floor suits an operatory layout."
-      ],
-      [
-        "3214 US Highway 98, Santa Rosa Beach",
-        "4,155 SF at $35.00 a foot plus $7.50 operating expenses. The best setting of anything reviewed: a new professional village with deep parking on both sides and title and mortgage neighbours rather than trade counters. It sits above your size band, and whether the landlord will demise below 4,155 SF is unanswered."
-      ]
     ]
   },
   "glance": {
@@ -287,7 +269,8 @@
       "agent": "Ruckel Properties, Inc., Dora Cawood",
       "src": "Moody's CRE",
       "note": "The cheapest all in on the tour by some distance. Older building, so the mechanical inspection matters more here than anywhere else.",
-      "photo": "palmplaza.jpg"
+      "photo": "palmplaza.jpg",
+      "limit": "The building dates to 1974, and that is the thing to weigh against the price."
     },
     {
       "n": "02",
@@ -368,7 +351,8 @@
       "agent": "Ruckel Properties, Inc., Dora Cawood",
       "src": "Moody's CRE",
       "note": "1,600 SF more than you asked for. Worth walking because the rate is the lowest here and the days on market give us room.",
-      "photo": "palmplaza.jpg"
+      "photo": "palmplaza.jpg",
+      "limit": "At 5,000 SF it is well above your target band"
     },
     {
       "n": "03",
@@ -449,7 +433,8 @@
       "agent": "Bellcore Commercial, Harry Bell Jr.",
       "src": "Crexi",
       "note": "The one purpose-built medical suite in the search. Price it and ask about demising.",
-      "photo": "bluewater.jpg"
+      "photo": "bluewater.jpg",
+      "limit": "At 4,000 SF it sits above your target band"
     },
     {
       "n": "04",
@@ -525,7 +510,8 @@
       "agent": "Bellcore Commercial, Harry Bell Jr.",
       "src": "Crexi",
       "note": "Same rate as 4536 but $2.28 a foot more all in. Worth seeing, hard to justify over the medical suite.",
-      "photo": "bluewater-office.jpg"
+      "photo": "bluewater-office.jpg",
+      "limit": "the operating expenses are materially higher at $9.03 a foot"
     },
     {
       "n": "05",
@@ -598,7 +584,8 @@
       "agent": "Unlisted",
       "src": "ECAR / FlexMLS",
       "note": "Cleanest budgeting on the list and a genuinely professional address. The second floor is the reason it is not higher.",
-      "photo": "commons.jpg"
+      "photo": "commons.jpg",
+      "limit": "The catch for a dental use is the floor: it is on the second storey"
     },
     {
       "n": "06",
@@ -662,7 +649,8 @@
       "agent": "Direct to landlord",
       "src": "Off market",
       "note": "Unlisted and under competing interest. Worth walking, but we should know quickly whether there is a real opening.",
-      "photo_absent_reason": "No photograph exists for this one. It is off market, never published on CoStar, Crexi, ECAR, or Moody's, and it came to us directly. We will see it for the first time together on the tour."
+      "photo_absent_reason": "No photograph exists for this one. It is off market, never published on CoStar, Crexi, ECAR, or Moody's, and it came to us directly. We will see it for the first time together on the tour.",
+      "limit": "The landlord is in negotiation with another prospec"
     },
     {
       "n": "07",
@@ -744,7 +732,8 @@
       "agent": "NBI Properties, Inc., Craig Barrett",
       "src": "CoStar",
       "note": "Good bones, right size, right floor. The published numbers are unreliable and we are getting them straight from the broker before we rank it.",
-      "photo": "11275.jpg"
+      "photo": "11275.jpg",
+      "limit": "The published figures on this one do not hold up, including the size"
     },
     {
       "n": "08",
@@ -813,7 +802,8 @@
       "agent": "Unlisted",
       "src": "CoStar",
       "note": "Best address on the list. February 2027 and an unpriced buildout are the two things that decide it.",
-      "photo": "grandblvd.jpg"
+      "photo": "grandblvd.jpg",
+      "limit": "it does not deliver until February 2027"
     },
     {
       "n": "09",
@@ -894,7 +884,8 @@
       "agent": "Unlisted",
       "src": "CoStar",
       "note": "Newest building on the tour and the free rent is genuine leverage. Parking is the thing to settle before it moves up.",
-      "photo": "4935.jpg"
+      "photo": "4935.jpg",
+      "limit": "Some units carry a 730 SF second floor office mezzanine"
     },
     {
       "n": "10",
@@ -973,7 +964,8 @@
         "The street address and parcel number, which are not assigned yet."
       ],
       "note": "We set this aside when the biggest suite was 747 SF. A 4,482 SF unit changes that, and the purchase option changes it more, because nothing else on this tour lets you own the building. It is also the one you cannot occupy next year, so it belongs on the list as a second track rather than a substitute.",
-      "photo": "corpwoods.jpg"
+      "photo": "corpwoods.jpg",
+      "limit": "It is under development and Phase 1 does not deliver until late 2026 or early 2027"
     }
   ]
 }
