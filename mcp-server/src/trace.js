@@ -152,13 +152,13 @@ export function incidentFactText({ routeKey, failureClass, correlationId, detail
 // (a 23505 on it is caught below and treated as "another writer already opened
 // this incident", not as an error) rather than by an application-level lock.
 //
-// NEVER WRITES state, resolved_at, recovery_evidence_ref or monitoring_until
-// on an EXISTING incident — only observed_at/expires_at, a pure freshness
-// bump. carr_writer (unlike carr_jobs — 0117's column-scoped grant) holds a
-// table-level UPDATE on ops.incident and COULD write those columns; the
-// migration's own proof exercises the 0115 CHECK constraint as the real
-// backstop precisely because this file's discipline is the only thing
-// stopping it otherwise. Closing an incident is a human's call, always.
+// A genuinely NEW occurrence may invalidate a recovery watch: monitoring goes
+// back to detected and its recovery evidence/window are cleared.  The exact
+// correlation source_ref is the idempotency boundary, so a replay does none of
+// that.  This writer NEVER writes resolved_at or root_cause and can only move
+// state toward detected, never toward resolved/reviewed. carr_writer has broad
+// table UPDATE, so these structural limits and their tests are the boundary;
+// closing an incident remains a human's call, always.
 export async function recordWorkerFailure(query, {
   environment, routeKey, failureClass, correlationId, detail,
   severity = DEFAULT_SEVERITY, serviceKey = SERVICE_KEY,
@@ -275,17 +275,27 @@ async function appendFactIfNew(query, incidentId, sourceRef, text) {
   const dup = await query(
     "select 1 from ops.incident_fact where incident_id=$1 and source_ref=$2 limit 1",
     [incidentId, sourceRef]);
-  if (dup.rows.length) return; // this exact correlation id already left a fact — never grow the list on a retry
+  if (dup.rows.length) return false; // replay: never grow the list or invalidate recovery twice
   await query(
     "insert into ops.incident_fact (incident_id, text, source_ref) values ($1,$2,$3)",
     [incidentId, text, sourceRef]);
-  // A pure freshness bump — never state, resolved_at, recovery_evidence_ref or
-  // monitoring_until. See the file header: closing an incident is a human's
-  // call, and this function structurally never touches the columns that do it.
+  // The old values drive every CASE expression in PostgreSQL's one UPDATE, so
+  // a monitoring row loses both recovery markers in the same transition that
+  // returns it to detected. A row already under investigation keeps its state.
   await query(
-    `update ops.incident set observed_at = now(), expires_at = now() + interval '${MONITORING_HOURS} hours'
+    `update ops.incident set observed_at = now(),
+            expires_at = now() + interval '${MONITORING_HOURS} hours',
+            state = case when state = 'monitoring' then 'detected' else state end,
+            recovery_evidence_ref = case when state = 'monitoring'
+                                       then null else recovery_evidence_ref end,
+            monitoring_until = case when state = 'monitoring'
+                                    then null else monitoring_until end,
+            next_action = case when state = 'monitoring'
+              then 'failed again during its watch — read the newest correlation fact'
+              else next_action end
        where id = $1`,
     [incidentId]);
+  return true;
 }
 
 // ── THE ROOT CAUSE OF THE FIRST DEPLOY (2026-08-14, defect cae5be2e, live

@@ -100,13 +100,15 @@ def record(dsn, *, state, failure_class=None, key=RUN_KEY):
 def incidents(cur):
     cur.execute(
         """select i.ref, i.severity, i.state, i.signature, i.occurrence_count,
-                  i.last_seen_at, i.resolved_at, i.root_cause
+                  i.last_seen_at, i.resolved_at, i.root_cause,
+                  i.recovery_evidence_ref, i.monitoring_until
              from ops.incident i
              join ops.service s on s.key = split_part(i.signature, '|', 1)
             where s.key = %s
          order by i.detected_at, i.ref""", (SERVICE,))
     cols = ("ref", "severity", "state", "signature", "occurrence_count",
-            "last_seen_at", "resolved_at", "root_cause")
+            "last_seen_at", "resolved_at", "root_cause",
+            "recovery_evidence_ref", "monitoring_until")
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
@@ -231,6 +233,12 @@ def main():
         check(rows[0]["state"] == "detected",
               f"a job that failed again during its watch must not read "
               f"'monitoring', reads {rows[0]['state']}")
+        check(rows[0]["recovery_evidence_ref"] is None
+              and rows[0]["monitoring_until"] is None,
+              "a returning failure must clear the recovery evidence/window "
+              "that previously made the incident eligible for closure")
+        check(rows[0]["resolved_at"] is None,
+              "a recurrence may invalidate recovery but must never close the incident")
 
     # ── 6. SEV-1 STAYS WITH A HUMAN, HOWEVER GREEN THE LEDGER ──────────────
     with psycopg.connect(owner, autocommit=True) as conn, conn.cursor() as cur:
@@ -245,6 +253,10 @@ def main():
           f"{after['state']}")
     check(after["resolved_at"] is None,
           "a SEV-1 must never be closed by the automatic path")
+    check(after["recovery_evidence_ref"] is not None
+          and after["monitoring_until"] is not None,
+          "new healthy evidence after a recurrence must be able to establish "
+          "a fresh monitoring window")
 
     # ── 7. AND THE JOB ROLE STILL CANNOT DO IT BY HAND ─────────────────────
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:

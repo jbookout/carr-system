@@ -753,13 +753,25 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
             "insert into ops.incident_fact (incident_id, text, source_ref) values ($1,$2,$3)",
             [incidentId, factText, sourceRef]);
 
-        // A pure freshness bump on an existing row — never state, resolved_at,
-        // recovery_evidence_ref or monitoring_until. This verb structurally
-        // never touches the columns that close an incident.
-        if (!opened)
+        // A NEW failure during a recovery watch invalidates that recovery.
+        // The fact insert above is the idempotency boundary: a replay with the
+        // same correlation/source_ref records nothing and therefore changes
+        // nothing here.  This may move monitoring -> detected and clear the
+        // evidence/window that made the board ready; it can never resolve an
+        // incident, stamp resolved_at, or write a root cause.  Those remain
+        // partner-only through close-incident.
+        if (!opened && recorded)
           await c.query(
             `update ops.incident set observed_at = now(),
-                    expires_at = now() + make_interval(hours => ${MONITORING_HOURS})
+                    expires_at = now() + make_interval(hours => ${MONITORING_HOURS}),
+                    state = case when state = 'monitoring' then 'detected' else state end,
+                    recovery_evidence_ref = case when state = 'monitoring'
+                                               then null else recovery_evidence_ref end,
+                    monitoring_until = case when state = 'monitoring'
+                                            then null else monitoring_until end,
+                    next_action = case when state = 'monitoring'
+                      then 'failed again during its watch — read get-incident ' || ref
+                      else next_action end
               where id = $1`, [incidentId]);
 
         const count = await c.query(
@@ -777,7 +789,8 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
           occurrences: count.rows[0].occurrences,
           fingerprint: fingerprint.signature,
           severity: opened ? (args.severity || "SEV-3") : open.rows[0].severity,
-          state: opened ? "detected" : open.rows[0].state,
+          state: opened || (recorded && open.rows[0].state === "monitoring")
+            ? "detected" : open.rows[0].state,
           note: opened
             ? null
             : "this fingerprint was already open — the occurrence was attached to the existing " +

@@ -289,6 +289,33 @@ test("ready_to_close is computed by the close guard itself, never by a second co
     { ready_to_close: false, blocked_by: "already resolved" });
 });
 
+test("a recurrence clears readiness for both board and close; a later recovery can become ready again", () => {
+  const recovered = { ref: "INC-5", state: "monitoring",
+    recovery_evidence_ref: "ops.run:old-green",
+    monitoring_until: "2026-08-22T00:00:00.000Z" };
+  assert.equal(readinessFor(recovered, NOW).ready_to_close, true);
+  assert.equal(closePreconditions(recovered, { rootCause: "cause", now: NOW }).ok, true);
+
+  // Exact row shape every recurrence writer must leave after a NEW failure.
+  const recurred = { ...recovered, state: "detected",
+    recovery_evidence_ref: null, monitoring_until: null };
+  const board = readinessFor(recurred, NOW);
+  const close = closePreconditions(recurred, { rootCause: "cause", now: NOW });
+  assert.equal(board.ready_to_close, false);
+  assert.match(board.blocked_by, /no recovery evidence/);
+  assert.equal(close.ok, false);
+  assert.match(close.error, /no recovery evidence/,
+    "the board and partner close must reject the same invalidated recovery");
+
+  const recoveredAgain = { ...recurred, state: "monitoring",
+    recovery_evidence_ref: "ops.run:new-green",
+    monitoring_until: "2026-08-22T00:00:00.000Z" };
+  assert.equal(readinessFor(recoveredAgain, NOW).ready_to_close, true);
+  assert.equal(closePreconditions(recoveredAgain,
+    { rootCause: "new recovery held", now: NOW }).ok, true,
+    "invalidating stale evidence must not prevent a later genuine recovery");
+});
+
 // ── 7. THE REGISTRY ENTRIES THEMSELVES ──────────────────────────────────────
 
 test("all five verbs are registered under the council's names", () => {
@@ -426,6 +453,8 @@ test("a repeat of an OPEN fingerprint attaches instead of minting a second row",
   assert.equal(out.opened, false);
   assert.equal(out.ref, "INC-20260823-01");
   assert.equal(out.occurrences, 29);
+  assert.equal(out.state, "detected",
+    "a new failure during monitoring must immediately stop reading as recovered");
   assert.equal(out.severity, "SEV-2", "an attach never re-reads severity off the caller's argument");
   assert.match(out.note, /already open/);
 
@@ -436,8 +465,12 @@ test("a repeat of an OPEN fingerprint attaches instead of minting a second row",
     "the occurrence still has to be recorded, or the repeat count never grows");
   assert.ok(statements.some((s) => s.includes("set observed_at = now()")),
     "an attach bumps freshness so the row does not read as stale");
-  assert.ok(!statements.some((s) => /resolved_at|recovery_evidence_ref\s*=/.test(s)),
-    "open-incident must be structurally unable to touch the closing columns");
+  const recurrence = statements.find((s) => s.includes("set observed_at = now()"));
+  assert.match(recurrence, /state = case when state = 'monitoring' then 'detected'/);
+  assert.match(recurrence, /recovery_evidence_ref = case when state = 'monitoring' then null/);
+  assert.match(recurrence, /monitoring_until = case when state = 'monitoring' then null/);
+  assert.doesNotMatch(recurrence, /resolved_at|root_cause|then 'resolved'|then 'reviewed'/,
+    "open-incident may invalidate recovery but remains structurally unable to close");
 });
 
 test("the same correlation observed twice records one occurrence, not two", async () => {
@@ -456,6 +489,8 @@ test("the same correlation observed twice records one occurrence, not two", asyn
   assert.equal(out.occurrence_recorded, false);
   assert.ok(!fake.sql.some(([s]) => s.includes("insert into ops.incident_fact")),
     "never grow the list on a retry — trace.js's rule, and the reason the count means anything");
+  assert.ok(!fake.sql.some(([s]) => s.includes("update ops.incident set observed_at")),
+    "the same replay boundary must also prevent invalidating recovery evidence");
 });
 
 test("open-incident takes the same ref-allocation lock the Python writer takes", async () => {

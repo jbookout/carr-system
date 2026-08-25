@@ -78,6 +78,8 @@ class FakeCursor:
                 # insert writes. Anything above one here had to be counted.
                 "occurrences": 1,
                 "state": "detected",
+                "recovery_evidence_ref": None,
+                "monitoring_until": None,
             })
             self._one = (incident_id,)
         elif normalized.startswith("insert into ops.incident_link "):
@@ -111,6 +113,8 @@ class FakeCursor:
             # watch found something, so the row goes back to detected.
             if row["state"] == "monitoring":
                 row["state"] = "detected"
+                row["recovery_evidence_ref"] = None
+                row["monitoring_until"] = None
             self._one = None
         else:
             raise AssertionError(f"unexpected SQL: {normalized[:180]}")
@@ -190,6 +194,9 @@ def main() -> int:
            source_kind="run", source_id="run-old",
            source_label="performance.release", state="failed",
            failure_class="performance_budget_exceeded", detail=None)
+    recurring.incidents[0].update(
+        state="monitoring", recovery_evidence_ref="ops.run:old-green",
+        monitoring_until=module.datetime(2026, 8, 26, tzinfo=module.timezone.utc))
     helper(**recurring_common, correlation_id=new_corr,
            source_kind="run", source_id="run-new",
            source_label="performance.release", state="failed",
@@ -219,6 +226,23 @@ def main() -> int:
     check("2h. the first arrival opens at one occurrence and counts nothing",
           recurring.events.count("occurrence_bump") == 2,
           f"events={recurring.events}")
+    check("2ha. a new linked failure invalidates recovery and returns monitoring to detected",
+          recurring.incidents[0]["state"] == "detected"
+          and recurring.incidents[0]["recovery_evidence_ref"] is None
+          and recurring.incidents[0]["monitoring_until"] is None,
+          f"incident={recurring.incidents[0]}")
+
+    # A later green observation is allowed to establish a new recovery. The
+    # recurrence invalidates stale evidence; it does not poison the row or
+    # bypass the ordinary close preconditions.
+    recurring.incidents[0].update(
+        state="monitoring", recovery_evidence_ref="ops.run:new-green",
+        monitoring_until=module.datetime(2026, 8, 24, tzinfo=module.timezone.utc))
+    later_ok, later_error, _ = module.resolve_preconditions(
+        recurring.incidents[0], root_cause="new recovery held",
+        now=module.datetime(2026, 8, 25, tzinfo=module.timezone.utc))
+    check("2hb. a new recovery can later satisfy the existing close guard",
+          later_ok, later_error or "")
 
     # A replayed row is the case the count must survive: tools/ops-spool.py
     # retries anything it could not land, and ops.incident_link's primary key
@@ -239,6 +263,28 @@ def main() -> int:
           and len(replayed.links) == 1,
           f"occurrences={replayed.incidents[0]['occurrences']} "
           f"links={len(replayed.links)}")
+
+    protected = FakeCursor()
+    protected_common = dict(common, cur=protected)
+    helper(**protected_common,
+           correlation_id="88888888-8888-4888-8888-888888888888",
+           source_kind="run", source_id="run-protected",
+           source_label="launchd.run", state="failed",
+           failure_class="exit_1", detail=None)
+    protected.incidents[0].update(
+        state="monitoring", recovery_evidence_ref="ops.run:protected-green",
+        monitoring_until=module.datetime(2026, 8, 26, tzinfo=module.timezone.utc))
+    helper(**protected_common,
+           correlation_id="88888888-8888-4888-8888-888888888888",
+           source_kind="run", source_id="run-protected",
+           source_label="launchd.run", state="failed",
+           failure_class="exit_1", detail=None)
+    check("2j. replaying the same ledger row preserves monitoring and its recovery evidence",
+          protected.incidents[0]["state"] == "monitoring"
+          and protected.incidents[0]["recovery_evidence_ref"] == "ops.run:protected-green"
+          and protected.incidents[0]["monitoring_until"]
+              == module.datetime(2026, 8, 26, tzinfo=module.timezone.utc),
+          f"incident={protected.incidents[0]}")
 
     before = (len(cur.incidents), len(cur.links), len(cur.facts))
     helper(**common, correlation_id="33333333-3333-4333-8333-333333333333",
