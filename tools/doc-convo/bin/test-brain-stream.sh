@@ -95,6 +95,16 @@ assert "CARD:" in reply
 assert completed == [reply]
 assert sentences[0][1] - started < returned - started
 
+for silent_text in ("", " ", "\n\t"):
+    silent_completed = []
+    silent, brain = convo_core.ask_brain_streaming(
+        silent_text, "test prompt", on_complete=silent_completed.append,
+    )
+    assert brain.returncode == 0
+    assert silent == ""
+    assert silent_completed == [""]
+assert (tmp / "count").read_text() == "1"
+
 memory, brain = convo_core.ask_brain_streaming(
     "what about the one before that?", "test prompt",
 )
