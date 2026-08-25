@@ -3808,6 +3808,31 @@ end $$;
 
 
 --
+-- Name: engineering_controller_binding(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+  select jsonb_build_object(
+    'envelope_id', e.id::text,
+    'envelope_digest', e.envelope_digest,
+    'slice_ref', e.slice_ref,
+    'plan_digest', sp.plan_digest,
+    'slice_plan', sp.plan,
+    'executor_actor', jsonb_build_object('id', a.id::text, 'slug', a.slug),
+    'agent_session_id', s.id::text
+  )
+    from ops.engineering_execution_envelope e
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+    join ops.capability_agent_session s on s.id=e.agent_session_id
+    join public.actor a on a.id=s.executor_actor_id
+   where e.id=p_envelope_id and e.job_id=p_job_id;
+$$;
+
+
+--
 -- Name: engineering_enqueue_slice_job(text, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3987,10 +4012,16 @@ CREATE FUNCTION ops.engineering_record_slice_receipt(p_envelope_id uuid, p_lease
     AS $$
 declare e ops.engineering_execution_envelope%rowtype;
         a ops.job_attempt%rowtype;
+        session_executor uuid;
         row ops.engineering_slice_receipt%rowtype;
 begin
   select * into e from ops.engineering_execution_envelope where id=p_envelope_id;
   if not found then raise exception 'engineering envelope not found'; end if;
+  select executor_actor_id into session_executor
+    from ops.capability_agent_session where id=e.agent_session_id;
+  if session_executor is null or p_executor_actor_id is distinct from session_executor then
+    raise exception 'engineering receipt executor is not the server-bound agent session';
+  end if;
   select attempt_row.* into a
     from ops.job_attempt attempt_row join ops.job j on j.id=attempt_row.job_id
    where attempt_row.job_id=e.job_id and attempt_row.attempt=j.attempt
@@ -4007,7 +4038,7 @@ begin
     (job_attempt_id,envelope_id,work_request_id,slice_ref,attempt_id,
      executor_actor_id,receipt_digest,outcome,receipt)
   values (a.id,e.id,e.work_request_id,e.slice_ref,p_receipt->>'attempt_id',
-          p_executor_actor_id,p_receipt_digest,p_receipt->>'outcome',p_receipt)
+          session_executor,p_receipt_digest,p_receipt->>'outcome',p_receipt)
   returning * into row;
   return row;
 end $$;
@@ -33195,8 +33226,10 @@ revoke all on function ops.current_sourced_work_requests(p_organization_tenant_i
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
+revoke all on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid) from public;
 revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text) from public;
 revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) from public;
+revoke all on function ops.engineering_record_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) from public;
 revoke all on function ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text) from public;
 revoke all on function ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) from public;
 revoke all on function ops.fence_definition_jobs(p_definition_key text, p_definition_version integer) from public;
@@ -33981,8 +34014,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
@@ -34014,6 +34047,7 @@ grant execute on function ops.engineering_admission_source(p_work_request text) 
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_reader;
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_writer;
 grant execute on function ops.engineering_claim_slice(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
+grant execute on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid) to carr_jobs;
 grant execute on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) to carr_writer;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_jobs;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_reader;
@@ -34073,8 +34107,8 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -34407,6 +34441,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0309_governed_execution_environment_providers.sql	e2d738f00ef8e2cbce8d77ad2f6fb5596dc1951de7f0e918a927ccc25b32eb47	2026-08-25 16:19:58.553035+00
 0310_engineering_execution_fabric.sql	f321288d38550d5d82598d6c335690d54c2c3acbb035c339387fe3f128a69e55	2026-08-25 16:46:49.704808+00
 0311_sponsored_engineering_executor_authority.sql	c465664010c578da8201a536887e0bf2a21f7573d5706ff62e943b460b3992c5	2026-08-25 19:06:06.825594+00
+0312_engineering_dispatch_controller.sql	96a9aed7dd38c11d0c9886fc88ba0fb62c647be7bdc194489a765e0083b8a500	2026-08-25 20:25:47.711357+00
 \.
 
 
@@ -34992,23 +35027,28 @@ begin
 end
 $carr_governed_execution_seeds$;
 
--- 0310's exact enabled on-demand engineering-slice:v1 job contract.  This is
--- the existing ops.job queue projection, not a second workflow or task store.
+-- The exact enabled on-demand engineering-slice:v1 job contract through 0312.
+-- A post-0312 snapshot marks 0311/0312 applied in its migration ledger, so a
+-- fresh rebuild will not replay their contract updates.  This INSERT uses
+-- ON CONFLICT DO NOTHING deliberately: it must therefore already be the final
+-- sponsored, lease-bound controller declaration rather than the old 0310 row.
+-- It remains the existing ops.job queue projection, not a second workflow or
+-- task store.
 insert into ops.job_definition
   (key,version,enabled,risk,owner_actor,execution_kind,execution_contract,
    inventory_contract,state_contract,routing_contract,filtering_contract,
    recurrence,validation_contract,retry_policy,deduplication,completion_contract,legacy_schedule)
 values
   ('engineering-slice',1,true,'yellow','hermes','deterministic',
-   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runCodexSlice","args":[],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
-   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["Codex Desktop fresh-native-session adapter"],"authority":"server-derived shadow execution only; no caller-selected identity, model, authority, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
+   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runEngineeringWorker","args":["room-bridge-engineering-controller"],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
+   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["room-bridge lease-bound controller","Codex Desktop fresh-native-session adapter"],"authority":"server-derived sponsored Codex execution with a closed repository action allowlist; no caller-selected identity, authority, model, action, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
    '{"states":["queued","running","succeeded","failed","timed_out"]}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["capability.candidate_admitted","runner.identity_bound"]},"description":"an accepted capability candidate and bound runner identity admit the slice"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.registered_args_selected"]},"description":"only the registered fresh Codex adapter is selected"}'::jsonb,
    '{"kind":"on_demand","schedule":null,"cron":null,"timezone":"America/Chicago","source":"MCP admit-engineering-slice only"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.exit_zero","command.workflow_marker_valid"]},"description":"the bounded adapter succeeds and returns its typed workflow marker"}'::jsonb,
    '{"max_attempts":2,"backoff":"constant","base_seconds":30,"cap_seconds":300,"timeout_seconds":1800}'::jsonb,
-   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}"}'::jsonb,
+   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}:generation:{generation}"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.receipt_persisted","command.execution_evidence_reconciles"]},"description":"lease-bound typed receipt persists and reconciles to the issued envelope","receipt_kind":"engineering_slice"}'::jsonb,
    '{"provider":"none","status":"disabled","disable_requires":"no scheduler exists; on-demand MCP admission only"}'::jsonb)
 on conflict (key,version) do nothing;
