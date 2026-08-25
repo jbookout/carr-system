@@ -29,6 +29,35 @@ def check(label: str, condition: bool, failures: list[str]) -> None:
         failures.append(label)
 
 
+def run_installer(home: str, *arguments: str, validator: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run the real zsh installer after zsh startup has seen its HOME.
+
+    zsh may normalize HOME during process startup when invoked directly with a
+    fixture environment. Assigning it inside `-c`, after startup, makes the
+    fixture value the one the installer actually renders.
+    """
+    env = dict(os.environ)
+    if validator is None:
+        env.pop("CARR_ROOM_BRIDGE_PLIST_VALIDATOR", None)
+    else:
+        env["CARR_ROOM_BRIDGE_PLIST_VALIDATOR"] = validator
+    return subprocess.run(
+        ["/bin/zsh", "-c", 'HOME="$1"; export HOME; shift; exec "$@"',
+         "room-bridge-selftest", home, str(INSTALLER), *arguments],
+        cwd=REPO, env=env, capture_output=True, text=True,
+    )
+
+
+def process_check(label: str, process: subprocess.CompletedProcess[str],
+                  predicate, failures: list[str]) -> None:
+    ok = predicate(process.returncode)
+    if not ok:
+        stdout = (process.stdout or "")[:240].replace("\n", "\\n")
+        stderr = (process.stderr or "")[:240].replace("\n", "\\n")
+        print(f"  detail {label}: rc={process.returncode} stdout={stdout!r} stderr={stderr!r}")
+    check(label, ok, failures)
+
+
 def main() -> int:
     failures: list[str] = []
     template = PLIST.read_text(encoding="utf-8")
@@ -92,13 +121,9 @@ def main() -> int:
     # A valid spaced HOME must produce a parseable plist and never touch the
     # user's LaunchAgents directory.
     with tempfile.TemporaryDirectory(prefix="room bridge ") as valid_home:
-        valid_env = dict(os.environ, HOME=valid_home)
-        rendered_run = subprocess.run(
-            ["/bin/zsh", str(INSTALLER), "--render-only"],
-            cwd=REPO, env=valid_env, capture_output=True, text=True,
-        )
-        check("actual zsh/sed render succeeds for spaced HOME",
-              rendered_run.returncode == 0, failures)
+        rendered_run = run_installer(valid_home, "--render-only")
+        process_check("actual zsh/sed render succeeds for spaced HOME",
+                      rendered_run, lambda code: code == 0, failures)
         try:
             actual = plistlib.loads(rendered_run.stdout.encode("utf-8"))
             actual_ok = True
@@ -106,6 +131,7 @@ def main() -> int:
             actual = {}
             actual_ok = False
             print(f"  detail actual render parse: {type(exc).__name__}: {exc}")
+            print(f"  detail actual render output: {(rendered_run.stdout or '')[:240]!r}")
         check("actual render-only output parses", actual_ok, failures)
         actual_path = actual.get("EnvironmentVariables", {}).get("PATH", "")
         check("actual render carries spaced HOME local bin",
@@ -115,28 +141,23 @@ def main() -> int:
 
         # Force the portable Python validator even on macOS, where plutil is
         # present, so hosted Linux and local runs exercise the same seam.
-        python_env = dict(valid_env, CARR_ROOM_BRIDGE_PLIST_VALIDATOR="python")
-        python_run = subprocess.run(
-            ["/bin/zsh", str(INSTALLER), "--render-only"],
-            cwd=REPO, env=python_env, capture_output=True, text=True,
-        )
-        check("forced Python plist fallback succeeds", python_run.returncode == 0, failures)
+        python_run = run_installer(valid_home, "--render-only", validator="python")
+        process_check("forced Python plist fallback succeeds",
+                      python_run, lambda code: code == 0, failures)
         try:
             plistlib.loads(python_run.stdout.encode("utf-8"))
             python_output_ok = True
         except Exception:
             python_output_ok = False
+            print(f"  detail Python fallback output: {(python_run.stdout or '')[:240]!r}")
         check("forced Python fallback emits valid plist only", python_output_ok, failures)
 
         # An explicitly empty override is not the same as an unset variable:
         # only the named auto/python choices are accepted, so configuration
         # corruption fails closed before the destination can be created.
-        empty_env = dict(valid_env, CARR_ROOM_BRIDGE_PLIST_VALIDATOR="")
-        empty_run = subprocess.run(
-            ["/bin/zsh", str(INSTALLER)],
-            cwd=REPO, env=empty_env, capture_output=True, text=True,
-        )
-        check("empty validator override fails closed", empty_run.returncode != 0, failures)
+        empty_run = run_installer(valid_home, validator="")
+        process_check("empty validator override fails closed",
+                      empty_run, lambda code: code != 0, failures)
         check("empty validator override emits no plist", empty_run.stdout == "", failures)
         check("empty validator override names validation refusal",
               "failed validation; refusing installation" in empty_run.stderr, failures)
@@ -150,14 +171,9 @@ def main() -> int:
     # silently dropped or interpreted by the renderer.
     bad_home = tempfile.mkdtemp(prefix="room bridge &| \\")
     try:
-        bad_env = dict(os.environ, HOME=bad_home,
-                       CARR_ROOM_BRIDGE_PLIST_VALIDATOR="python")
-        refused = subprocess.run(
-            ["/bin/zsh", str(INSTALLER)],
-            cwd=REPO, env=bad_env, capture_output=True, text=True,
-        )
-        check("metacharacter HOME fails closed before install",
-              refused.returncode != 0, failures)
+        refused = run_installer(bad_home, validator="python")
+        process_check("metacharacter HOME fails closed before install",
+                      refused, lambda code: code != 0, failures)
         check("metacharacter refusal names validation",
               "failed validation; refusing installation" in refused.stderr, failures)
         check("metacharacter refusal leaves LaunchAgents untouched",
