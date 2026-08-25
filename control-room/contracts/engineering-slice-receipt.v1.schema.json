@@ -1,1 +1,330 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"carr-engineering-slice-receipt-v1","contract":"carr-engineering-slice-receipt","version":"1.0.0","status":"phase0_contract_foundation_not_deployed","title":"CARR Engineering Slice Receipt v1","type":"object","additionalProperties":false,"required":["schema_version","envelope_digest","attempt_id","slice_ref","plan_digest","attribution","planned_resource_refs","actual_resource_refs","planned_component_refs","actual_component_refs","checks","outcome","artifact_refs","evidence_refs","deviations","source_evidence","reset_reconstruction","executor_claim","independent_verification_required"],"properties":{"schema_version":{"const":"engineering-slice-receipt.v1"},"envelope_digest":{"$ref":"#/$defs/Digest"},"attempt_id":{"$ref":"#/$defs/Id"},"slice_ref":{"$ref":"#/$defs/Id"},"plan_digest":{"$ref":"#/$defs/Digest"},"attribution":{"type":"object","additionalProperties":false,"required":["actor_ref","session_ref","adapter_ref"],"properties":{"actor_ref":{"$ref":"#/$defs/Id"},"session_ref":{"$ref":"#/$defs/Id"},"adapter_ref":{"$ref":"#/$defs/Id"}}},"planned_resource_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"actual_resource_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"planned_component_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"actual_component_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"checks":{"type":"array","items":{"$ref":"#/$defs/CheckResult"}},"outcome":{"enum":["claimed_complete","failed","blocked","reopened"]},"artifact_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"evidence_refs":{"type":"array","items":{"$ref":"#/$defs/Evidence"}},"deviations":{"type":"array","items":{"$ref":"#/$defs/Deviation"}},"source_evidence":{"$ref":"#/$defs/SourceEvidence"},"reset_reconstruction":{"$ref":"#/$defs/Reset"},"executor_claim":{"$ref":"#/$defs/Claim"},"independent_verification_required":{"const":true}},"$defs":{"Id":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9._:-]{2,127}$"},"Digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"Evidence":{"type":"object","additionalProperties":false,"required":["ref","redaction_class","content_digest"],"properties":{"ref":{"$ref":"#/$defs/Id"},"redaction_class":{"enum":["metadata_only","redacted_evidence"]},"content_digest":{"$ref":"#/$defs/Digest"}}},"CheckResult":{"type":"object","additionalProperties":false,"required":["check_ref","state","evidence_refs"],"properties":{"check_ref":{"$ref":"#/$defs/Id"},"state":{"enum":["passed","failed","blocked","not_run"]},"evidence_refs":{"type":"array","items":{"$ref":"#/$defs/Evidence"}}}},"Deviation":{"type":"object","additionalProperties":false,"required":["deviation_ref","category","reason","impact","plan_revision_required","evidence_refs"],"properties":{"deviation_ref":{"$ref":"#/$defs/Id"},"category":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1},"impact":{"type":"string","minLength":1},"plan_revision_required":{"type":"boolean"},"evidence_refs":{"type":"array","items":{"$ref":"#/$defs/Evidence"}}}},"SourceEvidence":{"type":"object","additionalProperties":false,"required":["worktree_ref","branch_ref","source_sha","evidence_refs"],"properties":{"worktree_ref":{"$ref":"#/$defs/Id"},"branch_ref":{"$ref":"#/$defs/Id"},"source_sha":{"type":"string","minLength":1},"evidence_refs":{"type":"array","items":{"$ref":"#/$defs/Evidence"}}}},"Reset":{"type":"object","additionalProperties":false,"required":["fresh_session","inherited_transcript_used","reconstruction_free","remediation_action"],"properties":{"fresh_session":{"const":true},"inherited_transcript_used":{"const":false},"reconstruction_free":{"type":"boolean"},"remediation_action":{"oneOf":[{"type":"string","minLength":1},{"type":"null"}]}}},"Claim":{"type":"object","additionalProperties":false,"required":["claim_state","claimed_by","claimed_at"],"properties":{"claim_state":{"const":"executor_claim"},"claimed_by":{"$ref":"#/$defs/Id"},"claimed_at":{"type":"string","minLength":1}}}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr-engineering-slice-receipt-v1",
+  "contract": "carr-engineering-slice-receipt",
+  "version": "1.0.0",
+  "status": "phase0_contract_foundation_not_deployed",
+  "title": "CARR Engineering Slice Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "envelope_digest",
+    "attempt_id",
+    "slice_ref",
+    "plan_digest",
+    "attribution",
+    "planned_resource_refs",
+    "actual_resource_refs",
+    "planned_component_refs",
+    "actual_component_refs",
+    "checks",
+    "outcome",
+    "artifact_refs",
+    "evidence_refs",
+    "deviations",
+    "source_evidence",
+    "reset_reconstruction",
+    "executor_claim",
+    "independent_verification_required"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "engineering-slice-receipt.v1"
+    },
+    "envelope_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "attempt_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "slice_ref": {
+      "$ref": "#/$defs/Id"
+    },
+    "plan_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor_ref",
+        "session_ref",
+        "adapter_ref"
+      ],
+      "properties": {
+        "actor_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "session_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "adapter_ref": {
+          "$ref": "#/$defs/Id"
+        }
+      }
+    },
+    "planned_resource_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      }
+    },
+    "actual_resource_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      }
+    },
+    "planned_component_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      }
+    },
+    "actual_component_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CheckResult"
+      }
+    },
+    "outcome": {
+      "enum": [
+        "claimed_complete",
+        "failed",
+        "blocked",
+        "reopened"
+      ]
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      }
+    },
+    "deviations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Deviation"
+      }
+    },
+    "source_evidence": {
+      "$ref": "#/$defs/SourceEvidence"
+    },
+    "reset_reconstruction": {
+      "$ref": "#/$defs/Reset"
+    },
+    "executor_claim": {
+      "$ref": "#/$defs/Claim"
+    },
+    "independent_verification_required": {
+      "const": true
+    }
+  },
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"
+    },
+    "Digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "redaction_class",
+        "content_digest"
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "redaction_class": {
+          "enum": [
+            "metadata_only",
+            "redacted_evidence"
+          ]
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "CheckResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "check_ref",
+        "state",
+        "evidence_refs"
+      ],
+      "properties": {
+        "check_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "not_run"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          }
+        }
+      }
+    },
+    "Deviation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deviation_ref",
+        "category",
+        "reason",
+        "impact",
+        "plan_revision_required",
+        "evidence_refs",
+        "out_of_scope_resource_refs",
+        "out_of_scope_component_refs",
+        "review_state"
+      ],
+      "properties": {
+        "deviation_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "impact": {
+          "type": "string",
+          "minLength": 1
+        },
+        "plan_revision_required": {
+          "type": "boolean"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          }
+        },
+        "out_of_scope_resource_refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/Id"}
+        },
+        "out_of_scope_component_refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/Id"}
+        },
+        "review_state": {
+          "enum": ["unreviewed", "reviewed", "resolved"]
+        }
+      }
+    },
+    "SourceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worktree_ref",
+        "branch_ref",
+        "source_sha",
+        "evidence_refs"
+      ],
+      "properties": {
+        "worktree_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "branch_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "source_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          }
+        }
+      }
+    },
+    "Reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fresh_session",
+        "inherited_transcript_used",
+        "reconstruction_free",
+        "remediation_action"
+      ],
+      "properties": {
+        "fresh_session": {
+          "const": true
+        },
+        "inherited_transcript_used": {
+          "const": false
+        },
+        "reconstruction_free": {
+          "type": "boolean"
+        },
+        "remediation_action": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_state",
+        "claimed_by",
+        "claimed_at"
+      ],
+      "properties": {
+        "claim_state": {
+          "const": "executor_claim"
+        },
+        "claimed_by": {
+          "$ref": "#/$defs/Id"
+        },
+        "claimed_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

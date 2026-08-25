@@ -100,7 +100,9 @@ function validTelemetryMeasurement(value) {
 function validEngineeringPassport(value) {
   if (!object(value) || value.schema_version !== "engineering-passport.v1" || !string(value.work_request?.id)
     || !number(value.work_request?.state_version) || !DIGEST.test(value.work_request?.canonical_record_digest)
-    || !DIGEST.test(value.plan_digest) || !DIGEST.test(value.projection_digest) || !list(value.slices)
+    || !DIGEST.test(value.plan_digest) || !DIGEST.test(value.projection_digest) || !object(value.slice_plan)
+    || value.slice_plan.schema_version !== "engineering-slice-plan.v1" || value.slice_plan.plan_digest !== value.plan_digest
+    || !list(value.slices) || !list(value.receipts) || !list(value.reviewer_facts) || !list(value.qa_facts)
     || !object(value.operator_receipt) || !object(value.closure) || !["blocked", "complete"].includes(value.closure_state)
     || !object(value.stale_conflict)) return false;
   const states = new Set(["eligible", "blocked", "claimed", "reopened", "verified_complete"]);
@@ -111,6 +113,16 @@ function validEngineeringPassport(value) {
   for (const field of ["work", "proof", "explanation", "release", "learning"]) {
     if (!object(value.closure[field]) || !string(value.closure[field].state) || !list(value.closure[field].evidence_refs)
       || !string(value.closure[field].note)) return false;
+  }
+  const learningRoutes = new Set(["regression_test", "gate_or_validator", "decision_record", "skill_or_workflow", "memory_or_rule_candidate", "incident_finding", "speculative_finding", "nothing_durable"]);
+  if (value.closure.learning.state !== "unresolved" && !learningRoutes.has(value.closure.learning.route)) return false;
+  if (value.closure_state === "complete") {
+    if (value.stale_conflict.state !== "none" || value.slices.length === 0 || value.receipts.length !== value.slices.length
+      || !value.slices.every((slice) => slice.state === "verified_complete")
+      || !["complete"].includes(value.closure.work.state) || !["complete"].includes(value.closure.proof.state)
+      || !["complete"].includes(value.closure.explanation.state)
+      || !(value.closure.release.state === "released" || value.closure.release.state === "not_required")
+      || value.closure.learning.state === "unresolved") return false;
   }
   return list(value.operator_receipt.what_changed) && list(value.operator_receipt.evidence_refs)
     && list(value.operator_receipt.deviations) && list(value.operator_receipt.remaining_risk)
@@ -161,7 +173,16 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       typedCounts.engineering_passport = (typedCounts.engineering_passport || 0) + 1;
       if (!validEngineeringPassport(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_engineering_passport" }); continue; }
       const prior = engineering.get(parsed.payload.work_request.id);
-      if (!prior || (Number(turn.seq) || 0) > prior.seq) engineering.set(parsed.payload.work_request.id, { payload: parsed.payload, seq: Number(turn.seq) || 0 });
+      if (prior && prior.payload.work_request.state_version === parsed.payload.work_request.state_version
+        && prior.payload.work_request.canonical_record_digest !== parsed.payload.work_request.canonical_record_digest) {
+        prior.conflict = true;
+        rejected.push({ seq: Number(turn.seq) || 0, reason: "conflicting_engineering_passport" });
+      } else if (!prior || parsed.payload.work_request.state_version > prior.payload.work_request.state_version
+        || (parsed.payload.work_request.state_version === prior.payload.work_request.state_version && (Number(turn.seq) || 0) > prior.seq)) {
+        engineering.set(parsed.payload.work_request.id, { payload: parsed.payload, seq: Number(turn.seq) || 0, conflict: false });
+      } else if (prior && parsed.payload.work_request.state_version < prior.payload.work_request.state_version) {
+        rejected.push({ seq: Number(turn.seq) || 0, reason: "stale_engineering_passport" });
+      }
       continue;
     }
     typedCounts[parsed.kind] += 1;
@@ -217,13 +238,25 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       && spatial.canonical_binding.canonical_record_digest === projection.source_state.canonical_record_digest
       && spatial.canonical_binding.source_projection_digest === projection.projection_digest;
     if (spatial && !spatialBound) rejected.push({ seq: surfaces.get(projection.work_request_id).seq, reason: "mismatched_spatial_surface" });
+    const engineeringCandidate = engineering.get(projection.work_request_id);
+    let engineeringPassport = null;
+    if (engineeringCandidate) {
+      const binding = engineeringCandidate.payload;
+      const exactBinding = binding.work_request.state_version === projection.source_state.state_version
+        && binding.work_request.canonical_record_digest === projection.source_state.canonical_record_digest
+        && binding.accepted_plan_revision.digest === projection.source_state.plan_revision_digest;
+      if (engineeringCandidate.conflict) rejected.push({ seq: engineeringCandidate.seq, reason: "conflicting_engineering_passport" });
+      else if (binding.work_request.state_version < projection.source_state.state_version) rejected.push({ seq: engineeringCandidate.seq, reason: "stale_engineering_passport" });
+      else if (!exactBinding) rejected.push({ seq: engineeringCandidate.seq, reason: "mismatched_engineering_passport" });
+      else engineeringPassport = binding;
+    }
     return {
       ...projection, wire_seq: row.seq, conflict: row.conflict, status: row.conflict ? "unknown_partial" : statusFor(projection),
       observed_at: observedAt || now, freshness: projection.state.progress === "stale" ? "stale" : "current_as_observed",
       eval_portfolio: portfolioBound ? portfolio : null,
       spatial_surface: spatialBound ? spatial : null,
       telemetry_measurements: [...(telemetryByAttempt.get(projection.attempt_lane.attempt_id)?.values() || [])].map((row) => row.payload),
-      engineering_passport: engineering.get(projection.work_request_id)?.payload || null,
+      engineering_passport: engineeringPassport,
     };
   }).sort((a, b) => b.wire_seq - a.wire_seq);
   return { enabled: passports.length > 0, passports, rejected, typedCounts };

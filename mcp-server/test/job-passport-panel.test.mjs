@@ -12,6 +12,16 @@ const roomSource = fs.readFileSync(new URL("../../dealroom/js/room.js", import.m
 const roomCss = fs.readFileSync(new URL("../../dealroom/css/room.css", import.meta.url), "utf8");
 const turn = (payload, seq = 1) => ({ seq: String(seq), kind: "receipt", at: "2026-08-24T12:00:06Z", body: JSON.stringify(payload) });
 const wrap = (kind, payload) => ({ job_passport: { schema_version: "job-passport-wire.v1", kind, payload } });
+const engineeringFor = (projection = fixture) => ({
+  schema_version: "engineering-passport.v1",
+  work_request: { id: projection.work_request_id, state_version: projection.source_state.state_version, canonical_record_digest: projection.source_state.canonical_record_digest },
+  accepted_plan_revision: { id: "plan:engineering", revision: 1, digest: projection.source_state.plan_revision_digest },
+  plan_digest: "sha256:" + "a".repeat(64), projection_digest: "sha256:" + "b".repeat(64),
+  slice_plan: { schema_version: "engineering-slice-plan.v1", plan_digest: "sha256:" + "a".repeat(64) }, receipts: [], reviewer_facts: [], qa_facts: [],
+  slices: [], operator_receipt: { what_changed: [], why: "blocked", evidence_refs: [], deviations: [], remaining_risk: [], manual_qa_items: [] },
+  closure: { work: { state: "unresolved", evidence_refs: [], note: "pending" }, proof: { state: "unresolved", evidence_refs: [], note: "pending" }, explanation: { state: "unresolved", evidence_refs: [], note: "pending" }, release: { state: "unresolved", evidence_refs: [], note: "pending" }, learning: { state: "unresolved", route: null, evidence_refs: [], note: "pending" } },
+  closure_state: "blocked", stale_conflict: { state: "none", reason: null },
+});
 
 test("Job Passport parses only strict typed wire wrappers", () => {
   assert.equal(parseJobPassportReceipt("not json").ok, false);
@@ -126,6 +136,20 @@ test("a malformed projection digest is visibly withheld before it can paint", ()
   const model = deriveJobPassports([turn(wrap("observatory_projection", malformed))]);
   assert.equal(model.enabled, false);
   assert.deepEqual(model.rejected, [{ seq: 1, reason: "invalid_projection" }]);
+});
+
+test("Engineering Passport binds to exact Observatory state and withholds stale/conflicting facts", () => {
+  const matching = engineeringFor(fixture);
+  const model = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", matching), 2)]);
+  assert.deepEqual(model.passports[0].engineering_passport, matching);
+  const stale = engineeringFor(fixture); const newerProjection = structuredClone(fixture); newerProjection.source_state.state_version = 2; newerProjection.source_state.canonical_record_digest = "sha256:" + "9".repeat(64);
+  const staleModel = deriveJobPassports([turn(wrap("observatory_projection", newerProjection), 1), turn(wrap("engineering_passport", stale), 2)]);
+  assert.equal(staleModel.passports[0].engineering_passport, null);
+  assert.ok(staleModel.rejected.some((row) => row.reason === "stale_engineering_passport"));
+  const conflict = engineeringFor(fixture); conflict.work_request.canonical_record_digest = "sha256:" + "d".repeat(64);
+  const conflictModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", matching), 2), turn(wrap("engineering_passport", conflict), 3)]);
+  assert.equal(conflictModel.passports[0].engineering_passport, null);
+  assert.ok(conflictModel.rejected.some((row) => row.reason === "conflicting_engineering_passport"));
 });
 
 test("regression guards preserve keyboard drilldown across a poll and a real mobile grid row", () => {

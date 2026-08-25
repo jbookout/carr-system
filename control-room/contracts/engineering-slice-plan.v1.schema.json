@@ -1,1 +1,250 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"carr-engineering-slice-plan-v1","contract":"carr-engineering-slice-plan","version":"1.0.0","status":"phase0_contract_foundation_not_deployed","title":"CARR Engineering Slice Plan v1","type":"object","additionalProperties":false,"required":["schema_version","work_request","accepted_plan_revision","plan_digest","slices"],"properties":{"schema_version":{"const":"engineering-slice-plan.v1"},"work_request":{"$ref":"#/$defs/Binding"},"accepted_plan_revision":{"$ref":"#/$defs/PlanRevision"},"plan_digest":{"$ref":"#/$defs/Digest"},"slices":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/Slice"}}},"$defs":{"Id":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9._:-]{2,127}$"},"Digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"Binding":{"type":"object","additionalProperties":false,"required":["id","state_version","canonical_record_digest"],"properties":{"id":{"$ref":"#/$defs/Id"},"state_version":{"type":"integer","minimum":1},"canonical_record_digest":{"$ref":"#/$defs/Digest"}}},"PlanRevision":{"type":"object","additionalProperties":false,"required":["id","revision","digest"],"properties":{"id":{"$ref":"#/$defs/Id"},"revision":{"type":"integer","minimum":1},"digest":{"$ref":"#/$defs/Digest"}}},"Evidence":{"type":"object","additionalProperties":false,"required":["ref","redaction_class","content_digest"],"properties":{"ref":{"$ref":"#/$defs/Id"},"redaction_class":{"enum":["metadata_only","redacted_evidence"]},"content_digest":{"$ref":"#/$defs/Digest"}}},"Check":{"type":"object","additionalProperties":false,"required":["check_ref","failure_condition","evidence_requirement"],"properties":{"check_ref":{"$ref":"#/$defs/Id"},"failure_condition":{"type":"string","minLength":1},"evidence_requirement":{"enum":["redacted_evidence_required","metadata_only_sufficient"]}}},"Slice":{"type":"object","additionalProperties":false,"required":["slice_ref","ordinal","objective","definition_of_done","dependency_refs","declared_resource_refs","declared_component_refs","declared_plan_step_refs","baseline_evidence_refs","planned_checks","scope_boundary","forbidden_change_refs","concurrency_posture","manual_qa_required","risk_class","release_requirement"],"properties":{"slice_ref":{"$ref":"#/$defs/Id"},"ordinal":{"type":"integer","minimum":1},"objective":{"type":"string","minLength":1},"definition_of_done":{"type":"string","minLength":1},"dependency_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"declared_resource_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"declared_component_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"declared_plan_step_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"baseline_evidence_refs":{"type":"array","items":{"$ref":"#/$defs/Evidence"}},"planned_checks":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/Check"}},"scope_boundary":{"type":"string","minLength":1},"forbidden_change_refs":{"type":"array","items":{"$ref":"#/$defs/Id"}},"concurrency_posture":{"enum":["parallel_safe","serial_after_dependencies","exclusive_resource"]},"manual_qa_required":{"type":"boolean"},"risk_class":{"enum":["R0","R1","R2","R3","R4","R5","R6"]},"release_requirement":{"enum":["required","not_required"]}}}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr-engineering-slice-plan-v1",
+  "contract": "carr-engineering-slice-plan",
+  "version": "1.0.0",
+  "status": "phase0_contract_foundation_not_deployed",
+  "title": "CARR Engineering Slice Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "work_request",
+    "accepted_plan_revision",
+    "plan_digest",
+    "slices"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "engineering-slice-plan.v1"
+    },
+    "work_request": {
+      "$ref": "#/$defs/Binding"
+    },
+    "accepted_plan_revision": {
+      "$ref": "#/$defs/PlanRevision"
+    },
+    "plan_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "slices": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/Slice"
+      }
+    }
+  },
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"
+    },
+    "Digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "Binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "state_version",
+        "canonical_record_digest"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "state_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "canonical_record_digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "PlanRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "redaction_class",
+        "content_digest"
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "redaction_class": {
+          "enum": [
+            "metadata_only",
+            "redacted_evidence"
+          ]
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "Check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "check_ref",
+        "failure_condition",
+        "evidence_requirement"
+      ],
+      "properties": {
+        "check_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "failure_condition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_requirement": {
+          "enum": [
+            "redacted_evidence_required",
+            "metadata_only_sufficient"
+          ]
+        }
+      }
+    },
+    "Slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slice_ref",
+        "ordinal",
+        "objective",
+        "definition_of_done",
+        "dependency_refs",
+        "declared_resource_refs",
+        "declared_component_refs",
+        "declared_plan_step_refs",
+        "baseline_evidence_refs",
+        "planned_checks",
+        "scope_boundary",
+        "forbidden_change_refs",
+        "concurrency_posture",
+        "manual_qa_required",
+        "risk_class",
+        "release_requirement"
+      ],
+      "properties": {
+        "slice_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
+        "definition_of_done": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dependency_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "declared_resource_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "declared_component_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "declared_plan_step_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "baseline_evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          }
+        },
+        "planned_checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Check"
+          }
+        },
+        "scope_boundary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "forbidden_change_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "concurrency_posture": {
+          "enum": [
+            "parallel_safe",
+            "serial_after_dependencies",
+            "exclusive_resource"
+          ]
+        },
+        "manual_qa_required": {
+          "type": "boolean"
+        },
+        "risk_class": {
+          "enum": [
+            "R0",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "R5",
+            "R6"
+          ]
+        },
+        "release_requirement": {
+          "enum": [
+            "required",
+            "not_required"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1572,7 +1572,8 @@ function boot() {
           panel.appendChild(el("p", "passport-engineering-receipt", `Operator receipt: ${engineering.operator_receipt.why}. Remaining risk: ${engineering.operator_receipt.remaining_risk.map(humanRef).join(", ") || "none"}.`));
           const closureList = el("ul", "passport-engineering-closure");
           for (const field of ["work", "proof", "explanation", "release", "learning"]) {
-            closureList.appendChild(el("li", null, `${humanRef(field)} disposition: ${engineering.closure[field].state.replace(/_/g, " ")} — ${engineering.closure[field].note}`));
+            const route = engineering.closure[field].route ? ` · route ${humanRef(engineering.closure[field].route)}` : "";
+            closureList.appendChild(el("li", null, `${humanRef(field)} disposition: ${engineering.closure[field].state.replace(/_/g, " ")}${route} — ${engineering.closure[field].note}`));
           }
           panel.appendChild(closureList);
           if (engineering.stale_conflict.state !== "none") panel.appendChild(el("p", "passport-engineering-conflict", `State posture: ${engineering.stale_conflict.state} — ${engineering.stale_conflict.reason}`));
