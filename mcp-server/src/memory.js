@@ -8,6 +8,7 @@ import { personalScopeForActor, organizationTenantForActor } from "./identity.js
 const KINDS = ["preference", "fact", "episodic", "procedural"];
 const SCOPES = ["shared", "personal"];
 const FORBIDDEN_PASSPORT_FIELDS = ["work_request", "work_request_version", "job_attempt_id", "source_state"];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function sponsorFor(actor, ToolError) {
   const scope = personalScopeForActor(actor);
@@ -18,10 +19,7 @@ function sponsorFor(actor, ToolError) {
 async function planAnchor(c, actor, planId, ToolError) {
   if (planId === undefined || planId === null || planId === "") return null;
   const r = await c.query(
-    `select p.id, p.work_request_id, p.work_request_version
-       from ops.sourced_work_request_plan p
-       join ops.work_request w on w.id=p.work_request_id
-      where p.id=$1 and w.organization_tenant_id=$2`,
+    `select * from resolve_memory_plan_anchor($1::uuid,$2::text)`,
     [planId, organizationTenantForActor(actor)]);
   if (!r.rows.length) throw new ToolError({ error: "memory_plan_not_found_or_forbidden", plan_id: planId });
   return r.rows[0];
@@ -30,6 +28,21 @@ async function planAnchor(c, actor, planId, ToolError) {
 function humanOnlyDirect(actor, ToolError) {
   if (!actor?.human) throw new ToolError({ error: "human_only",
     hint: "this memory transition requires an interactive human partner" });
+}
+
+function requireUuid(value, field, ToolError) {
+  if (typeof value !== "string" || !UUID_RE.test(value))
+    throw new ToolError({ error: `${field}_invalid`, field });
+  return value;
+}
+
+function requireReason(value, ToolError) { return validText(value, "reason", ToolError); }
+
+function recallLimit(value, ToolError) {
+  if (value === undefined) return 20;
+  if (!Number.isInteger(value) || value < 1 || value > 100)
+    throw new ToolError({ error: "memory_limit_invalid", hint: "limit must be an integer from 1 through 100" });
+  return value;
 }
 
 function validText(value, field, ToolError) {
@@ -53,6 +66,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       handler: async (c, actor, args) => { guard(args);
         if (FORBIDDEN_PASSPORT_FIELDS.some(field => Object.prototype.hasOwnProperty.call(args, field)))
           throw new ToolError({ error: "memory_plan_anchor_only", hint: "Phase 1 accepts only plan_id; execution attempts and deviations belong to the next envelope slice" });
+        if (args.plan_id !== undefined) requireUuid(args.plan_id, "plan_id", ToolError);
         return withEnvelope(c, actor, "observe-memory", args, async () => {
         guard(args);
         if (!KINDS.includes(args.kind)) throw new ToolError({ error: "memory_kind_invalid", allowed: KINDS });
@@ -95,8 +109,9 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       }, required: ["query"] },
       handler: async (c, actor, args) => {
         guard(args);
+        const limit = recallLimit(args.limit, ToolError);
+        const query = validText(args.query, "query", ToolError);
         const scope = sponsorFor(actor, ToolError);
-        const limit = Math.min(Math.max(Number(args.limit || 20), 1), 100);
         const r = await c.query(
           `select id, kind, statement, context, scope, confidence, status, version, created_at,
                   ts_rank(search_vector, plainto_tsquery('english',$1)) as relevance
@@ -107,7 +122,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
             order by (ts_rank(search_vector, plainto_tsquery('english',$1)) +
                       0.5 * ts_rank(to_tsvector('english', coalesce(context,'')), plainto_tsquery('english',coalesce($4,'')))) desc,
                      confidence desc, created_at desc limit $5`,
-          [validText(args.query, "query", ToolError), scope.sponsor, organizationTenantForActor(actor), args.context || "", limit]);
+          [query, scope.sponsor, organizationTenantForActor(actor), args.context || "", limit]);
         return { ok: true, query: args.query, context: args.context || null, memories: r.rows, count: r.rows.length };
       },
     },
@@ -117,6 +132,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       inputSchema: { type: "object", properties: { memory_id: { type: "string" } }, required: ["memory_id"] },
       handler: async (c, actor, args) => {
         guard(args);
+        requireUuid(args.memory_id, "memory_id", ToolError);
         const scope = sponsorFor(actor, ToolError);
         const r = await c.query(
           `select m.*, coalesce(jsonb_agg(to_jsonb(e) order by e.observed_at desc) filter (where e.id is not null),'[]'::jsonb) as evidence
@@ -136,7 +152,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, reason: { type: "string" },
       }, required: ["idempotency_key", "memory_id", "base_version", "reason"] },
-      handler: async (c, actor, args) => { guard(args); humanOnlyDirect(actor, ToolError); return withEnvelope(c, actor, "promote-memory", args, async () => {
+      handler: async (c, actor, args) => { guard(args); humanOnlyDirect(actor, ToolError); requireUuid(args.memory_id, "memory_id", ToolError); requireReason(args.reason, ToolError); return withEnvelope(c, actor, "promote-memory", args, async () => {
         const scope = sponsorFor(actor, ToolError);
         const r = await c.query(
           `update memory_item set status='promoted', version=version+1, promoted_by_actor_id=$4, promoted_at=now(), updated_at=now()
@@ -155,7 +171,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, statement: { type: "string" }, reason: { type: "string" },
       }, required: ["idempotency_key", "memory_id", "base_version", "statement", "reason"] },
-      handler: async (c, actor, args) => { guard(args); humanOnlyDirect(actor, ToolError); return withEnvelope(c, actor, "correct-memory", args, async () => {
+      handler: async (c, actor, args) => { guard(args); humanOnlyDirect(actor, ToolError); requireUuid(args.memory_id, "memory_id", ToolError); validText(args.statement, "statement", ToolError); requireReason(args.reason, ToolError); return withEnvelope(c, actor, "correct-memory", args, async () => {
         const text = validText(args.statement, "statement", ToolError);
         const scope = sponsorFor(actor, ToolError);
         const tenant = organizationTenantForActor(actor);
@@ -187,7 +203,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, reason: { type: "string" },
       }, required: ["idempotency_key", "memory_id", "base_version", "reason"] },
-      handler: async (c, actor, args) => { guard(args); humanOnlyDirect(actor, ToolError); return withEnvelope(c, actor, "forget-memory", args, async () => {
+      handler: async (c, actor, args) => { guard(args); humanOnlyDirect(actor, ToolError); requireUuid(args.memory_id, "memory_id", ToolError); requireReason(args.reason, ToolError); return withEnvelope(c, actor, "forget-memory", args, async () => {
         const scope = sponsorFor(actor, ToolError);
         const r = await c.query(
           `update memory_item set status='forgotten', forgotten_by_actor_id=$4, forget_reason=$5, forgotten_at=now(), version=version+1, updated_at=now()

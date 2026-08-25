@@ -5,6 +5,19 @@
 
 begin;
 
+create or replace function resolve_memory_plan_anchor(p_plan_id uuid, p_tenant text)
+returns table(plan_id uuid, work_request_id uuid, work_request_version integer)
+language sql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+  select p.id, p.work_request_id, p.work_request_version
+    from ops.sourced_work_request_plan p
+    join ops.work_request w on w.id=p.work_request_id
+   where p.id=$1 and w.organization_tenant_id=$2;
+$$;
+revoke all on function resolve_memory_plan_anchor(uuid,text) from public, carr_reader, carr_jobs, carr_authority;
+grant execute on function resolve_memory_plan_anchor(uuid,text) to carr_writer;
+
 create table memory_item (
   id uuid primary key default gen_random_uuid(),
   organization_tenant_id text not null,
@@ -87,7 +100,11 @@ create index memory_evidence_memory_idx on memory_evidence(memory_id, observed_a
 create or replace function memory_item_immutable_core()
 returns trigger language plpgsql as $$
 begin
-  if new.statement is distinct from old.statement
+  if new.kind is distinct from old.kind
+     or new.context is distinct from old.context
+     or new.confidence is distinct from old.confidence
+     or new.observed_by_actor_id is distinct from old.observed_by_actor_id
+     or new.statement is distinct from old.statement
      or new.scope is distinct from old.scope
      or new.owner_actor_id is distinct from old.owner_actor_id
      or new.organization_tenant_id is distinct from old.organization_tenant_id
@@ -97,6 +114,43 @@ begin
      or new.predecessor_id is distinct from old.predecessor_id
      or new.lineage_root_id is distinct from old.lineage_root_id then
     raise exception 'memory_item core is immutable; create a successor for corrections';
+  end if;
+  if new.version <> old.version + 1 then
+    raise exception 'memory_item lifecycle updates must increment version exactly once';
+  end if;
+  if new.status is not distinct from old.status then
+    raise exception 'memory_item status must make one allowed lifecycle transition';
+  end if;
+  if old.status='candidate' and new.status='promoted' then
+    if new.promoted_by_actor_id is null or new.promoted_at is null
+       or new.corrected_by_actor_id is distinct from old.corrected_by_actor_id
+       or new.correction_reason is distinct from old.correction_reason
+       or new.corrected_at is distinct from old.corrected_at
+       or new.forgotten_by_actor_id is distinct from old.forgotten_by_actor_id
+       or new.forget_reason is distinct from old.forget_reason
+       or new.forgotten_at is distinct from old.forgotten_at then
+      raise exception 'candidate promotion requires actor and timestamp';
+    end if;
+  elsif old.status in ('candidate','promoted') and new.status='corrected' then
+    if new.corrected_by_actor_id is null or new.correction_reason is null or new.corrected_at is null
+       or new.promoted_by_actor_id is distinct from old.promoted_by_actor_id
+       or new.promoted_at is distinct from old.promoted_at
+       or new.forgotten_by_actor_id is distinct from old.forgotten_by_actor_id
+       or new.forget_reason is distinct from old.forget_reason
+       or new.forgotten_at is distinct from old.forgotten_at then
+      raise exception 'memory correction requires actor, reason, and timestamp';
+    end if;
+  elsif old.status in ('candidate','promoted','corrected') and new.status='forgotten' then
+    if new.forgotten_by_actor_id is null or new.forget_reason is null or new.forgotten_at is null
+       or new.promoted_by_actor_id is distinct from old.promoted_by_actor_id
+       or new.promoted_at is distinct from old.promoted_at
+       or new.corrected_by_actor_id is distinct from old.corrected_by_actor_id
+       or new.correction_reason is distinct from old.correction_reason
+       or new.corrected_at is distinct from old.corrected_at then
+      raise exception 'memory forgetting requires actor, reason, and timestamp';
+    end if;
+  else
+    raise exception 'memory_item status transition is not an allowed lifecycle transition';
   end if;
   return new;
 end $$;
@@ -114,3 +168,13 @@ grant select, insert on memory_evidence to carr_writer;
 revoke delete on memory_item, memory_evidence from carr_reader, carr_writer, carr_jobs;
 
 commit;
+
+do $$
+begin
+  if not has_function_privilege('carr_writer', 'resolve_memory_plan_anchor(uuid,text)', 'execute') then
+    raise exception '0297 FAILED: carr_writer cannot execute the narrow plan resolver';
+  end if;
+  if has_table_privilege('carr_writer', 'ops.sourced_work_request_plan', 'select') then
+    raise exception '0297 FAILED: carr_writer gained broad plan-table SELECT';
+  end if;
+end $$;
