@@ -7,7 +7,7 @@
 // canonical state before it is wrapped for the wire.
 
 const WIRE_VERSION = "job-passport-wire.v1";
-const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "eval_portfolio", "spatial_surface", "telemetry_measurement"]);
+const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "eval_portfolio", "spatial_surface", "telemetry_measurement", "engineering_passport"]);
 const PROGRESS = new Set(["active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"]);
 const LIFECYCLE = new Set(["succeeded", "failed", "timed_out", "cancelled", "partial", "unknown"]);
 const VERIFICATION = new Set(["verified_success", "verified_failure", "partial", "unknown", "not_attempted"]);
@@ -97,6 +97,26 @@ function validTelemetryMeasurement(value) {
   return value.value.kind !== "estimate" || (string(value.value.estimate_method) && string(value.value.uncertainty));
 }
 
+function validEngineeringPassport(value) {
+  if (!object(value) || value.schema_version !== "engineering-passport.v1" || !string(value.work_request?.id)
+    || !number(value.work_request?.state_version) || !DIGEST.test(value.work_request?.canonical_record_digest)
+    || !DIGEST.test(value.plan_digest) || !DIGEST.test(value.projection_digest) || !list(value.slices)
+    || !object(value.operator_receipt) || !object(value.closure) || !["blocked", "complete"].includes(value.closure_state)
+    || !object(value.stale_conflict)) return false;
+  const states = new Set(["eligible", "blocked", "claimed", "reopened", "verified_complete"]);
+  if (!value.slices.every((slice) => object(slice) && string(slice.slice_ref) && number(slice.ordinal)
+    && list(slice.dependency_refs) && states.has(slice.state) && list(slice.planned_check_refs)
+    && list(slice.deviation_refs) && typeof slice.manual_qa_required === "boolean"
+    && ["required", "not_required"].includes(slice.release_requirement))) return false;
+  for (const field of ["work", "proof", "explanation", "release", "learning"]) {
+    if (!object(value.closure[field]) || !string(value.closure[field].state) || !list(value.closure[field].evidence_refs)
+      || !string(value.closure[field].note)) return false;
+  }
+  return list(value.operator_receipt.what_changed) && list(value.operator_receipt.evidence_refs)
+    && list(value.operator_receipt.deviations) && list(value.operator_receipt.remaining_risk)
+    && list(value.operator_receipt.manual_qa_items) && string(value.operator_receipt.why);
+}
+
 function compareProjection(a, b) {
   const av = a.source_state.state_version;
   const bv = b.source_state.state_version;
@@ -132,10 +152,18 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
   const portfolios = new Map();
   const surfaces = new Map();
   const telemetryByAttempt = new Map();
+  const engineering = new Map();
   for (const turn of turns || []) {
     if (turn?.kind !== "receipt") continue;
     const parsed = parseJobPassportReceipt(turn.body);
     if (!parsed.ok) continue;
+    if (parsed.kind === "engineering_passport") {
+      typedCounts.engineering_passport = (typedCounts.engineering_passport || 0) + 1;
+      if (!validEngineeringPassport(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_engineering_passport" }); continue; }
+      const prior = engineering.get(parsed.payload.work_request.id);
+      if (!prior || (Number(turn.seq) || 0) > prior.seq) engineering.set(parsed.payload.work_request.id, { payload: parsed.payload, seq: Number(turn.seq) || 0 });
+      continue;
+    }
     typedCounts[parsed.kind] += 1;
     if (parsed.kind === "evaluation_kernel" || parsed.kind === "eval_portfolio") {
       if (!validEvalPortfolio(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_eval_portfolio" }); continue; }
@@ -195,6 +223,7 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       eval_portfolio: portfolioBound ? portfolio : null,
       spatial_surface: spatialBound ? spatial : null,
       telemetry_measurements: [...(telemetryByAttempt.get(projection.attempt_lane.attempt_id)?.values() || [])].map((row) => row.payload),
+      engineering_passport: engineering.get(projection.work_request_id)?.payload || null,
     };
   }).sort((a, b) => b.wire_seq - a.wire_seq);
   return { enabled: passports.length > 0, passports, rejected, typedCounts };

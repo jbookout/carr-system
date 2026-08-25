@@ -1553,6 +1553,31 @@ function boot() {
           ladder.appendChild(el("p", "passport-eval-failures", `Failure taxonomy: ${failures.map((row) => humanRef(row.class_name)).join(", ") || "none"}.`));
           card.appendChild(ladder);
         }
+        if (passport.engineering_passport) {
+          const engineering = passport.engineering_passport;
+          const panel = el("section", "passport-engineering");
+          panel.setAttribute("aria-label", "Engineering Passport lifecycle");
+          panel.appendChild(el("h3", "passport-engineering-title", `Engineering Passport · ${engineering.closure_state}`));
+          const states = engineering.slices.map((slice) => {
+            const deps = slice.dependency_refs.length ? ` · depends on ${slice.dependency_refs.map(humanRef).join(", ")}` : " · no dependencies";
+            return `${humanRef(slice.slice_ref)}: ${slice.state.replace(/_/g, " ")}${deps}`;
+          });
+          const stateList = el("ul", "passport-engineering-slices");
+          for (const state of states) stateList.appendChild(el("li", null, state));
+          panel.appendChild(stateList);
+          const deviations = engineering.operator_receipt.deviations.length
+            ? `Planned-vs-actual deviations: ${engineering.operator_receipt.deviations.map(humanRef).join(", ")}.`
+            : "Planned-vs-actual deviations: none recorded.";
+          panel.appendChild(el("p", "passport-engineering-deviations", deviations));
+          panel.appendChild(el("p", "passport-engineering-receipt", `Operator receipt: ${engineering.operator_receipt.why}. Remaining risk: ${engineering.operator_receipt.remaining_risk.map(humanRef).join(", ") || "none"}.`));
+          const closureList = el("ul", "passport-engineering-closure");
+          for (const field of ["work", "proof", "explanation", "release", "learning"]) {
+            closureList.appendChild(el("li", null, `${humanRef(field)} disposition: ${engineering.closure[field].state.replace(/_/g, " ")} — ${engineering.closure[field].note}`));
+          }
+          panel.appendChild(closureList);
+          if (engineering.stale_conflict.state !== "none") panel.appendChild(el("p", "passport-engineering-conflict", `State posture: ${engineering.stale_conflict.state} — ${engineering.stale_conflict.reason}`));
+          card.appendChild(panel);
+        }
         const detail = el("details", "passport-detail");
         detail.open = card.dataset.detailOpen === "true";
         detail.addEventListener("toggle", () => { card.dataset.detailOpen = String(detail.open); });
