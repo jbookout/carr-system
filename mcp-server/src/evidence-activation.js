@@ -6,10 +6,21 @@ import { organizationTenantForActor } from "./identity.js";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WR = /^WR-[0-9]{1,12}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const ATTEMPT_RELIABILITY_NOT_VISIBLE_MESSAGE = "attempt reliability is not visible to tenant";
 const RAW_RECEIPT_KEYS = new Set(["raw_prompt", "raw_transcript", "tool_payload", "raw_output", "prompt", "transcript", "expected_output", "expected_answer", "held_out_expected_output", "held_out_answer"]);
 const BOUNDED_SCALAR = /^[^\s]{1,127}$/;
 const RECEIPT_REQUIRED = new Set(["schema_version", "attempt_id", "envelope_digest", "attempt_ordinal", "adapter", "lifecycle", "result", "attestation", "negative_knowledge", "telemetry", "tool_event_summaries", "observation", "interventions", "handoff_proposal", "visual_artifacts", "evaluation_binding", "knowledge_activation", "reliability"]);
 const RECEIPT_ALLOWED = new Set([...RECEIPT_REQUIRED]);
+
+// The security-definer read function deliberately uses one stable refusal for
+// both a missing AttemptReceipt and a receipt owned by another tenant.  Map
+// only that exact PostgreSQL raise-exception (P0001 + exact message) to the
+// public not-found ToolError.  Other database faults must remain failures so
+// schema, connectivity, and privilege regressions cannot masquerade as a
+// missing record.
+export function isAttemptReliabilityVisibilityRefusal(error) {
+  return error?.code === "P0001" && error?.message === ATTEMPT_RELIABILITY_NOT_VISIBLE_MESSAGE;
+}
 const KNOWLEDGE_REQUIRED = new Set(["bundle_digest", "item_dispositions", "closure", "mode", "canonical_binding"]);
 const RELIABILITY_REQUIRED = new Set(["route_digest", "topology_digest", "evaluation_plan_digest", "grounding_sufficiency", "deterministic_checks", "model_judgement", "human_acceptance", "trajectory", "evaluator_results", "corrections", "defects", "incidents", "downstream_outcome", "outcome_horizon", "process_metrics", "eval_candidates", "shadow_comparisons", "learning_disposition", "telemetry", "closure"]);
 const RELIABILITY_ALLOWED = RELIABILITY_REQUIRED;
@@ -238,7 +249,14 @@ export function evidenceActivationTools({ withEnvelope, ToolError }) {
       inputSchema: { type: "object", additionalProperties: false, properties: { attempt_id: { type: "string" } }, required: ["attempt_id"] },
       handler: async (c, actor, args) => {
         await c.query("select set_config('carr.organization_tenant_id',$1::text,true) /* read-attempt-reliability:tenant */", [organizationTenantForActor(actor)]);
-        const reliability = (await c.query("select ops.read_attempt_receipt_reliability($1::text) as reliability /* read-attempt-reliability */", [args.attempt_id])).rows[0]?.reliability;
+        let result;
+        try {
+          result = await c.query("select ops.read_attempt_receipt_reliability($1::text) as reliability /* read-attempt-reliability */", [args.attempt_id]);
+        } catch (error) {
+          if (isAttemptReliabilityVisibilityRefusal(error)) throw new ToolError({ error: "attempt_reliability_not_found" });
+          throw error;
+        }
+        const reliability = result.rows[0]?.reliability;
         if (!reliability) throw new ToolError({ error: "attempt_reliability_not_found" });
         return { ok: true, reliability, ...activationReliabilityWire(reliability) };
       },
