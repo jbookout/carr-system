@@ -362,7 +362,23 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
   const rows = [];
   for (const job of claimed.rows) {
     const bound = await c.query("select * from ops.engineering_execution_envelope where job_id=$1", [job.job_id]);
-    if (bound.rows.length && bound.rows[0].envelope) rows.push({ ...job, envelope: bound.rows[0].envelope, envelope_id: bound.rows[0].id, envelope_digest: bound.rows[0].envelope_digest });
+    if (!bound.rows.length || !bound.rows[0].envelope) {
+      rows.push({ ...job, controller_error: "engineering_envelope_not_found" });
+      continue;
+    }
+    const envelopeRow = bound.rows[0];
+    const bindingResult = await c.query(
+      "select ops.engineering_controller_binding($1::uuid,$2::uuid) as binding",
+      [envelopeRow.id, job.job_id],
+    );
+    const binding = bindingResult.rows[0]?.binding;
+    if (!binding || typeof binding !== "object") {
+      rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
+        envelope_digest: envelopeRow.envelope_digest, controller_error: "engineering_controller_binding_missing" });
+      continue;
+    }
+    rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
+      envelope_digest: envelopeRow.envelope_digest, controller_binding: binding });
   }
   return rows;
 }
@@ -388,23 +404,78 @@ export async function submitEngineeringReceipt(c, claimed, receipt, actor, ToolE
   return { ok: true, receipt_id: inserted.rows[0].id, receipt_digest: receiptDigest };
 }
 
+function controllerActor(claim, ToolError) {
+  const binding = claim?.controller_binding;
+  const actor = binding?.executor_actor;
+  if (!actor || typeof actor !== "object") error(ToolError, { error: "engineering_controller_binding_invalid" });
+  const actorId = uuid(actor.id, "controller_binding.executor_actor.id", ToolError);
+  const actorSlug = id(actor.slug, "controller_binding.executor_actor.slug", ToolError);
+  // The first live adapter is deliberately fixed.  A controller cannot turn a
+  // job into another principal by supplying a different actor at invocation.
+  if (actorSlug !== "codex") error(ToolError, { error: "engineering_executor_not_supported", executor: actorSlug });
+  return { id: actorId, slug: actorSlug };
+}
+
+function controllerPlan(claim, ToolError) {
+  const binding = claim?.controller_binding;
+  const plan = requirePlan(binding?.slice_plan, ToolError);
+  const slice = sliceFor(plan, claim?.payload?.slice_ref, ToolError);
+  if (binding.envelope_id !== claim.envelope_id || binding.envelope_digest !== claim.envelope_digest
+      || binding.slice_ref !== slice.slice_ref || binding.plan_digest !== plan.plan_digest)
+    error(ToolError, { error: "engineering_controller_binding_mismatch" });
+  return { plan, slice };
+}
+
+async function failEngineeringClaim(c, claim, failureClass, detail) {
+  const failure = await c.query(
+    "select ops.fail_job($1::uuid,$2::uuid,$3::text,$4::text) as state",
+    [claim.job_id, claim.lease_token, failureClass, String(detail || "engineering controller failure").slice(0, 1000)],
+  );
+  return { job_id: claim.job_id, state: failure.rows[0]?.state || "failure_unreadable",
+    failure_class: failureClass };
+}
+
+async function controllerReadback(c, claim, ToolError) {
+  const work = claim?.payload?.work_request;
+  if (typeof work !== "string" || !work.trim()) return { state: "unavailable", reason: "work_request_missing" };
+  const row = await c.query("select ops.engineering_passport_facts($1::text) as facts", [work]);
+  if (!row.rows[0]?.facts?.source) return { state: "unavailable", reason: "passport_facts_missing" };
+  const passport = closureProjection(row.rows[0].facts, ToolError);
+  const slice = passport.slices.find(item => item.slice_ref === claim.payload.slice_ref);
+  return { state: "read", work_request: passport.work_request.id, slice_ref: claim.payload.slice_ref,
+    slice_state: slice?.state || "unknown", projection_digest: passport.projection_digest };
+}
+
 // Dedicated controller entrypoint: claim from the existing job ledger, invoke
 // the fresh-native Codex adapter, then persist its typed claim through the
 // lease-bound receipt function.  The controller supplies the already audited
 // room-bridge dispatcher; no Claude fallback or inherited transcript path is
 // permitted here.
-export async function runEngineeringWorker({ c, worker, actor, desk, dispatchEnvelope, limit = 1, ToolError }) {
+export async function runEngineeringWorker({ c, worker, desk, dispatchEnvelope, limit = 1, ToolError }) {
   if (typeof dispatchEnvelope !== "function") throw new Error("engineering worker requires the Codex room-bridge dispatcher");
   const claims = await claimEngineeringSlice(c, worker, limit);
   const results = [];
   for (const claim of claims) {
-    if (claim.definition_key !== "engineering-slice") continue;
-    const task = { ...(claim.payload || {}), job_ref: `job:${claim.job_id}`, attempt_id: `attempt:${claim.attempt}` };
-    const receipt = await runCodexSlice({ dispatchEnvelope, desk, envelope: claim.envelope, task });
-    if (!receipt || typeof receipt !== "object") throw new Error("Codex worker returned no typed receipt");
-    results.push(await submitEngineeringReceipt(c, claim, receipt, actor, ToolError));
+    if (claim.definition_key !== "engineering-slice") {
+      results.push(await failEngineeringClaim(c, claim, "engineering_definition_mismatch", "claimed row was not engineering-slice"));
+      continue;
+    }
+    try {
+      if (claim.controller_error) error(ToolError, { error: claim.controller_error });
+      const actor = controllerActor(claim, ToolError);
+      const { plan, slice } = controllerPlan(claim, ToolError);
+      const task = { ...(claim.payload || {}), job_ref: `job:${claim.job_id}`,
+        attempt_id: `attempt:${claim.attempt}`, engineering_plan: plan, engineering_slice: slice };
+      const receipt = await runCodexSlice({ dispatchEnvelope, desk, envelope: claim.envelope, task });
+      if (!receipt || typeof receipt !== "object") throw new Error("Codex worker returned no typed receipt");
+      const persisted = await submitEngineeringReceipt(c, claim, receipt, actor, ToolError);
+      results.push({ ...persisted, operator_readback: await controllerReadback(c, claim, ToolError) });
+    } catch (cause) {
+      results.push(await failEngineeringClaim(c, claim, "engineering_dispatch_failed",
+        cause?.message || cause?.error || "engineering dispatch failed"));
+    }
   }
-  return { claimed: claims.length, completed: results.length, results };
+  return { claimed: claims.length, completed: results.filter(result => result.ok === true).length, results };
 }
 
 export async function recordEngineeringReview(c, actor, args, ToolError, writeEvent) {

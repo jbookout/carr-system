@@ -31,6 +31,19 @@ const slice = {
 const plan = { plan_digest: `sha256:${"3".repeat(64)}`, slices: [slice] };
 const actor = { id: "33333333-3333-4333-8333-333333333333", slug: "codex", sponsoring_human_slug: "joe" };
 
+function controllerPlan() {
+  const item = {
+    slice_ref: "slice:one", ordinal: 1, objective: "Do the bounded work", definition_of_done: "A typed receipt exists",
+    dependency_refs: [], declared_resource_refs: [], declared_component_refs: [], declared_plan_step_refs: [],
+    baseline_evidence_refs: [], planned_checks: [{ check_ref: "check:one", failure_condition: "missing", evidence_requirement: "metadata_only_sufficient" }],
+    scope_boundary: "one bounded slice", forbidden_change_refs: [], concurrency_posture: "parallel_safe", manual_qa_required: false,
+    risk_class: "R1", release_requirement: "required",
+  };
+  const typed = { schema_version: "engineering-slice-plan.v1", work_request: { id: source.work.id, state_version: 3, canonical_record_digest: source.work.canonical_record_digest }, accepted_plan_revision: { id: source.plan.plan_ref, revision: 2, digest: source.plan.digest }, slices: [item] };
+  typed.plan_digest = digest(typed);
+  return typed;
+}
+
 test("canonical digest is stable across object key order and matches SHA-256", () => {
   assert.equal(canonicalDigest({ b: 2, a: 1 }), canonicalDigest({ a: 1, b: 2 }));
   assert.equal(canonicalDigest({ a: 1 }), "sha256:015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862");
@@ -101,20 +114,44 @@ test("the committed plan shape is validated and Passport closure is schema-shape
 
 test("the worker invokes the fresh Codex path and submits the returned typed receipt", async () => {
   const calls = [];
-  const fakeClaim = { definition_key: "engineering-slice", job_id: "66666666-6666-4666-8666-666666666666", attempt: 1, lease_token: "77777777-7777-4777-8777-777777777777", envelope_id: "88888888-8888-4888-8888-888888888888", envelope_digest: `sha256:${"a".repeat(64)}`, envelope: { server_binding: { adapter: { surface: "codex_desktop" } } }, payload: { slice_ref: "slice:one" } };
+  const typed = controllerPlan();
+  const fakeClaim = { definition_key: "engineering-slice", job_id: "66666666-6666-4666-8666-666666666666", attempt: 1, lease_token: "77777777-7777-4777-8777-777777777777", envelope_id: "88888888-8888-4888-8888-888888888888", envelope_digest: `sha256:${"a".repeat(64)}`, envelope: { server_binding: { adapter: { surface: "codex_desktop" } } }, payload: { work_request: "WR-301", slice_ref: "slice:one", plan_digest: typed.plan_digest } };
   const c = { query: async (sql) => {
     calls.push(sql);
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [fakeClaim] };
     if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: fakeClaim.envelope_id, work_request_id: "99999999-9999-4999-8999-999999999999", envelope: fakeClaim.envelope, envelope_digest: `sha256:${"a".repeat(64)}`, slice_ref: "slice:one" }] };
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: fakeClaim.envelope_id, envelope_digest: fakeClaim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
     if (sql.includes("work_request w")) return { rows: [{ ref: "WR-301" }] };
     if (sql.includes("engineering_passport_facts")) return { rows: [] };
     if (sql.includes("engineering_record_slice_receipt")) return { rows: [{ id: "receipt:one" }] };
     return { rows: [] };
   } };
-  const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: fakeClaim.envelope_digest, attempt_id: "attempt:1", slice_ref: "slice:one", plan_digest: plan.plan_digest, attribution: {}, planned_resource_refs: [], actual_resource_refs: [], planned_component_refs: [], actual_component_refs: [], checks: [{ check_ref: "check:one" }], artifact_refs: [], evidence_refs: [], deviations: [], source_evidence: {}, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false }, executor_claim: { claimed_by: "codex" }, independent_verification_required: true, outcome: "claimed_complete" };
-  const result = await runEngineeringWorker({ c, worker: "engineering-worker", actor: { id: actor.id, slug: "codex" }, desk: "hermes-desktop", dispatchEnvelope: async (_desk, _envelope, task, options) => { calls.push({ task, options }); return receipt; }, ToolError: Error });
+  const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: fakeClaim.envelope_digest, attempt_id: "attempt:1", slice_ref: "slice:one", plan_digest: typed.plan_digest, attribution: {}, planned_resource_refs: [], actual_resource_refs: [], planned_component_refs: [], actual_component_refs: [], checks: [{ check_ref: "check:one" }], artifact_refs: [], evidence_refs: [], deviations: [], source_evidence: {}, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false }, executor_claim: { claimed_by: "codex" }, independent_verification_required: true, outcome: "claimed_complete" };
+  const result = await runEngineeringWorker({ c, worker: "engineering-worker", desk: "hermes-desktop", dispatchEnvelope: async (_desk, _envelope, task, options) => { calls.push({ task, options }); return receipt; }, ToolError: Error });
   assert.equal(result.completed, 1);
   assert.deepEqual(calls.find(row => row.options)?.options, { fresh: true });
+  assert.equal(calls.find(row => row.options)?.task.engineering_plan.plan_digest, typed.plan_digest);
+});
+
+test("a controller dispatch failure records the canonical retry receipt without a duplicate dispatch", async () => {
+  const typed = controllerPlan();
+  const claim = { definition_key: "engineering-slice", job_id: "66666666-6666-4666-8666-666666666666", attempt: 1, lease_token: "77777777-7777-4777-8777-777777777777", envelope_id: "88888888-8888-4888-8888-888888888888", envelope_digest: `sha256:${"a".repeat(64)}`, envelope: { server_binding: { adapter: { surface: "codex_desktop" } } }, payload: { work_request: "WR-301", slice_ref: "slice:one", plan_digest: typed.plan_digest } };
+  const calls = [];
+  const c = { query: async (sql) => {
+    calls.push(sql);
+    if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
+    if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: claim.envelope_id, envelope: claim.envelope, envelope_digest: claim.envelope_digest }] };
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
+    if (sql.includes("ops.fail_job")) return { rows: [{ state: "retry_wait" }] };
+    return { rows: [] };
+  } };
+  let dispatched = 0;
+  const result = await runEngineeringWorker({ c, worker: "engineering-worker", desk: "engineering-codex", ToolError: Error,
+    dispatchEnvelope: async () => { dispatched += 1; throw new Error("adapter unavailable"); } });
+  assert.equal(dispatched, 1);
+  assert.equal(result.completed, 0);
+  assert.deepEqual(result.results[0], { job_id: claim.job_id, state: "retry_wait", failure_class: "engineering_dispatch_failed" });
+  assert.equal(calls.filter(sql => typeof sql === "string" && sql.includes("ops.fail_job")).length, 1);
 });
 
 test("admission fails closed when a DAG dependency lacks a passed independent review", async () => {

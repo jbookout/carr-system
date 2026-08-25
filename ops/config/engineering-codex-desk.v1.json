@@ -1,0 +1,10 @@
+{
+  "schema_version": "engineering-codex-desk.v1",
+  "name": "engineering-codex",
+  "kind": "codex-session",
+  "model": "gpt-5.6-sol",
+  "effort": "high",
+  "cwd": "{{REPO}}",
+  "sandbox": "workspace-write",
+  "room_seat": null
+}

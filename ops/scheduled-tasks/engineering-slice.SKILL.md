@@ -14,9 +14,12 @@ accepted Work Request plan has been projected into a typed slice plan.
 
 The server selects the Codex Desktop adapter, binds a fresh native session,
 issues the immutable execution envelope, and enqueues the fixed shadow-mode
-`ops.job`. The executor may return only a lease-bound typed receipt. Its claim
-does not complete the slice until a different actor records an evidence-backed
-review with `review-engineering-slice`.
+`ops.job`. The room-bridge's lease-bound controller calls only
+`ops.engineering_claim_slice`, derives the exact executor and plan from that
+envelope, then starts the dedicated Codex desk fresh with no database
+credential. The executor may return only a lease-bound typed receipt. Its
+claim does not complete the slice until a different actor records an
+evidence-backed review with `review-engineering-slice`.
 
 Never accept caller-selected tenant, sponsor, identity, authority, model,
 provider, adapter, or session continuity. Never use inherited transcripts,
