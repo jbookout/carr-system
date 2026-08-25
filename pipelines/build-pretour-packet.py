@@ -134,7 +134,12 @@ def facts(rows):
 
 def media(folder, p):
     if not p.get("photo"):
-        return ""
+        # No picture, and require_photo has already established that this option
+        # carries a written reason. Print the reason in the slot the photograph
+        # would have filled, so the gap is answered on the page rather than left
+        # for the client to wonder about.
+        why = (p.get("photo_absent_reason") or "").strip()
+        return f'<div class="cmedia1"><div class="nophoto">{e(why)}</div></div>' if why else ""
     return (f'<div class="cmedia1"><img class="hero fw" src="{data_uri(folder, p["photo"])}" '
             f'alt="{e(p["addr"])}"></div>')
 
@@ -183,6 +188,44 @@ def card(folder, p):
     </section>'''
 
 
+def require_photo(p):
+    """Every option carries a picture. Dell ruled this on 2026-08-25, in his words:
+    "Dont ever produce a pre tour of tour packet without a pic for each option."
+
+    A tour packet is walked through with a client, and an option with no picture
+    reads as the one nobody bothered with. The rule is absolute rather than a
+    default, so it is enforced here rather than remembered: a missing picture stops
+    the build and names the option, instead of shipping a card with a hole in it.
+
+    This is deliberately NOT satisfied by a placeholder image.
+
+    AMENDED 2026-08-25, same day, on the first option that tripped it: 10916 Emerald
+    Coast Parkway. That option is off market and, in its own record, "not published
+    on CoStar, Crexi, ECAR, or Moody's." No photograph of it exists in the rev
+    folders, the 19 August packet source, the vault, or Downloads, and none can,
+    because it was never listed. The absolute form of this rule would have blocked
+    the packet forever on a stop we actually want to walk.
+
+    So the rule keeps its teeth and gains a named exit. What Dell was protecting
+    against, in his reasoning, is a card that "reads as the one nobody bothered
+    with" - a SILENT hole. An option that states on its face why no photograph
+    exists reads as the opposite: the one nobody else has. A silent hole is still a
+    hard stop. An explained absence renders the explanation where the picture would
+    have gone, in the client's language.
+
+    The reason must be written by a human into content.json. The renderer never
+    invents one, and it still never accepts a placeholder image.
+    """
+    name = (p.get("photo") or "").strip()
+    why = (p.get("photo_absent_reason") or "").strip()
+    if not name and not why:
+        raise PacketRefusal(
+            f'{p["addr"]}: no photo. Every option in a tour packet carries a '
+            f'picture (Dell, 2026-08-25). Add "photo" to this option and put the '
+            f'file in photos/. If no photograph can exist, say why in '
+            f'"photo_absent_reason" and that sentence prints on the card.')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder", nargs="?", default=".")
@@ -207,6 +250,7 @@ def main():
         for p in c["options"]:
             address_line(p)
             agent_line(p)
+            require_photo(p)
     except (AssetControlRefusal, PacketRefusal) as exc:
         print(f"STOP: {exc}", file=sys.stderr)
         return 2
@@ -215,8 +259,26 @@ def main():
                             "Logos", "CARR_White_Logo.png"))
     css = open(os.path.join(HERE, "pretour-style.css"), encoding="utf-8").read()
 
+    # THE THREE OPENING BLOCKS ARE OPTIONAL, and each is omitted entirely rather
+    # than rendered empty. Dell, 2026-08-25: "take out the info on the bottom half
+    # of this first page and start with options at a glance." Blanking them in
+    # content.json was not enough on its own, because the template emitted the
+    # wrapper whatever was inside it, which left an empty bordered box and a
+    # stray rule where the summary had been.
+    #
+    # The representation statement is safe to drop from the TOP because it is not
+    # dropped from the DOCUMENT: promise_footer carries the same disclosure in the
+    # footer and stays unconditional. A packet may lose its opening summary. It
+    # never loses the statement of who CARR works for.
+    lead = client.get("lead") or ""
+    promise = client.get("promise") or ""
+    snapshot = client.get("snapshot") or []
+
     snap = "".join(f'<div><div class="k">{e(k)}</div><div class="v">{e(v)}</div></div>'
-                   for k, v in client["snapshot"])
+                   for k, v in snapshot)
+    lead_block = f'<p class="lead">{e(lead)}</p>' if lead.strip() else ""
+    snap_block = f'<div class="snap">{snap}</div>' if snapshot else ""
+    fid_block = f'<div class="fid">{e(promise)}</div>' if promise.strip() else ""
 
     thead = "".join(f"<th>{e(h)}</th>" for h in c["glance"]["columns"])
     tbody = ""
@@ -248,9 +310,9 @@ def main():
   <div class="prep"><b>Prepared for {e(client["name"])}</b> &nbsp;|&nbsp; {e(client["where"])}</div>
 </header>
 <main>
-  <p class="lead">{e(client["lead"])}</p>
-  <div class="snap">{snap}</div>
-  <div class="fid">{e(client["promise"])}</div>
+  {lead_block}
+  {snap_block}
+  {fid_block}
 
   <h2><span class="secnum">Options at a glance</span></h2>
   <div class="h2sub">{e(c["glance"]["intro"])}</div>
