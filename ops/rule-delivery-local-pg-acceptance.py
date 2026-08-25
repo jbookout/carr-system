@@ -27,6 +27,9 @@ from pathlib import Path
 
 import psycopg
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.rule_delivery_activation import EXPECTED_IDS  # noqa:E402
+
 REPO = Path(__file__).resolve().parent.parent
 MAP = REPO / "ops" / "config" / "rule-enforcement-map.json"
 PY = REPO / ".venv" / "bin" / "python"
@@ -70,7 +73,8 @@ def main() -> int:
     # make one map-shared rule Dell-personal to prove the compiler reads
     # rule.personal_to and the audit checks the installed result.
     store_scope_by_id = dict(scope_by_id)
-    synthetic_dell = data["active_rule_ids"]["shared"][0]
+    synthetic_dell = next(rid for rid in data["active_rule_ids"]["shared"]
+                          if rid not in EXPECTED_IDS)
     store_scope_by_id[synthetic_dell] = "dell"
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -218,6 +222,63 @@ def main() -> int:
         result = run("tools/sync-rule-load-layers.py", dsn)
         check("the backfill runs clean again once the store and map agree",
               result.returncode == 0, result.stderr.strip()[-300:])
+
+        # ── policy and nine controls move in one guarded transaction ─────────
+        admission = run("tools/sync-rule-admission.py", dsn)
+        check("the admission sync builds the nine-control preimage",
+              admission.returncode == 0, admission.stderr.strip()[-500:])
+        digest = "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a"
+        cur.execute("""select * from ops.set_rule_delivery_mode(
+                       'enforced','local-pg-acceptance','seven-day evidence fixture',%s)""",
+                    (digest,))
+        cutover = one(cur)
+        check("cutover reports the exact nine", cutover[0] == "enforced" and cutover[1] == 9)
+        cur.execute("select mode from ops.rule_delivery_policy")
+        check("cutover flips policy to enforced", one(cur)[0] == "enforced")
+        cur.execute("""select count(*) from ops.rule_enforcement_point ep
+                       join rule r on r.id=ep.rule_id
+                      where left(r.id::text,8)=any(%s) and ep.control_key='pack_delivery'
+                        and ep.enforcement_class='stop_gate' and ep.installed""",
+                    (sorted(EXPECTED_IDS),))
+        check("cutover installs pack_delivery/stop_gate on all nine", one(cur)[0] == 9)
+
+        admission = run("tools/sync-rule-admission.py", dsn)
+        check("a future admission sync is policy-aware", admission.returncode == 0,
+              admission.stderr.strip()[-500:])
+        cur.execute("""select count(*) from ops.rule_enforcement_point ep
+                       join rule r on r.id=ep.rule_id
+                      where left(r.id::text,8)=any(%s) and ep.control_key='pack_delivery'
+                        and ep.enforcement_class='stop_gate'""", (sorted(EXPECTED_IDS),))
+        check("an enforced sync does not revert the nine controls", one(cur)[0] == 9)
+
+        try:
+            cur.execute("update ops.rule_delivery_policy set mode='shadow' where singleton")
+            check("a direct policy-only update is refused", False, "update was accepted")
+        except psycopg.Error as exc:
+            check("a direct policy-only update is refused",
+                  "use ops.set_rule_delivery_mode" in str(exc), str(exc))
+
+        cur.execute("""select * from ops.set_rule_delivery_mode(
+                       'shadow','local-pg-acceptance','rollback fixture',%s)""", (digest,))
+        rollback = one(cur)
+        check("rollback reports the exact nine", rollback[0] == "shadow" and rollback[1] == 9)
+        cur.execute("""select count(*) from ops.rule_enforcement_point ep
+                       join rule r on r.id=ep.rule_id
+                      where left(r.id::text,8)=any(%s) and ep.control_key='session_boot'
+                        and ep.enforcement_class='surfacing'""", (sorted(EXPECTED_IDS),))
+        check("rollback restores all nine session_boot rows", one(cur)[0] == 9)
+        cur.execute("select count(*) from ops.rule_delivery_activation_receipt")
+        check("cutover and rollback each leave an append-only receipt", one(cur)[0] == 2)
+
+        try:
+            cur.execute("""select * from ops.set_rule_delivery_mode(
+                           'enforced','local-pg-acceptance','wrong digest',%s)""",
+                        ("0" * 64,))
+            check("a stale map digest refuses cutover", False, "cutover was accepted")
+        except psycopg.Error as exc:
+            check("a stale map digest refuses cutover", "digest preimage" in str(exc), str(exc))
+        cur.execute("select mode from ops.rule_delivery_policy")
+        check("a refused cutover leaves policy in shadow", one(cur)[0] == "shadow")
         cur.execute("alter table rule enable trigger user")
 
     if FAILURES:

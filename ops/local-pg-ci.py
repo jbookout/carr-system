@@ -274,6 +274,23 @@ def run_local_ci(
                         file=sys.stderr,
                     )
                 else:
+                    delivery_script = repo / "ops/rule-delivery-local-pg-acceptance.py"
+                    delivery = command_runner.run(
+                        [acceptance_python, delivery_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if delivery.returncode:
+                        print(
+                            f"local-db-ci: rule-delivery acceptance failed: "
+                            f"{_failure_detail(delivery)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = delivery.returncode
+                    else:
+                        print("local-db-ci: atomic rule-delivery cutover acceptance passed")
+                if exit_code == 0:
                     canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
                     canary = command_runner.run(
                         [acceptance_python, canary_script],

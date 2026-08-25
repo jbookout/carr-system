@@ -980,6 +980,17 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // said out loud, rather than a session that boots with no rules at all.
         const deliveryUsable = plan.length > 0 && selectedShortIds.size > 0;
         const enforcing = deliveryMode === "enforced" && deliveryUsable;
+        // Intro-politics rules deliberately do not belong to the full boot
+        // corpus above, but they DO make up the vendor-intros pack.  Building
+        // selectedShortIds from 219 rows and then filtering only the 205-row
+        // recitation pool made that pack a phantom: reported selected, never
+        // deliverable.  In enforcement only, widen the candidate pool; the
+        // selected ids still decide whether any intro rule actually arrives.
+        const deliveryRulePool = enforcing ? (await c.query(
+          `select statement, human_quote, taught_by, personal_to, scope, id
+             from v_compiled_rules
+            where (personal_to is null or ($1::text is not null and personal_to = $1))
+            order by personal_to nulls first, activated_at, statement`, [who])).rows : allRules;
 
         // TWO SCOPINGS MUST NOT MULTIPLY. When the typed guidance registry is
         // active, `selectedById` above already holds a NARROWED set — constitution
@@ -990,7 +1001,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // filtering. Layer 0 is the floor of a boot in both designs, and a floor
         // that two correct mechanisms can quietly sink through is not a floor.
         if (enforcing) {
-          for (const r of allRules) {
+          for (const r of deliveryRulePool) {
             const id = String(r.id).slice(0, 8).toLowerCase();
             if (selectedShortIds.has(id) && !selectedById.has(id)) selectedById.set(id, r);
           }
