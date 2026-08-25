@@ -42,6 +42,9 @@ CURRENT_PROVIDER_VERSION = "10000000-0000-4000-8000-000000000001"
 PRIOR_PROVIDER_VERSION = "20000000-0000-4000-8000-000000000002"
 PLAN_HASH = "sha256:" + "c" * 64
 ROLLBACK_PLAN = "runbooks/rollback-worker.md"
+# Bound from the disposable database before each fixture is seeded.  The
+# checked-in migration surface advances independently of this historical gate.
+SCHEMA_HIGHEST_MIGRATION = "0202_staging_release_readback_receipt.sql"
 SCHEMA_APPLIED_COUNT = 202
 SCHEMA_LEDGER_SHA256 = "sha256:" + "7" * 64
 
@@ -93,7 +96,28 @@ def ensure_authority_roles(cur) -> None:
     cur.execute("grant carr_authority to carr_authority_joe,carr_authority_dell")
 
 
+def bind_live_schema_identity(cur) -> None:
+    """Use this disposable database's exact schema ledger for fixture facts."""
+    cur.execute("""select (max(filename collate \"C\") collate \"default\"),
+                        count(*)::integer,
+                        'sha256:' || encode(public.digest(
+                          coalesce(string_agg(
+                            convert_to(filename, 'UTF8') || decode('00', 'hex') ||
+                            convert_to(sha256, 'UTF8') || decode('0a', 'hex'),
+                            ''::bytea order by filename collate \"C\"), ''::bytea),
+                          'sha256'), 'hex')
+                   from public.schema_migrations""")
+    highest, count, digest = one(cur)
+    if not highest or not count or not digest:
+        raise AssertionError("disposable schema ledger is empty or unreadable")
+    global SCHEMA_HIGHEST_MIGRATION, SCHEMA_APPLIED_COUNT, SCHEMA_LEDGER_SHA256
+    SCHEMA_HIGHEST_MIGRATION = highest
+    SCHEMA_APPLIED_COUNT = count
+    SCHEMA_LEDGER_SHA256 = digest
+
+
 def seed_fixture(cur, prefix: str) -> dict:
+    bind_live_schema_identity(cur)
     now = datetime.now(timezone.utc)
     service_key = f"p5-readback-{prefix}-{uuid.uuid4()}"
     cur.execute("""insert into ops.service(key,name,family,criticality,owner_actor)
@@ -154,7 +178,7 @@ def seed_fixture(cur, prefix: str) -> dict:
       (uuid.uuid4(),current_key,service_id,CURRENT_SHA,CURRENT_PROVIDER_VERSION,
        "sha256:"+"1"*64,"sha256:"+"2"*64,ROLLBACK_PLAN,PLAN_HASH,
        ["0202_staging_release_readback_receipt.sql"],
-       "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,
+       SCHEMA_HIGHEST_MIGRATION,SCHEMA_APPLIED_COUNT,
        SCHEMA_LEDGER_SHA256,now,
        now+timedelta(days=2)))
     current_id = cur.fetchone()[0]
@@ -176,7 +200,7 @@ def seed_staging_candidate(cur, fixture: dict) -> tuple[str, uuid.UUID]:
       %s,%s,%s,%s,'wrapper','gate',now(),now()+interval '2 days') returning id""",
       (uuid.uuid4(),key,fixture["service_id"],CURRENT_SHA,uuid.uuid4(),"sha256:"+"4"*64,
        "sha256:"+"5"*64,ROLLBACK_PLAN,PLAN_HASH,["0219_staging_release_approval_receipt.sql"],
-       "0219_staging_release_approval_receipt.sql",SCHEMA_APPLIED_COUNT,SCHEMA_LEDGER_SHA256))
+       SCHEMA_HIGHEST_MIGRATION,SCHEMA_APPLIED_COUNT,SCHEMA_LEDGER_SHA256))
     return key,cur.fetchone()[0]
 
 
@@ -212,7 +236,7 @@ def record_params(fixture: dict, attempt: uuid.UUID, step: str, idem: uuid.UUID,
                   version: uuid.UUID, *, verb_count: int = 211,
                   program6_actions_enabled: bool = False) -> tuple:
     return (idem,version,f"carr-staging-{idem.hex}",verb_count,
-            "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170,
+            SCHEMA_HIGHEST_MIGRATION,SCHEMA_APPLIED_COUNT,170,
             program6_actions_enabled)
 
 
@@ -220,7 +244,7 @@ def legacy_prior_record_params(fixture: dict, attempt: uuid.UUID, step: str,
                                idem: uuid.UUID, version: uuid.UUID, *,
                                verb_count: int = 211) -> tuple:
     return (idem,version,f"carr-staging-{idem.hex}",verb_count,
-            "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170)
+            SCHEMA_HIGHEST_MIGRATION,SCHEMA_APPLIED_COUNT,170)
 
 
 def prepare_params(fixture: dict, attempt: uuid.UUID, step: str,
@@ -641,9 +665,10 @@ def main() -> int:
         owner(cur)
         cur.execute("set local session_replication_role=replica")
         cur.execute("""update ops.staging_recovery_rehearsal_bundle
-          set declared_schema_highest_migration='0202_staging_release_readback_receipt.sql',
+          set declared_schema_highest_migration=%s,
               declared_schema_applied_count=%s
-          where current_release_id=%s""",(SCHEMA_APPLIED_COUNT-1,fixture["current_id"]))
+          where current_release_id=%s""",
+          (SCHEMA_HIGHEST_MIGRATION,SCHEMA_APPLIED_COUNT-1,fixture["current_id"]))
         cur.execute("set local session_replication_role=origin")
         authority(cur,"carr_authority_joe")
         check("Joe approval rejects a typed bundle for a stale applied count",refuses(cur,
@@ -753,7 +778,7 @@ def main() -> int:
           values(%s,%s,'production','complete',%s,'cloudflare-workers',%s,%s,
           'jobs',211,%s,170,%s,%s,%s,'production:/readback','wrapper','gate',%s)""",
           (completion_correlation,completion_fixture["service_id"],CURRENT_SHA,CURRENT_PROVIDER_VERSION,
-           completion_fixture["current_id"],"0202_staging_release_readback_receipt.sql",
+           completion_fixture["current_id"],SCHEMA_HIGHEST_MIGRATION,
            completion_now,completion_now,completion_now,completion_now))
         cur.execute("""insert into ops.run(
           correlation_id,kind,service_id,environment,run_key,state,started_at,ended_at,
