@@ -11,8 +11,6 @@ create table memory_item (
   work_request_id uuid references ops.work_request(id),
   work_request_version integer,
   plan_id uuid references ops.sourced_work_request_plan(id),
-  job_attempt_id uuid references ops.job_attempt(id),
-  source_state text,
   kind text not null check (kind in ('preference','fact','episodic','procedural')),
   statement text not null check (length(btrim(statement)) > 0),
   context text,
@@ -41,12 +39,36 @@ create table memory_item (
   check ((scope='shared' and owner_actor_id is null) or
          (scope='personal' and owner_actor_id is not null)),
   check (length(btrim(organization_tenant_id)) > 0),
-  check (work_request_id is null or work_request_version is not null),
+  check ((plan_id is null and work_request_id is null and work_request_version is null) or
+         (plan_id is not null and work_request_id is not null and work_request_version is not null)),
   check (status <> 'promoted' or promoted_by_actor_id is not null)
 );
 create index memory_item_search_idx on memory_item using gin(search_vector);
 create index memory_item_scope_idx on memory_item(scope, owner_actor_id, status, confidence desc);
 create index memory_item_tenant_scope_idx on memory_item(organization_tenant_id, scope, owner_actor_id, status);
+
+create or replace function memory_item_plan_anchor_valid()
+returns trigger language plpgsql security definer
+set search_path = pg_catalog, public, ops
+as $$
+declare plan_row record;
+begin
+  if new.plan_id is null then return new; end if;
+  select plan.work_request_id, plan.work_request_version, w.organization_tenant_id
+    into plan_row
+    from ops.sourced_work_request_plan plan
+    join ops.work_request w on w.id=plan.work_request_id
+   where plan.id=new.plan_id;
+  if not found or plan_row.work_request_id is distinct from new.work_request_id
+     or plan_row.work_request_version is distinct from new.work_request_version
+     or plan_row.organization_tenant_id is distinct from new.organization_tenant_id then
+    raise exception 'memory plan anchor is missing, cross-tenant, or mismatched';
+  end if;
+  return new;
+end $$;
+drop trigger if exists memory_item_plan_anchor_valid on memory_item;
+create trigger memory_item_plan_anchor_valid
+before insert or update on memory_item for each row execute function memory_item_plan_anchor_valid();
 
 create table memory_evidence (
   id uuid primary key default gen_random_uuid(),
@@ -61,6 +83,26 @@ create table memory_evidence (
   created_at timestamptz not null default now()
 );
 create index memory_evidence_memory_idx on memory_evidence(memory_id, observed_at desc);
+
+create or replace function memory_item_immutable_core()
+returns trigger language plpgsql as $$
+begin
+  if new.statement is distinct from old.statement
+     or new.scope is distinct from old.scope
+     or new.owner_actor_id is distinct from old.owner_actor_id
+     or new.organization_tenant_id is distinct from old.organization_tenant_id
+     or new.work_request_id is distinct from old.work_request_id
+     or new.work_request_version is distinct from old.work_request_version
+     or new.plan_id is distinct from old.plan_id
+     or new.predecessor_id is distinct from old.predecessor_id
+     or new.lineage_root_id is distinct from old.lineage_root_id then
+    raise exception 'memory_item core is immutable; create a successor for corrections';
+  end if;
+  return new;
+end $$;
+drop trigger if exists memory_item_immutable_core on memory_item;
+create trigger memory_item_immutable_core
+before update on memory_item for each row execute function memory_item_immutable_core();
 
 revoke update, delete on memory_evidence from public;
 -- Deny-by-default: handlers apply tenant and sponsor predicates; the DB roles

@@ -17,6 +17,12 @@ const authorityGuard = args => {
   if (Object.keys(args || {}).some(key => banned.includes(key))) throw new ToolError({ error: "caller_authority_field_forbidden" });
 };
 const TOOLS = memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields: authorityGuard });
+async function strictEnvelope(c, _actor, _verb, args, fn) {
+  if (!args.idempotency_key) throw new ToolError({ error: "missing_idempotency_key" });
+  await c.query("envelope lookup");
+  return fn();
+}
+const STRICT_TOOLS = memoryTools({ withEnvelope: strictEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields: authorityGuard });
 const KEY = "0297aaaa-0000-4000-8000-000000000001";
 
 test("memory kernel exposes observe, recall, promote, correct, and forget", () => {
@@ -34,6 +40,7 @@ test("observe derives personal scope from the verified sponsor and stores proven
   const statements = [];
   const client = { query: async (sql, params) => {
     statements.push({ sql, params });
+    if (/from ops\.sourced_work_request_plan/.test(sql)) return { rows: [{ id: "plan-1", work_request_id: "wr-1", work_request_version: 3 }] };
     if (/insert into memory_item/.test(sql)) return { rows: [{ id: "memory-1", version: 1, status: "candidate", scope: "personal" }] };
     if (/insert into memory_evidence/.test(sql)) return { rows: [{ id: "evidence-1" }] };
     return { rows: [] };
@@ -41,15 +48,14 @@ test("observe derives personal scope from the verified sponsor and stores proven
   const out = await TOOLS["observe-memory"].handler(client,
     { id: "runtime", slug: "codex", human: false, sponsoring_human_slug: "joe", sponsor_required: true },
     { idempotency_key: KEY, kind: "preference", statement: "Prefer concise summaries", context: "briefing", scope: "personal",
-      work_request: "WR-42", work_request_version: 3, plan_id: "plan-1", job_attempt_id: "attempt-1", source_state: "verification",
+      plan_id: "plan-1",
       evidence: { source_type: "conversation", source_ref: "turn-1", observation: "Joe corrected a verbose draft" } });
   assert.equal(out.ok, true);
   const item = statements.find(s => /insert into memory_item/.test(s.sql));
-  assert.equal(item.params[10], "joe", "personal owner comes from verified sponsor, not args");
+  assert.equal(item.params[8], "joe", "personal owner comes from verified sponsor, not args");
   assert.match(item.sql, /organization_tenant_id/);
   assert.match(item.sql, /work_request_id/);
   assert.match(item.sql, /plan_id/);
-  assert.match(item.sql, /job_attempt_id/);
   assert.match(item.sql, /actor_id/);
   const evidence = statements.find(s => /insert into memory_evidence/.test(s.sql));
   assert.equal(evidence.params[1], "conversation");
@@ -149,4 +155,58 @@ test("known private UUIDs stay partner-isolated in both recall and mutation pred
   const recall = calls.find(call => /select id, kind, statement/.test(call.sql));
   assert.equal(recall.params[1], "dell");
   assert.match(recall.sql, /organization_tenant_id=\$3/);
+});
+
+test("authority aliases are rejected before envelope/DB and nonhuman direct writes refuse before envelope", async () => {
+  let queries = 0;
+  const client = { query: async () => { queries++; return { rows: [] }; } };
+  for (const alias of ["tenant", "tenant_id", "identity", "actor", "audience", "capabilities", "actions", "write", "calls_models"])
+    await assert.rejects(() => STRICT_TOOLS["observe-memory"].handler(client, { slug: "joe", human: true },
+      { idempotency_key: KEY, kind: "fact", statement: "x", scope: "shared", evidence: {}, [alias]: "injected" }),
+      error => error.payload?.error === "caller_authority_field_forbidden");
+  for (const name of ["promote-memory", "correct-memory", "forget-memory"])
+    await assert.rejects(() => STRICT_TOOLS[name].handler(client, { slug: "codex", human: false }, { idempotency_key: KEY, memory_id: "m", base_version: 1, statement: "x", reason: "x" }),
+      error => error.payload?.error === "human_only");
+  assert.equal(queries, 0);
+});
+
+test("sponsor failures are typed and happen before any query", async () => {
+  let queries = 0;
+  const client = { query: async () => { queries++; return { rows: [] }; } };
+  await assert.rejects(() => TOOLS["recall-memory"].handler(client, { slug: "codex", human: false, via: "oauth-google", sponsor_required: true }, { query: "x" }),
+    error => error.payload?.error === "missing_or_ambiguous_sponsor");
+  await assert.rejects(() => TOOLS["recall-memory"].handler(client, { slug: "unknown", human: false }, { query: "x" }),
+    error => error.payload?.error === "invalid_runtime_principal");
+  assert.equal(queries, 0);
+});
+
+test("plan anchor is validated tenant-scoped and derives work request/version", async () => {
+  const statements = [];
+  const client = { query: async (sql, params) => {
+    statements.push({ sql, params });
+    if (/from ops\.sourced_work_request_plan/.test(sql)) return { rows: [{ id: "plan-1", work_request_id: "wr-1", work_request_version: 7 }] };
+    if (/insert into memory_item/.test(sql)) return { rows: [{ id: "m1", status: "candidate", version: 1 }] };
+    if (/insert into memory_evidence/.test(sql)) return { rows: [{ id: "e1" }] };
+    return { rows: [] };
+  } };
+  await TOOLS["observe-memory"].handler(client, { id: "joe", slug: "joe", human: true },
+    { idempotency_key: KEY, kind: "fact", statement: "Plan-bound fact", scope: "shared", plan_id: "plan-1",
+      evidence: { source_type: "run", observation: "observed" } });
+  const anchor = statements.find(s => /from ops\.sourced_work_request_plan/.test(s.sql));
+  assert.match(anchor.sql, /organization_tenant_id/);
+  const insert = statements.find(s => /insert into memory_item/.test(s.sql));
+  assert.match(insert.sql, /work_request_id/);
+  assert.equal(insert.params.includes(7), true, "stored provenance uses plan's version, not caller input");
+});
+
+test("unknown/cross-tenant plans and caller-assembled passport fields refuse before memory insert", async () => {
+  const statements = [];
+  const client = { query: async (sql) => { statements.push(sql); return { rows: [] }; } };
+  await assert.rejects(() => TOOLS["observe-memory"].handler(client, { id: "joe", slug: "joe", human: true },
+    { idempotency_key: KEY, kind: "fact", statement: "x", scope: "shared", plan_id: "unknown-plan", evidence: { source_type: "x", observation: "x" } }),
+    error => error.payload?.error === "memory_plan_not_found_or_forbidden");
+  await assert.rejects(() => TOOLS["observe-memory"].handler(client, { id: "joe", slug: "joe", human: true },
+    { idempotency_key: KEY, kind: "fact", statement: "x", scope: "shared", work_request: "WR-1", evidence: { source_type: "x", observation: "x" } }),
+    error => error.payload?.error === "memory_plan_anchor_only");
+  assert.equal(statements.some(sql => /insert into memory_item/.test(sql)), false);
 });
