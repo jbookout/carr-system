@@ -42,6 +42,7 @@ from git_env import fixture_env  # noqa: E402
 # and the test drift apart, which is the two-homes disease.
 COPIES = [
     "hooks/machine-converge.py",
+    "lib/machine_prerequisites.py",
     "ops/config-as-code.py",
     "ops/git_env.py",
     "ops/githooks/pre-push",

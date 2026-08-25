@@ -12,33 +12,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-
-# EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE — see the same preflight in
-# ops/calendar-prebrief-collector-selftest.py for the full reasoning. Short
-# version: Apple's /usr/bin/openssl is LibreSSL, LibreSSL has no Ed25519, and
-# without this the proof died with a bare CalledProcessError on any stock Mac.
-# Narrow on purpose — it declines only when the keypair cannot be minted at all,
-# and every assertion still runs wherever OpenSSL 3 is present.
-def _require_ed25519() -> None:
-    # Minting a throwaway key IS the question, so a build that can do Ed25519
-    # never skips regardless of how its text output is worded. See the collector
-    # selftest for why the earlier text-grep version was the wrong probe.
-    with tempfile.TemporaryDirectory() as probe_dir:
-        attempt = subprocess.run(
-            ["openssl", "genpkey", "-algorithm", "ED25519",
-             "-out", str(Path(probe_dir) / "probe.pem")],
-            capture_output=True, text=True)
-    if attempt.returncode == 0:
-        return
-    build = subprocess.run(["openssl", "version"], capture_output=True, text=True)
-    print(f"openssl here cannot mint an Ed25519 key "
-          f"({(build.stdout or '').strip() or 'unknown build'}); this proof needs OpenSSL 3")
-    sys.exit(78)
-
-
-_require_ed25519()
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from lib.machine_prerequisites import require_openssl_ed25519_or_exit
+
+OPENSSL = require_openssl_ed25519_or_exit()
 SCRIPT = ROOT / "tools/calendar-prebrief-coordinator.py"
 spec = importlib.util.spec_from_file_location("coordinator", SCRIPT)
 assert spec and spec.loader
@@ -69,7 +47,7 @@ def sign(private: Path, payload: bytes) -> bytes:
         raw_input.flush()
         raw_input.seek(0)
         return subprocess.run(
-            ["openssl", "pkeyutl", "-sign", "-inkey", str(private), "-rawin",
+            [OPENSSL, "pkeyutl", "-sign", "-inkey", str(private), "-rawin",
              "-in", f"/dev/fd/{raw_input.fileno()}"],
             capture_output=True, check=True, pass_fds=(raw_input.fileno(),),
         ).stdout
@@ -87,9 +65,9 @@ def contract() -> dict[str, object]:
 with tempfile.TemporaryDirectory() as raw:
     root = Path(raw)
     private, public = root / "private.pem", root / "public.pem"
-    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(private)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([OPENSSL, "genpkey", "-algorithm", "ED25519", "-out", str(private)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     private.chmod(0o600)
-    subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(public)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([OPENSSL, "pkey", "-in", str(private), "-pubout", "-out", str(public)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     raw_payload = {"version": 1, "window": {"starts_at": "2026-08-13T06:30:00Z", "ends_at": "2026-10-04T06:30:00Z"}, "observed_calendars": [{"sponsor": "joe", "calendar_key": "a" * 64}], "events": [{"sponsor": "joe", "calendar_key": "a" * 64, "event_key": "b" * 64, "occurrence_key": "c" * 64, "starts_at": "2026-08-20T08:00:00Z", "ends_at": "2026-08-20T09:00:00Z", "title": "Meeting", "location": None, "attendee_emails": ["raw.attendee@example.test"]}]}
     envelope = contract() | {"raw_payload": raw_payload, "raw_payload_digest": hashlib.sha256(coordinator._canonical(raw_payload)).hexdigest(), "raw_payload_count": 1, "collector_version": "fixture-1", "key_fingerprint": hashlib.sha256(public.read_bytes()).hexdigest()}
     signature = sign(private, coordinator._canonical(envelope))

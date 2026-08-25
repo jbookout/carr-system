@@ -1778,6 +1778,10 @@ try:
         _first = _lines[0] if _lines else "(no output)"
         if _p.returncode == 0:
             print(f"  OK {'machine config':<18} {_first.split('— ', 1)[-1]}")
+        elif "PREREQUISITES MISSING" in _first:
+            print(f"  ✗✗ {'machine setup':<18} {_first.split(': ', 1)[-1]}")
+            print(f"     {'':<18} config-as-code lists each missing dependency and its fix")
+            rc = 1
         elif "MISSING FROM MACHINE" in _first:
             # The 2026-08-08 case: a plugin install deleted the hooks block from
             # ~/.claude/settings.json and all five gates stopped running. The old
