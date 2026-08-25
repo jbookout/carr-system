@@ -13637,7 +13637,7 @@ CREATE VIEW ops.v_control_plane_doctrine_failures AS
 --
 
 CREATE VIEW ops.v_service_environment_health AS
- WITH latest AS (
+ WITH latest_run AS (
          SELECT DISTINCT ON (r.service_id, r.environment) r.service_id,
             r.environment,
             r.state,
@@ -13651,32 +13651,168 @@ CREATE VIEW ops.v_service_environment_health AS
            FROM ops.run r
           WHERE (r.state = ANY (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text]))
           ORDER BY r.service_id, r.environment, r.observed_at DESC
+        ), joe_terminal_job AS MATERIALIZED (
+         SELECT j.id,
+            j.definition_key,
+            j.definition_version,
+            j.correlation_id,
+            j.idempotency_key,
+            j.scheduled_for,
+            j.mode,
+            j.state,
+            j.payload,
+            j.attempt,
+            j.max_attempts,
+            j.next_attempt_at,
+            j.lease_owner,
+            j.lease_token,
+            j.leased_until,
+            j.timeout_seconds,
+            j.last_failure_class,
+            j.last_failure_detail,
+            j.created_at,
+            j.started_at,
+            j.ended_at,
+            j.updated_at
+           FROM ops.job j
+          WHERE ((j.definition_key = 'calendar-prebrief-projection-joe-daily'::text) AND (j.definition_version = 1) AND (j.mode = 'live'::text) AND (j.state = ANY (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])))
+          ORDER BY COALESCE(j.ended_at, j.updated_at) DESC, j.scheduled_for DESC, j.created_at DESC, j.id DESC
+         LIMIT 1
+        ), joe_job_evidence AS (
+         SELECT j.id,
+            j.definition_key,
+            j.definition_version,
+            j.correlation_id,
+            j.idempotency_key,
+            j.scheduled_for,
+            j.mode,
+            j.state,
+            j.payload,
+            j.attempt,
+            j.max_attempts,
+            j.next_attempt_at,
+            j.lease_owner,
+            j.lease_token,
+            j.leased_until,
+            j.timeout_seconds,
+            j.last_failure_class,
+            j.last_failure_detail,
+            j.created_at,
+            j.started_at,
+            j.ended_at,
+            j.updated_at,
+            p.id AS projection_receipt_id,
+            a.id AS attestation_receipt_id,
+            c.id AS capture_challenge_id,
+            completion.id AS completion_receipt_id,
+            terminal.id AS terminal_receipt_id,
+            ((p.id IS NOT NULL) AND (a.id IS NOT NULL) AND (c.id IS NOT NULL) AND (completion.id IS NOT NULL)) AS success_evidence_valid
+           FROM (((((joe_terminal_job j
+             LEFT JOIN ops.calendar_prebrief_projection_receipt p ON (((p.job_id = j.id) AND (p.attempt = j.attempt) AND (p.sponsor = 'joe'::text))))
+             LEFT JOIN ops.calendar_prebrief_source_attestation_receipt a ON (((a.id = p.source_attestation_id) AND (a.job_id = j.id) AND (a.attempt = j.attempt) AND (a.sponsor = 'joe'::text) AND (a.mode = 'live'::text) AND (a.destination = 'live'::text) AND (a.snapshot_at = p.snapshot_at) AND (a.allowlist_revision_id = p.allowlist_revision_id) AND (a.allowlist_digest = p.allowlist_digest))))
+             LEFT JOIN ops.calendar_prebrief_capture_challenge c ON (((c.id = a.capture_challenge_id) AND (c.job_id = j.id) AND (c.attempt = j.attempt) AND (c.sponsor = 'joe'::text) AND (c.mode = 'live'::text) AND (c.destination = 'live'::text) AND (c.lease_token = a.lease_token) AND (c.scheduled_for = j.scheduled_for) AND (c.allowlist_revision_id = p.allowlist_revision_id) AND (c.allowlist_digest = p.allowlist_digest))))
+             LEFT JOIN LATERAL ( SELECT r.id
+                   FROM ops.job_receipt r
+                  WHERE ((r.job_id = j.id) AND (r.attempt = j.attempt) AND (r.kind = 'completion'::text) AND (r.receipt_ref = ((('calendar-prebrief:joe:'::text || (j.id)::text) || ':'::text) || (j.attempt)::text)) AND (r.evidence = jsonb_build_object('sponsor', 'joe', 'mode', 'live', 'attestation_id', a.id, 'receipt_id', p.id, 'allowlist_revision_id', p.allowlist_revision_id, 'allowlist_digest', p.allowlist_digest)))
+                  ORDER BY r.created_at DESC, r.id DESC
+                 LIMIT 1) completion ON (true))
+             LEFT JOIN LATERAL ( SELECT r.id
+                   FROM ops.job_receipt r
+                  WHERE ((r.job_id = j.id) AND (r.attempt = j.attempt) AND (((j.state = 'failed'::text) AND (r.kind = 'failure'::text)) OR ((j.state = 'timed_out'::text) AND (r.kind = ANY (ARRAY['timeout'::text, 'failure'::text]))) OR ((j.state = 'cancelled'::text) AND (r.kind = 'override'::text)) OR ((j.state = 'dead_lettered'::text) AND (r.kind = 'dead_letter'::text))))
+                  ORDER BY r.created_at DESC, r.id DESC
+                 LIMIT 1) terminal ON (true))
+        ), joe_observation AS (
+         SELECT 'calendar-prebrief-projection-joe-daily'::text AS run_key,
+                CASE
+                    WHEN ((j.state = 'succeeded'::text) AND j.success_evidence_valid) THEN 'succeeded'::text
+                    WHEN (j.state = 'succeeded'::text) THEN 'failed'::text
+                    ELSE j.state
+                END AS state,
+                CASE
+                    WHEN ((j.state = 'succeeded'::text) AND (NOT j.success_evidence_valid)) THEN 'calendar_prebrief_completion_evidence_missing'::text
+                    WHEN ((j.state <> 'succeeded'::text) AND (j.terminal_receipt_id IS NULL)) THEN COALESCE(j.last_failure_class, 'calendar_prebrief_terminal_evidence_missing'::text)
+                    ELSE j.last_failure_class
+                END AS failure_class,
+            j.correlation_id,
+            COALESCE(j.ended_at, j.updated_at) AS observed_at,
+            NULL::timestamp with time zone AS expires_at,
+                CASE
+                    WHEN ((j.state = 'succeeded'::text) AND j.success_evidence_valid) THEN 'calendar_prebrief_projection_receipt'::text
+                    WHEN (j.terminal_receipt_id IS NOT NULL) THEN 'job_receipt'::text
+                    ELSE 'job'::text
+                END AS source_kind,
+                CASE
+                    WHEN ((j.state = 'succeeded'::text) AND j.success_evidence_valid) THEN ('ops.calendar_prebrief_projection_receipt:'::text || (j.projection_receipt_id)::text)
+                    WHEN (j.terminal_receipt_id IS NOT NULL) THEN ('ops.job_receipt:'::text || (j.terminal_receipt_id)::text)
+                    ELSE ('ops.job:'::text || (j.id)::text)
+                END AS source_ref
+           FROM joe_job_evidence j
+        ), observation AS (
+         SELECT se_1.service_id,
+            se_1.environment,
+                CASE
+                    WHEN (s_1.key = 'calendar-prebrief-joe'::text) THEN jo.state
+                    ELSE lr.state
+                END AS state,
+                CASE
+                    WHEN (s_1.key = 'calendar-prebrief-joe'::text) THEN jo.observed_at
+                    ELSE lr.observed_at
+                END AS observed_at,
+                CASE
+                    WHEN (s_1.key = 'calendar-prebrief-joe'::text) THEN jo.expires_at
+                    ELSE lr.expires_at
+                END AS expires_at,
+                CASE
+                    WHEN (s_1.key = 'calendar-prebrief-joe'::text) THEN jo.run_key
+                    ELSE lr.run_key
+                END AS run_key,
+                CASE
+                    WHEN (s_1.key = 'calendar-prebrief-joe'::text) THEN jo.failure_class
+                    ELSE lr.failure_class
+                END AS failure_class,
+                CASE
+                    WHEN (s_1.key = 'calendar-prebrief-joe'::text) THEN jo.source_kind
+                    ELSE lr.source_kind
+                END AS source_kind,
+                CASE
+                    WHEN (s_1.key = 'calendar-prebrief-joe'::text) THEN jo.source_ref
+                    ELSE lr.source_ref
+                END AS source_ref,
+                CASE
+                    WHEN (s_1.key = 'calendar-prebrief-joe'::text) THEN jo.correlation_id
+                    ELSE lr.correlation_id
+                END AS correlation_id
+           FROM (((ops.service_environment se_1
+             JOIN ops.service s_1 ON ((s_1.id = se_1.service_id)))
+             LEFT JOIN latest_run lr ON (((lr.service_id = se_1.service_id) AND (lr.environment = se_1.environment))))
+             LEFT JOIN joe_observation jo ON ((s_1.key = 'calendar-prebrief-joe'::text)))
+          WHERE (s_1.retired_at IS NULL)
         )
  SELECT se.service_id,
     s.key AS service_key,
     s.name AS service_name,
     s.criticality,
     se.environment,
-    l.run_key AS last_run_key,
-    l.state AS last_run_state,
-    l.failure_class AS last_failure_class,
-    l.correlation_id AS last_correlation_id,
-    l.observed_at,
-    COALESCE(l.expires_at, (l.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision))) AS expires_at,
-    ops.freshness(l.observed_at, COALESCE(l.expires_at, (l.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision)))) AS freshness_state,
-    COALESCE(l.source_kind, 'registry'::text) AS source_kind,
-    COALESCE(l.source_ref, 'ops.service_environment'::text) AS source_ref,
+    o.run_key AS last_run_key,
+    o.state AS last_run_state,
+    o.failure_class AS last_failure_class,
+    o.correlation_id AS last_correlation_id,
+    o.observed_at,
+    COALESCE(o.expires_at, (o.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision))) AS expires_at,
+    ops.freshness(o.observed_at, COALESCE(o.expires_at, (o.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision)))) AS freshness_state,
+    COALESCE(o.source_kind, 'registry'::text) AS source_kind,
+    COALESCE(o.source_ref, 'ops.service_environment'::text) AS source_ref,
         CASE
-            WHEN (l.state IS NULL) THEN 'unknown'::text
-            WHEN (ops.freshness(l.observed_at, COALESCE(l.expires_at, (l.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision)))) <> 'fresh'::text) THEN 'unknown'::text
-            WHEN (l.state = ANY (ARRAY['failed'::text, 'timed_out'::text])) THEN 'unavailable'::text
-            WHEN (l.state = ANY (ARRAY['skipped'::text, 'cancelled'::text])) THEN 'degraded'::text
-            WHEN (l.state = 'succeeded'::text) THEN 'healthy'::text
+            WHEN (o.state IS NULL) THEN 'unknown'::text
+            WHEN (ops.freshness(o.observed_at, COALESCE(o.expires_at, (o.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision)))) <> 'fresh'::text) THEN 'unknown'::text
+            WHEN (o.state = ANY (ARRAY['failed'::text, 'timed_out'::text, 'dead_lettered'::text])) THEN 'unavailable'::text
+            WHEN (o.state = ANY (ARRAY['skipped'::text, 'cancelled'::text])) THEN 'degraded'::text
+            WHEN (o.state = 'succeeded'::text) THEN 'healthy'::text
             ELSE 'unknown'::text
         END AS health
    FROM ((ops.service_environment se
      JOIN ops.service s ON ((s.id = se.service_id)))
-     LEFT JOIN latest l ON (((l.service_id = se.service_id) AND (l.environment = se.environment))))
+     JOIN observation o ON (((o.service_id = se.service_id) AND (o.environment = se.environment))))
   WHERE (s.retired_at IS NULL);
 
 
@@ -13684,7 +13820,7 @@ CREATE VIEW ops.v_service_environment_health AS
 -- Name: VIEW v_service_environment_health; Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON VIEW ops.v_service_environment_health IS 'THE ONLY PLACE HEALTH IS EXPRESSED, and it is derived. The premortem names false health from stale collectors as the second most likely catastrophe; a stored health column is that failure mechanism. A silent collector reads unknown here because no green was ever written down.';
+COMMENT ON VIEW ops.v_service_environment_health IS 'The only place service health is expressed. Ordinary services derive from ops.run. calendar-prebrief-joe derives read-only from its exact Joe v1 live ops.job and typed projection/attestation/completion receipts, so its narrow runtime does not need broad ops.run write authority. Missing or stale evidence is never green, and unrelated workflows or modes cannot count.';
 
 
 --
@@ -32705,6 +32841,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0305_deal_history_queue_receipt_missing_visibility.sql	1099b02cfcd47812feaca5b18747190be5e730faf0abb81e0eea3604cda800e4	2026-08-25 13:47:29.212984+00
 0306_sourced_work_shape_disposition.sql	9a205a2c8c2ca50b61d5ee60b8883c0ff66a8138691d822faaf7ce4295ffb7af	2026-08-25 14:50:55.723919+00
 0307_calendar_prebrief_joe_schedule_time_and_failure.sql	686279a0ec797be4a7ddd36906bea175d2ae9bed89d1f54069520ae8525f2ef0	2026-08-25 15:28:07.424335+00
+0308_calendar_prebrief_service_health.sql	d4339ed5e43218806c0366adb5c19cb66c2cf8f51e3ce4622fa786448b49ef6c	2026-08-25 16:03:16.887415+00
 \.
 
 
