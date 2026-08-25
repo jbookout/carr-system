@@ -23,9 +23,11 @@
 #   regularly holds another live session's uncommitted work; see rule 308ef1de).
 #   COUNT CHECK catches the class — compare the verb count about to ship against
 #   the count recorded by the last successful deploy, and refuse on a DROP.
-#   The sole exception is an already-prepared typed `prior` recovery leg: its
-#   completed/read-back Production prior is what authorises the temporary drop,
-#   never a caller flag.
+#   The sole exceptions are the already-prepared typed recovery legs
+#   (`current_before`, `prior`, `current_after`, or the isolated
+#   `restore_only` repair): the matching DB writer must durably prepare that
+#   exact step and return its deterministic provider tag before it authorises a
+#   temporary drop. Standalone/source deploys and caller flags never waive it.
 #
 # The count is EXACT, not parsed: it imports the module and reads
 # Object.keys(TOOLS).length. A regex over the source undercounts (61 vs the real
@@ -203,6 +205,44 @@ while [ "$#" -gt 0 ]; do
 done
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
+
+# A temporary verb-count drop is authorized only after the DB writer for the
+# exact typed recovery step has durably prepared the attempt and returned its
+# deterministic provider tag.  This is deliberately a function shared by the
+# preflight shrink gate and the later deployment prepare: the later call is an
+# idempotent replay of the same writer input, never a second authorization path.
+prepare_typed_recovery_shrink() {
+  [ "$TARGET_ENV" = "staging" ] || fail "typed recovery shrink is staging-only."
+  [ "$RECOVERY_STEP" != "standalone" ] || fail "standalone deploys cannot authorize verb shrink."
+  [ -n "$STAGING_RECEIPT_KEY" ] || fail "typed recovery shrink needs a staging receipt idempotency key."
+  printf '%s\n' "$STAGING_RECEIPT_KEY" | grep -Eq \
+    '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+    || fail "--staging-receipt-idempotency-key must be a lowercase canonical UUID."
+
+  case "$RECOVERY_STEP" in
+    current_before|prior|current_after)
+      TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-attempt prepare \
+        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+        --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+        --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --recovery-step "$RECOVERY_STEP" \
+        --git-sha "$HEAD_SHA" --correlation "$RECOVERY_ATTEMPT_ID" \
+        --field expected_provider_tag)" \
+        || fail "the typed recovery step was not durably prepared; verb shrink is refused."
+      ;;
+    restore_only)
+      TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-restore-only prepare \
+        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+        --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+        --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --git-sha "$HEAD_SHA" \
+        --correlation "$RECOVERY_ATTEMPT_ID" --field expected_provider_tag)" \
+        || fail "the typed restore-only repair was not durably prepared; verb shrink is refused."
+      ;;
+    *) fail "standalone deploys cannot authorize verb shrink." ;;
+  esac
+  printf '%s\n' "$TYPED_RECOVERY_TAG" | grep -Eq '^carr-staging-[0-9a-f]{32}$' \
+    || fail "the prepared typed recovery step returned no exact provider tag; verb shrink is refused."
+  echo "  !!  shrinking by $LOST verb(s), allowed only by the exact prepared typed recovery step"
+}
 
 if [ "$VERSION_MODE" != "ordinary" ] && [ "$TARGET_ENV" != "production" ]; then
   fail "provider-version operations are Production-only; staging is a source rehearsal and receives its own build."
@@ -401,33 +441,15 @@ case "$LEDGER_RC" in
   0)
     if [ -n "$PREVIOUS" ] && [ "$SHIPPING" -lt "$PREVIOUS" ]; then
       LOST=$((PREVIOUS - SHIPPING))
-      if [ "$RECOVERY_STEP" != "prior" ] || [ "$TARGET_ENV" != "staging" ]; then
+      if [ "$RECOVERY_STEP" = "standalone" ] || [ "$TARGET_ENV" != "staging" ]; then
         fail "this deploy would REMOVE $LOST verb(s) from $TARGET_ENV.
   last deployed: $PREVIOUS
   about to ship: $SHIPPING
 
-  Source and standalone deploys cannot waive the verb-loss guard. Only the
-  exact prepared `prior` leg of a typed staging recovery may temporarily shrink."
+  Source and standalone deploys cannot waive the verb-loss guard. Only an
+  exact prepared typed staging recovery step may temporarily shrink."
       fi
-      [ -n "$STAGING_RECEIPT_KEY" ] \
-        || fail "typed recovery prior shrink needs a staging receipt idempotency key."
-      printf '%s\n' "$STAGING_RECEIPT_KEY" | grep -Eq \
-        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
-        || fail "--staging-receipt-idempotency-key must be a lowercase canonical UUID."
-      # The existing sole writer validates the current candidate, distinct
-      # completed prior, shared service, exact prior SHA and Production
-      # readback BEFORE returning a tag.  This prepare is replayed later in
-      # the staging deploy path; it is not a caller-controlled override.
-      TYPED_PRIOR_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-attempt prepare \
-        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
-        --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
-        --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --recovery-step prior \
-        --git-sha "$HEAD_SHA" --correlation "$RECOVERY_ATTEMPT_ID" \
-        --field expected_provider_tag)" \
-        || fail "the typed recovery prior was not durably prepared; verb shrink is refused."
-      printf '%s\n' "$TYPED_PRIOR_TAG" | grep -Eq '^carr-staging-[0-9a-f]{32}$' \
-        || fail "the typed recovery prior returned no exact provider tag; verb shrink is refused."
-      echo "  !!  shrinking by $LOST verb(s), allowed only by the exact prepared recovery prior"
+      prepare_typed_recovery_shrink
     else
       echo "  OK  no verb loss (last deployed to $TARGET_ENV: $PREVIOUS)"
     fi
@@ -818,6 +840,9 @@ else
     DEPLOY_TAG="$(staging_attempt prepare --field expected_provider_tag)" \
       || fail "the exact staging deployment attempt was not durably prepared."
     [ -n "$DEPLOY_TAG" ] || fail "the prepared staging attempt returned no provider tag."
+    if [ -n "${TYPED_RECOVERY_TAG:-}" ] && [ "$DEPLOY_TAG" != "$TYPED_RECOVERY_TAG" ]; then
+      fail "the idempotent typed recovery prepare returned a different provider tag."
+    fi
     ATTEMPT_CLAIM_FIELD="deploy_claimed"
     [ "$RECOVERY_STEP" != "restore_only" ] || ATTEMPT_CLAIM_FIELD="mutation_claimed"
     ATTEMPT_DEPLOY_CLAIMED="$(staging_attempt prepare --field "$ATTEMPT_CLAIM_FIELD")" \
