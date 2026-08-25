@@ -4,6 +4,7 @@ import fs from "node:fs";
 
 const migration = fs.readFileSync(new URL("../../migrations/0310_engineering_execution_fabric.sql", import.meta.url), "utf8");
 const authorityRepair = fs.readFileSync(new URL("../../migrations/0311_sponsored_engineering_executor_authority.sql", import.meta.url), "utf8");
+const controllerMigration = fs.readFileSync(new URL("../../migrations/0312_engineering_dispatch_controller.sql", import.meta.url), "utf8");
 const runtime = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 const mcp = fs.readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
 const registry = JSON.parse(fs.readFileSync(new URL("../../ops/config/control-plane-workflows.v1.json", import.meta.url), "utf8"));
@@ -70,7 +71,7 @@ test("the reviewed control-plane inventory carries the exact engineering job con
   assert.ok(workflow);
   assert.equal(workflow.enabled, true);
   assert.equal(workflow.risk, "yellow");
-  assert.deepEqual(workflow.execution, { kind: "deterministic", entrypoint: "mcp-server/src/engineering-runtime.js", export: "runCodexSlice", args: [], shadow_args: [], canary: { enabled: false, reason: "fresh native Codex execution has no isolated canary adapter" } });
+  assert.deepEqual(workflow.execution, { kind: "deterministic", entrypoint: "mcp-server/src/engineering-runtime.js", export: "runEngineeringWorker", args: ["room-bridge-engineering-controller"], shadow_args: [], canary: { enabled: false, reason: "fresh native Codex execution has no isolated canary adapter" } });
   assert.equal(workflow.inventory.trigger, "MCP admission only; no scheduler");
   assert.equal(workflow.inventory.current_completion_signal, "lease-bound typed receipt plus independent reviewer fact");
   assert.deepEqual(workflow.recurrence, { kind: "on_demand", schedule: null, cron: null, timezone: "America/Chicago", source: "MCP admit-engineering-slice only" });
@@ -79,9 +80,20 @@ test("the reviewed control-plane inventory carries the exact engineering job con
   assert.deepEqual(workflow.validation, { key: "facts.all_true", spec: { all_of: ["command.exit_zero", "command.workflow_marker_valid"] }, description: "the bounded adapter succeeds and returns its typed workflow marker" });
   assert.deepEqual(workflow.retry, { max_attempts: 2, backoff: "constant", base_seconds: 30, cap_seconds: 300, timeout_seconds: 1800 });
   assert.equal(workflow.inventory.authority, "server-derived sponsored Codex execution with a closed repository action allowlist; no caller-selected identity, authority, model, action, or native session");
+  assert.deepEqual(workflow.inventory.external_dependencies, ["room-bridge lease-bound controller", "Codex Desktop fresh-native-session adapter"]);
   assert.deepEqual(workflow.deduplication, { key_template: "engineering-slice:{plan_digest}:{work_request}:{slice_ref}:generation:{generation}" });
   assert.deepEqual(workflow.completion, { key: "facts.all_true", spec: { all_of: ["command.receipt_persisted", "command.execution_evidence_reconciles"] }, description: "lease-bound typed receipt persists and reconciles to the issued envelope", receipt_kind: "engineering_slice" });
   assert.deepEqual(workflow.legacy_schedule, { provider: "none", status: "disabled", disable_requires: "no scheduler exists; on-demand MCP admission only" });
+});
+
+test("0312 binds the controller to the issued session and closes PUBLIC execution", () => {
+  assert.match(controllerMigration, /create or replace function ops\.engineering_controller_binding/);
+  assert.match(controllerMigration, /join ops\.capability_agent_session s on s\.id=e\.agent_session_id/);
+  assert.match(controllerMigration, /p_executor_actor_id is distinct from session_executor/);
+  assert.match(controllerMigration, /revoke all on function ops\.engineering_controller_binding\(uuid,uuid\) from public/);
+  assert.match(controllerMigration, /revoke all on function ops\.engineering_record_slice_receipt\(uuid,uuid,jsonb,text,uuid\) from public/);
+  assert.match(controllerMigration, /aclexplode/);
+  assert.doesNotMatch(controllerMigration, /ops\.claim_job\(/);
 });
 
 test("Hermes keeps execution controller-only while retaining its existing capture allowlist", () => {
