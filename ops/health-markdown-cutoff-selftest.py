@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import ast
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +27,12 @@ if function is None:
     sys.exit("health-markdown-cutoff-selftest: filter function is missing")
 namespace: dict[str, object] = {}
 exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE), "exec"), namespace)
-filter_watch = namespace["_retired_watch_entries"]
+WatchEntry = tuple[str, str]
+FilterWatch = Callable[
+    [list[WatchEntry], set[str]],
+    tuple[list[WatchEntry], list[WatchEntry]],
+]
+filter_watch = cast(FilterWatch, namespace["_retired_watch_entries"])
 
 
 def check(label: str, condition: bool, detail: str = "") -> None:
