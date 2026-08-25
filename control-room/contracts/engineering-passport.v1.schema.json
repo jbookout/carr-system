@@ -70,6 +70,8 @@
     },
     "slices": {
       "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/State"
       }
@@ -152,7 +154,8 @@
             "type": "array"
           },
           "checks": {
-            "type": "array"
+            "type": "array",
+            "minItems": 1
           },
           "source_evidence": {
             "type": "object"

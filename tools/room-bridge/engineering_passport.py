@@ -168,6 +168,17 @@ def validate_engineering_slice_plan(plan: Any) -> dict[str, Any]:
     return value
 
 
+def _validate_plan_envelope_binding(plan: dict[str, Any], envelope: dict[str, Any]) -> None:
+    """Require the accepted plan and server envelope to describe one authority state."""
+    if plan["work_request"]["id"] != envelope["work_request_id"]:
+        raise EngineeringContractError("accepted plan work request does not match execution envelope")
+    state = envelope["state_binding"]
+    if plan["work_request"]["state_version"] != state["state_version"] or plan["work_request"]["canonical_record_digest"] != state["canonical_record_digest"]:
+        raise EngineeringContractError("accepted plan state binding does not match execution envelope")
+    if plan["accepted_plan_revision"] != envelope["plan_revision"]:
+        raise EngineeringContractError("accepted plan revision does not match execution envelope")
+
+
 def _assert_acyclic(slices: Iterable[dict[str, Any]]) -> None:
     graph = {row["slice_ref"]: set(row["dependency_refs"]) for row in slices}
     visiting: set[str] = set(); visited: set[str] = set()
@@ -217,7 +228,14 @@ def _validate_receipt(value: Any, plan: dict[str, Any], envelope: dict[str, Any]
         seen.add(item["check_ref"])
         if item["state"] not in {"passed", "failed", "blocked", "not_run"}:
             raise EngineeringContractError("engineering receipt check state is invalid")
-        _evidence(item["evidence_refs"], "engineering receipt check evidence_refs")
+        evidence_rows = _evidence(item["evidence_refs"], "engineering receipt check evidence_refs")
+        if item["state"] == "passed":
+            if not evidence_rows:
+                raise EngineeringContractError("passed check requires evidence")
+            requirement = next(check["evidence_requirement"] for check in slices[row["slice_ref"]]["planned_checks"] if check["check_ref"] == item["check_ref"])
+            required_class = "redacted_evidence" if requirement == "redacted_evidence_required" else "metadata_only"
+            if not any(evidence["redaction_class"] == required_class for evidence in evidence_rows):
+                raise EngineeringContractError(f"passed check requires {required_class}")
     if planned - seen:
         raise EngineeringContractError("receipt omits a planned check")
     if row["outcome"] not in {"claimed_complete", "failed", "blocked", "reopened"}:
@@ -262,6 +280,7 @@ def _validate_receipt(value: Any, plan: dict[str, Any], envelope: dict[str, Any]
     if row["independent_verification_required"] is not True: raise EngineeringContractError("engineering receipt requires independent verification")
     if envelope is not None:
         bound = base.validate_execution_envelope(envelope)
+        _validate_plan_envelope_binding(plan, bound)
         if row["envelope_digest"] != base.execution_envelope_digest(bound): raise EngineeringContractError("receipt does not bind exact execution envelope")
     return row
 
@@ -273,6 +292,7 @@ def validate_engineering_slice_receipt(receipt: Any, plan: Any, envelope: Any | 
 def build_engineering_slice_packet(envelope: Any, plan: Any, slice_ref: str) -> dict[str, Any]:
     bound = base.validate_execution_envelope(envelope)
     accepted = validate_engineering_slice_plan(plan)
+    _validate_plan_envelope_binding(accepted, bound)
     row = next((item for item in accepted["slices"] if item["slice_ref"] == slice_ref), None)
     if row is None: raise EngineeringContractError("cannot build packet for unknown slice")
     packet_envelope = _narrowed_envelope(bound, row)
@@ -314,6 +334,7 @@ def validate_engineering_slice_packet(packet: Any, plan: Any, source_envelope: A
     if row["schema_version"] != "engineering-slice-packet.v1" or row["fresh_native_session_required"] is not True:
         raise EngineeringContractError("engineering slice packet must require a fresh native session")
     accepted = validate_engineering_slice_plan(plan); source = base.validate_execution_envelope(source_envelope)
+    _validate_plan_envelope_binding(accepted, source)
     _str(row["slice_ref"], "engineering packet slice_ref", identifier=True); _digest(row["plan_digest"], "engineering packet plan_digest"); _digest(row["envelope_digest"], "engineering packet envelope_digest"); _digest(row["packet_digest"], "engineering packet packet_digest")
     if row["plan_digest"] != accepted["plan_digest"] or row["envelope_digest"] != base.execution_envelope_digest(source): raise EngineeringContractError("engineering packet source binding does not match")
     expected = next((item for item in accepted["slices"] if item["slice_ref"] == row["slice_ref"]), None)
@@ -346,13 +367,17 @@ def _validated_reviewers(plan: dict[str, Any], receipts: list[dict[str, Any]], r
         if (fact["slice_ref"], fact["reviewer_ref"], fact["session_ref"]) in reviewer_keys: raise EngineeringContractError("duplicate reviewer fact")
         reviewer_keys.add((fact["slice_ref"], fact["reviewer_ref"], fact["session_ref"]))
         if fact["state"] not in {"passed", "failed", "blocked"}: raise EngineeringContractError("reviewer fact state is invalid")
-        _evidence(fact["evidence_refs"], "reviewer fact evidence_refs")
+        reviewer_evidence = _evidence(fact["evidence_refs"], "reviewer fact evidence_refs")
+        if fact["state"] == "passed" and not reviewer_evidence:
+            raise EngineeringContractError("passed independent review requires evidence")
         _ids(fact["reviewed_deviation_refs"], "reviewer fact reviewed_deviation_refs"); _ids(fact["resolved_deviation_refs"], "reviewer fact resolved_deviation_refs")
         deviation_refs = {item["deviation_ref"] for item in receipt["deviations"]}
         if set(fact["reviewed_deviation_refs"]) != deviation_refs or not set(fact["resolved_deviation_refs"]).issubset(deviation_refs):
             raise EngineeringContractError("reviewer fact must cover every receipt deviation")
         if fact["state"] == "passed" and (set(fact["resolved_deviation_refs"]) != deviation_refs or any(item["review_state"] != "resolved" for item in receipt["deviations"])):
             raise EngineeringContractError("passed review requires every deviation resolved")
+        if fact["slice_ref"] in result:
+            raise EngineeringContractError("more than one reviewer verdict for a slice is ambiguous")
         result[fact["slice_ref"]] = fact
     return result
 
@@ -404,9 +429,23 @@ def _qa_facts(plan: dict[str, Any], receipts: list[dict[str, Any]], facts: Itera
         if fact["slice_ref"] not in known: raise EngineeringContractError("manual QA fact names a slice without a receipt")
         if fact["slice_ref"] in result: raise EngineeringContractError("duplicate manual QA fact")
         if fact["state"] not in {"passed", "failed", "blocked"}: raise EngineeringContractError("manual QA state is invalid")
-        _evidence(fact["evidence_refs"], "manual QA fact evidence_refs"); _str(fact["note"], "manual QA fact note")
+        qa_evidence = _evidence(fact["evidence_refs"], "manual QA fact evidence_refs"); _str(fact["note"], "manual QA fact note")
+        if fact["state"] == "passed" and not qa_evidence:
+            raise EngineeringContractError("passed manual QA requires evidence")
         result[fact["slice_ref"]] = fact
     return result
+
+
+def _derived_operator_receipt(slices: list[dict[str, Any]], receipts: list[dict[str, Any]], qa: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    evidence_by_ref = {item["ref"]: item for receipt in receipts for item in receipt["evidence_refs"]}
+    return {
+        "what_changed": [item["slice_ref"] for item in slices if item["state"] == "verified_complete"],
+        "why": "derived from accepted plan and typed receipts",
+        "evidence_refs": [evidence_by_ref[key] for key in sorted(evidence_by_ref)],
+        "deviations": sorted({deviation["deviation_ref"] for receipt in receipts for deviation in receipt["deviations"]}),
+        "remaining_risk": [item["slice_ref"] for item in slices if item["state"] != "verified_complete"],
+        "manual_qa_items": [item["slice_ref"] for item in slices if item["manual_qa_required"] and item["slice_ref"] not in qa],
+    }
 
 
 def _closure_complete(slices: list[dict[str, Any]], receipts: list[dict[str, Any]], reviewers: dict[str, dict[str, Any]], qa: dict[str, dict[str, Any]], closure: dict[str, dict[str, Any]], conflict: dict[str, Any]) -> bool:
@@ -447,8 +486,7 @@ def project_engineering_passport(plan: Any, receipts: Iterable[Any], *, reviewer
         "learning": _learning(learning or {"state": "unresolved", "route": None, "evidence_refs": [], "note": "learning disposition pending"}),
     }
     closure_complete = _closure_complete(slices, receipt_rows, reviewer_by, qa_by, closure, stale_conflict or {"state": "none", "reason": None})
-    operator_evidence = {ev["ref"]: ev for rec in receipt_rows for ev in rec["evidence_refs"]}
-    projection = {"schema_version": "engineering-passport.v1", "work_request": accepted["work_request"], "accepted_plan_revision": accepted["accepted_plan_revision"], "plan_digest": accepted["plan_digest"], "slice_plan": accepted, "slices": slices, "receipts": receipt_rows, "reviewer_facts": list(reviewer_by.values()), "qa_facts": list(qa_by.values()), "operator_receipt": {"what_changed": [item["slice_ref"] for item in slices if item["state"] == "verified_complete"], "why": "derived from accepted plan and typed receipts", "evidence_refs": [operator_evidence[key] for key in sorted(operator_evidence)], "deviations": sorted({dev["deviation_ref"] for rec in receipt_rows for dev in rec["deviations"]}), "remaining_risk": [item["slice_ref"] for item in slices if item["state"] != "verified_complete"], "manual_qa_items": [item["slice_ref"] for item in slices if item["manual_qa_required"] and item["slice_ref"] not in qa_by]}, "closure": closure, "closure_state": "complete" if closure_complete else "blocked", "stale_conflict": stale_conflict or {"state": "none", "reason": None}}
+    projection = {"schema_version": "engineering-passport.v1", "work_request": accepted["work_request"], "accepted_plan_revision": accepted["accepted_plan_revision"], "plan_digest": accepted["plan_digest"], "slice_plan": accepted, "slices": slices, "receipts": receipt_rows, "reviewer_facts": list(reviewer_by.values()), "qa_facts": list(qa_by.values()), "operator_receipt": _derived_operator_receipt(slices, receipt_rows, qa_by), "closure": closure, "closure_state": "complete" if closure_complete else "blocked", "stale_conflict": stale_conflict or {"state": "none", "reason": None}}
     projection["projection_digest"] = base.canonical_digest(projection)
     return projection
 
@@ -468,6 +506,15 @@ def validate_engineering_passport(value: Any) -> dict[str, Any]:
     if row["closure_state"] not in {"blocked", "complete"}: raise EngineeringContractError("engineering passport closure_state is invalid")
     projected_slices = _list(row["slices"], "engineering passport slices")
     if len(projected_slices) != len(accepted["slices"]): raise EngineeringContractError("engineering passport must project every accepted slice")
+    expected_order = [item["slice_ref"] for item in sorted(accepted["slices"], key=lambda item: item["ordinal"])]
+    projected_refs = []
+    projected_ordinals = []
+    for projected in projected_slices:
+        if not isinstance(projected, dict): raise EngineeringContractError("engineering passport slice state must be an object")
+        if "slice_ref" not in projected or "ordinal" not in projected: raise EngineeringContractError("engineering passport slice state binding is incomplete")
+        projected_refs.append(projected["slice_ref"]); projected_ordinals.append(projected["ordinal"])
+    if projected_refs != expected_order or projected_ordinals != [item["ordinal"] for item in sorted(accepted["slices"], key=lambda item: item["ordinal"])]:
+        raise EngineeringContractError("engineering passport slice coverage or order is not exact")
     expected_eligible = set(eligible_slices(accepted, receipt_rows, list(reviewer_by.values())))
     receipt_by_slice = {item["slice_ref"]: item for item in receipt_rows}
     for projected in projected_slices:
@@ -480,6 +527,9 @@ def validate_engineering_passport(value: Any) -> dict[str, Any]:
             raise EngineeringContractError("engineering passport slice state is not derived from bound facts")
     operator = _exact(row["operator_receipt"], {"what_changed", "why", "evidence_refs", "deviations", "remaining_risk", "manual_qa_items"}, "engineering passport operator_receipt")
     _ids(operator["what_changed"], "operator what_changed"); _str(operator["why"], "operator why"); _ids(operator["deviations"], "operator deviations"); _ids(operator["remaining_risk"], "operator remaining_risk"); _ids(operator["manual_qa_items"], "operator manual_qa_items"); _evidence(operator["evidence_refs"], "operator evidence_refs")
+    expected_operator = _derived_operator_receipt(projected_slices, receipt_rows, qa_by)
+    if operator != expected_operator:
+        raise EngineeringContractError("operator receipt is not derived from bound engineering facts")
     closure = _exact(row["closure"], {"work", "proof", "explanation", "release", "learning"}, "engineering passport closure")
     for field, allowed in (("work", {"unresolved", "complete"}), ("proof", {"unresolved", "complete"}), ("explanation", {"unresolved", "complete"}), ("release", {"unresolved", "released", "not_required"})):
         _disposition(closure[field], field, allowed)
