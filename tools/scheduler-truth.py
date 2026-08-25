@@ -54,6 +54,10 @@ import sys
 from typing import Any, Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+from lib.launchd_observation import LaunchdObservationError
+from lib.launchd_observation import loaded_labels as native_loaded_labels
+
 REPO_PLISTS = os.path.join(REPO, "ops", "launchd")
 INSTALLED = os.path.expanduser("~/Library/LaunchAgents")
 SERVICES = os.path.join(REPO, "ops", "config", "services.json")
@@ -140,14 +144,16 @@ def read_plist(path: str) -> dict[str, Any]:
 
 
 def loaded_labels() -> Optional[set[str]]:
-    """What launchd currently holds. `launchctl list` prints pid/status/label."""
+    """What launchd currently holds, from a native exact print read.
+
+    ``launchctl list`` is not an authoritative inventory on this Mac and has
+    reported zero while exact ``launchctl print`` reads found loaded jobs.
+    ``None`` means launchd was unreadable; it must never be treated as empty.
+    """
     try:
-        out = subprocess.run(["launchctl", "list"], capture_output=True,
-                             text=True, timeout=30).stdout
-    except Exception:
+        return native_loaded_labels()
+    except (LaunchdObservationError, OSError, subprocess.SubprocessError):
         return None
-    return {ln.split("\t")[-1].strip() for ln in out.splitlines()
-            if "com.carr." in ln}
 
 
 def wrapped(pl: dict[str, Any]) -> bool:
