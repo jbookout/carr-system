@@ -3,6 +3,8 @@ name: engineering-slice
 description: On-demand Engineering Passport execution contract; never scheduled.
 ---
 
+# doctrine: carr-production-maturity-baseline
+
 # Engineering Passport Slice
 
 This is an on-demand control-plane definition, not a recurring task. Never
