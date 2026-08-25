@@ -113,8 +113,33 @@ RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
 STAGING_RECEIPT_KEY=""
 EXACT_SOURCE_ROOT=""
+EXACT_RUNTIME_LINK=""
 # Filled only from the exact immutable release manifest after preflight.
 EXPECTED_PROGRAM6_ACTIONS=""
+
+# A detached recovery source is validated as a clean, exact Git tree and must
+# not carry ignored dependencies.  Wrangler still needs the current verified
+# runtime to bundle that exact Worker, so the link below is provisioned only
+# after source and package-lock validation.  One cleanup hook owns all
+# ephemeral files so later receipt-specific traps cannot strand the link.
+cleanup_ephemeral() {
+  if [ -n "${STAGING_RECEIPT:-}" ] && [ -e "$STAGING_RECEIPT" ]; then
+    rm -f "$STAGING_RECEIPT"
+  fi
+  if [ -n "${EXACT_RUNTIME_LINK:-}" ] && [ -L "$EXACT_RUNTIME_LINK" ] \
+      && [ "$(readlink "$EXACT_RUNTIME_LINK")" = "$REPO/mcp-server/node_modules" ]; then
+    rm -f "$EXACT_RUNTIME_LINK"
+  fi
+}
+cleanup_on_signal() {
+  cleanup_ephemeral
+  trap - EXIT HUP INT TERM
+  exit "$1"
+}
+trap cleanup_ephemeral EXIT
+trap 'cleanup_on_signal 129' HUP
+trap 'cleanup_on_signal 130' INT
+trap 'cleanup_on_signal 143' TERM
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check)         CHECK_ONLY=1 ;;
@@ -205,6 +230,25 @@ if [ -n "$EXACT_SOURCE_ROOT" ]; then
   SOURCE_ROOT="$("$PY" "$REPO/tools/validate-exact-recovery-source.py" \
     --root "$EXACT_SOURCE_ROOT" --sha "$PINNED_RELEASE")" \
     || fail "the internal exact source root is not the bound clean detached source."
+  CURRENT_PACKAGE_LOCK="$REPO/mcp-server/package-lock.json"
+  EXACT_PACKAGE_LOCK="$SOURCE_ROOT/mcp-server/package-lock.json"
+  [ -f "$CURRENT_PACKAGE_LOCK" ] \
+    || fail "the current wrapper dependency lockfile is missing."
+  [ -f "$EXACT_PACKAGE_LOCK" ] \
+    || fail "the exact recovery source dependency lockfile is missing."
+  cmp -s "$CURRENT_PACKAGE_LOCK" "$EXACT_PACKAGE_LOCK" \
+    || fail "the exact recovery source dependency lockfile differs from the current verified runtime."
+  EXACT_RUNTIME_LINK="$SOURCE_ROOT/mcp-server/node_modules"
+  [ -d "$REPO/mcp-server/node_modules" ] \
+    || fail "the current verified runtime dependencies are missing."
+  if [ -e "$EXACT_RUNTIME_LINK" ] || [ -L "$EXACT_RUNTIME_LINK" ]; then
+    fail "the exact recovery source already contains mcp-server/node_modules."
+  fi
+  ln -s "$REPO/mcp-server/node_modules" "$EXACT_RUNTIME_LINK" \
+    || fail "could not provision the current verified runtime for exact recovery bundling."
+  [ -L "$EXACT_RUNTIME_LINK" ] \
+    && [ "$(readlink "$EXACT_RUNTIME_LINK")" = "$REPO/mcp-server/node_modules" ] \
+    || fail "the exact recovery runtime link was not created with the expected target."
   WORKER_DIR="$SOURCE_ROOT/mcp-server"
 fi
 if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "production" ]; then
@@ -1276,7 +1320,6 @@ if [ "$TARGET_ENV" = "staging" ]; then
     || fail "checked-in staging target config is not exact."
   STAGING_RECEIPT="$(mktemp "${TMPDIR:-/tmp}/carr-staging-release.XXXXXX")"
   chmod 600 "$STAGING_RECEIPT"
-  trap 'rm -f "$STAGING_RECEIPT"' EXIT INT TERM
   STAGING_OK=0
   record_staging_receipt() {
     record_staging_receipt_file "$STAGING_RECEIPT" >/dev/null
@@ -1290,7 +1333,7 @@ if [ "$TARGET_ENV" = "staging" ]; then
     sleep 5
   done
   rm -f "$STAGING_RECEIPT"
-  trap - EXIT INT TERM
+  STAGING_RECEIPT=""
   if [ "$STAGING_OK" = 1 ]; then
     echo "  recorded immutable staging /release receipt for $CARR_CORRELATION_ID"
   else
