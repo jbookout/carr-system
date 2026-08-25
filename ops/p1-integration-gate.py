@@ -83,12 +83,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import secrets
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -170,15 +173,105 @@ def psql(conn_string: str, *args: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=1800)
 
 
-def run_tool(script: str, *args: str, dsn: str) -> subprocess.CompletedProcess:
+# Cover the conventional DATABASE_URL plus every DATABASE_URL_* spelling and
+# every CARR credential spelling in use today (CARR_DB_*,
+# CARR_IMPORT_DB_URL, CARR_RECONCILE_DB_URL, and future CARR_*DB*_URL names).
+# This is intentionally broader than ops-record's current DSN_FOR list: the
+# rehearsal boundary must not depend on which tool happens to consume an
+# ambient credential today.
+_DB_URL_ENV = re.compile(r"(?:DATABASE_URL|^CARR_.*DB.*_URL$)")
+
+
+def _same_database_target(owner_dsn: str, jobs_dsn: str) -> bool:
+    """Prove a routine DSN is the exact carr_jobs target of the owner DSN."""
+    try:
+        owner = urlsplit(owner_dsn)
+        jobs = urlsplit(jobs_dsn)
+        owner_port, jobs_port = owner.port, jobs.port
+    except (AttributeError, ValueError):
+        return False
+    return (
+        owner.scheme in {"postgres", "postgresql"}
+        and jobs.scheme == owner.scheme
+        and bool(owner.hostname)
+        and jobs.hostname == owner.hostname
+        and jobs_port == owner_port
+        and jobs.path == owner.path
+        and jobs.query == owner.query
+        and unquote(jobs.username or "") == "carr_jobs"
+    )
+
+
+def _isolated_tool_env(owner_dsn: str, jobs_dsn: str | None = None) -> dict[str, str]:
+    """Return a subprocess environment bound only to this rehearsal database.
+
+    `tools/ops-record.py` deliberately loads ~/.config/carr/db.env as a last
+    resort.  Passing the caller's ambient environment therefore is not an
+    isolation boundary: a missing CARR_DB_JOBS_URL silently turns a rehearsal
+    write into a production write.  Remove every known database-credential
+    shape before installing the exact owner/jobs URLs for this ephemeral
+    database.  The explicit jobs URL is required for routine ledger writes;
+    there is no fallback to DATABASE_URL or the operator's db.env.
+    """
+    if not owner_dsn:
+        raise ValueError("p1 integration tool invocation requires an owner DSN")
+    env = {key: value for key, value in os.environ.items()
+           if not _DB_URL_ENV.search(key)}
+    env["DATABASE_URL"] = owner_dsn
+    if jobs_dsn is not None:
+        env["CARR_DB_JOBS_URL"] = jobs_dsn
+    return env
+
+
+def _jobs_login_dsn(owner_dsn: str, password: str) -> str:
+    """Render a carr_jobs URL preserving the same host/database/query target."""
+    parsed = urlsplit(owner_dsn)
+    if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+        raise ValueError("integration owner DSN has no PostgreSQL host")
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    return urlunsplit((parsed.scheme,
+                       f"carr_jobs:{quote(password, safe='')}@{host}",
+                       parsed.path, parsed.query, ""))
+
+
+def prepare_jobs_login(owner_dsn: str, *, connect=None, sql_module=None) -> str:
+    """Set a throwaway carr_jobs password and return its same-database DSN.
+
+    The schema snapshot creates carr_jobs with a random placeholder password.
+    Resetting it in-process on the disposable database is the same probe used
+    by p1-rebuild-gate; no credential is printed or persisted in the repo.
+    """
+    if connect is None or sql_module is None:
+        import psycopg
+        from psycopg import sql
+        connect = connect or psycopg.connect
+        sql_module = sql_module or sql
+    password = secrets.token_urlsafe(32)
+    with connect(owner_dsn, autocommit=True) as owner:
+        with owner.cursor() as cur:
+            cur.execute(sql_module.SQL("alter role {} password {}").format(
+                sql_module.Identifier("carr_jobs"), sql_module.Literal(password)))
+    return _jobs_login_dsn(owner_dsn, password)
+
+
+def run_tool(script: str, *args: str, dsn: str, jobs_dsn: str | None,
+             runner: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> subprocess.CompletedProcess:
     """Drive one of the system's real entry points against the rebuilt database.
 
-    DATABASE_URL is the only thing that changes. If a tool needs anything else
-    from the machine to work, this is where that shows up — which is the point.
+    Owner operations receive DATABASE_URL; routine ops-record writes receive
+    CARR_DB_JOBS_URL. Both are exact credentials for this branch/database.
+    Ambient database URLs are removed first, so ops-record's db.env loader
+    cannot silently redirect the run to a developer or production database.
     """
-    return subprocess.run([sys.executable, str(REPO / script), *args],
-                          capture_output=True, text=True, timeout=600,
-                          env={**os.environ, "DATABASE_URL": dsn})
+    if jobs_dsn is None:
+        raise ValueError("p1 integration tool invocation requires an explicit carr_jobs DSN")
+    if not _same_database_target(dsn, jobs_dsn):
+        raise ValueError("p1 integration tool invocation requires a carr_jobs DSN for the exact owner database target")
+    return runner([sys.executable, str(REPO / script), *args],
+                  capture_output=True, text=True, timeout=600,
+                  env=_isolated_tool_env(dsn, jobs_dsn))
 
 
 def main() -> int:
@@ -280,12 +373,27 @@ def main() -> int:
         migrated = subprocess.run(
             [sys.executable, str(REPO / "tools" / "migrate.py"), "--apply", "--yes"],
             capture_output=True, text=True, timeout=1800,
-            env={**os.environ, "DATABASE_URL": target_dsn})
+            env=_isolated_tool_env(target_dsn))
         if migrated.returncode != 0:
             check("0. the environment reconstructs before integration can be tested", False,
                   migrated.stderr.strip().splitlines()[-1][:200] if migrated.stderr.strip() else "")
             return 1
         say("  reconstructed: schema loaded, migrations applied")
+        say("")
+
+        # The schema creates carr_jobs with an in-process placeholder password.
+        # Establish a disposable login now, before any real routine entry point
+        # is called, and keep its DSN bound to this exact fresh database.
+        try:
+            jobs_dsn = prepare_jobs_login(target_dsn)
+        except Exception as exc:
+            check("0b. the rebuilt carr_jobs login binds to this database", False,
+                  f"{type(exc).__name__}: {str(exc)[:160]}")
+            return 1
+        bound = _same_database_target(target_dsn, jobs_dsn)
+        check("0b. the rebuilt carr_jobs login binds to this database", bound)
+        if not bound:
+            return 1
         say("")
 
         # ── 1. THE APPLICATION CAN POPULATE ITS OWN CATALOG ──────────────────
@@ -295,7 +403,8 @@ def main() -> int:
         # unusable until the repo's declarations have been pushed into it. The
         # rebuild gate never discovers this, because a table can exist and be
         # empty and still satisfy `to_regclass`.
-        synced = run_tool("tools/ops-record.py", "sync-registry", dsn=target_dsn)
+        synced = run_tool("tools/ops-record.py", "sync-registry",
+                          dsn=target_dsn, jobs_dsn=jobs_dsn)
         check("1. the application populates its own service catalog from the repo",
               synced.returncode == 0,
               (synced.stderr.strip() or synced.stdout.strip()).splitlines()[-1][:200]
@@ -313,7 +422,7 @@ def main() -> int:
                          "--key", run_key, "--state", "succeeded",
                          "--kind", "check", "--source-kind", "wrapper",
                          "--source-ref", "ops/p1-integration-gate.py",
-                         dsn=target_dsn)
+                         dsn=target_dsn, jobs_dsn=jobs_dsn)
         check("2. the application writes through its own entry point, not raw SQL",
               wrote.returncode == 0,
               (wrote.stderr.strip() or wrote.stdout.strip()).splitlines()[-1][:200]
