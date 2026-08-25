@@ -151,7 +151,11 @@ def test_source_head_advance_suppresses_health():
 
     reader = Reader()
     original_reader = queue_projection.open_reader
-    queue_projection.open_reader = lambda _path: reader
+
+    def open_fake_reader(_path: Path) -> Reader:
+        return reader
+
+    queue_projection.open_reader = open_fake_reader
     try:
         state = {"queue_event_cursor": 0, "queue_projection_digest": None}
         posted = []
