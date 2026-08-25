@@ -144,6 +144,7 @@ def _repairs_exact_origin_collision(
     head_contains_origin: bool,
 ) -> bool:
     """Admit only this self-expiring 0298 memory migration repair state."""
+    remote = set(remote_names)
     current = set(current_names)
     unregistered = {
         slot: names for slot, names in collision_report(remote_names).items()
