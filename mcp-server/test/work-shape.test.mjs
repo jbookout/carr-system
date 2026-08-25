@@ -11,6 +11,7 @@ import { implementationShapeError, shapeDecisionError, shapeDispositionError, wo
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const MIGRATION = path.join(REPO, "migrations/0132_work_shape_revision.sql");
+const SOURCED_SHAPE_MIGRATION = path.join(REPO, "migrations/0306_sourced_work_shape_disposition.sql");
 
 class ToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
@@ -171,6 +172,37 @@ test("set-work-shape-disposition uses Work Request optimistic locking and freeze
   );
 });
 
+test("a sourced triaged disposition uses the exact receipt-backed database transition", async () => {
+  const base = {
+    id: "22222222-2222-4222-8222-222222222222", ref: "WR-000007", title: "Sourced disposition",
+    state: "triaged", version: 2, capture_idempotency_key: "33333333-3333-4333-8333-333333333333",
+    shape_disposition: null, shape_fixed_surface_ref: null, shape_rationale: null,
+  };
+  const calls = [];
+  const db = { query: async (sql, params = []) => {
+    calls.push({ sql, params });
+    if (sql.includes("from ops.work_request") && sql.includes("for update")) return { rows: [base] };
+    if (sql.includes("set_sourced_work_request_shape_disposition")) return { rows: [{
+      ...base, version: 3, shape_disposition: "required", shape_fixed_surface_ref: null,
+      shape_rationale: "The implementation surface remains open.", shape_decided_by_actor_id: actor.id,
+      shape_decided_at: "2026-08-25T00:00:00Z", replayed: false,
+    }] };
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const events = [];
+  const tools = workShapeTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async (...args) => events.push(args), ToolError });
+  const result = await tools["set-work-shape-disposition"].handler(db, actor, {
+    idempotency_key: "44444444-4444-4444-8444-444444444444", work_request: base.ref, base_version: 2,
+    disposition: "required", rationale: "The implementation surface remains open.",
+  });
+  assert.equal(result.work_request.version, 3);
+  assert.equal(result.work_request.shape_disposition, "required");
+  const transition = calls.find(call => call.sql.includes("set_sourced_work_request_shape_disposition"));
+  assert.deepEqual(transition.params, [base.ref, 2, "required", null, "The implementation surface remains open.", actor.id, "44444444-4444-4444-8444-444444444444"]);
+  assert.equal(calls.some(call => call.sql.includes("update ops.work_request set shape_disposition")), false);
+  assert.equal(events[0][2], "set-work-shape-disposition");
+});
+
 test("both shape writes serialize identical idempotency keys before replay lookup", () => {
   const source = fs.readFileSync(path.join(REPO, "mcp-server/src/tools.js"), "utf8");
   const body = source.slice(source.indexOf("async function withEnvelope"), source.indexOf("async function writeEvent"));
@@ -278,4 +310,22 @@ test("migration makes disposition mandatory at implementation entry and revision
   assert.match(sql, /shape_work_request_version <> old\.version/i);
   assert.match(sql, /existing ready rows[\s\S]+remain undecided and refuse at claim/i);
   assert.doesNotMatch(sql, /update ops\.work_request[\s\S]{0,800}program_key='carr-ai-engineering-suite-v1'/i);
+});
+
+test("sourced shape disposition is append-only, base-versioned, and cannot be overwritten by ready-plan acceptance", () => {
+  const sql = fs.readFileSync(SOURCED_SHAPE_MIGRATION, "utf8");
+  assert.match(sql, /create table if not exists ops\.sourced_work_request_shape_disposition_receipt/i);
+  assert.match(sql, /idempotency_key uuid not null unique/i);
+  assert.match(sql, /base_version integer not null/i);
+  assert.match(sql, /result_version integer not null/i);
+  assert.match(sql, /decided_by_actor_id uuid not null/i);
+  assert.match(sql, /before update or delete on ops\.sourced_work_request_shape_disposition_receipt/i);
+  assert.match(sql, /set_sourced_work_request_shape_disposition\([\s\S]+p_decided_by_actor_id uuid[\s\S]+p_idempotency_key uuid/i);
+  assert.match(sql, /old\.state = 'triaged'[\s\S]+new\.state = 'triaged'[\s\S]+sourced_work_request_shape_disposition_receipt/i);
+  assert.match(sql, /sourced_work_request_plan_shape_binding_receipt/i);
+  assert.match(sql, /elsif w\.shape_disposition = 'required'[\s\S]+work_request_version[\s\S]+= w\.version/i);
+  assert.match(sql, /applied_disposition := w\.shape_disposition/i);
+  assert.doesNotMatch(sql, /set state='ready'[\s\S]{0,600}shape_disposition\s*=\s*'not_required'/i);
+  assert.match(sql, /grant execute on function ops\.set_sourced_work_request_shape_disposition[\s\S]+to carr_writer/i);
+  assert.doesNotMatch(sql, /grant execute on function ops\.set_sourced_work_request_shape_disposition[\s\S]+to carr_authority/i);
 });

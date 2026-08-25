@@ -96,6 +96,23 @@ def node_bin() -> str:
     return "node"
 
 
+def break_glass_dsn(db_tap, branch):
+    """Choose the narrow Joe authority credential for an authority-only verb.
+
+    A named rehearsal branch has no corresponding authority credential, so it
+    retains the existing owner-derived branch path.  On production, though,
+    the documented authority credential must win when it is available: deriving
+    neondb_owner first makes an authority-only verb unreachable through this
+    otherwise receipted wrapper and widens its database privilege needlessly.
+    The value is returned only to subprocess environment construction and is
+    never printed.
+    """
+    authority_url = os.environ.get("CARR_DB_AUTHORITY_JOE_URL")
+    if branch is None and authority_url:
+        return authority_url
+    return db_tap.dsn(branch or "production")
+
+
 def main() -> None:
     argv = sys.argv[1:]
     branch = None
@@ -143,7 +160,7 @@ def main() -> None:
         sys.exit(rc)
 
     # ---- break-glass path: direct database connection, receipted ----
-    url = _db_tap().dsn(branch or "production")
+    url = break_glass_dsn(_db_tap(), branch)
     env = {
         **os.environ,
         "DATABASE_URL": url,
