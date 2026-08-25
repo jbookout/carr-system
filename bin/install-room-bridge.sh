@@ -6,9 +6,18 @@
 # any other hook or LaunchAgent — for that, ops/config-as-code.py is the
 # broad reconciler and this script is not it.
 #
-# Usage: ./bin/install-room-bridge.sh
+# Usage: ./bin/install-room-bridge.sh [--render-only]
 
 set -eu
+
+RENDER_ONLY=0
+if [ "${1:-}" = "--render-only" ]; then
+  [ "$#" -eq 1 ] || { print -u2 -- 'install-room-bridge: --render-only takes no arguments'; exit 64; }
+  RENDER_ONLY=1
+elif [ "$#" -ne 0 ]; then
+  print -u2 -- 'usage: install-room-bridge.sh [--render-only]'
+  exit 64
+fi
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 LABEL="com.carr.room-bridge"
@@ -23,9 +32,36 @@ if [ ! -f "$SOURCE" ]; then
 fi
 
 # The repo template stays portable; only the machine copy contains its actual
-# checkout path. plutil validates before anything touches LaunchAgents.
-/usr/bin/sed "s|{{REPO}}|$REPO|g" "$SOURCE" > "$TMP"
-/usr/bin/plutil -lint "$TMP" >/dev/null
+# checkout and home paths. plutil validates before anything touches
+# LaunchAgents. Escape sed replacement metacharacters so a portable path with
+# an ampersand, backslash, or delimiter cannot corrupt the rendered plist.
+escape_sed_replacement() {
+  print -r -- "$1" | /usr/bin/sed 's/[\\&|]/\\&/g'
+}
+REPO_REPLACEMENT="$(escape_sed_replacement "$REPO")"
+HOME_REPLACEMENT="$(escape_sed_replacement "$HOME")"
+/usr/bin/sed -e "s|{{REPO}}|$REPO_REPLACEMENT|g" \
+            -e "s|{{HOME}}|$HOME_REPLACEMENT|g" "$SOURCE" > "$TMP"
+
+# Every template token must be resolved before the destination is touched.
+# This is deliberately a refusal, not a best-effort install: launchd accepting
+# a plist that still names {{REPO}} or {{HOME}} would strand the bridge on the
+# next scheduled wake with no useful diagnostic at the call site.
+if /usr/bin/grep -Eq '\{\{[^}]+\}\}' "$TMP"; then
+  print -u2 -- "install-room-bridge: rendered plist still contains an unresolved template token"
+  exit 1
+fi
+if ! /usr/bin/plutil -lint "$TMP" >/dev/null; then
+  print -u2 -- "install-room-bridge: rendered plist failed validation; refusing installation"
+  exit 1
+fi
+
+# The selftest uses this render-only seam with fixture HOME values. It writes
+# only to stdout and exits before creating LaunchAgents or loading launchd.
+if [ "$RENDER_ONLY" -eq 1 ]; then
+  /bin/cat "$TMP"
+  exit 0
+fi
 
 mkdir -p "$HOME/Library/LaunchAgents" "$REPO/out"
 /usr/bin/install -m 644 "$TMP" "$DEST"
