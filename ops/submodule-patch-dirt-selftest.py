@@ -79,6 +79,8 @@ index 111..222 100644
 +let b = 99
  let d = 5
 """
+DIFF_TRAILING_SPACE = PATCH.replace("+let b = 3\n", "+let b = 3 \n")
+DIFF_LEADING_SPACE = PATCH.replace("+let b = 3\n", "+ let b = 3\n")
 
 
 def main() -> int:
@@ -88,6 +90,10 @@ def main() -> int:
     check("changed_lines ignores diff headers",
           changed_lines(PATCH),
           {("+", "let b = 3"), ("+", "let c = 4"), ("-", "let b = 2")})
+
+    check("changed_lines preserves leading and trailing whitespace",
+          changed_lines("+ leading\n+trailing \n+\n-\n"),
+          {("+", " leading"), ("+", "trailing "), ("+", ""), ("-", "")})
 
     check("empty diff yields nothing", changed_lines(""), set())
 
@@ -107,6 +113,12 @@ def main() -> int:
         # A changed value inside the patched hunk must not pass either
         check("dirt that CONTRADICTS the patch is NOT expected",
               submodule_dirt_is_tracked_patch(DIFF_DIFFERENT, pdir), False)
+
+        check("dirt with a TRAILING-SPACE edit is NOT expected",
+              submodule_dirt_is_tracked_patch(DIFF_TRAILING_SPACE, pdir), False)
+
+        check("dirt with a LEADING-SPACE edit is NOT expected",
+              submodule_dirt_is_tracked_patch(DIFF_LEADING_SPACE, pdir), False)
 
         # No dirt at all is not "expected patch dirt" — it is simply clean, and
         # the caller never asks. Guard it anyway so the answer is never True by

@@ -17,6 +17,7 @@ from health_submodule import classify_loose_status
 
 QUILL = "tools/dictation-rig/vendor/quill"
 QUILL_PATCHES = "tools/dictation-rig/patches"
+SUBMODULE_CONFIG = ".gitmodules"
 
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -29,9 +30,22 @@ def eligible_for_fast_forward(repo: str, incoming: str) -> tuple[bool, str]:
 
     The sole permitted tracked state is the exact Quill patch dirt classified by
     ``health_submodule``.  Even that state is safe only when the incoming range
-    changes neither the recorded Quill gitlink nor the patch source that
-    explains the dirt.  Every uncertainty is a refusal.
+    changes neither the recorded Quill gitlink, the patch source that explains
+    the dirt, nor the repository's submodule configuration.  Every uncertainty
+    is a refusal.
     """
+    # Fence identity inputs even for a currently clean checkout.  A changed
+    # gitlink, patch source, or .gitmodules entry needs a reviewed submodule
+    # transition; fleet-sync cannot prove that a blind fast-forward preserves
+    # the installed Quill build.
+    changed = _git(repo, "diff", "--quiet", "HEAD", incoming, "--", QUILL,
+                   QUILL_PATCHES, SUBMODULE_CONFIG)
+    if changed.returncode == 1:
+        return (False,
+                "incoming update changes Quill gitlink, tracked patches, or .gitmodules")
+    if changed.returncode != 0:
+        return False, "could not compare incoming Quill identity inputs"
+
     status = _git(repo, "status", "--porcelain", "--untracked-files=no")
     if status.returncode:
         return False, "could not read tracked checkout status"
@@ -48,13 +62,7 @@ def eligible_for_fast_forward(repo: str, incoming: str) -> tuple[bool, str]:
     if expected != [QUILL]:
         return False, "unverifiable tracked submodule state: " + ", ".join(expected)
 
-    changed = _git(repo, "diff", "--quiet", "HEAD", incoming, "--", QUILL,
-                   QUILL_PATCHES)
-    if changed.returncode == 0:
-        return True, "only byte-proven expected Quill patch dirt"
-    if changed.returncode == 1:
-        return False, "incoming update changes Quill gitlink or tracked patches"
-    return False, "could not compare incoming Quill gitlink and patches"
+    return True, "only byte-proven expected Quill patch dirt"
 
 
 def main() -> int:

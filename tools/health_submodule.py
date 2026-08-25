@@ -88,8 +88,12 @@ def changed_lines(diff_text: str) -> set[tuple[str, str]]:
                             "deleted file", "similarity ", "rename ", "old mode",
                             "new mode", "Binary files")):
             continue
-        if line.startswith(("+", "-")) and len(line) > 1:
-            out.add((line[0], line[1:].strip()))
+        if line.startswith(("+", "-")):
+            # The content after the diff marker is evidence.  Do not strip it:
+            # leading or trailing whitespace is a real source edit, and making
+            # it disappear here would let that edit impersonate a tracked
+            # patch.  splitlines() removes only the physical line ending.
+            out.add((line[0], line[1:]))
     return out
 
 

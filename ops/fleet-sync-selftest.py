@@ -202,6 +202,18 @@ def test_non_main_branch_refuses():
     print("PASS  refuses on a non-main branch without moving it")
 
 
+def test_untracked_scratch_is_ignored():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        scratch = os.path.join(b, "session-scratch.txt")
+        open(scratch, "w").write("untracked session artifact\n")
+        r = run_sync(b)
+        assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert "fast-forwarded" in r.stdout, r.stdout
+        assert open(scratch).read() == "untracked session artifact\n"
+    print("PASS  intentional untracked scratch is ignored and preserved")
+
+
 def test_expected_quill_patch_allows_unrelated_fast_forward():
     with tempfile.TemporaryDirectory() as tmp:
         b = build(tmp)
@@ -233,6 +245,36 @@ def test_extra_quill_edit_refuses():
     print("PASS  extra Quill edit refuses")
 
 
+def test_quill_trailing_space_edit_refuses():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, parent = add_expected_quill_patch(tmp, b)
+        open(os.path.join(quill, "quill.txt"), "w").write("patched \n")
+        open(os.path.join(parent, "f.txt"), "a").write("remote advance\n")
+        git(parent, "add", "f.txt")
+        git(parent, "commit", "-qm", "remote advance")
+        git(parent, "push", "-q", "origin", "main")
+        r = run_sync(b)
+        assert r.returncode == 78, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert "actionable" in r.stdout, r.stdout
+    print("PASS  Quill trailing-space edit refuses")
+
+
+def test_quill_leading_space_edit_refuses():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, parent = add_expected_quill_patch(tmp, b)
+        open(os.path.join(quill, "quill.txt"), "w").write(" patched\n")
+        open(os.path.join(parent, "f.txt"), "a").write("remote advance\n")
+        git(parent, "add", "f.txt")
+        git(parent, "commit", "-qm", "remote advance")
+        git(parent, "push", "-q", "origin", "main")
+        r = run_sync(b)
+        assert r.returncode == 78, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert "actionable" in r.stdout, r.stdout
+    print("PASS  Quill leading-space edit refuses")
+
+
 def test_changed_patch_refuses():
     with tempfile.TemporaryDirectory() as tmp:
         b = build(tmp)
@@ -244,7 +286,7 @@ def test_changed_patch_refuses():
         git(parent, "push", "-q", "origin", "main")
         r = run_sync(b)
         assert r.returncode == 78, f"{r.returncode}: {r.stdout}{r.stderr}"
-        assert "incoming update changes Quill gitlink or tracked patches" in r.stdout, repr(r.stdout + r.stderr)
+        assert "incoming update changes Quill gitlink, tracked patches, or .gitmodules" in r.stdout, repr(r.stdout + r.stderr)
     print("PASS  incoming changed tracked patch refuses")
 
 
@@ -279,8 +321,24 @@ def test_incoming_quill_gitlink_refuses():
         git(parent, "push", "-q", "origin", "main")
         r = run_sync(b)
         assert r.returncode == 78, f"{r.returncode}: {r.stdout}{r.stderr}"
-        assert "incoming update changes Quill gitlink or tracked patches" in r.stdout, repr(r.stdout + r.stderr)
+        assert "incoming update changes Quill gitlink, tracked patches, or .gitmodules" in r.stdout, repr(r.stdout + r.stderr)
     print("PASS  incoming moved Quill gitlink refuses")
+
+
+def test_incoming_gitmodules_change_refuses():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        _, parent = add_expected_quill_patch(tmp, b)
+        modules = os.path.join(parent, ".gitmodules")
+        open(modules, "a").write("# submodule identity review required\n")
+        git(parent, "add", ".gitmodules")
+        git(parent, "commit", "-qm", "change submodule configuration")
+        git(parent, "push", "-q", "origin", "main")
+        r = run_sync(b)
+        assert r.returncode == 78, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert "incoming update changes Quill gitlink, tracked patches, or .gitmodules" in r.stdout, repr(r.stdout + r.stderr)
+        assert behind(b) == 1, "fleet-sync must not advance across .gitmodules changes"
+    print("PASS  incoming .gitmodules change refuses")
 
 
 def main():
@@ -291,12 +349,16 @@ def main():
     test_clean_tree_fast_forwards()
     test_already_current_is_a_noop()
     test_non_main_branch_refuses()
+    test_untracked_scratch_is_ignored()
     test_expected_quill_patch_allows_unrelated_fast_forward()
     test_extra_quill_edit_refuses()
+    test_quill_trailing_space_edit_refuses()
+    test_quill_leading_space_edit_refuses()
     test_changed_patch_refuses()
     test_moved_quill_gitlink_refuses()
     test_incoming_quill_gitlink_refuses()
-    print("9/9 fleet-sync cases passed")
+    test_incoming_gitmodules_change_refuses()
+    print("13/13 fleet-sync cases passed")
     return 0
 
 
