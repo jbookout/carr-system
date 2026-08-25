@@ -22,32 +22,6 @@
       "tel": "+18508600749",
       "email": "dell.mccraney@carr.us"
     },
-    "findings": [
-      [
-        "Your constraint is a monthly number, not a rate per foot",
-        "Your lender caps a monthly payment, so we rank by gross monthly cost rather than by asking rate. A 2,500 SF suite at $19 and a 5,000 SF suite at $17 are not close on your budget even though the rates look similar: they are $3,958 and $7,083 a month."
-      ],
-      [
-        "Operating expenses decide four of these, not the asking rate",
-        "Bluewater Bay 4536 and 1507 both ask $22.00 a foot. With operating expenses added they are $28.75 and $31.03 all in, so the office suite is the more expensive of the two despite the identical headline. Any card here showing operating expenses as Unlisted carries an unpriced gap we close with the landlord before comparing."
-      ],
-      [
-        "Niceville and Freeport buy you more room for the money",
-        "The lowest base rents in the search sit inland. Palm Plaza asks $17 to $19 a foot against $28.50 on Highway 98 in Santa Rosa Beach. The trade is drive time and patient draw, which is a question about how you bring patients in rather than a question about real estate."
-      ],
-      [
-        "Ground floor is the filter that removes most of this market",
-        "A dental build needs operatory plumbing, vacuum and compressor lines, equipment delivery, and post-sedation patient egress. That rules out upstairs suites almost automatically, and it is why several otherwise well-priced spaces on the corridor are not on this list."
-      ],
-      [
-        "Only one space here was built for the use",
-        "Bluewater Bay 4536 is listed as medical space in a grocery-anchored center with 33,000 vehicles a day. Everywhere else you are converting retail, office, or flex, and the fit-out benchmark for medical or office work runs roughly $180 a foot before dental equipment."
-      ],
-      [
-        "Lease term is an outcome of the build-out, not a starting point",
-        "A dental fit-out is the largest number in this deal, and much of it is money a landlord can put in as a tenant improvement allowance. The landlord recovers that allowance through rent across the term, so the length of the lease follows from how much they contribute. That is why no suggested term sits on these cards. We ask each landlord what they will fund first, then negotiate the term that amortizes it at a monthly payment your lender will accept. Expect that to be longer than a standard first lease, and treat the extra years as what the allowance costs rather than as a concession."
-      ]
-    ],
     "confirmations": [
       [
         "Your operatory count",
