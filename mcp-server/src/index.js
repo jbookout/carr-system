@@ -80,7 +80,7 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken, hermesActorForToken } from "./identity.js";
+import { actorFromProps, agentActorForToken, hermesActorForTokenMaps } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
@@ -403,7 +403,8 @@ function reviewActorFor(request, env) {
 // before a deploy. A boundary that can only be tested by deploying is not a
 // boundary anyone should trust.
 function hermesActorFor(request, env) {
-  return hermesActorForToken(request.headers.get("authorization"), env.HERMES_TOKENS);
+  return hermesActorForTokenMaps(request.headers.get("authorization"),
+    env.HERMES_TOKENS, env.HERMES_TOKENS_EXTRA);
 }
 
 // ---------- agent tokens (outside-model CLIs at full scope, loop #227/#239) ----------

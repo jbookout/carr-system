@@ -65,6 +65,11 @@
 // through this path is unverifiable because of it. There is no argv slug
 // anymore. On the default path the actor is server-derived from the
 // LOCAL_TOKENS bearer (identity.js), never from anything this Mac asserts.
+// One bounded internal caller, the queue projector, sets
+// CARR_MCP_CLIENT_PROFILE=hermes-projector so this client reads the separate
+// CARR_HERMES_MCP_TOKEN from the same 600-mode token file. That selector is a
+// client purpose, not an actor claim: the Worker still derives hermes-pilot by
+// matching the bearer against HERMES_TOKENS. No ordinary run.sh call sets it.
 // On the break-glass path the actor is still derived from ONE place,
 // ~/.config/carr/local-actor.json, written once per machine by
 // bin/set-local-actor.sh — see resolveIdentity() below for why break-glass
@@ -87,6 +92,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { humanOnlyGuidance, isHumanOnlyError } from "./human-only-hint.mjs";
+import { selectLocalClientCredential } from "./local-client-auth.mjs";
 import { TOOLS, ToolError, executeRegisteredTool } from "./src/tools.js";
 
 // The `ws` package, NOT Node's built-in WebSocket: under Node 26 the native
@@ -128,49 +134,37 @@ const args = JSON.parse(rawArgs);
 const CARR_MCP_URL = process.env.CARR_MCP_URL || "https://api.doctorcre.com/mcp";
 const MCP_TOKENS_ENV = process.env.CARR_MCP_ENV ||
   path.join(os.homedir(), ".config", "carr", "mcp-tokens.env");
-const LOCAL_TOKEN_VAR = "CARR_MCP_LOCAL_TOKEN";
-
-/** Same lookup convention as pipelines/run_codex_review.py's read_review_token:
- * env var first, then a `KEY=value` line in the 600 tokens file. Never a
- * dotenv library — this repo is stdlib/no-extra-dependency by convention for
- * exactly this kind of small parse. */
-function readLocalToken() {
-  if (process.env[LOCAL_TOKEN_VAR]) return process.env[LOCAL_TOKEN_VAR];
-  let raw;
-  try {
-    raw = fs.readFileSync(MCP_TOKENS_ENV, "utf8");
-  } catch {
-    return "";
-  }
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
-    if (t.startsWith(`${LOCAL_TOKEN_VAR}=`)) {
-      return t.slice(LOCAL_TOKEN_VAR.length + 1).trim().replace(/^['"]|['"]$/g, "");
-    }
-  }
-  return "";
-}
-
 async function runViaWorker(verbName, verbArgs) {
-  const token = readLocalToken();
-  if (!token) {
+  let tokenFile = "";
+  try { tokenFile = fs.readFileSync(MCP_TOKENS_ENV, "utf8"); } catch { /* named below */ }
+  let credential;
+  try {
+    credential = selectLocalClientCredential(process.env, tokenFile);
+  } catch (e) {
+    console.error(`${e.message}; supported profiles: local, hermes-projector`);
+    process.exit(2);
+  }
+  if (!credential.token) {
     console.error(
-      `no local MCP token — set ${LOCAL_TOKEN_VAR} in ${MCP_TOKENS_ENV} (600, outside the repo) ` +
-      `or export ${LOCAL_TOKEN_VAR} directly. Provisioning: pipelines/provision-local-client.sql ` +
-      `(Joe) or pipelines/provision-dell-local-client.sql (Dell) + ` +
-      "\"wrangler secret put LOCAL_TOKENS\" — see mcp-server/wrangler.toml's secrets header.\n" +
+      `no MCP token for client profile ${credential.profile} — set ${credential.tokenVariable} ` +
+      `in ${MCP_TOKENS_ENV} (600, outside the repo) or export ${credential.tokenVariable} directly. ` +
+      `Local-machine provisioning: pipelines/provision-local-client.sql (Joe) or ` +
+      `pipelines/provision-dell-local-client.sql (Dell). Hermes-projector provisioning uses the ` +
+      `existing HERMES_TOKENS door. Then update the matching Worker secret with ` +
+      `\"wrangler secret put ${credential.profile === "hermes-projector" ? "HERMES_TOKENS_EXTRA" : "LOCAL_TOKENS"}\" ` +
+      "— see mcp-server/wrangler.toml's secrets header.\n" +
       "This is the default path failing VISIBLY, per design — it does not fall back to a direct " +
       "database connection. That path exists only as explicit break-glass; see this file's header."
     );
     process.exit(2);
   }
-  console.error(`local-verb identity -> local machine actor (via local-token) -> ${CARR_MCP_URL}`);
+  console.error(`local-verb identity -> ${credential.identityNotice} -> ${CARR_MCP_URL}`);
 
   let res;
   try {
     res = await fetch(CARR_MCP_URL, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      headers: { "content-type": "application/json", authorization: `Bearer ${credential.token}` },
       body: JSON.stringify({
         jsonrpc: "2.0", id: 1, method: "tools/call",
         params: { name: verbName, arguments: verbArgs },

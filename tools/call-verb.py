@@ -48,6 +48,13 @@ no DATABASE_URL set. On the break-glass path, identity comes from
 ~/.config/carr/local-actor.json (bin/set-local-actor.sh) — see
 mcp-server/local-verb.mjs for the resolution and its stated limits.
 
+The unattended room bridge's queue projector is the one bounded internal
+exception to the LOCAL_TOKENS credential choice: its subprocess sets
+CARR_MCP_CLIENT_PROFILE=hermes-projector, causing local-verb.mjs to read
+CARR_HERMES_MCP_TOKEN from the same 600-mode file. The Worker still derives the
+actor from HERMES_TOKENS; no slug or token is put in argv. Ordinary bridge calls
+clear the selector in verb_io.py and remain joe-local.
+
 Never prints the DSN or any token value.
 """
 import importlib.util

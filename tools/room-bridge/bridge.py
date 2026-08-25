@@ -465,6 +465,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              probe_auth=auth_control.probe_auth, launch_login=auth_control.launch_login,
              desk_stop=dispatch.desk_stop, desk_start=dispatch.desk_start,
              read_profiles=verb_io.read_profiles,
+             project_room_turn=verb_io.project_room_queue,
              queue_service: kanban_adapter.QueueService | None = None,
              queue_executor: queue_dispatch.QueueDeskExecutor | None = None,
              queue_projector=queue_projection.project_once,
@@ -709,7 +710,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         state["queue_projection_checked_at"] = projection_checked_at
         try:
             projection_events = queue_projector(
-                state=state, add_room_turn=add_room_turn,
+                state=state, add_room_turn=project_room_turn,
                 target_catalog=queue_service.catalog.get("targets", {}),
                 checked_at=projection_checked_at,
             )

@@ -36,6 +36,7 @@ SUITES = (
     "tools/room-bridge/test_queue_unit.py",
     "tools/room-bridge/test_queue_projection_unit.py",
     "tools/room-bridge/test_queue_dispatch_unit.py",
+    "tools/room-bridge/test_verb_io_unit.py",
 )
 SUITE_TIMEOUT_SECONDS = 60
 

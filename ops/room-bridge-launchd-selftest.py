@@ -111,6 +111,12 @@ def main() -> int:
     arguments = concrete.get("ProgramArguments", [])
     check("rendered program arguments point at the fixture checkout",
           any(fixture_repo in str(arg) for arg in arguments), failures)
+    rendered_text = rendered
+    check("rendered plist carries no local or Hermes token variable",
+          "CARR_MCP_LOCAL_TOKEN" not in rendered_text and
+          "CARR_HERMES_MCP_TOKEN" not in rendered_text, failures)
+    check("rendered plist carries no client identity selector",
+          "CARR_MCP_CLIENT_PROFILE" not in rendered_text, failures)
 
     # The unresolved-token refusal must happen before install can touch the
     # user's LaunchAgents directory.

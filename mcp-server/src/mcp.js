@@ -221,6 +221,8 @@ export const PROFILES = {
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-defect",
+    // A runtime-only door: exact queue receipts, fixed provenance, no raw room prose.
+    "project-room-queue",
   ]),
 };
 
@@ -266,7 +268,8 @@ const PROFILE_NOTICE = {
   hermes:
     "\n\n<notice>This session runs on the HERMES profile: every read verb, plus exactly nine " +
     "additive write verbs — log-activity, stamp-touch, add-loop, update-loop, set-next-action, " +
-    "complete-action, add-critical-date, record-finding, record-defect. Every other write verb " +
+    "complete-action, add-critical-date, record-finding, record-defect, and one runtime-only " +
+    "shape-checked queue projection door. Every other write verb " +
     "refuses with not_in_profile: no advancing a deal, no creating a party, no merging, no touching " +
     "a rule, no drafting a client document, and there is no send verb in this system at all. This " +
     "profile is locked server-side by a HERMES_TOKENS bearer, not by ?profile=, and cannot be " +

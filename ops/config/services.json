@@ -214,7 +214,7 @@
     {
       "key": "room-bridge",
       "name": "Partner room bridge",
-      "purpose": "Polls the shared partner room (add-room-turn/read-room, Idea 78) and routes new turns to local desks (claude-session, codex-session), captures each desk's reply and posts it back, and runs the assignment grammar. The live wire between the room and the desks registered in ~/.config/carr/hermes-desks.json.",
+      "purpose": "Polls the shared partner room (add-room-turn/read-room, Idea 78) and routes new turns to local desks (claude-session, codex-session), captures each desk's reply and posts it back, and runs the assignment grammar. Queue projection alone uses the locked, shape-checked project-room-queue door; ordinary room traffic remains on the local-machine identity. The live wire between the room and the desks registered in ~/.config/carr/hermes-desks.json.",
       "family": "Local Mac edge",
       "criticality": "medium",
       "owner_actor": "joe",
