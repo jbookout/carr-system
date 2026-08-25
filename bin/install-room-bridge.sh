@@ -23,7 +23,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 LABEL="com.carr.room-bridge"
 SOURCE="$REPO/ops/launchd/$LABEL.plist"
 DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
-TMP="$(mktemp -t carr-room-bridge-plist)"
+TMP="$(mktemp "${TMPDIR:-/tmp}/carr-room-bridge-plist.XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
 
 if [ ! -f "$SOURCE" ]; then

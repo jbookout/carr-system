@@ -84,6 +84,11 @@ def main() -> int:
     check("installer refuses unresolved tokens", r"grep -Eq '\{\{[^}]+\}\}'" in installer, failures)
     check("installer exposes a render-only seam", "--render-only" in installer, failures)
     check("installer exposes a named plist validator", "validate_plist()" in installer, failures)
+    portable_mktemp = 'mktemp "${TMPDIR:-/tmp}/carr-room-bridge-plist.XXXXXX"'
+    check("installer pins a GNU/macOS portable mktemp template",
+          portable_mktemp in installer, failures)
+    check("installer has no BSD-only mktemp prefix",
+          'mktemp -t carr-room-bridge-plist' not in installer, failures)
 
     # Exercise the same placeholder contract with paths containing spaces. The
     # installer separately escapes sed replacement metacharacters; plist XML
