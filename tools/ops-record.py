@@ -1234,7 +1234,10 @@ def _record_failure_incident(
     # found something: the row returns to detected and drops the recovery
     # evidence it can no longer stand on. carr_jobs holds a column-scoped update
     # on exactly these fields (0117, widened for the counters in 0293), so this
-    # runs on the collector path without any escalation.
+    # runs on the collector path without any escalation. This transition can
+    # only reopen the watch: it never writes resolved_at/root_cause and never
+    # moves state toward resolved. A replay has linked=False, so it cannot
+    # invalidate recovery or alter readiness.
     if linked and not opened:
         cur.execute(
             """update ops.incident

@@ -240,7 +240,7 @@ test("recordWorkerFailure: a fact's source_ref matches the regex migration 0123'
   assert.equal(parsed[1], A_CORR, "the arm must recover the recurrence's own correlation id, unchanged");
 });
 
-test("recordWorkerFailure: NEVER writes state, resolved_at, recovery_evidence_ref or monitoring_until — closing an incident is a human's call", async () => {
+test("recordWorkerFailure: a new recurrence invalidates monitoring evidence but can never close an incident", async () => {
   const svcId = "svc-1", incId = "inc-open";
   const { query, calls } = fakeQuery([
     { match: /select id from ops\.service/, rows: [{ id: svcId }] },
@@ -250,13 +250,15 @@ test("recordWorkerFailure: NEVER writes state, resolved_at, recovery_evidence_re
   await recordWorkerFailure(query, {
     environment: "staging", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
   });
-  const writes = calls.filter((c) => /^update ops\.incident|^insert into ops\.incident\b/.test(c.text.trim()));
-  for (const w of writes) {
-    assert.doesNotMatch(w.text, /\bstate\s*=/, `must never set state: ${w.text}`);
-    assert.doesNotMatch(w.text, /resolved_at/, `must never touch resolved_at: ${w.text}`);
-    assert.doesNotMatch(w.text, /recovery_evidence_ref/, `must never touch recovery_evidence_ref: ${w.text}`);
-    assert.doesNotMatch(w.text, /monitoring_until/, `must never touch monitoring_until: ${w.text}`);
-  }
+  const update = calls.find((c) => /^\s*update ops\.incident set observed_at/.test(c.text));
+  assert.ok(update, "the new fact must invalidate a stale recovery watch");
+  assert.match(update.text, /state = case when state = 'monitoring' then 'detected'/);
+  assert.match(update.text, /recovery_evidence_ref = case when state = 'monitoring'\s+then null/);
+  assert.match(update.text, /monitoring_until = case when state = 'monitoring'\s+then null/);
+  assert.doesNotMatch(update.text, /resolved_at|root_cause/,
+    "failure recording may invalidate recovery but still carries no closure authority");
+  assert.doesNotMatch(update.text, /then\s+'resolved'|then\s+'reviewed'/,
+    "the only state transition this writer may make is back to detected");
 });
 
 // ────────────────────────────────────────────────────────────────────────
