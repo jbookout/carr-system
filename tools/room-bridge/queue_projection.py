@@ -64,6 +64,17 @@ def _source_seq(task: dict) -> int | None:
         return None
 
 
+def _cap(task: dict) -> str:
+    body = task.get("body")
+    if not isinstance(body, str) or not body.startswith("[CARR_QUEUE_META "):
+        return "read"
+    try:
+        value = json.loads(body.split("]", 1)[0][len("[CARR_QUEUE_META "):]).get("cap")
+        return value if isinstance(value, str) and value in {"read", "repo-write", "record-write", "merge-approve", "production", "external-send", "destructive", "credential"} else "read"
+    except (IndexError, ValueError, json.JSONDecodeError):
+        return "read"
+
+
 def _priority(value: object) -> str:
     try:
         return f"P{max(0, min(4, 4 - _as_int(value)))}"
@@ -79,7 +90,7 @@ def card_for(task: dict, *, target_catalog: dict, updated_at: object) -> dict:
         "effective_model": model,
         "status": str(task.get("status") or "triage")[:32],
         "priority": _priority(task.get("priority")),
-        "cap": "read",  # Slice 1 is intentionally read-only.
+        "cap": _cap(task),
         "updated_at": _iso(updated_at),
         "source_seq": _source_seq(task),
     }

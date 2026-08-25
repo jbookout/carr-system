@@ -59,7 +59,7 @@ export async function readRoomTurns(c, args = {}) {
   if (room === null) return { ok: false, error: "room_invalid" };
   const { after, limit } = normalizeRoomPaging(args);
   const r = await c.query(
-    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id
+    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id, origin_channel, origin_actor
        from v_partner_room_turn
       where room_id=$1 and id > $2
       order by id asc limit $3 /* partner-room:read */`,
@@ -102,7 +102,7 @@ export async function readRoomQueue(c, args = {}, { now = Date.now() } = {}) {
   const room = normalizeRoomName(args.room);
   if (room === null) return { ok: false, error: "room_invalid" };
   const r = await c.query(
-    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id
+    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id, origin_channel, origin_actor
        from v_partner_room_turn where room_id=$1 and kind='receipt'
       order by id desc limit 800 /* partner-room:queue */`, [room],
   );
@@ -123,26 +123,29 @@ export async function readRoomQueue(c, args = {}, { now = Date.now() } = {}) {
 // THE ONE ROOM APPEND, for the same reason. Sponsor is always resolved by the
 // CALLER from a verified credential and passed in — this function never reads
 // it off an argument object that came from a request body.
-export async function appendRoomTurn(c, { room, sponsor, seat, kind, body, msgId }) {
+export async function appendRoomTurn(c, { room, sponsor, seat, kind, body, msgId, originChannel, originActor }) {
+  if (!(["mcp", "browser-human"].includes(originChannel)) || !SLUG.test(originActor || ""))
+    throw new TypeError("room provenance must be server-derived");
   const ins = await c.query(
-    `insert into partner_room_turn (room_id, sponsor, seat, kind, body, msg_id)
-     values ($1,$2,$3,$4,$5,$6)
+    `insert into partner_room_turn (room_id, sponsor, seat, kind, body, msg_id, origin_channel, origin_actor)
+     values ($1,$2,$3,$4,$5,$6,$7,$8)
      on conflict (msg_id) do nothing
      returning id, to_jsonb(at)#>>'{}' as at /* partner-room:say */`,
-    [room, sponsor, seat, kind, body, msgId],
+    [room, sponsor, seat, kind, body, msgId, originChannel, originActor],
   );
   if (!ins.rows.length) {
     const prior = await c.query(
-      "select id, room_id, sponsor, seat from partner_room_turn where msg_id=$1 /* partner-room:dedup-read */",
+      "select id, room_id, sponsor, seat, kind, origin_channel, origin_actor from partner_room_turn where msg_id=$1 /* partner-room:dedup-read */",
       [msgId],
     );
     if (!prior.rows.length) return { ok: false, error: "dedup_row_vanished", msg_id: msgId };
     const p = prior.rows[0];
     return { ok: true, deduplicated: true, room: p.room_id, seq: p.id,
-      sponsor: p.sponsor, seat: p.seat, msg_id: msgId };
+      sponsor: p.sponsor, seat: p.seat, kind: p.kind, origin_channel: p.origin_channel,
+      origin_actor: p.origin_actor, msg_id: msgId };
   }
   return { ok: true, room, seq: ins.rows[0].id, at: ins.rows[0].at,
-    sponsor, seat, kind, msg_id: msgId };
+    sponsor, seat, kind, origin_channel: originChannel, origin_actor: originActor, msg_id: msgId };
 }
 
 export function partnerRoomTools({ withEnvelope, ToolError }) {
@@ -180,7 +183,8 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
             hint: "the room only takes turns from a credential a partner sponsors; this one has no partner behind it" });
 
         const msgId = args.msg_id === undefined ? crypto.randomUUID() : String(args.msg_id).toLowerCase();
-        const appended = await appendRoomTurn(c, { room, sponsor: scope.sponsor, seat, kind, body, msgId });
+        const appended = await appendRoomTurn(c, { room, sponsor: scope.sponsor, seat, kind, body, msgId,
+          originChannel: "mcp", originActor: actor.slug });
         if (appended.ok !== true) { const { ok: _ok, ...failure } = appended; throw new ToolError(failure); }
         return appended;
       }),

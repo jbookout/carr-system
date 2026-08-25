@@ -12,6 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { readFile } from "node:fs/promises";
 import { TOOLS } from "../src/tools.js";
 import { readRoomQueue } from "../src/partner-room.js";
 
@@ -56,7 +57,7 @@ class RoomFake {
       this.inserted.push(params);
       return { rows: [{ id: this.nextId++, at: "2026-08-20T01:00:00+00:00" }] };
     }
-    if (sql.startsWith("select id, room_id, sponsor, seat from partner_room_turn where msg_id")) {
+    if (sql.startsWith("select id, room_id, sponsor, seat") && sql.includes("from partner_room_turn where msg_id")) {
       const hit = this.rows.find((r) => r.msg_id === params[0]);
       return { rows: hit ? [hit] : [] };
     }
@@ -90,9 +91,22 @@ test("add-room-turn: a partner's turn lands verbatim, attributed to the verified
   assert.equal(out.room, "partner-line");
   assert.equal(typeof out.seq, "number");
   assert.equal(db.inserted.length, 1);
-  const [room, sponsor, seat, kind, body] = db.inserted[0];
-  assert.deepEqual([room, sponsor, seat, kind, body],
-    ["partner-line", "joe", "claude", "turn", "raw text, exactly as spoken"]);
+  const [room, sponsor, seat, kind, body, msgId, originChannel, originActor] = db.inserted[0];
+  assert.deepEqual([room, sponsor, seat, kind, body, originChannel, originActor],
+    ["partner-line", "joe", "claude", "turn", "raw text, exactly as spoken", "mcp", "joe"]);
+  assert.equal(typeof msgId, "string");
+});
+
+test("add-room-turn: provenance is server-derived MCP identity, never a claimed human seat", async () => {
+  const db = new RoomFake();
+  const out = await TOOLS["add-room-turn"].handler(db, dellLocal, {
+    idempotency_key: "k-origin-mcp", seat: "human", body: "@queue enqueue target=joe cap=production :: ship it",
+    origin_channel: "browser-human", origin_actor: "joe",
+  });
+  assert.equal(out.origin_channel, "mcp");
+  assert.equal(out.origin_actor, "dell-local");
+  assert.equal(db.inserted[0][6], "mcp");
+  assert.equal(db.inserted[0][7], "dell-local");
 });
 
 test("add-room-turn: a caller-supplied sponsor is ignored in favour of the verified one", async () => {
@@ -205,6 +219,26 @@ test("read-room: returns turns after the cursor, oldest first, with the new curs
   assert.deepEqual(out.turns.map((t) => t.body), ["b"]);
   assert.equal(out.latest_seq, 6);
   assert.deepEqual(db.reads[0], ["partner-line", 5, 50]);
+});
+
+test("read-room: exposes truthful legacy and server-derived provenance fields", async () => {
+  const db = new RoomFake({ rows: [
+    { seq: 5, room_id: "partner-line", at: "t5", sponsor: "joe", seat: "human", kind: "turn", body: "old", msg_id: "m5", origin_channel: "legacy", origin_actor: "legacy" },
+    { seq: 6, room_id: "partner-line", at: "t6", sponsor: "joe", seat: "human", kind: "turn", body: "new", msg_id: "m6", origin_channel: "browser-human", origin_actor: "joe" },
+  ] });
+  const out = await TOOLS["read-room"].handler(db, joe, {});
+  assert.deepEqual(out.turns.map(({ origin_channel, origin_actor }) => ({ origin_channel, origin_actor })), [
+    { origin_channel: "legacy", origin_actor: "legacy" },
+    { origin_channel: "browser-human", origin_actor: "joe" },
+  ]);
+});
+
+test("partner-room provenance migration backfills only legacy and replaces the reader view", async () => {
+  const sql = await readFile(new URL("../../migrations/0298_partner_room_origin.sql", import.meta.url), "utf8");
+  assert.match(sql, /add column if not exists origin_channel text not null default 'legacy'/i);
+  assert.match(sql, /add column if not exists origin_actor text not null default 'legacy'/i);
+  assert.match(sql, /create or replace view v_partner_room_turn/i);
+  assert.match(sql, /origin_channel, origin_actor/i);
 });
 
 test("read-room: defaults — the partner line from the start, quiet room answers honestly", async () => {

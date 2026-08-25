@@ -20,6 +20,7 @@ authority, state, or AttemptReceipt records from the small queue header.
 from __future__ import annotations
 
 import json
+import re
 from typing import Callable
 
 
@@ -27,10 +28,16 @@ META_PREFIX = "[CARR_QUEUE_META "
 RESULT_PREFIX = "CARR_QUEUE_RESULT "
 META_FIELDS = {"v", "target", "cap", "source_seq", "source_msg_id", "finish"}
 RESULT_FIELDS = {"v", "task_id", "outcome", "summary"}
+RECORD_WRITE_EVIDENCE_FIELDS = {"mcp_verb", "record_id", "readback_verb", "readback_record_id"}
 TERMINAL_STATES = {"done", "review", "blocked", "archived"}
+MCP_VERB = re.compile(r"^[a-z][a-z0-9-]{0,79}$")
 
 
 class QueueDispatchError(ValueError):
+    pass
+
+
+class RecordWriteEvidenceMissing(QueueDispatchError):
     pass
 
 
@@ -72,7 +79,8 @@ def parse_queue_task(task: dict, target_alias: str, target: dict) -> dict:
     if not separator or not first.startswith(META_PREFIX) or not first.endswith("]"):
         raise QueueDispatchError("queue task metadata is absent")
     meta = _decode_exact(first[len(META_PREFIX):-1], META_FIELDS, "queue task metadata")
-    if meta["v"] != 1 or meta["target"] != target_alias or meta["cap"] != "read":
+    if (meta["v"] != 1 or meta["target"] != target_alias or
+            meta["cap"] not in target.get("capabilities", [])):
         raise QueueDispatchError("queue task metadata does not match its target")
     if meta["finish"] not in {"done", "review"}:
         raise QueueDispatchError("queue task finish state is invalid")
@@ -91,13 +99,27 @@ def parse_queue_task(task: dict, target_alias: str, target: dict) -> dict:
     return {"task_id": task_id, "title": title.strip(), "instructions": instructions.strip(), "meta": meta}
 
 
-def parse_terminal_result(raw: str, task_id: str) -> dict:
+def parse_terminal_result(raw: str, task_id: str, cap: str = "read") -> dict:
     if not isinstance(raw, str):
         raise QueueDispatchError("terminal result is absent")
     lines = [line.strip() for line in raw.rstrip().splitlines() if line.strip()]
     if not lines or not lines[-1].startswith(RESULT_PREFIX):
         raise QueueDispatchError("terminal result line is absent")
-    value = _decode_exact(lines[-1][len(RESULT_PREFIX):], RESULT_FIELDS, "terminal result")
+    try:
+        value = json.loads(lines[-1][len(RESULT_PREFIX):])
+    except json.JSONDecodeError as exc:
+        raise QueueDispatchError("terminal result is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise QueueDispatchError("terminal result fields are invalid")
+    allowed = [RESULT_FIELDS]
+    if value.get("outcome") == "blocked":
+        allowed.append(RESULT_FIELDS | {"code"})
+    if set(value) not in allowed:
+        if cap == "record-write" and value.get("outcome") == "success" and set(value) == RESULT_FIELDS:
+            raise RecordWriteEvidenceMissing("record-write evidence is absent")
+        expected = RESULT_FIELDS | RECORD_WRITE_EVIDENCE_FIELDS
+        if not (cap == "record-write" and value.get("outcome") == "success" and set(value) == expected):
+            raise QueueDispatchError("terminal result fields are invalid")
     if value["v"] != 1 or value["task_id"] != task_id:
         raise QueueDispatchError("terminal result belongs to another task")
     if value["outcome"] not in {"success", "blocked"}:
@@ -106,6 +128,18 @@ def parse_terminal_result(raw: str, task_id: str) -> dict:
     if not isinstance(summary, str) or not summary.strip() or len(summary) > 500 or "\n" in summary:
         raise QueueDispatchError("terminal result summary is invalid")
     value["summary"] = summary.strip()
+    if value["outcome"] == "blocked" and "code" in value:
+        if value["code"] != "capability_escalation_required":
+            raise QueueDispatchError("terminal result block code is invalid")
+    if cap == "record-write" and value["outcome"] == "success":
+        for field in RECORD_WRITE_EVIDENCE_FIELDS:
+            evidence = value.get(field)
+            if not isinstance(evidence, str) or not evidence.strip() or len(evidence) > 200 or "\n" in evidence:
+                raise RecordWriteEvidenceMissing("record-write evidence is invalid")
+        if not MCP_VERB.fullmatch(value["mcp_verb"]) or not MCP_VERB.fullmatch(value["readback_verb"]):
+            raise RecordWriteEvidenceMissing("record-write MCP verb evidence is invalid")
+        if value["record_id"] != value["readback_record_id"]:
+            raise RecordWriteEvidenceMissing("record-write read-back identifies another record")
     return value
 
 
@@ -131,11 +165,18 @@ class QueueDeskExecutor:
     @staticmethod
     def _prompt(parsed: dict) -> str:
         task_id = parsed["task_id"]
+        evidence = ""
+        if parsed["meta"]["cap"] == "record-write":
+            evidence = (
+                " For record-write success, also include bounded mcp_verb, record_id, readback_verb, "
+                "and readback_record_id fields in that JSON; no evidence means Review or Blocked, never Done."
+            )
         return (
             f"[Hermes queue {task_id}] {parsed['title']}\n\n{parsed['instructions']}\n\n"
             "Your final non-empty line must be exactly one JSON object prefixed with "
             f"CARR_QUEUE_RESULT and must bind task_id={task_id}. Allowed outcomes: success, blocked. "
-            "Keep summary to one redacted sentence of at most 500 characters."
+            "Keep summary to one redacted sentence of at most 500 characters. If broader authority is needed, "
+            "return outcome=blocked with code=capability_escalation_required." + evidence
         )
 
     def start(self, target_alias: str, *, dispatch_call: Callable[[str], dict],
@@ -179,6 +220,7 @@ class QueueDeskExecutor:
                 "pending": {
                     "origin_kind": "queue", "kanban_task_id": task_id,
                     "target": target_alias, "finish": parsed["meta"]["finish"],
+                    "cap": parsed["meta"]["cap"],
                     "dispatch_msg_id": row.get("msg_id"),
                     "injected_at": row.get("dispatched_at"),
                 },
@@ -189,7 +231,8 @@ class QueueDeskExecutor:
             return {"outcome": "dispatch_failed", "task_id": task_id, "target": target_alias}
         raw_result = row.get("result")
         return self.finish_pending(
-            {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"]},
+            {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
+             "cap": parsed["meta"]["cap"]},
             raw_result if isinstance(raw_result, str) else "",
         )
 
@@ -201,7 +244,15 @@ class QueueDeskExecutor:
         if current in TERMINAL_STATES:
             return {"outcome": "already_terminal", "task_id": task_id}
         try:
-            terminal = parse_terminal_result(raw_result, task_id)
+            terminal = parse_terminal_result(raw_result, task_id, str(pending.get("cap") or "read"))
+        except RecordWriteEvidenceMissing:
+            metadata = {"queue_protocol": "carr-queue-result.v1", "target": pending.get("target"),
+                        "outcome": "unverified", "verification": "record_write_evidence_missing"}
+            if pending.get("finish") == "review":
+                self.adapter.request_review(task_id, "record_write_evidence_missing", metadata)
+                return {"outcome": "review", "task_id": task_id}
+            self.adapter.block(task_id, "record_write_evidence_missing", kind="needs_input")
+            return {"outcome": "record_write_evidence_missing", "task_id": task_id}
         except QueueDispatchError:
             self.adapter.block(task_id, "result_protocol_error")
             return {"outcome": "result_protocol_error", "task_id": task_id}
@@ -212,8 +263,10 @@ class QueueDeskExecutor:
             "target": pending.get("target"),
             "outcome": terminal["outcome"],
         }
+        if pending.get("cap") == "record-write":
+            metadata["record_write"] = {key: terminal[key] for key in RECORD_WRITE_EVIDENCE_FIELDS}
         if terminal["outcome"] == "blocked":
-            self.adapter.block(task_id, summary, kind="needs_input")
+            self.adapter.block(task_id, terminal.get("code") or summary, kind="needs_input")
             return {"outcome": "blocked", "task_id": task_id}
         if pending.get("finish") == "review":
             self.adapter.request_review(task_id, summary, metadata)

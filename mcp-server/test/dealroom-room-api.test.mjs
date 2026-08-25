@@ -195,6 +195,8 @@ test("posting a turn ignores every caller-supplied attribution and mints its own
   const written = calls.writes[0];
   assert.equal(written.seat, "human", "the panel has no seat selector and the server enforces that");
   assert.equal(written.sponsor, "joe", "sponsor comes from the verified session, never the body");
+  assert.equal(written.originChannel, "browser-human", "only the authenticated browser endpoint may stamp human origin");
+  assert.equal(written.originActor, "joe", "the browser identity is server-derived from the session");
   assert.equal(written.kind, "turn");
   assert.equal(written.body, "hello the room");
   assert.notEqual(written.msgId, "11111111-1111-1111-1111-111111111111");

@@ -162,5 +162,7 @@ test("every assignment change posts the wire receipt in the same transaction", a
   assert.equal(body.agent_profile.key, "builder");
   assert.equal(body.agent_profile.model, "opus");
   assert.equal(body.agent_profile.status, "active");
+  assert.equal(receipt.params[6], "mcp");
+  assert.equal(receipt.params[7], "joe");
   assert.equal(out.receipt_seq, "79");
 });

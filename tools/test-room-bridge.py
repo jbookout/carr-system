@@ -31,11 +31,15 @@ sys.path.insert(0, str(HERE / "room-bridge"))
 import test_dispatch_unit  # noqa: E402
 import test_desk_start_unit  # noqa: E402
 import test_codex_live_unit  # noqa: E402
+import test_queue_dispatch_unit  # noqa: E402
+import test_queue_unit  # noqa: E402
 
 SUITES = [
     ("dispatch (hermes desk wire)", test_dispatch_unit.main),
     ("desk start/stop lifecycle", test_desk_start_unit.main),
     ("codex-live wire protocol", test_codex_live_unit.main),
+    ("Observatory queue ingress", test_queue_unit.main),
+    ("Observatory queue dispatch", test_queue_dispatch_unit.main),
 ]
 
 

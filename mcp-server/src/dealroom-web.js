@@ -505,6 +505,7 @@ async function roomTurnPost(request, env, session, dependencies) {
     posted = await dependencies.roomWriteFn(env, {
       sponsor: scope.sponsor, seat: "human", kind, body,
       msgId: await roomMessageId(session.key, body, dependencies.now()),
+      originChannel: "browser-human", originActor: session.actor.slug,
     });
   } catch (error) {
     return json({ error: "wire_unavailable", detail: String(error?.message || error).slice(0, 200) }, 503);

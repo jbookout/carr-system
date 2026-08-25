@@ -576,6 +576,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                             kanban_task_id=pending["kanban_task_id"],
                             target=pending["target"],
                             finish=pending["finish"],
+                            cap=pending.get("cap"),
                         )
                     if queue_outcome.get("outcome") != "idle":
                         delivered.append({"desk": name, **queue_outcome})

@@ -44,14 +44,21 @@ CATALOG = {
     "targets": {
         "sol": {"enabled": True, "adapter": "desk", "assignee": "desk:codex-desk",
                 "capabilities": ["read"], "effective_model": "gpt-5.6-sol"},
+        "claude": {"enabled": True, "adapter": "desk", "assignee": "desk:joe-desk",
+                   "capabilities": ["read", "repo-write", "record-write"], "effective_model": "claude"},
+        "joe": {"enabled": True, "adapter": "manual", "assignee": "human:joe",
+                "capabilities": ["merge-approve", "production", "external-send", "destructive", "credential"],
+                "effective_model": "Joe manual lane"},
         "retired": {"enabled": False, "adapter": "hermes", "assignee": "builder",
                     "capabilities": ["read"], "unavailable_reason": "retired"},
     },
 }
 
 
-def turn(body, *, msg_id="11111111-1111-4111-8111-111111111111", seat="codex", seq=12):
-    return {"body": body, "msg_id": msg_id, "seat": seat, "sponsor": "joe", "seq": seq}
+def turn(body, *, msg_id="11111111-1111-4111-8111-111111111111", seat="codex", seq=12,
+         origin_channel="mcp", origin_actor="codex"):
+    return {"body": body, "msg_id": msg_id, "seat": seat, "sponsor": "joe", "seq": seq,
+            "origin_channel": origin_channel, "origin_actor": origin_actor}
 
 
 def test_strict_enqueue_and_bounds():
@@ -93,6 +100,30 @@ def test_targets_and_status_parse_without_model():
     assert by_state.kind == "status" and by_state.value["state"] == "review"
 
 
+def test_server_origin_not_claimed_human_seat_governs_human_only_enqueue():
+    attempted = turn("@queue enqueue target=joe cap=merge-approve :: Approve the merge",
+                     seat="human", origin_channel="mcp", origin_actor="codex")
+    parsed = queue_grammar.parse(attempted, CATALOG)
+    assert parsed.kind == "rejected"
+    assert parsed.code == "capability_human_only"
+
+
+def test_browser_human_can_create_only_manual_human_lane_work():
+    allowed = queue_grammar.parse(turn(
+        "@queue enqueue target=joe cap=merge-approve :: Approve the merge",
+        seat="human", origin_channel="browser-human", origin_actor="joe"), CATALOG)
+    assert allowed.kind == "enqueue"
+    assert allowed.value["manual"] is True
+    assert allowed.value["finish"] == "review"
+    refused = queue_grammar.parse(turn(
+        "@queue enqueue target=claude cap=merge-approve :: Approve the merge",
+        seat="human", origin_channel="browser-human", origin_actor="joe"), CATALOG)
+    assert refused.kind == "rejected" and refused.code == "capability_human_lane_required"
+    legacy = queue_grammar.parse(turn(
+        "@queue enqueue target=joe cap=read :: Do work", origin_channel="legacy", origin_actor="legacy"), CATALOG)
+    assert legacy.kind == "rejected" and legacy.code == "origin_untrusted"
+
+
 def test_adapter_constructs_fixed_canonical_create_and_idempotency():
     seen = []
 
@@ -114,6 +145,28 @@ def test_adapter_constructs_fixed_canonical_create_and_idempotency():
     assert body.startswith("[CARR_QUEUE_META ") and '"cap":"read"' in body
 
 
+def test_catalog_exactly_allowlists_yellow_and_human_capabilities():
+    catalog = kanban_adapter.load_catalog()
+    assert catalog["targets"]["sol"]["capabilities"] == ["read"]
+    assert catalog["targets"]["claude"]["capabilities"] == ["read", "repo-write", "record-write"]
+    human_only = set(queue_grammar.HUMAN_ONLY)
+    for alias, entry in catalog["targets"].items():
+        if alias == "joe":
+            assert set(entry["capabilities"]) == human_only
+        else:
+            assert not human_only.intersection(entry["capabilities"]), alias
+
+
+def test_manual_create_is_atomically_blocked_before_dispatch_can_see_it():
+    seen = []
+    command = queue_grammar.parse(turn("@queue enqueue target=joe cap=production :: Release", seat="human",
+                                      origin_channel="browser-human", origin_actor="joe"), CATALOG).value
+    adapter = kanban_adapter.KanbanAdapter(runner=lambda argv: seen.append(argv) or {"id": "t_manual0001", "created": True})
+    adapter.create(command, turn("ignored"), CATALOG["targets"]["joe"])
+    argv = seen[0]
+    assert argv[argv.index("--initial-status") + 1] == "blocked"
+
+
 def test_mutation_guard_idempotency_is_not_optional():
     """Removing the idempotency flag makes this test fail before a bridge retry can duplicate work."""
     source = inspect.getsource(kanban_adapter.KanbanAdapter.create)
@@ -128,6 +181,9 @@ def test_service_creates_for_every_room_seat_and_keeps_status_bounded():
         def create(self, command, incoming, target):
             self.creates.append((command, incoming, target))
             return {"task_id": "t_queue0001", "created": False}
+
+        def block(self, *_args, **_kwargs):
+            raise AssertionError("a duplicate must not be reblocked")
 
         def show(self, task_id):
             return {"task": {"id": task_id, "title": "x" * 1000, "status": "todo", "body": "never receipt this"}}
@@ -145,6 +201,29 @@ def test_service_creates_for_every_room_seat_and_keeps_status_bounded():
     status = service.handle(turn("@queue status id=t_queue0001"), room="partner-line")
     rendered = json.dumps(status["receipt"])
     assert "never receipt this" not in rendered and len(rendered) < 1000
+
+
+def test_human_manual_lane_is_canonically_blocked_and_sol_write_never_creates():
+    class FakeAdapter:
+        def __init__(self):
+            self.creates = []
+
+        def create(self, command, incoming, target):
+            self.creates.append((command, target))
+            return {"task_id": "t_manual0001", "created": True}
+
+    adapter = FakeAdapter()
+    service = kanban_adapter.QueueService(catalog=CATALOG, adapter=adapter)
+    human = turn("@queue enqueue target=joe cap=production :: Release it", seat="human",
+                 origin_channel="browser-human", origin_actor="joe")
+    out = service.handle(human, room="partner-line")
+    assert out["receipt"]["queue_accepted"]["status"] == "blocked"
+    command = adapter.creates[0][0]
+    assert command["manual"] is True
+    sol_write = turn("@queue enqueue target=sol cap=repo-write :: Change it")
+    rejected = service.handle(sol_write, room="partner-line")
+    assert rejected["receipt"]["queue_rejected"]["code"] == "capability_target_refused"
+    assert len(adapter.creates) == 1
 
 
 def test_legacy_assignment_is_deprecated_without_a_local_log():
@@ -195,8 +274,13 @@ def main():
     check("strict enqueue grammar and bounds", test_strict_enqueue_and_bounds)
     check("shared key and delivery idempotency", test_shared_key_converges_and_source_id_deduplicates)
     check("targets and status are model-free reads", test_targets_and_status_parse_without_model)
+    check("server origin beats claimed human seat", test_server_origin_not_claimed_human_seat_governs_human_only_enqueue)
+    check("browser humans use only the manual human lane", test_browser_human_can_create_only_manual_human_lane_work)
     check("adapter fixed canonical create", test_adapter_constructs_fixed_canonical_create_and_idempotency)
+    check("catalog explicitly denies unreviewed capability grants", test_catalog_exactly_allowlists_yellow_and_human_capabilities)
+    check("manual create is atomically blocked", test_manual_create_is_atomically_blocked_before_dispatch_can_see_it)
     check("all model seats enqueue and status is bounded", test_service_creates_for_every_room_seat_and_keeps_status_bounded)
+    check("manual cards block and Sol refuses writes before create", test_human_manual_lane_is_canonically_blocked_and_sol_write_never_creates)
     check("legacy assignment is deprecation-only", test_legacy_assignment_is_deprecated_without_a_local_log)
     check("mutation guard: idempotency", test_mutation_guard_idempotency_is_not_optional)
     check("queue command is consumed before routing", test_bridge_consumes_queue_before_routing_and_posts_receipt)

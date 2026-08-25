@@ -26,6 +26,10 @@ def main():
     assert payload["event"] == "started"
     assert payload["card"]["status"] == "todo"
     assert payload["card"]["title"] == "Queue <title>", "the wire carries data; the UI escapes it"
+    record_task = {**task(), "body": '[CARR_QUEUE_META {"v":1,"target":"claude","cap":"record-write","source_seq":1,"source_msg_id":"m","finish":"review"}]\nWrite one record.'}
+    record_card = queue_projection.card_for(record_task, target_catalog={"claude": {
+        "assignee": "desk:joe-desk", "effective_model": "claude"}}, updated_at=200)
+    assert record_card["cap"] == "record-write", "yellow work must not project as misleading read-only work"
     assert queue_projection.event_msg_id("carr-build", 41) == queue_projection.event_msg_id("carr-build", 41)
     assert queue_projection.event_msg_id("carr-build", 41) != queue_projection.event_msg_id("carr-build", 42)
 
