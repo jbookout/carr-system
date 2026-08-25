@@ -458,14 +458,28 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         const updated = (await c.query(`update ops.work_request set state='confirmed_closed', completion_kind=$2, completion_evidence=$3::jsonb, verification_accepted_at=now(), verification_evidence_ref=$4, closed_at=now(), updated_at=now(), version=version+1 where id=$1 returning *`, [row.id, args.completion_kind, JSON.stringify(persistedEvidence), pass.id])).rows[0];
         await c.query(`update ops.capability_agent_session set state='completed', completed_at=now(), version=version+1 where id=$1`, [session.id]);
         await writeEvent(c, actor, "complete-capability-project", "ops_work_request", row.id, { field: "state", old: { state: "verification", capability_agent_session_id: session.id }, new: { state: "confirmed_closed", completion_kind: args.completion_kind, attestation_id: pass.id, candidate_fingerprint: session.candidate_fingerprint }, human_quote: args.human_quote || null, idempotency_key: args.idempotency_key });
-        const later = await c.query(`select * from ops.work_request where program_key=$1 and program_ordinal>$2 order by program_ordinal limit 1 for update`, [DEFAULT_PROGRAM, row.program_ordinal]);
-        const next = nextProjectState(row.program_ordinal, later.rows.map(r => ({ sequence: Number(r.program_ordinal), state: r.state })));
-        const nextRow = later.rows[0] || null;
         // THE HEAD ONLY MOVES WHEN THE HEAD CLOSED. Settling a decline out of
         // order must not announce its neighbour as current — the real head has
         // not moved, and writing that it has would put a false "you are up next"
         // in the timeline of a row nobody has reached.
-        if (nextRow && row.__is_program_head !== false) await writeEvent(c, actor, "complete-capability-project", "ops_work_request", nextRow.id, { field: "program_head", old: { current: false }, new: { current: true, predecessor_ref: row.ref }, idempotency_key: args.idempotency_key });
+        //
+        // AND IT MUST NOT ASK ABOUT THAT NEIGHBOUR EITHER, which is the half this
+        // was missing. nextProjectState() asserts the successor is `ready`, and the
+        // successor of an out-of-order decline is frequently another decline that
+        // has ALREADY been settled — so the assertion fired on a queue that was
+        // behaving exactly as designed, and rolled the close back. Measured
+        // 2026-08-24: four of the suite's remaining declines were unclosable for
+        // this reason alone, and every further out-of-order close created more.
+        // The successor question belongs to the head's advance and to nothing else.
+        const isHead = row.__is_program_head !== false;
+        let next = { completeProgram: false, nextSequence: null };
+        let nextRow = null;
+        if (isHead) {
+          const later = await c.query(`select * from ops.work_request where program_key=$1 and program_ordinal>$2 order by program_ordinal limit 1 for update`, [DEFAULT_PROGRAM, row.program_ordinal]);
+          next = nextProjectState(row.program_ordinal, later.rows.map(r => ({ sequence: Number(r.program_ordinal), state: r.state })));
+          nextRow = later.rows[0] || null;
+          if (nextRow) await writeEvent(c, actor, "complete-capability-project", "ops_work_request", nextRow.id, { field: "program_head", old: { current: false }, new: { current: true, predecessor_ref: row.ref }, idempotency_key: args.idempotency_key });
+        }
         return { ok: true, completed_project: programRow(updated), program_complete: next.completeProgram, next_project: programRow(nextRow), next_session_brief: sessionBrief(nextRow) };
       }),
     },
