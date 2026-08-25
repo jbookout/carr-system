@@ -146,3 +146,38 @@ test("context activation installs the derived tenant before compiling the accept
   assert.equal(response.result.replayed, false);
   assert.equal(calls.length, 3);
 });
+
+test("envelope issuance installs the derived tenant inside the write transaction", async () => {
+  const { tools, client, calls } = allTools((sql, params) => {
+    if (/issue-execution-envelope:tenant/.test(sql)) {
+      assert.deepEqual(params, ["carr-internal"]);
+      return { rows: [] };
+    }
+    if (/issue_execution_envelope_v1/.test(sql)) {
+      assert.match(calls[0].sql, /set_config\('carr\.organization_tenant_id'/);
+      return { rows: [{ envelope_digest: `sha256:${"c".repeat(64)}`, replayed: false }] };
+    }
+    throw new Error(`unexpected query: ${sql}`);
+  });
+  const response = await tools["issue-execution-envelope"].handler(client, actor, {
+    human_ref: "WR-000007", binding_id: "ctx-0123456789abcdef",
+    idempotency_key: "b12be2fe-9c1c-4a8d-b46e-54f92b510018",
+  });
+  assert.equal(response.result.replayed, false);
+  assert.equal(calls.length, 2);
+});
+
+test("activation read and render bind tenant in the same serverless statement", async () => {
+  const { tools, client, calls } = allTools((sql, params) => {
+    assert.match(sql, /with tenant_scope as materialized/);
+    assert.match(sql, /set_config\('carr\.organization_tenant_id'/);
+    assert.deepEqual(params, ["carr-internal", "WR-000007", "ctx-0123456789abcdef"]);
+    if (/read_context_activation/.test(sql)) return { rows: [{ activation: { binding: { binding_id: "ctx-0123456789abcdef" } } }] };
+    if (/render_context_activation_for_brief/.test(sql)) return { rows: [{ items: [] }] };
+    throw new Error(`unexpected query: ${sql}`);
+  });
+  const args = { human_ref: "WR-000007", binding_id: "ctx-0123456789abcdef" };
+  assert.equal((await tools["read-context-activation"].handler(client, actor, args)).activation.binding.binding_id, args.binding_id);
+  assert.deepEqual((await tools["render-context-activation"].handler(client, actor, args)).items, []);
+  assert.equal(calls.length, 2);
+});
