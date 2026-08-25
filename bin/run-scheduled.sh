@@ -144,18 +144,33 @@ fi
 SERVICE="$1"; shift
 RUN_KEY="$1"; shift
 
+REPO="${0:A:h:h}"
+
 # XPC_SERVICE_NAME belongs to the process launchd starts directly.  A nested
-# interpreter may replace it with `0`, so preserve the exact identity only for
-# the one wrapper/service tuple that needs to avoid unloading itself.  Every
-# other invocation explicitly clears the attestation.
+# interpreter may replace it with `0`, so preserve the identity only after the
+# loaded service, this wrapper PID, and the complete canonical fleet tuple all
+# agree.  Ambient variables and a forged XPC name are not evidence.
+unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
+unset CARR_RUN_SCHEDULED_LAUNCHD_PID
+unset CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM
+wrapper_pid=$$
 if [ "$SERVICE" = "fleet-sync" ] \
     && [ "${XPC_SERVICE_NAME:-}" = "com.carr.fleet-sync" ]; then
+  # This is not authorization. It ensures malformed tuple/PID proof fails
+  # closed in the child instead of degrading to an external self-unload.
+  export CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM=1
+fi
+if [ "${CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM:-}" = 1 ] \
+    && [ "$RUN_KEY" = "fleet.sync" ] \
+    && [ "$#" -eq 2 ] \
+    && [ "$1" = "/bin/zsh" ] \
+    && [ "${2:A}" = "$REPO/bin/fleet-sync.sh" ] \
+    && launchctl print "gui/$UID/com.carr.fleet-sync" 2>/dev/null \
+       | grep -Eq "^[[:space:]]*pid = ${wrapper_pid}[[:space:]]*$"; then
   export CARR_RUN_SCHEDULED_XPC_SERVICE_NAME=com.carr.fleet-sync
-else
-  unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
+  export CARR_RUN_SCHEDULED_LAUNCHD_PID=$wrapper_pid
 fi
 
-REPO="${0:A:h:h}"
 LOG="$REPO/out/run-scheduled.log"
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3

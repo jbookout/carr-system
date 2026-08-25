@@ -89,15 +89,44 @@ fi
 # Re-render the installed wiring from whatever the checkout now holds. Idempotent
 # by design and the same installer bin/migrate-dell.sh runs; on an already-correct
 # machine it changes nothing.
-# run-scheduled preserves launchd's exact XPC identity before the nested zsh
-# replaces XPC_SERVICE_NAME with `0`.  Only that attested wrapper identity may
-# claim the exemption; a sanctioned manual fleet-sync run remains an external
-# installer and retains authority to reload com.carr.fleet-sync.
-if [ "${CARR_RUN_SCHEDULED_XPC_SERVICE_NAME:-}" = "com.carr.fleet-sync" ]; then
+# run-scheduled preserves a PID-bound launchd identity before the nested zsh
+# replaces XPC_SERVICE_NAME with `0`.  Re-prove that the attested PID is our
+# actual parent and is still launchd's loaded fleet process.  A manual ambient
+# variable therefore cannot claim the exemption.
+attested_pid="${CARR_RUN_SCHEDULED_LAUNCHD_PID:-}"
+loaded_parent=0
+if launchctl print "gui/$UID/com.carr.fleet-sync" 2>/dev/null \
+   | grep -Eq "^[[:space:]]*pid = ${PPID}[[:space:]]*$"; then
+  loaded_parent=1
+fi
+valid_attestation=0
+if [ "${CARR_RUN_SCHEDULED_XPC_SERVICE_NAME:-}" = "com.carr.fleet-sync" ] \
+    && [[ "$attested_pid" = <-> ]] \
+    && [ "$PPID" = "$attested_pid" ] \
+    && [ "$loaded_parent" -eq 1 ]; then
+  valid_attestation=1
+fi
+if [ "$valid_attestation" -eq 1 ]; then
   export CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL=com.carr.fleet-sync
+elif [ "${CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM:-}" = 1 ] \
+    || [ -n "${CARR_RUN_SCHEDULED_XPC_SERVICE_NAME:-}" ] \
+    || [ -n "${CARR_RUN_SCHEDULED_LAUNCHD_PID:-}" ] \
+    || [ "$loaded_parent" -eq 1 ]; then
+  unset CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL
+  unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
+  unset CARR_RUN_SCHEDULED_LAUNCHD_PID
+  unset CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM
+  print -ru2 -- "fleet-sync: ACTIVE-SELF PROOF REFUSED — self evidence exists, but"
+  print -ru2 -- "    the exact fleet-sync/fleet.sync canonical tuple, wrapper parent PID,"
+  print -ru2 -- "    and live launchctl PID do not all agree; refusing config install so"
+  print -ru2 -- "    this job cannot unload itself"
+  exit 1
 else
   unset CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL
 fi
+unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
+unset CARR_RUN_SCHEDULED_LAUNCHD_PID
+unset CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM
 if ! "$PY" "$REPO/ops/config-as-code.py" install --apply </dev/null; then
   print -ru2 -- "fleet-sync: config-as-code install --apply failed"
   exit 1
