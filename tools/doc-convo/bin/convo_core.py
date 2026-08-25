@@ -103,6 +103,14 @@ class BrainProcess:
     def ask(self, text: str, system_prompt: str,
             on_text: Callable[[str], None]) -> subprocess.CompletedProcess:
         with self.lock:
+            # A silent or noise-only transcription becomes a whitespace-only
+            # message, which the stream-json API rejects with a 400.  The
+            # doc-convo rig calls `claude` by name, so it may run a PATH binary
+            # without the runtime's newer guard.  Keep the rig safe at any
+            # version and avoid starting or resuming a brain process for no-op
+            # input.
+            if not text or not text.strip():
+                return subprocess.CompletedProcess([], 0, "", "")
             try:
                 process = self._ensure(system_prompt)
             except OSError as exc:
