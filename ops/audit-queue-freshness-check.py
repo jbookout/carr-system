@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import csv
 import fnmatch
+import json
 import os
 import re
 import sys
@@ -90,6 +91,9 @@ ARTIFACT_GLOBS = (
 SKIP_DIRS = {"__pycache__", "doc-convo", "node_modules", "vendor"}
 
 RULE_ID = re.compile(r"^[0-9a-f]{8}$")
+AUDIT_FIELDS = ("id", "plain_name", "bucket", "enforcement_or_sketch", "evidence")
+AUDIT_BUCKETS = {"E", "P", "U", "J"}
+MAP_PATH = os.path.join("ops", "config", "rule-enforcement-map.json")
 
 # THE ESCAPE HATCH, and why the check needs one to stay alive.
 #
@@ -130,6 +134,98 @@ def newest_audit(repo: str) -> str | None:
     """The most recent audit table, or None if the audits dir has none."""
     found = sorted(glob(os.path.join(repo, "audits", "rule-enforceability-audit-*.tsv")))
     return found[-1] if found else None
+
+
+def active_rule_ids(repo: str) -> tuple[set[str], list[str]]:
+    """Read the versioned active inventory that the audit must cover exactly."""
+    path = os.path.join(repo, MAP_PATH)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            mapping = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return set(), [f"cannot read {MAP_PATH}: {exc}"]
+
+    scopes = mapping.get("active_rule_ids")
+    if not isinstance(scopes, dict) or not scopes:
+        return set(), [f"{MAP_PATH} has no active_rule_ids inventory"]
+
+    ids: list[str] = []
+    errors: list[str] = []
+    for scope, scope_ids in scopes.items():
+        if not isinstance(scope, str) or not scope:
+            errors.append("active_rule_ids has an invalid scope")
+            continue
+        if not isinstance(scope_ids, list):
+            errors.append(f"active_rule_ids.{scope} is not a list")
+            continue
+        for rid in scope_ids:
+            if not isinstance(rid, str) or not RULE_ID.fullmatch(rid):
+                errors.append(f"active_rule_ids.{scope} has malformed id {rid!r}")
+            else:
+                ids.append(rid)
+    if len(ids) != len(set(ids)):
+        errors.append("active_rule_ids contains duplicate ids")
+    return set(ids), errors
+
+
+def inventory_errors(repo: str, audit: str | None) -> list[str]:
+    """Return every structural or membership error in the current audit table.
+
+    The enforcement map is a reviewed, versioned projection of the active store.
+    The audit is an assessment *of that same population*, not a historical sample;
+    it therefore fails closed when either source cannot be joined exactly.
+    """
+    expected, errors = active_rule_ids(repo)
+    if audit is None:
+        return errors + ["no rule-enforceability audit table found"]
+
+    try:
+        with open(audit, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            if reader.fieldnames != list(AUDIT_FIELDS):
+                return errors + [
+                    f"{os.path.relpath(audit, repo)} has malformed header "
+                    f"(expected tab-separated {', '.join(AUDIT_FIELDS)})"
+                ]
+            audit_ids: list[str] = []
+            for line, row in enumerate(reader, start=2):
+                if row is None or None in row:
+                    errors.append(f"row {line} has the wrong number of columns")
+                    continue
+                if any(not isinstance(row.get(field), str) or not row[field].strip()
+                       for field in AUDIT_FIELDS):
+                    errors.append(f"row {line} has a blank required field")
+                    continue
+                rid = row["id"].strip()
+                if not RULE_ID.fullmatch(rid):
+                    errors.append(f"row {line} has malformed id {rid!r}")
+                    continue
+                bucket = row["bucket"].strip()
+                if bucket not in AUDIT_BUCKETS:
+                    errors.append(f"row {line} has invalid bucket {bucket!r}")
+                    continue
+                audit_ids.append(rid)
+    except OSError as exc:
+        return errors + [f"cannot read {os.path.relpath(audit, repo)}: {exc}"]
+
+    seen: set[str] = set()
+    duplicate_ids: set[str] = set()
+    for rid in audit_ids:
+        if rid in seen:
+            duplicate_ids.add(rid)
+        else:
+            seen.add(rid)
+    duplicates = sorted(duplicate_ids)
+    if duplicates:
+        errors.append("audit has duplicate id(s): " + ", ".join(duplicates))
+    actual = set(audit_ids)
+    missing = sorted(expected - actual)
+    extras = sorted(actual - expected)
+    if missing:
+        errors.append("audit is missing active map id(s): " + ", ".join(missing))
+    if extras:
+        errors.append("audit contains inactive/unknown id(s): " + ", ".join(extras))
+    return errors
 
 
 def enforcement_artifacts(repo: str) -> dict[str, str]:
@@ -191,9 +287,17 @@ def stale_rows(repo: str) -> tuple[list[tuple[str, str, str, list[str]]], str | 
 def main() -> int:
     repo = sys.argv[1] if len(sys.argv) > 1 else REPO
     findings, audit = stale_rows(repo)
-    if audit is None:
-        print("no rule-enforceability audit table found — nothing to check")
-        return 0
+    errors = inventory_errors(repo, audit)
+    if errors:
+        print("RULE-ENFORCEABILITY AUDIT INVENTORY INVALID\n")
+        for error in errors:
+            print(f"  {error}")
+        print(
+            "\nFIX: refresh the audit so it has one well-formed current row for every "
+            "id in ops/config/rule-enforcement-map.json active_rule_ids, and no others."
+        )
+        return 1
+    assert audit is not None
     rel_audit = os.path.relpath(audit, repo)
     if not findings:
         print(f"audit queue fresh — no row in {rel_audit} contradicts the tree")
