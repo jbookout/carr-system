@@ -1,11 +1,17 @@
 -- 0297_restore_only_provider_uuid_repair.sql
 --
 -- 0295/0296 stored release.provider_version_id as text while the append-only
--- restore-only attempt binds a UUID column. Keep applied migrations intact;
--- replace only the typed prepare writer after first proving the stored value
--- has the exact canonical UUID shape.
+-- restore-only attempt binds a UUID column. 0295 also double-escaped the table
+-- constraint's migration filename suffix, so even the correctly cast row would
+-- be rejected. Keep applied migrations intact; repair both live boundaries.
 
 begin;
+
+alter table ops.staging_restore_only_attempt
+  drop constraint staging_restore_only_attempt_declared_schema_highest_migr_check;
+alter table ops.staging_restore_only_attempt
+  add constraint staging_restore_only_attempt_declared_schema_highest_migr_check
+  check (declared_schema_highest_migration ~ '^[0-9]{4}_[a-z0-9_.-]+\.sql$');
 
 create or replace function ops.prepare_staging_restore_only_attempt(
   p_idempotency_key uuid, p_correlation_id uuid, p_release_key text,

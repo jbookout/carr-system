@@ -377,6 +377,9 @@ assert "create or replace function ops.prepare_staging_restore_only_attempt" in 
 assert "provider_version_id !~ '^[0-9a-f]{8}" in uuid_repair
 assert "target_provider_version:=current_release.provider_version_id::uuid" in uuid_repair
 assert uuid_repair.count("target_provider_version") >= 4
+assert "drop constraint staging_restore_only_attempt_declared_schema_highest_migr_check" in uuid_repair
+assert "declared_schema_highest_migration ~ '^[0-9]{4}_[a-z0-9_.-]+\\.sql$'" in uuid_repair
+assert "declared_schema_highest_migration ~ '^[0-9]{4}_[a-z0-9_.-]+\\\\.sql$'" not in uuid_repair
 assert "migration 0295" not in uuid_repair.lower()
 
 completion_grant = (ROOT / "migrations" / "0215_program5_completion_hash_grant.sql").read_text()
