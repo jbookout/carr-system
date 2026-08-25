@@ -8287,6 +8287,145 @@ end $$;
 
 
 --
+-- Name: memory_item_immutable_core(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.memory_item_immutable_core() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if new.created_at is distinct from old.created_at then
+    raise exception 'memory_item created_at is immutable';
+  end if;
+  if new.kind is distinct from old.kind
+     or new.context is distinct from old.context
+     or new.confidence is distinct from old.confidence
+     or new.observed_by_actor_id is distinct from old.observed_by_actor_id
+     or new.statement is distinct from old.statement
+     or new.scope is distinct from old.scope
+     or new.owner_actor_id is distinct from old.owner_actor_id
+     or new.organization_tenant_id is distinct from old.organization_tenant_id
+     or new.work_request_id is distinct from old.work_request_id
+     or new.work_request_version is distinct from old.work_request_version
+     or new.plan_id is distinct from old.plan_id
+     or new.predecessor_id is distinct from old.predecessor_id
+     or new.lineage_root_id is distinct from old.lineage_root_id then
+    raise exception 'memory_item core is immutable; create a successor for corrections';
+  end if;
+  if new.version <> old.version + 1 then
+    raise exception 'memory_item lifecycle updates must increment version exactly once';
+  end if;
+  if new.status is not distinct from old.status then
+    raise exception 'memory_item status must make one allowed lifecycle transition';
+  end if;
+  if old.status='candidate' and new.status='promoted' then
+    if old.promoted_by_actor_id is not null or old.promoted_at is not null
+       or new.promoted_by_actor_id is null or new.promoted_at is null
+       or new.corrected_by_actor_id is distinct from old.corrected_by_actor_id
+       or new.correction_reason is distinct from old.correction_reason
+       or new.corrected_at is distinct from old.corrected_at
+       or new.forgotten_by_actor_id is distinct from old.forgotten_by_actor_id
+       or new.forget_reason is distinct from old.forget_reason
+       or new.forgotten_at is distinct from old.forgotten_at then
+      raise exception 'candidate promotion requires actor and timestamp';
+    end if;
+  elsif old.status in ('candidate','promoted') and new.status='corrected' then
+    if old.corrected_by_actor_id is not null or old.correction_reason is not null or old.corrected_at is not null
+       or new.corrected_by_actor_id is null or new.correction_reason is null or new.corrected_at is null
+       or new.promoted_by_actor_id is distinct from old.promoted_by_actor_id
+       or new.promoted_at is distinct from old.promoted_at
+       or new.forgotten_by_actor_id is distinct from old.forgotten_by_actor_id
+       or new.forget_reason is distinct from old.forget_reason
+       or new.forgotten_at is distinct from old.forgotten_at then
+      raise exception 'memory correction requires actor, reason, and timestamp';
+    end if;
+  elsif old.status in ('candidate','promoted','corrected') and new.status='forgotten' then
+    if old.forgotten_by_actor_id is not null or old.forget_reason is not null or old.forgotten_at is not null
+       or new.forgotten_by_actor_id is null or new.forget_reason is null or new.forgotten_at is null
+       or new.promoted_by_actor_id is distinct from old.promoted_by_actor_id
+       or new.promoted_at is distinct from old.promoted_at
+       or new.corrected_by_actor_id is distinct from old.corrected_by_actor_id
+       or new.correction_reason is distinct from old.correction_reason
+       or new.corrected_at is distinct from old.corrected_at then
+      raise exception 'memory forgetting requires actor, reason, and timestamp';
+    end if;
+  else
+    raise exception 'memory_item status transition is not an allowed lifecycle transition';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: memory_item_insert_valid(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.memory_item_insert_valid() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+declare prior memory_item%rowtype; expected_root uuid;
+begin
+  -- Timestamps are server-owned; caller-supplied values are ignored.
+  new.created_at := now();
+  new.updated_at := new.created_at;
+  if new.status <> 'candidate' or new.version <> 1
+     or new.promoted_by_actor_id is not null or new.promoted_at is not null
+     or new.corrected_by_actor_id is not null or new.correction_reason is not null or new.corrected_at is not null
+     or new.forgotten_by_actor_id is not null or new.forget_reason is not null or new.forgotten_at is not null then
+    raise exception 'new memory rows must start as clean candidate version 1';
+  end if;
+  if new.predecessor_id is null or new.lineage_root_id is null then
+    if new.predecessor_id is not null or new.lineage_root_id is not null then
+      raise exception 'new memory roots cannot carry partial lineage';
+    end if;
+    return new;
+  end if;
+  select * into prior from public.memory_item where id=new.predecessor_id;
+  expected_root := coalesce(prior.lineage_root_id, prior.id);
+  if not found or prior.status <> 'corrected'
+     or prior.organization_tenant_id is distinct from new.organization_tenant_id
+     or prior.scope is distinct from new.scope
+     or prior.owner_actor_id is distinct from new.owner_actor_id
+     or prior.kind is distinct from new.kind
+     or prior.context is distinct from new.context
+     or prior.confidence is distinct from new.confidence
+     or prior.work_request_id is distinct from new.work_request_id
+     or prior.work_request_version is distinct from new.work_request_version
+     or prior.plan_id is distinct from new.plan_id
+     or new.lineage_root_id is distinct from expected_root then
+    raise exception 'memory successor lineage does not match corrected predecessor';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: memory_item_plan_anchor_valid(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.memory_item_plan_anchor_valid() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'ops'
+    AS $$
+declare plan_row record;
+begin
+  if new.plan_id is null then return new; end if;
+  select plan.work_request_id, plan.work_request_version, w.organization_tenant_id
+    into plan_row
+    from ops.sourced_work_request_plan plan
+    join ops.work_request w on w.id=plan.work_request_id
+   where plan.id=new.plan_id;
+  if not found or plan_row.work_request_id is distinct from new.work_request_id
+     or plan_row.work_request_version is distinct from new.work_request_version
+     or plan_row.organization_tenant_id is distinct from new.organization_tenant_id then
+    raise exception 'memory plan anchor is missing, cross-tenant, or mismatched';
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: normalize_retrieval_phrase(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8422,6 +8561,21 @@ begin
    where id=p.id;
   return landed;
 end $$;
+
+
+--
+-- Name: resolve_memory_plan_anchor(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.resolve_memory_plan_anchor(p_plan_id uuid, p_tenant text) RETURNS TABLE(plan_id uuid, work_request_id uuid, work_request_version integer)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+  select p.id, p.work_request_id, p.work_request_version
+    from ops.sourced_work_request_plan p
+    join ops.work_request w on w.id=p.work_request_id
+   where p.id=$1 and w.organization_tenant_id=$2;
+$_$;
 
 
 --
@@ -14607,6 +14761,70 @@ COMMENT ON TABLE public.media_recommendation IS 'What Doc recommends a partner r
 
 
 --
+-- Name: memory_evidence; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.memory_evidence (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    memory_id uuid NOT NULL,
+    source_type text NOT NULL,
+    source_ref text,
+    observation text NOT NULL,
+    human_quote text,
+    observed_by_actor_id uuid NOT NULL,
+    provenance jsonb DEFAULT '{}'::jsonb NOT NULL,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT memory_evidence_observation_check CHECK ((length(btrim(observation)) > 0)),
+    CONSTRAINT memory_evidence_source_type_check CHECK ((length(btrim(source_type)) > 0))
+);
+
+
+--
+-- Name: memory_item; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.memory_item (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    work_request_id uuid,
+    work_request_version integer,
+    plan_id uuid,
+    kind text NOT NULL,
+    statement text NOT NULL,
+    context text,
+    scope text NOT NULL,
+    owner_actor_id uuid,
+    observed_by_actor_id uuid NOT NULL,
+    status text DEFAULT 'candidate'::text NOT NULL,
+    confidence numeric(4,3) DEFAULT 0.500 NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    promoted_by_actor_id uuid,
+    promoted_at timestamp with time zone,
+    corrected_by_actor_id uuid,
+    correction_reason text,
+    corrected_at timestamp with time zone,
+    forgotten_by_actor_id uuid,
+    forget_reason text,
+    forgotten_at timestamp with time zone,
+    predecessor_id uuid,
+    lineage_root_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, ((COALESCE(statement, ''::text) || ' '::text) || COALESCE(context, ''::text)))) STORED,
+    CONSTRAINT memory_item_check CHECK ((((scope = 'shared'::text) AND (owner_actor_id IS NULL)) OR ((scope = 'personal'::text) AND (owner_actor_id IS NOT NULL)))),
+    CONSTRAINT memory_item_check1 CHECK ((((plan_id IS NULL) AND (work_request_id IS NULL) AND (work_request_version IS NULL)) OR ((plan_id IS NOT NULL) AND (work_request_id IS NOT NULL) AND (work_request_version IS NOT NULL)))),
+    CONSTRAINT memory_item_check2 CHECK (((status <> 'promoted'::text) OR (promoted_by_actor_id IS NOT NULL))),
+    CONSTRAINT memory_item_confidence_check CHECK (((confidence >= (0)::numeric) AND (confidence <= (1)::numeric))),
+    CONSTRAINT memory_item_kind_check CHECK ((kind = ANY (ARRAY['preference'::text, 'fact'::text, 'episodic'::text, 'procedural'::text]))),
+    CONSTRAINT memory_item_organization_tenant_id_check CHECK ((length(btrim(organization_tenant_id)) > 0)),
+    CONSTRAINT memory_item_scope_check CHECK ((scope = ANY (ARRAY['shared'::text, 'personal'::text]))),
+    CONSTRAINT memory_item_statement_check CHECK ((length(btrim(statement)) > 0)),
+    CONSTRAINT memory_item_status_check CHECK ((status = ANY (ARRAY['candidate'::text, 'promoted'::text, 'corrected'::text, 'forgotten'::text])))
+);
+
+
+--
 -- Name: national_account_owner; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -14872,8 +15090,12 @@ CREATE TABLE public.partner_room_turn (
     kind text DEFAULT 'turn'::text NOT NULL,
     body text NOT NULL,
     msg_id uuid NOT NULL,
+    origin_channel text DEFAULT 'legacy'::text NOT NULL,
+    origin_actor text DEFAULT 'legacy'::text NOT NULL,
     CONSTRAINT partner_room_turn_body_bounds CHECK (((btrim(body) <> ''::text) AND (length(body) <= 20000))),
     CONSTRAINT partner_room_turn_kind_known CHECK ((kind = ANY (ARRAY['turn'::text, 'system'::text, 'receipt'::text]))),
+    CONSTRAINT partner_room_turn_origin_actor_slug CHECK ((origin_actor ~ '^[a-z0-9][a-z0-9-]{0,31}$'::text)),
+    CONSTRAINT partner_room_turn_origin_channel_known CHECK ((origin_channel = ANY (ARRAY['legacy'::text, 'mcp'::text, 'browser-human'::text]))),
     CONSTRAINT partner_room_turn_room_slug CHECK ((room_id ~ '^[a-z0-9][a-z0-9-]{0,31}$'::text)),
     CONSTRAINT partner_room_turn_seat_slug CHECK ((seat ~ '^[a-z0-9][a-z0-9-]{0,31}$'::text)),
     CONSTRAINT partner_room_turn_sponsor_known CHECK ((sponsor = ANY (ARRAY['joe'::text, 'dell'::text])))
@@ -14885,6 +15107,20 @@ CREATE TABLE public.partner_room_turn (
 --
 
 COMMENT ON TABLE public.partner_room_turn IS 'Idea 78 partner room: append-only AI-to-AI turn log served by the Worker. sponsor is server-derived from the verified credential; seat is the claimed brain on that side. Raw text, never a summary. The live wire, not the record — durable outcomes go through decisions/loops.';
+
+
+--
+-- Name: COLUMN partner_room_turn.origin_channel; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.partner_room_turn.origin_channel IS 'Server-derived ingress channel: legacy for pre-0298 history, mcp for tool writes, browser-human for authenticated Observatory posts.';
+
+
+--
+-- Name: COLUMN partner_room_turn.origin_actor; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.partner_room_turn.origin_actor IS 'Server-derived authenticated actor slug. Never supplied by a room command or queue grammar.';
 
 
 --
@@ -19379,7 +19615,9 @@ CREATE VIEW public.v_partner_room_turn AS
     seat,
     kind,
     body,
-    msg_id
+    msg_id,
+    origin_channel,
+    origin_actor
    FROM public.partner_room_turn;
 
 
@@ -19387,7 +19625,7 @@ CREATE VIEW public.v_partner_room_turn AS
 -- Name: VIEW v_partner_room_turn; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.v_partner_room_turn IS 'read-room''s read surface: the partner room verbatim, cursor over (room_id, id). carr_reader holds no grant on the table itself.';
+COMMENT ON VIEW public.v_partner_room_turn IS 'read-room surface: append-only partner-room turns plus server-derived origin provenance. carr_reader holds no grant on the table itself.';
 
 
 --
@@ -22814,6 +23052,22 @@ ALTER TABLE ONLY public.media_recommendation
 
 
 --
+-- Name: memory_evidence memory_evidence_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_evidence
+    ADD CONSTRAINT memory_evidence_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: memory_item memory_item_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: national_account_owner national_account_owner_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -24015,6 +24269,34 @@ CREATE UNIQUE INDEX media_recommendation_title_uniq ON public.media_recommendati
 
 
 --
+-- Name: memory_evidence_memory_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX memory_evidence_memory_idx ON public.memory_evidence USING btree (memory_id, observed_at DESC);
+
+
+--
+-- Name: memory_item_scope_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX memory_item_scope_idx ON public.memory_item USING btree (scope, owner_actor_id, status, confidence DESC);
+
+
+--
+-- Name: memory_item_search_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX memory_item_search_idx ON public.memory_item USING gin (search_vector);
+
+
+--
+-- Name: memory_item_tenant_scope_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX memory_item_tenant_scope_idx ON public.memory_item USING btree (organization_tenant_id, scope, owner_actor_id, status);
+
+
+--
 -- Name: negotiation_claim_round_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -25127,6 +25409,27 @@ CREATE TRIGGER loop_block_touch BEFORE UPDATE ON public.loop_block FOR EACH ROW 
 --
 
 CREATE TRIGGER loop_item_touch BEFORE UPDATE ON public.loop_item FOR EACH ROW EXECUTE FUNCTION public.trg_touch_row();
+
+
+--
+-- Name: memory_item memory_item_immutable_core; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER memory_item_immutable_core BEFORE UPDATE ON public.memory_item FOR EACH ROW EXECUTE FUNCTION public.memory_item_immutable_core();
+
+
+--
+-- Name: memory_item memory_item_insert_valid; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER memory_item_insert_valid BEFORE INSERT ON public.memory_item FOR EACH ROW EXECUTE FUNCTION public.memory_item_insert_valid();
+
+
+--
+-- Name: memory_item memory_item_plan_anchor_valid; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER memory_item_plan_anchor_valid BEFORE INSERT OR UPDATE ON public.memory_item FOR EACH ROW EXECUTE FUNCTION public.memory_item_plan_anchor_valid();
 
 
 --
@@ -28078,6 +28381,94 @@ ALTER TABLE ONLY public.media_recommendation
 
 
 --
+-- Name: memory_evidence memory_evidence_memory_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_evidence
+    ADD CONSTRAINT memory_evidence_memory_id_fkey FOREIGN KEY (memory_id) REFERENCES public.memory_item(id);
+
+
+--
+-- Name: memory_evidence memory_evidence_observed_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_evidence
+    ADD CONSTRAINT memory_evidence_observed_by_actor_id_fkey FOREIGN KEY (observed_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: memory_item memory_item_corrected_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_corrected_by_actor_id_fkey FOREIGN KEY (corrected_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: memory_item memory_item_forgotten_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_forgotten_by_actor_id_fkey FOREIGN KEY (forgotten_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: memory_item memory_item_lineage_root_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_lineage_root_id_fkey FOREIGN KEY (lineage_root_id) REFERENCES public.memory_item(id);
+
+
+--
+-- Name: memory_item memory_item_observed_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_observed_by_actor_id_fkey FOREIGN KEY (observed_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: memory_item memory_item_owner_actor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_owner_actor_id_fkey FOREIGN KEY (owner_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: memory_item memory_item_plan_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES ops.sourced_work_request_plan(id);
+
+
+--
+-- Name: memory_item memory_item_predecessor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_predecessor_id_fkey FOREIGN KEY (predecessor_id) REFERENCES public.memory_item(id);
+
+
+--
+-- Name: memory_item memory_item_promoted_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_promoted_by_actor_id_fkey FOREIGN KEY (promoted_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: memory_item memory_item_work_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.memory_item
+    ADD CONSTRAINT memory_item_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
 -- Name: national_account_owner national_account_owner_account_client_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -28848,6 +29239,7 @@ revoke all on function public.assert_situation_retrieval_golden(p_suite_digest t
 revoke all on function public.capture_call_context(requested_deal_ids uuid[]) from public;
 revoke all on function public.log_retrieval_query(p_query text, p_result_count integer, p_section_ids uuid[], p_score_bands jsonb, p_policy_id text, p_policy_version bigint, p_explicit_hit boolean, p_scope_ref text) from public;
 revoke all on function public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) from public;
+revoke all on function public.resolve_memory_plan_anchor(p_plan_id uuid, p_tenant text) from public;
 revoke all on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) from public;
 revoke all on function public.retrieval_visibility_actor_id(p_sponsor_slug text) from public;
 revoke all on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text, p_allow_fallback boolean) from public;
@@ -29256,6 +29648,10 @@ grant insert, select, update on table public.marketing_subject to carr_writer;
 grant select on table public.media_recommendation to carr_exporter;
 grant select on table public.media_recommendation to carr_reader;
 grant insert, select, update on table public.media_recommendation to carr_writer;
+grant select on table public.memory_evidence to carr_reader;
+grant insert, select on table public.memory_evidence to carr_writer;
+grant select on table public.memory_item to carr_reader;
+grant insert, select, update on table public.memory_item to carr_writer;
 grant insert, select, update on table public.national_account_owner to carr_writer;
 grant select on table public.negotiation_claim to carr_reader;
 grant insert, select, update on table public.negotiation_claim to carr_writer;
@@ -29615,6 +30011,7 @@ grant execute on function public.current_retrievable_doctrine(p_actor_id uuid, p
 grant execute on function public.log_retrieval_query(p_query text, p_result_count integer, p_section_ids uuid[], p_score_bands jsonb, p_policy_id text, p_policy_version bigint, p_explicit_hit boolean, p_scope_ref text) to carr_writer;
 grant execute on function public.normalize_retrieval_phrase(value text) to carr_writer;
 grant execute on function public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) to carr_writer;
+grant execute on function public.resolve_memory_plan_anchor(p_plan_id uuid, p_tenant text) to carr_writer;
 grant execute on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) to carr_writer;
 grant execute on function public.retrieval_visibility_actor_id(p_sponsor_slug text) to carr_reader;
 grant execute on function public.retrieval_visibility_actor_id(p_sponsor_slug text) to carr_writer;
@@ -29891,6 +30288,9 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0295_staging_restore_only_recovery.sql	0d381ef9d2eb3a833b055bf688185489632faf6aeb568d49d03aa3e0f1b72b8b	2026-08-24 17:04:52.004777+00
 0296_restore_only_recovery_repair.sql	b4e93a9838954dd323487a66ae0ff6a43e33aa9ec811eaf54c7313507e04822d	2026-08-24 17:57:14.358848+00
 0297_restore_only_provider_uuid_repair.sql	591399dd207c62fd5efce9b2a33dc4160eb0e1274010732e7ad557ecbd829afa	2026-08-25 01:41:04.709394+00
+0298_partner_room_origin.sql	c4776a66dc9f78aed6fe253f095a5b2391560ce79daef8f345434d4c48c77af3	2026-08-25 03:31:03.482538+00
+0299_memory_kernel.sql	e85bc1182e4adfbac1bde76e68a430c38c893d3eaf6339adbdd4ff306d05f69f	2026-08-25 03:31:03.851592+00
+0300_operational_hermes_bot_profiles.sql	ba638cd04dbfbb147469eaf541df800b33644c885b3dd1d53dd010374b88934e	2026-08-25 03:31:04.102815+00
 \.
 
 

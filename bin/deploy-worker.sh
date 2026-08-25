@@ -727,6 +727,20 @@ case "$EXPECTED_PROGRAM6_ACTIONS" in
   enabled|disabled) ;;
   *) fail "release manifest returned an invalid Program 6 posture." ;;
 esac
+EXPECTED_SCHEMA_HIGHEST_MIGRATION="$("$PY" -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["schema_highest_migration"])' \
+  "$RELEASE_MANIFEST")" \
+  || fail "release manifest has no declared schema highest migration."
+EXPECTED_SCHEMA_APPLIED_COUNT="$("$PY" -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["schema_applied_count"])' \
+  "$RELEASE_MANIFEST")" \
+  || fail "release manifest has no declared schema applied count."
+printf '%s' "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
+  | grep -Eq '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$' \
+  || fail "release manifest declared an invalid schema highest migration."
+printf '%s' "$EXPECTED_SCHEMA_APPLIED_COUNT" \
+  | grep -Eq '^[1-9][0-9]*$' \
+  || fail "release manifest declared an invalid schema applied count."
 
 if [ "$CHECK_ONLY" = "1" ]; then
   echo ""
@@ -996,7 +1010,9 @@ if [ "$TARGET_ENV" = "production" ]; then
         "$PY" "$REPO/ops/verify-worker-release.py" \
           --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
           --provider-version-id "$PROVIDER_VERSION_ID" \
-          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" >/dev/null 2>&1
+          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+          --expected-schema-highest-migration "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
+          --expected-schema-applied-count "$EXPECTED_SCHEMA_APPLIED_COUNT" >/dev/null 2>&1
       LIVE_VERIFY_RC=$?
       set -e
       if [ "$LIVE_VERIFY_RC" -eq 0 ]; then
@@ -1030,7 +1046,9 @@ if [ "$TARGET_ENV" = "production" ]; then
       "$PY" "$REPO/ops/verify-worker-release.py" \
         --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
         --provider-version-id "$PROVIDER_VERSION_ID" \
-        --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" || true
+        --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+        --expected-schema-highest-migration "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
+        --expected-schema-applied-count "$EXPECTED_SCHEMA_APPLIED_COUNT" || true
     echo "  Production /release is malformed or does not match the approved identity," \
          "still, after $LIVE_RELEASE_ATTEMPT attempt(s) over" \
          "$((LIVE_RELEASE_ATTEMPT * LIVE_READBACK_SLEEP))s. This is a settled" \

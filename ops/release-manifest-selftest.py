@@ -42,6 +42,7 @@ WHAT IT PROVES
 """
 
 import atexit
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -51,6 +52,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TOOL = REPO / "tools" / "release-manifest.py"
+
+_spec = importlib.util.spec_from_file_location("release_manifest", TOOL)
+assert _spec and _spec.loader
+RELEASE_MANIFEST = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(RELEASE_MANIFEST)
 
 FAILURES: list[str] = []
 
@@ -85,9 +91,17 @@ def git(*args: str) -> str:
 
 def main() -> int:
     print("release-manifest-selftest: P0-1 rebuild clause")
+    tool_source = TOOL.read_text(encoding="utf-8")
+    ledger_start = tool_source.index("def migration_tree_ledger")
+    ledger_end = tool_source.index("def ensure_exact_schema_prefix", ledger_start)
+    ledger_impl = tool_source[ledger_start:ledger_end]
+    check("0g. migration ledger reads one byte-preserving git archive",
+          'git_bytes("archive", "--format=tar"' in ledger_impl
+          and 'git("show", f"{sha}:migrations/{filename}")' not in ledger_impl)
 
-    first = build("--sha", "HEAD")
-    second = build("--sha", "HEAD")
+    tested_sha = "HEAD"
+    first = build("--sha", tested_sha)
+    second = build("--sha", tested_sha)
 
     check("0a. manifest declares the full applied schema ledger count",
           isinstance(first.get("schema_applied_count"), int)
@@ -104,6 +118,45 @@ def main() -> int:
               {"enabled": True, "posture": "enabled"},
               {"enabled": False, "posture": "disabled"}))
 
+    # Seed the exact failure with the same numeric prefix but a different
+    # filename/content pair.  A numeric-prefix comparison would incorrectly
+    # accept this renamed migration; the release-manifest gate must refuse it.
+    try:
+        RELEASE_MANIFEST.ensure_exact_schema_prefix(
+            [("0301a_schema.sql", "a" * 64)],
+            [("0301_schema.sql", "b" * 64)],
+        )
+    except SystemExit as exc:
+        check("0e. an exact filename/content ledger mismatch is refused",
+              "exact migration ledger" in str(exc))
+    else:
+        check("0e. an exact filename/content ledger mismatch is refused", False,
+              "same-number migration rename was accepted")
+
+    exact_prefix = [("0300_schema.sql", "a" * 64)]
+    expected_tree = exact_prefix + [("0301_schema.sql", "b" * 64)]
+    try:
+        RELEASE_MANIFEST.ensure_exact_schema_prefix(exact_prefix, expected_tree)
+    except SystemExit as exc:
+        check("0f. an exact pending migration suffix is accepted", False, str(exc))
+    else:
+        count, highest, digest = RELEASE_MANIFEST.schema_ledger_identity(expected_tree)
+        check("0f. an exact pending suffix binds the post-rollout ledger",
+              count == 2 and highest == "0301_schema.sql"
+              and digest.startswith("sha256:") and len(digest) == 71)
+
+    try:
+        RELEASE_MANIFEST.ensure_exact_schema_prefix(
+            [("0300_schema.sql", "a" * 64), ("0302_schema.sql", "c" * 64)],
+            expected_tree + [("0302_schema.sql", "c" * 64)],
+        )
+    except SystemExit as exc:
+        check("0h. a hole inside the applied ledger is refused",
+              "exact migration ledger" in str(exc))
+    else:
+        check("0h. a hole inside the applied ledger is refused", False,
+              "non-prefix snapshot ledger was accepted")
+
     # 1. determinism
     check("1. two builds of one SHA are identical",
           first == second,
@@ -111,9 +164,9 @@ def main() -> int:
 
     # 2. the digest belongs to the commit, not the checkout
     dirty = bool(git("status", "--porcelain").strip())
-    head_sha = git("rev-parse", "HEAD").strip()
+    head_sha = git("rev-parse", tested_sha).strip()
     by_sha = build("--sha", head_sha)
-    check("2. HEAD and its explicit SHA digest identically"
+    check("2. tested SHA and its explicit SHA digest identically"
           + (" (working tree is dirty, which is the interesting case)" if dirty else ""),
           by_sha["artifact_digest"] == first["artifact_digest"])
 
@@ -132,8 +185,14 @@ def main() -> int:
              "--", "mcp-server", "dealroom",
              ":(exclude)mcp-server/.last-deployed-verb-count"))
         if differs.returncode != 0:
-            other = sha
-            break
+            candidate_attempt = run("build", "--sha", sha,
+                                    "--performance-budget-ref", "runbook:worker-performance-v1",
+                                    "--performance-budget-ms", "1500",
+                                    "--recovery-strategy", "rollback",
+                                    "--rollback-plan-ref", "runbook:rollback-worker-v1")
+            if candidate_attempt.returncode == 0:
+                other = sha
+                break
     if other:
         older = build("--sha", other)
         check("3. a commit whose deployed tree differs digests differently",
@@ -205,7 +264,7 @@ def main() -> int:
     out = run("plan-hash", "--manifest", _tmp_json(performance))
     check("6c. changing the approved performance budget moves the plan hash",
           out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
-    partial = run("build", "--sha", "HEAD", "--performance-budget-ref",
+    partial = run("build", "--sha", tested_sha, "--performance-budget-ref",
                   "runbook:worker-performance-v1")
     check("6d. partial performance assurance input is refused", partial.returncode != 0)
     recovery_plan = dict(first)
@@ -226,7 +285,7 @@ def main() -> int:
     check("6g. changing the full applied-ledger digest moves the plan hash",
           out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
 
-    legacy_out = run("build", "--sha", "HEAD")
+    legacy_out = run("build", "--sha", tested_sha)
     legacy = json.loads(legacy_out.stdout) if legacy_out.returncode == 0 else {}
     legacy_path = _tmp_json(legacy)
     legacy_verify = run("verify", "--manifest", legacy_path)
@@ -237,9 +296,9 @@ def main() -> int:
     # source. Binding that returned identity must preserve source evidence and
     # produce the exact plan hash an approver sees.
     with tempfile.TemporaryDirectory() as tmp:
-        source = Path(tmp) / "source.json"
-        source.write_text(json.dumps(first))
-        out = run("bind-provider", "--manifest", str(source),
+        source_path = Path(tmp) / "source.json"
+        source_path.write_text(json.dumps(first))
+        out = run("bind-provider", "--manifest", str(source_path),
                   "--provider", "cloudflare-workers",
                   "--provider-version-id", "cf-version-test-001")
         check("7a. a post-upload provider version binds successfully",
@@ -261,7 +320,7 @@ def main() -> int:
         check("7d. a bound manifest verifies its recorded source evidence",
               out.returncode == 0, out.stdout.strip()[-300:])
 
-        out = run("bind-provider", "--manifest", str(source),
+        out = run("bind-provider", "--manifest", str(source_path),
                   "--provider", "cloudflare-workers", "--provider-version-id", "")
         check("7e. an empty provider version ID is refused", out.returncode != 0)
 

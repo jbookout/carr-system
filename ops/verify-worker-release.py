@@ -27,12 +27,17 @@ def main() -> int:
     parser.add_argument("--provider-version-id", required=True)
     parser.add_argument("--expected-program6-actions", required=True,
                         choices=["enabled", "disabled"])
+    parser.add_argument("--expected-schema-highest-migration", required=True)
+    parser.add_argument("--expected-schema-applied-count", required=True, type=int)
     args = parser.parse_args()
 
     expected_version = canonical_uuid(args.provider_version_id)
     if (expected_version is None
             or re.fullmatch(r"[0-9a-fA-F]{40}", args.sha) is None
-            or not args.environment or not args.provider):
+            or not args.environment or not args.provider
+            or re.fullmatch(r"[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql",
+                            args.expected_schema_highest_migration) is None
+            or args.expected_schema_applied_count <= 0):
         print("verify-worker-release: malformed expected identity", file=sys.stderr)
         return 2
 
@@ -50,6 +55,7 @@ def main() -> int:
     git_sha_value = payload.get("git_sha")
     worker_version_value = payload.get("worker_version")
     program6_actions_value = payload.get("program6_actions")
+    schema_value = payload.get("schema")
     env: dict[str, object] = env_value if isinstance(env_value, dict) else {}
     git_sha: dict[str, object] = (
         git_sha_value if isinstance(git_sha_value, dict) else {})
@@ -57,6 +63,7 @@ def main() -> int:
         worker_version_value if isinstance(worker_version_value, dict) else {})
     program6_actions: dict[str, object] = (
         program6_actions_value if isinstance(program6_actions_value, dict) else {})
+    schema: dict[str, object] = schema_value if isinstance(schema_value, dict) else {}
     observed_id = worker_version.get("id")
     observed_version = canonical_uuid(observed_id) if isinstance(observed_id, str) else None
     mismatches = []
@@ -75,6 +82,10 @@ def main() -> int:
             or program6_actions.get("posture") != args.expected_program6_actions
             or program6_actions.get("reason") is not None):
         mismatches.append("program6_actions")
+    if schema.get("highest_applied_migration") != args.expected_schema_highest_migration:
+        mismatches.append("schema.highest_applied_migration")
+    if schema.get("applied_count") != args.expected_schema_applied_count:
+        mismatches.append("schema.applied_count")
     if mismatches:
         print("verify-worker-release: identity mismatch: " + ", ".join(mismatches),
               file=sys.stderr)

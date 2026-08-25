@@ -115,7 +115,13 @@ def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subp
             args = sys.argv[1:]
             failure = os.environ.get("FAKE_PROGRAM5_FAILURE", "")
             if args and args[0] == "-c":
-                print("100")
+                expression = args[1] if len(args) > 1 else ""
+                if "schema_highest_migration" in expression:
+                    print("0300_operational_hermes_bot_profiles.sql")
+                elif "schema_applied_count" in expression:
+                    print("236")
+                else:
+                    print("100")
                 raise SystemExit(0)
             tool = Path(args[0]).name if args else ""
             rest = args[1:]
