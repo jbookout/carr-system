@@ -11,6 +11,7 @@ supplied bundle cannot pass in a fresh throwaway database.
 
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import hashlib
 import json
@@ -112,7 +113,7 @@ def _plugin_manifest(provider_key: str) -> dict:
 def _conformance_observation(
     provider_ref: str,
     manifest: dict,
-    observed_at: object,
+    observed_at: dt.datetime,
     *,
     run_ref: str,
     status: str,
