@@ -14,6 +14,7 @@ create table if not exists ops.tour_rights_receipt (
   status text not null check (status in ('active','expired','revoked','unknown')),
   created_at timestamptz not null default now(), unique (organization_tenant_id, id),
   unique (organization_tenant_id, provider, policy_key, receipt_version),
+  constraint tour_rights_receipt_one_successor unique (organization_tenant_id, supersedes_receipt_id),
   foreign key (organization_tenant_id, supersedes_receipt_id) references ops.tour_rights_receipt (organization_tenant_id, id),
   check (jsonb_typeof(allowed_field_classes) = 'array' and jsonb_typeof(allowed_use_classes) = 'array'),
   check (expires_at is null or expires_at > effective_at), check (status <> 'revoked' or revoked_at is not null)
@@ -129,7 +130,7 @@ create table if not exists ops.tour_share_grant (
   grant_version integer not null check (grant_version > 0), token_digest text not null check (token_digest ~ '^sha256:[a-f0-9]{64}$'),
   audience text not null check (audience in ('client','internal')), permission_scopes jsonb not null, rotated_from_grant_id uuid, created_at timestamptz not null default now(), expires_at timestamptz,
   revoked_at timestamptz, status text not null check (status in ('active','revoked','expired','rotated')),
-  unique (organization_tenant_id, id), unique (organization_tenant_id, projection_id, grant_version), unique (token_digest),
+  unique (organization_tenant_id, id), unique (organization_tenant_id, projection_id, grant_version), constraint tour_share_grant_one_successor unique (organization_tenant_id, rotated_from_grant_id), unique (token_digest),
   foreign key (organization_tenant_id, projection_id) references ops.tour_public_projection (organization_tenant_id, id),
   foreign key (organization_tenant_id, rotated_from_grant_id) references ops.tour_share_grant (organization_tenant_id, id),
   check (jsonb_typeof(permission_scopes) = 'array' and jsonb_array_length(permission_scopes) > 0 and permission_scopes <@ '["view_packet","view_map"]'::jsonb), check (expires_at is null or expires_at > created_at), check (status <> 'revoked' or revoked_at is not null)
@@ -186,8 +187,8 @@ declare prior ops.tour_rights_receipt%rowtype;
 begin
   if new.supersedes_receipt_id is null and new.receipt_version <> 1 then raise exception 'rights receipt version requires supersession lineage'; end if;
   if new.supersedes_receipt_id is not null then
-    select * into prior from ops.tour_rights_receipt where id=new.supersedes_receipt_id and organization_tenant_id=new.organization_tenant_id;
-    if not found or prior.policy_key <> new.policy_key or prior.provider <> new.provider or prior.receipt_version >= new.receipt_version then raise exception 'rights receipt supersession lineage is invalid'; end if;
+    select * into prior from ops.tour_rights_receipt where id=new.supersedes_receipt_id and organization_tenant_id=new.organization_tenant_id for update;
+    if not found or prior.policy_key <> new.policy_key or prior.provider <> new.provider or new.receipt_version <> prior.receipt_version + 1 then raise exception 'rights receipt supersession lineage is invalid'; end if;
   end if;
   return new;
 end $$;
@@ -207,8 +208,8 @@ begin
   if new.rotated_from_grant_id is null and new.grant_version <> 1 then raise exception 'share grant version requires rotation lineage'; end if;
   if new.rotated_from_grant_id is not null then
     if new.rotated_from_grant_id = new.id then raise exception 'share grant cannot rotate itself'; end if;
-    select * into prior from ops.tour_share_grant where id=new.rotated_from_grant_id and organization_tenant_id=new.organization_tenant_id;
-    if not found or prior.projection_id <> new.projection_id or prior.grant_version >= new.grant_version then raise exception 'share grant rotation lineage is invalid'; end if;
+    select * into prior from ops.tour_share_grant where id=new.rotated_from_grant_id and organization_tenant_id=new.organization_tenant_id for update;
+    if not found or prior.projection_id <> new.projection_id or new.grant_version <> prior.grant_version + 1 then raise exception 'share grant rotation lineage is invalid'; end if;
   end if;
   return new;
 end $$;
@@ -282,6 +283,8 @@ begin
     values ('10000000-0000-4000-8000-000000000001','tour-proof','proof','county',1,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','https://example.invalid/terms',now(),'proof','tour', '["display.name"]','["source_intake","canonical_fact"]',now()-interval '2 hours','active');
     insert into ops.tour_rights_receipt (id,organization_tenant_id,provider,policy_key,receipt_version,receipt_digest,terms_url,reviewed_at,reviewer,intended_use,allowed_field_classes,allowed_use_classes,effective_at,status,supersedes_receipt_id)
     values ('10000000-0000-4000-8000-000000000002','tour-proof','proof','county',2,'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','https://example.invalid/terms',now(),'proof','tour', '["display.name"]','["source_intake","canonical_fact","client_public_display"]',now()-interval '1 hour','active','10000000-0000-4000-8000-000000000001');
+    begin insert into ops.tour_rights_receipt (id,organization_tenant_id,provider,policy_key,receipt_version,receipt_digest,terms_url,reviewed_at,reviewer,intended_use,allowed_field_classes,allowed_use_classes,effective_at,status,supersedes_receipt_id) values ('10000000-0000-4000-8000-000000000003','tour-proof','proof','county',3,'sha256:abababababababababababababababababababababababababababababababab','https://example.invalid/terms',now(),'proof','tour','["display.name"]','["source_intake","canonical_fact"]',now(),'active','10000000-0000-4000-8000-000000000001'); raise exception 'proof expected skipped rights version denial'; exception when raise_exception then if sqlerrm <> 'rights receipt supersession lineage is invalid' then raise; end if; end;
+    begin insert into ops.tour_rights_receipt (id,organization_tenant_id,provider,policy_key,receipt_version,receipt_digest,terms_url,reviewed_at,reviewer,intended_use,allowed_field_classes,allowed_use_classes,effective_at,status,supersedes_receipt_id) values ('10000000-0000-4000-8000-000000000004','tour-proof','proof','county',2,'sha256:acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac','https://example.invalid/terms',now(),'proof','tour','["display.name"]','["source_intake","canonical_fact"]',now(),'active','10000000-0000-4000-8000-000000000001'); raise exception 'proof expected forked rights successor denial'; exception when unique_violation then null; end;
     begin
       insert into ops.tour_source_evidence (organization_tenant_id,stable_locator,evidence_class,retrieved_at,retrieval_status,content_digest,rights_receipt_id,data_classification) values ('tour-proof','https://example.invalid/old','direct_source',now(),'read','sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc','10000000-0000-4000-8000-000000000001','public');
       raise exception 'proof expected superseded rights denial';
@@ -324,6 +327,9 @@ begin
     begin insert into ops.tour_conflict_resolution_receipt (organization_tenant_id,conflict_id,selected_field_assertion_id,rationale,evidence,resolver_actor_id,resolved_at,receipt_digest) values ('tour-proof','10000000-0000-4000-8000-000000000070','10000000-0000-4000-8000-000000000031','proof mismatch','{}','proof',now(),'sha256:1313131313131313131313131313131313131313131313131313131313131313'); raise exception 'proof expected conflict resolution denial'; exception when raise_exception then if sqlerrm <> 'conflict resolution selection is not a matching participant' then raise; end if; end;
     begin insert into ops.tour_conflict_resolution_receipt (organization_tenant_id,conflict_id,selected_field_assertion_id,rationale,evidence,resolver_actor_id,resolved_at,receipt_digest) values ('tour-proof','10000000-0000-4000-8000-000000000070','10000000-0000-4000-8000-000000000030','proof duplicate','{}','proof',now(),'sha256:1414141414141414141414141414141414141414141414141414141414141414'); raise exception 'proof expected second conflict resolution denial'; exception when unique_violation then null; end;
     insert into ops.tour_share_grant (id,organization_tenant_id,projection_id,grant_version,token_digest,audience,permission_scopes,status) values ('10000000-0000-4000-8000-000000000080','tour-proof','10000000-0000-4000-8000-000000000060',1,'sha256:1111111111111111111111111111111111111111111111111111111111111111','client','["view_packet"]','active');
+    begin insert into ops.tour_share_grant (organization_tenant_id,projection_id,grant_version,token_digest,audience,permission_scopes,status,rotated_from_grant_id) values ('tour-proof','10000000-0000-4000-8000-000000000060',3,'sha256:1818181818181818181818181818181818181818181818181818181818181818','client','["view_packet"]','active','10000000-0000-4000-8000-000000000080'); raise exception 'proof expected skipped share version denial'; exception when raise_exception then if sqlerrm <> 'share grant rotation lineage is invalid' then raise; end if; end;
+    insert into ops.tour_share_grant (id,organization_tenant_id,projection_id,grant_version,token_digest,audience,permission_scopes,status,rotated_from_grant_id) values ('10000000-0000-4000-8000-000000000081','tour-proof','10000000-0000-4000-8000-000000000060',2,'sha256:1919191919191919191919191919191919191919191919191919191919191919','client','["view_packet"]','active','10000000-0000-4000-8000-000000000080');
+    begin insert into ops.tour_share_grant (organization_tenant_id,projection_id,grant_version,token_digest,audience,permission_scopes,status,rotated_from_grant_id) values ('tour-proof','10000000-0000-4000-8000-000000000060',2,'sha256:1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a','client','["view_packet"]','active','10000000-0000-4000-8000-000000000080'); raise exception 'proof expected forked share successor denial'; exception when unique_violation then null; end;
     begin update ops.tour_share_grant set status='revoked' where id='10000000-0000-4000-8000-000000000080'; raise exception 'proof expected share rewrite denial'; exception when raise_exception then if sqlerrm <> 'tour_share_grant is append-only' then raise; end if; end;
     begin delete from ops.tour_share_grant where id='10000000-0000-4000-8000-000000000080'; raise exception 'proof expected share delete denial'; exception when raise_exception then if sqlerrm <> 'tour_share_grant is append-only' then raise; end if; end;
     begin insert into ops.tour_share_grant (organization_tenant_id,projection_id,grant_version,token_digest,audience,permission_scopes,status,rotated_from_grant_id) values ('tour-proof','10000000-0000-4000-8000-000000000060',2,'sha256:2222222222222222222222222222222222222222222222222222222222222222','client','["edit_cheat_sheet"]','active','10000000-0000-4000-8000-000000000080'); raise exception 'proof expected unsafe scope denial'; exception when check_violation then null; end;

@@ -11,7 +11,7 @@ const fixture = JSON.parse(read("mcp-server/test/fixtures/tour-operations-founda
 const migration = read("migrations/0318_tour_operations_foundation.sql");
 
 test("foundation contract preserves provenance, conflicts, audit, rights versions and tenant integrity", () => {
-  assert.equal(contract.version, "1.5.0");
+  assert.equal(contract.version, "1.6.0");
   for (const field of ["property_id", "field_key", "source_evidence_id", "observed_at", "effective_from", "rights_receipt_id", "confidence", "data_classification"]) assert(contract.canonical_record_policy.required_fact_metadata.includes(field), field);
   for (const entity of ["FactConflict", "AuditEvent", "TourPropertyMembership", "ProjectionFact"]) assert.ok(contract.entities[entity], entity);
   assert.match(contract.entities.RightsReceipt.rule, /immutable versioned.*fail closed/i);
