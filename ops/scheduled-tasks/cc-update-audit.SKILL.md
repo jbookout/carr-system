@@ -11,6 +11,16 @@ Run exactly this:
 
 **There are TWO Claude Code binaries on this Mac and they are usually on different versions.** The PATH binary (`/opt/homebrew/bin/claude`, npm-global, self-updating) is what `claude --version` reports. The desktop app ships and updates its OWN runtime under `~/Library/Application Support/Claude/claude-code/<version>/`, and THAT is what actually executes Joe's sessions. On 2026-08-09 they were 2.1.226 and 2.1.222 respectively. Watching only the PATH binary blinds this audit to the runtime that matters, so the gate tracks both and fires when EITHER moves.
 
+**Do not infer scheduled-task runtime from the word "unattended." Refresh the execution topology
+locally on every audit.** Claude Code's native scheduled tasks are provider state owned by the
+desktop app under `~/Library/Application Support/Claude/claude-code-sessions/**/scheduled-tasks.json`;
+they do not invoke the PATH CLI. The 2026-08-25 readback found CLI 2.1.236, app runtime 2.1.237, a
+Claude-owned native task snapshot, no user crontab, and no task LaunchAgent invoking the CLI. Those
+versions and task counts are dated evidence, not permanent doctrine. Explicit PATH consumers in the
+repository currently include `tools/doc-convo` and room-bridge desks, so a `cli=` change still
+matters, but for those consumers rather than for the native scheduler. Recheck the provider
+snapshot, crontab/launchd state and explicit `claude` call sites before describing blast radius.
+
 Run exactly this:
 
 ```
@@ -25,7 +35,7 @@ echo "last_audited: $LAST"
 
 **If `current` equals `last_audited` exactly, STOP IMMEDIATELY.** Reply with one line: "No Claude Code update since $LAST. No audit needed." Do nothing else. Do not read files, do not spawn agents, do not call verbs. This is the normal outcome on most days and it must cost almost nothing.
 
-**Only if the strings differ** do you continue to Step 1. Say in your report WHICH binary moved, because it changes what the findings mean: a change in `app=` is present tense and affects Joe's sessions now, while a change in `cli=` is only what headless or PATH-invoked work would pick up.
+**Only if the strings differ** do you continue to Step 1. Say in your report WHICH binary moved, because it changes what the findings mean: a change in `app=` affects Joe's interactive sessions and Claude-owned native scheduled tasks, while a change in `cli=` affects explicit PATH consumers such as doc-convo and room-bridge desks. Refresh those consumers rather than repeating this example as an exhaustive list.
 
 Every version between the old and new numbers is in scope, not just the newest, because weekends and closed-app days stack several releases. When the two binaries sit at different versions, scope runs from the LOWER of the two audited numbers to the HIGHER of the two current ones, so nothing falls in the gap between them.
 
@@ -44,7 +54,7 @@ This is IT Support's job, not the main session's. Spawn the `it-support` agent w
 **"What in this release changes what the CARR system can or should do, and what in this release breaks or de-risks something we already run?"**
 
 Direct it to assess against the system as it actually exists, specifically:
-- The scheduled tasks in ~/.claude/scheduled-tasks/ (16 of them, several headless), especially anything touching MCP connection, print mode / `-p`, permissions, sandboxing, or background sessions
+- The provider-native tasks in ~/.claude/scheduled-tasks/ and the current Claude-owned scheduler snapshot (never a dated task count), especially anything touching MCP connection, permissions, sandboxing or background sessions. Do not call these CLI/headless tasks unless current process and scheduler evidence proves that execution path.
 - The record layer and MCP server in ~/carr-system (the ONE code repo; if it cannot reach that repo it must say so and stop, never improvise another home)
 - The skills in {{HOME}}/My Drive/.claude/skills/ and the agents in {{HOME}}/My Drive/.claude/agents/
 - The browser lanes: costar-operator, salesforce-reader, and any Chrome-driven SOP
