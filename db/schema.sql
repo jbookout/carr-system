@@ -1868,6 +1868,31 @@ end $$;
 
 
 --
+-- Name: calendar_prebrief_joe_live_due_at(timestamp with time zone); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.calendar_prebrief_joe_live_due_at(p_now timestamp with time zone) RETURNS timestamp with time zone
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare local_now timestamp; local_due timestamp; due timestamptz;
+begin
+  if p_now is null then
+    raise exception 'Joe calendar scheduler requires an observed instant';
+  end if;
+  local_now := p_now at time zone 'America/Chicago';
+  if extract(isodow from local_now) not between 1 and 5
+     or local_now::time < time '06:30'
+     or local_now::time >= time '06:45' then
+    return null;
+  end if;
+  local_due := local_now::date + time '06:30';
+  due := local_due at time zone 'America/Chicago';
+  return due;
+end $$;
+
+
+--
 -- Name: calendar_prebrief_resolver_sponsor(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -7801,11 +7826,11 @@ CREATE FUNCTION ops.schedule_calendar_prebrief_joe_live_job() RETURNS TABLE(job_
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
-declare local_now timestamp; due timestamptz; jid uuid;
+declare due timestamptz; jid uuid;
 begin
  if session_user<>'carr_jobs' then raise exception 'Joe scheduler identity refused'; end if;
- local_now:=now() at time zone 'America/Chicago';
- if extract(isodow from local_now) not between 1 and 5 or local_now::time < time '06:30' or local_now::time >= time '06:45' then return; end if;
+ due := ops.calendar_prebrief_joe_live_due_at(now());
+ if due is null then return; end if;
  if not exists(select 1 from ops.job_definition where key='calendar-prebrief-projection-joe-daily' and version=1 and owner_actor='joe' and enabled) or not exists(
    select 1
      from ops.calendar_prebrief_allowed_calendar a
@@ -7820,7 +7845,6 @@ begin
       and l.configuration_digest=a.configuration_digest
     where a.sponsor='joe'
  ) then raise exception 'Joe scheduler activation gate refused'; end if;
- due:=date_trunc('day',local_now) + interval '6 hours 30 minutes'; due:=due at time zone 'America/Chicago';
  select (ops.enqueue_job('calendar-prebrief-projection-joe-daily',1,due,jsonb_build_object('workflow_key','calendar-prebrief-projection-joe-daily','scheduled_for',due),'calendar-prebrief:joe:'||due::text,'live')).id into jid;
  return query select jid,due;
 end $$;
@@ -31486,6 +31510,7 @@ revoke all on function ops.authority_actor_slug() from public;
 revoke all on function ops.calendar_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.calendar_prebrief_attestor_sponsor() from public;
 revoke all on function ops.calendar_prebrief_canonical_event_digest(p_events jsonb) from public;
+revoke all on function ops.calendar_prebrief_joe_live_due_at(p_now timestamp with time zone) from public;
 revoke all on function ops.calendar_prebrief_resolver_sponsor() from public;
 revoke all on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.claim_calendar_prebrief_joe_live_job(p_worker text, p_lease_seconds integer) from public;
@@ -32281,6 +32306,7 @@ grant execute on function ops.approve_staging_release(p_release_key text, p_plan
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.attest_attempt_receipt_evaluation(p_attempt_id text, p_evaluator_kind text, p_check_ref text, p_dimension_refs jsonb, p_status text, p_independent boolean, p_evidence_refs jsonb, p_evaluation_metadata jsonb, p_outcome_feedback_ref text, p_outcome_feedback_hash text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
+grant execute on function ops.calendar_prebrief_joe_live_due_at(p_now timestamp with time zone) to carr_jobs;
 grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.claim_calendar_prebrief_joe_live_job(p_worker text, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
@@ -32351,8 +32377,8 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -32678,6 +32704,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0304_hermes_runtime_admission.sql	7a424204f01af73bd98e7c01e9f48a8efd531d088a2e4198e05337ea565b9abe	2026-08-25 11:43:10.83544+00
 0305_deal_history_queue_receipt_missing_visibility.sql	1099b02cfcd47812feaca5b18747190be5e730faf0abb81e0eea3604cda800e4	2026-08-25 13:47:29.212984+00
 0306_sourced_work_shape_disposition.sql	9a205a2c8c2ca50b61d5ee60b8883c0ff66a8138691d822faaf7ce4295ffb7af	2026-08-25 14:50:55.723919+00
+0307_calendar_prebrief_joe_schedule_time_and_failure.sql	686279a0ec797be4a7ddd36906bea175d2ae9bed89d1f54069520ae8525f2ef0	2026-08-25 15:28:07.424335+00
 \.
 
 
