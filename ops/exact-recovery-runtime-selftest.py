@@ -5,14 +5,20 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "ops"))
+from git_env import fixture_env  # noqa: E402
+
+
 DEPLOY = ROOT / "bin" / "deploy-worker.sh"
 WRANGLER = ROOT / "mcp-server" / "node_modules" / ".bin" / "wrangler"
 RUNTIME = ROOT / "mcp-server" / "node_modules"
+FIXTURE_ENV = fixture_env()
 RECOVERY_ARGS = (
     "--env", "staging",
     "--release-key", "candidate",
@@ -39,18 +45,22 @@ def make_source(*, mismatch: bool = False, broken_attachment: bool = False) -> t
             config.read_text(encoding="utf-8").replace("routes = []\n", "", 1),
             encoding="utf-8",
         )
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True, env=FIXTURE_ENV)
     subprocess.run(["git", "-C", str(root), "config", "user.email", "selftest@example.invalid"],
-                   check=True)
+                   check=True, env=FIXTURE_ENV)
     subprocess.run(["git", "-C", str(root), "config", "user.name", "selftest"],
-                   check=True)
-    subprocess.run(["git", "-C", str(root), "add", "mcp-server", "dealroom"], check=True)
-    subprocess.run(["git", "-C", str(root), "commit", "-qm", "fixture"], check=True)
-    sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-    subprocess.run(["git", "-C", str(root), "checkout", "-q", "--detach", sha], check=True)
+                   check=True, env=FIXTURE_ENV)
+    subprocess.run(["git", "-C", str(root), "add", "mcp-server", "dealroom"],
+                   check=True, env=FIXTURE_ENV)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "fixture"],
+                   check=True, env=FIXTURE_ENV)
+    sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  text=True, env=FIXTURE_ENV).strip()
+    subprocess.run(["git", "-C", str(root), "checkout", "-q", "--detach", sha],
+                   check=True, env=FIXTURE_ENV)
     if broken_attachment:
         subprocess.run(["git", "-C", str(root), "update-ref",
-                        "refs/remotes/origin/main", sha], check=True)
+                        "refs/remotes/origin/main", sha], check=True, env=FIXTURE_ENV)
     return holder, root, sha
 
 
@@ -59,7 +69,7 @@ def wrapper(root: Path, sha: str) -> subprocess.CompletedProcess[str]:
         ["sh", str(DEPLOY), "--release-sha", sha,
          "--internal-exact-source-root", str(root), *RECOVERY_ARGS],
         cwd=ROOT,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env={**FIXTURE_ENV, "GIT_TERMINAL_PROMPT": "0"},
         capture_output=True,
         text=True,
         timeout=45,
