@@ -182,6 +182,141 @@ def learning_refusals_project_as_shared_kernel_blockers():
     assert any(code.startswith("policy_learning_blocker:critical_dimension_regression") for code in blockers)
 
 
+def shadow_fixture():
+    digest = lambda char: "sha256:" + char * 64
+    shared = {
+        "work_request_id": "wr:shadow-01",
+        "input_binding_digest": digest("1"),
+        "context_binding_digest": digest("2"),
+        "case_ref": "case:golden-routing-01",
+        "case_digest": digest("3"),
+        "case_set_digest": digest("4"),
+        "bounded_metadata": True,
+        "field_allowlist": ["task_class", "risk_class", "route_id"],
+    }
+
+    def route_binding(route_ref, provider_ref):
+        profile = {
+            "provider_ref": provider_ref,
+            "model_ref": "model:router-v1",
+            "reasoning_effort_ref": "effort:standard",
+            "topology_digest": digest("6"),
+            "grounding_digest": digest("7"),
+        }
+        runtime_digest = learning.canonical_digest({"route_ref": route_ref, "runtime_profile": profile})
+        route_digest = learning.canonical_digest({"route_ref": route_ref, "runtime_binding_digest": runtime_digest})
+        return {**shared, "route_ref": route_ref, "runtime_profile": profile, "runtime_binding_digest": runtime_digest, "route_binding_digest": route_digest}
+
+    baseline_binding = route_binding("route:baseline", "provider:baseline")
+    candidate_binding = route_binding("route:candidate", "provider:candidate")
+    return {
+        "comparison_id": "comparison:shadow-01",
+        "case_ref": "case:golden-routing-01",
+        "context_binding": {"baseline": baseline_binding, "candidate": candidate_binding},
+        "baseline_route": "route:baseline",
+        "candidate_route": "route:candidate",
+        "baseline_binding_digest": baseline_binding["route_binding_digest"],
+        "candidate_binding_digest": candidate_binding["route_binding_digest"],
+        "route_dimensions": ["provider"],
+        "evaluation_dimensions": ["quality", "security", "latency"],
+        "dimension_results": [
+            {"dimension_id": "provider", "baseline_status": "passed", "candidate_status": "passed", "critical": False, "verifier_kind": "deterministic", "baseline_value": "provider:baseline", "candidate_value": "provider:candidate", "direction": "not_comparable", "evidence_refs": ["evidence:provider"]},
+            {"dimension_id": "quality", "baseline_status": "passed", "candidate_status": "passed", "critical": True, "verifier_kind": "deterministic", "baseline_value": 0.90, "candidate_value": 0.90, "direction": "higher_is_better", "evidence_refs": ["evidence:quality"]},
+            {"dimension_id": "security", "baseline_status": "passed", "candidate_status": "passed", "critical": True, "verifier_kind": "deterministic", "baseline_value": 1.0, "candidate_value": 1.0, "direction": "equivalent_only", "evidence_refs": ["evidence:security"]},
+            {"dimension_id": "latency", "baseline_status": "passed", "candidate_status": "passed", "critical": False, "verifier_kind": "deterministic", "baseline_value": 100.0, "candidate_value": 80.0, "direction": "lower_is_better", "evidence_refs": ["evidence:latency"]},
+        ],
+        "candidate_execution": {"allowed_actions": [], "external_side_effects": False, "side_effect_attempted": False, "capability_refusal_evidence_refs": []},
+        "outcome_horizon": {"state": "mature", "ends_at": "2026-08-25T12:00:00Z", "evidence_refs": ["evidence:outcome"]},
+        "result_provenance": {"baseline_evidence_refs": ["evidence:baseline"], "candidate_evidence_refs": ["evidence:candidate"], "evaluator_ref": "evaluator:independent-deterministic", "evaluator_kind": "deterministic", "independence_state": "independent", "redaction_class": "metadata_only", "raw_content_present": False, "private_content_present": False},
+        "state": "matched",
+        "promotion_state": "not_promoted",
+        "requested_state": "eligible_for_human_review",
+        "policy_version_cas": "cas:router-v2",
+        "kill_switch_ref": "kill-switch:router-v2",
+        "rollback_ref": "rollback:router-v1",
+        "expires_at": "2026-08-25T12:00:00Z",
+        "evidence_refs": ["evidence:shadow-comparison"],
+    }
+
+
+def safe_shadow_binding_is_reviewable_and_side_effect_free():
+    value = shadow_fixture()
+    assert learning.validate_shadow_route_binding(value) == value
+    result = learning.evaluate_shadow_comparison(value, as_of="2026-08-25T12:00:00Z")
+    assert result["decision"] == "eligible_for_human_review"
+    assert result["promotion_state"] == "not_promoted"
+
+
+def shadow_critical_regression_blocks_despite_cost_latency_gain():
+    value = shadow_fixture()
+    value["state"] = "mismatch"
+    value["dimension_results"][1]["candidate_value"] = 0.70
+    value["dimension_results"][3]["candidate_value"] = 20.0
+    result = learning.evaluate_shadow_comparison(value, as_of="2026-08-25T12:00:00Z")
+    assert result["decision"] == "not_eligible"
+    assert "critical_dimension_regression:quality" in result["reason_codes"]
+
+
+def shadow_side_effect_attempt_requires_refusal_evidence():
+    value = shadow_fixture()
+    value["candidate_execution"]["side_effect_attempted"] = True
+    refuse(lambda: learning.validate_shadow_route_binding(value), "capability refusal security evidence")
+    value["candidate_execution"]["capability_refusal_evidence_refs"] = ["evidence:capability-refusal"]
+    assert learning.validate_shadow_route_binding(value) == value
+    result = learning.evaluate_shadow_comparison(value, as_of="2026-08-25T12:00:00Z")
+    assert result["decision"] == "not_eligible"
+    assert "security_capability_refusal_observed" in result["reason_codes"]
+
+
+def shadow_requires_exact_frozen_binding_and_mature_outcome():
+    value = shadow_fixture()
+    value["context_binding"]["candidate"]["input_binding_digest"] = "sha256:" + "9" * 64
+    refuse(lambda: learning.validate_shadow_route_binding(value), "shared Work Request/input/context/case bindings")
+    value = shadow_fixture()
+    value["context_binding"]["candidate"]["runtime_binding_digest"] = value["context_binding"]["baseline"]["runtime_binding_digest"]
+    value["context_binding"]["candidate"]["route_binding_digest"] = learning.canonical_digest({"route_ref": value["candidate_route"], "runtime_binding_digest": value["context_binding"]["candidate"]["runtime_binding_digest"]})
+    value["candidate_binding_digest"] = value["context_binding"]["candidate"]["route_binding_digest"]
+    refuse(lambda: learning.validate_shadow_route_binding(value), "runtime digest is not tied")
+    value = shadow_fixture()
+    value["context_binding"]["candidate"]["route_binding_digest"] = value["context_binding"]["baseline"]["route_binding_digest"]
+    value["candidate_binding_digest"] = value["context_binding"]["candidate"]["route_binding_digest"]
+    refuse(lambda: learning.validate_shadow_route_binding(value), "route digest is not tied")
+    value = shadow_fixture()
+    value["context_binding"]["candidate"]["context_binding_digest"] = "sha256:" + "8" * 64
+    refuse(lambda: learning.validate_shadow_route_binding(value), "shared Work Request/input/context/case bindings")
+    value = shadow_fixture()
+    value["case_ref"] = "case:other"
+    refuse(lambda: learning.validate_shadow_route_binding(value), "match the frozen case binding")
+    value = shadow_fixture()
+    value["context_binding"]["candidate"]["runtime_profile"] = value["context_binding"]["baseline"]["runtime_profile"].copy()
+    value["context_binding"]["candidate"]["runtime_binding_digest"] = learning.canonical_digest({"route_ref": value["candidate_route"], "runtime_profile": value["context_binding"]["candidate"]["runtime_profile"]})
+    value["context_binding"]["candidate"]["route_binding_digest"] = learning.canonical_digest({"route_ref": value["candidate_route"], "runtime_binding_digest": value["context_binding"]["candidate"]["runtime_binding_digest"]})
+    value["candidate_binding_digest"] = value["context_binding"]["candidate"]["route_binding_digest"]
+    refuse(lambda: learning.validate_shadow_route_binding(value), "changed runtime profile fields")
+    value = shadow_fixture()
+    value["outcome_horizon"] = {"state": "immature", "ends_at": "2026-08-25T12:00:00Z", "evidence_refs": []}
+    result = learning.evaluate_shadow_comparison(value, as_of="2026-08-25T12:00:00Z")
+    assert result["decision"] == "not_eligible"
+    assert "insufficient_evidence:outcome_horizon_immature" in result["reason_codes"]
+
+
+def shadow_cannot_request_active_or_store_raw_content():
+    value = shadow_fixture()
+    value["requested_state"] = "active"
+    refuse(lambda: learning.validate_shadow_route_binding(value), "bounded exploration or active")
+    value = shadow_fixture()
+    value["context_binding"]["candidate"]["field_allowlist"].append("raw_transcript")
+    refuse(lambda: learning.validate_shadow_route_binding(value), "raw or private")
+    value = shadow_fixture()
+    result = learning.evaluate_shadow_comparison(value, as_of="2026-08-25T11:59:59Z")
+    assert result["decision"] == "not_eligible"
+    assert "insufficient_evidence:outcome_horizon_immature" in result["reason_codes"]
+    value = shadow_fixture()
+    result = learning.evaluate_shadow_comparison(value, as_of="2026-08-26T00:00:00Z")
+    assert result["decision"] == "not_eligible"
+    assert "insufficient_evidence:comparison_expired" in result["reason_codes"]
+
+
 if __name__ == "__main__":
     for name, check in (
         ("JSON Schema validates the fixture and nested closed shapes", json_schema_fixture_and_nested_shapes_are_real_contracts),
@@ -193,5 +328,10 @@ if __name__ == "__main__":
         ("temporal ordering is fail closed", temporal_ordering_refuses_future_or_out_of_horizon_evidence),
         ("critical regression, scalar reward, and ineligible action fail", critical_regression_scalar_reward_and_ineligible_action_fail),
         ("learning refusal becomes a shared evaluation blocker", learning_refusals_project_as_shared_kernel_blockers),
+        ("safe shadow binding is reviewable and side-effect free", safe_shadow_binding_is_reviewable_and_side_effect_free),
+        ("critical shadow regression beats cost and latency", shadow_critical_regression_blocks_despite_cost_latency_gain),
+        ("shadow side effects require refusal evidence", shadow_side_effect_attempt_requires_refusal_evidence),
+        ("shadow binding and outcome horizon are exact", shadow_requires_exact_frozen_binding_and_mature_outcome),
+        ("shadow cannot request active or store raw content", shadow_cannot_request_active_or_store_raw_content),
     ):
         check(); print(f"ok  {name}")

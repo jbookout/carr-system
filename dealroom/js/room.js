@@ -1553,6 +1553,46 @@ function boot() {
           ladder.appendChild(el("p", "passport-eval-failures", `Failure taxonomy: ${failures.map((row) => humanRef(row.class_name)).join(", ") || "none"}.`));
           card.appendChild(ladder);
         }
+        if (passport.activation_reliability) {
+          const facts = passport.activation_reliability;
+          const activation = facts.knowledge_activation;
+          const reliability = facts.reliability;
+          const canonical = facts.canonical;
+          const issuedEnvelope = passport.engineering_passport?.execution_envelopes?.find((envelope) => envelope.work_request_id === passport.work_request_id) || null;
+          const knowledge = el("section", "passport-activation-section");
+          knowledge.setAttribute("aria-label", "Knowledge and Grounding");
+          knowledge.appendChild(el("h3", null, "Knowledge & Grounding"));
+          knowledge.appendChild(el("p", null, activation
+            ? `Bound bundle ${activation.bundle_digest.slice(0, 16)}… · ${activation.closure.state.replace(/_/g, " ")} · ${activation.item_dispositions.length} redacted item disposition(s).`
+            : "No activation receipt is available; grounding is withheld rather than inferred."));
+          card.appendChild(knowledge);
+
+          const route = el("section", "passport-activation-section");
+          route.setAttribute("aria-label", "Route and Agent Topology");
+          route.appendChild(el("h3", null, "Route & Agent Topology"));
+          route.appendChild(el("p", null, issuedEnvelope?.runtime_profile && issuedEnvelope?.execution_topology && issuedEnvelope?.evaluation_plan
+            ? `Server-issued runtime: ${humanRef(issuedEnvelope.runtime_profile.ref)} · ${humanRef(issuedEnvelope.runtime_profile.model_id)}; topology: ${humanRef(issuedEnvelope.execution_topology.ref)}; evaluation plan: ${humanRef(issuedEnvelope.evaluation_plan.ref)}. Observed staffing: ${humanRef(actual.surface)} · ${humanRef(actual.harness_id)}.`
+            : `Observed route: ${humanRef(actual.surface)} · ${humanRef(actual.model_id)} · ${humanRef(actual.harness_id)}. Server runtime/topology is withheld until an exact issued envelope is bound.`));
+          card.appendChild(route);
+
+          const outcome = el("section", "passport-activation-section");
+          outcome.setAttribute("aria-label", "Evaluation and Outcome");
+          outcome.appendChild(el("h3", null, "Evaluation & Outcome"));
+          outcome.appendChild(el("p", null, reliability
+            ? `Grounding: ${reliability.grounding_sufficiency.state}; deterministic checks: ${reliability.deterministic_checks.length}; judge: ${reliability.model_judgement.state}; human outcome: ${reliability.human_acceptance.state}; horizon: ${reliability.outcome_horizon.state}; closure: ${(canonical?.reliability?.state || reliability.closure.state).replace(/_/g, " ")} (${(canonical?.reliability?.reasons || reliability.closure.reasons).join(", ") || "canonical authority evidence required"}).`
+            : "No reliability receipt is available; outcome is not promoted."));
+          card.appendChild(outcome);
+
+          const learning = el("section", "passport-activation-section");
+          learning.setAttribute("aria-label", "Learning");
+          learning.appendChild(el("h3", null, "Learning"));
+          learning.appendChild(el("p", null, canonical
+            ? `Canonical learning lifecycle: ${canonical.learning.lifecycle.replace(/_/g, " ")}; candidates: ${canonical.learning.candidate_refs.map(humanRef).join(", ") || "none"}; canonical telemetry: ${canonical.telemetry.length} signal(s). All remain human-gated and unpromoted.`
+            : reliability
+              ? "Canonical learning projection is unavailable; executor receipt candidates are never used as learning state."
+            : "No learning proposal is inferred from missing evidence."));
+          card.appendChild(learning);
+        }
         if (passport.engineering_passport) {
           const engineering = passport.engineering_passport;
           const panel = el("section", "passport-engineering");

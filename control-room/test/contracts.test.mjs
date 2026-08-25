@@ -15,7 +15,26 @@ test("all contract files are valid versioned JSON", () => {
     const value = read(path.join("contracts", file));
     if (file !== "fixture-schema.v1.json") {
       assert.equal(value.version, "1.0.0", file);
-      assert.match(value.status, /^phase[01]_/, file);
+      assert.match(value.status, /^(phase[01]_.*)$/, file);
+    }
+  }
+});
+
+test("evidence activation manifest maps every required admission case to an executable gate", () => {
+  const manifest = read("contracts/evidence-activation-acceptance-map.v1.json");
+  assert.equal(manifest.schema_version, "evidence-activation-acceptance-map.v1");
+  assert.equal(manifest.promotion_posture, "human_review_only");
+  assert.equal(manifest.cases.length, 14);
+  assert.equal(new Set(manifest.cases.map(row => row.id)).size, 14);
+  for (const row of manifest.cases) {
+    assert.match(row.id, /^[a-z0-9_]+$/);
+    assert.ok(Array.isArray(row.evidence) && row.evidence.length > 0, `${row.id} evidence is non-empty`);
+    for (const evidence of row.evidence) {
+      assert.equal(typeof evidence.file, "string");
+      assert.equal(typeof evidence.assertion, "string");
+      const gate = path.resolve(ROOT, "..", evidence.file);
+      assert.ok(fs.existsSync(gate), `${row.id} evidence file exists: ${evidence.file}`);
+      assert.ok(fs.readFileSync(gate, "utf8").includes(evidence.assertion), `${row.id} assertion is executable: ${evidence.assertion}`);
     }
   }
 });

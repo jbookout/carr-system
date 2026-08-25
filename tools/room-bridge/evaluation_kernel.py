@@ -22,19 +22,25 @@ class EvalPortfolioError(contract.ContractError):
 RUNGS = {"smoke", "regression", "hill_climb", "launch"}
 OUTCOMES = {"passed", "failed", "blocked", "unknown"}
 DIRECTIONS = {"improved", "equivalent", "regressed", "not_compared"}
-PORTFOLIO_FIELDS = {"schema_version", "portfolio_id", "data_class", "generated_at", "workflow", "policy", "provenance", "migration", "binding", "case_set", "taxonomy", "cases", "results", "frontier_comparisons", "experiments", "behavior_findings", "notes"}
+PORTFOLIO_FIELDS = {"schema_version", "portfolio_id", "data_class", "generated_at", "workflow", "policy", "provenance", "outcome_horizon", "drift", "migration", "binding", "case_set", "taxonomy", "cases", "results", "frontier_comparisons", "experiments", "behavior_findings", "notes"}
 WORKFLOW_FIELDS = {"workflow_id", "rubric_id", "rubric_version", "rubric_digest", "case_set_digest"}
 POLICY_FIELDS = {"policy_id", "policy_version", "policy_digest", "default_effect", "risk_requirements"}
-RISK_REQUIREMENT_FIELDS = {"risk_class", "lifecycle", "required_rungs", "independent_review_required"}
+RISK_REQUIREMENT_FIELDS = {"risk_class", "lifecycle", "required_rungs", "required_evaluator_kinds", "min_held_out_cases", "max_critical_failure_count", "max_critical_failure_rate", "confidence_posture", "drift_tolerance", "independent_review_required", "human_acceptance_required", "outcome_horizon_maturity"}
 PROVENANCE_FIELDS = {"source_class", "production_trace_review", "expires_at"}
+OUTCOME_HORIZON_FIELDS = {"status", "matures_at", "evidence_refs"}
+DRIFT_FIELDS = {"status", "observed_delta", "baseline_ref", "evidence_refs"}
 MIGRATION_FIELDS = {"canonical_contract", "legacy_aliases"}
 BINDING_FIELDS = {"work_request_id", "plan_revision_digest", "state_version", "canonical_record_digest", "accepted_resource_revisions", "projection_digest", "risk_class", "lifecycle"}
-CASE_SET_FIELDS = {"case_set_id", "version", "refresh_state", "production_trace_review"}
-TAXONOMY_FIELDS = {"taxonomy_version", "refresh_state", "production_trace_review", "failure_modes"}
+CASE_SET_FIELDS = {"case_set_id", "version", "refresh_state", "production_trace_review", "golden_sets"}
+GOLDEN_SET_FIELDS = {"golden_set_ref", "workflow_lane", "risk_class", "split", "case_ids"}
+TAXONOMY_FIELDS = {"taxonomy_version", "refresh_state", "production_trace_review", "unknown_posture", "failure_modes"}
 FAILURE_MODE_FIELDS = {"failure_mode_id", "parent_id", "class_name", "status", "affected_stages", "affected_dimensions", "evidence_refs", "provenance", "refresh_state"}
-CASE_FIELDS = {"case_id", "rung", "phase_id", "job_stages", "adapter_configuration", "evaluator_version", "evidence_refs", "refresh_state", "diagnosis_required"}
-RESULT_FIELDS = {"result_id", "case_id", "rung", "attempt_id", "status", "confidence", "evidence_refs", "dimension_results", "stage_results", "telemetry", "failure_mode_ids"}
-DIMENSION_FIELDS = {"dimension_id", "status", "direction_vs_baseline", "evidence_refs"}
+CASE_FIELDS = {"case_id", "rung", "phase_id", "workflow_lane", "risk_class", "split", "golden_set_ref", "target_golden_set_ref", "case_provenance", "case_kind", "human_label_ref", "lifecycle", "lifecycle_history", "job_stages", "adapter_configuration", "evaluator_version", "evidence_refs", "refresh_state", "diagnosis_required"}
+LIFECYCLE_EVENT_FIELDS = {"from", "to", "evidence_ref"}
+RESULT_FIELDS = {"result_id", "case_id", "rung", "attempt_id", "status", "confidence", "evidence_refs", "dimension_results", "stage_results", "telemetry", "evaluator_results", "failure_mode_ids"}
+DIMENSION_FIELDS = {"dimension_id", "status", "direction_vs_baseline", "critical", "evidence_refs"}
+EVALUATOR_RESULT_FIELDS = {"kind", "evaluator_ref", "rubric_ref", "provenance", "calibration", "lower_bound_evidence_ref", "status", "confidence", "critical", "independence_state", "evidence_refs", "human_accepted"}
+CALIBRATION_FIELDS = {"status", "calibration_ref", "sample_count"}
 STAGE_RESULT_FIELDS = {"stage_id", "status", "dimension_ids", "evidence_refs"}
 TELEMETRY_FIELDS = {"latency_ms", "cost_usd", "usage", "recovery_count", "intervention_count", "reset_tax"}
 COMPARISON_FIELDS = {"comparison_id", "baseline_result_id", "candidate_result_id", "required_dimensions", "dimension_tolerances", "evidence_required", "promotion_state"}
@@ -78,6 +84,14 @@ def _outcome(value: Any, label: str) -> str:
     return value
 
 
+def _contains_key(value: Any, forbidden: set[str]) -> bool:
+    if isinstance(value, dict):
+        return bool(forbidden & set(value)) or any(_contains_key(item, forbidden) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_key(item, forbidden) for item in value)
+    return False
+
+
 def _validate_binding(value: Any) -> dict[str, Any]:
     row = _exact(value, BINDING_FIELDS, "eval portfolio binding")
     _id(row["work_request_id"], "eval portfolio work_request_id")
@@ -111,8 +125,10 @@ def validate_eval_portfolio(raw: Any, projection: Any | None = None) -> dict[str
     if value["schema_version"] != "carr-evaluation-kernel.v1":
         raise EvalPortfolioError("unsupported shared evaluation kernel schema_version")
     _id(value["portfolio_id"], "eval portfolio portfolio_id")
-    if value["data_class"] != "synthetic_only":
-        raise EvalPortfolioError("eval portfolio v1 is synthetic_only")
+    if value["data_class"] not in {"synthetic_only", "metadata_only", "redacted_evidence"}:
+        raise EvalPortfolioError("eval portfolio data_class is invalid")
+    if value["data_class"] == "redacted_evidence" and _contains_key(value, {"raw_prompt", "raw_transcript", "tool_payload", "raw_output"}):
+        raise EvalPortfolioError("redacted evidence cannot contain raw prompt, transcript, tool payload, or output")
     contract._timestamp(value["generated_at"], "eval portfolio generated_at")
     workflow = _exact(value["workflow"], WORKFLOW_FIELDS, "evaluation workflow rubric")
     for field in ("workflow_id", "rubric_id", "rubric_version"):_id(workflow[field], f"evaluation workflow {field}")
@@ -128,11 +144,36 @@ def validate_eval_portfolio(raw: Any, projection: Any | None = None) -> dict[str
     for raw_requirement in policy["risk_requirements"]:
         requirement = _exact(raw_requirement, RISK_REQUIREMENT_FIELDS, "evaluation risk requirement")
         key = (requirement["risk_class"], requirement["lifecycle"])
-        if key in policy_rows or requirement["risk_class"] not in {f"R{i}" for i in range(7)} or requirement["lifecycle"] not in {"rehearsal", "change", "experiment", "launch"} or not set(requirement["required_rungs"]).issubset(RUNGS) or not requirement["required_rungs"] or not isinstance(requirement["independent_review_required"], bool): raise EvalPortfolioError("evaluation risk requirement is invalid")
+        if key in policy_rows or requirement["risk_class"] not in {f"R{i}" for i in range(7)} or requirement["lifecycle"] not in {"rehearsal", "change", "experiment", "launch"} or not set(requirement["required_rungs"]).issubset(RUNGS) or not requirement["required_rungs"] or not isinstance(requirement["independent_review_required"], bool) or not isinstance(requirement["human_acceptance_required"], bool): raise EvalPortfolioError("evaluation risk requirement is invalid")
+        if not isinstance(requirement["required_evaluator_kinds"], list) or not requirement["required_evaluator_kinds"] or not set(requirement["required_evaluator_kinds"]).issubset({"deterministic", "judge", "human_acceptance"}): raise EvalPortfolioError("evaluation required evaluator kinds are invalid")
+        for field in ("min_held_out_cases", "max_critical_failure_count"):
+            if not isinstance(requirement[field], int) or isinstance(requirement[field], bool) or requirement[field] < 0: raise EvalPortfolioError("evaluation risk sample/failure bounds are invalid")
+        if not isinstance(requirement["max_critical_failure_rate"], (int, float)) or isinstance(requirement["max_critical_failure_rate"], bool) or not 0 <= requirement["max_critical_failure_rate"] <= 1: raise EvalPortfolioError("evaluation critical failure rate bound is invalid")
+        if requirement["confidence_posture"] not in {"descriptive", "lower_bound_required"} or not isinstance(requirement["drift_tolerance"], (int, float)) or isinstance(requirement["drift_tolerance"], bool) or requirement["drift_tolerance"] < 0 or requirement["outcome_horizon_maturity"] not in {"not_required", "required"}: raise EvalPortfolioError("evaluation statistical gate posture is invalid")
         policy_rows.add(key)
     provenance = _exact(value["provenance"], PROVENANCE_FIELDS, "evaluation provenance")
     if provenance["source_class"] not in {"synthetic_only", "production_redacted"} or provenance["production_trace_review"] not in {"unavailable_no_production_traces", "redacted_production_review"}: raise EvalPortfolioError("evaluation provenance is invalid")
     contract._timestamp(provenance["expires_at"], "evaluation provenance expires_at")
+    if value["data_class"] in {"synthetic_only", "metadata_only"} and (provenance["source_class"] != "synthetic_only" or provenance["production_trace_review"] != "unavailable_no_production_traces"):
+        raise EvalPortfolioError("synthetic or metadata evaluation must declare unavailable production provenance")
+    if value["data_class"] == "redacted_evidence" and (provenance["source_class"] != "production_redacted" or provenance["production_trace_review"] != "redacted_production_review"):
+        raise EvalPortfolioError("redacted evidence must declare redacted production provenance")
+    horizon = _exact(value["outcome_horizon"], OUTCOME_HORIZON_FIELDS, "evaluation outcome horizon")
+    if horizon["status"] not in {"mature", "immature", "unavailable", "stale"}: raise EvalPortfolioError("evaluation outcome horizon status is invalid")
+    contract._timestamp(horizon["matures_at"], "evaluation outcome horizon matures_at")
+    _refs(horizon["evidence_refs"], "evaluation outcome horizon evidence_refs")
+    if horizon["status"] == "mature" and (value["generated_at"] < horizon["matures_at"] or not horizon["evidence_refs"]):
+        raise EvalPortfolioError("mature outcome horizon cannot precede maturity or omit evidence")
+    if horizon["status"] != "mature" and value["generated_at"] >= horizon["matures_at"]:
+        raise EvalPortfolioError("outcome horizon cannot remain immature after its maturity timestamp")
+    drift = _exact(value["drift"], DRIFT_FIELDS, "evaluation drift evidence")
+    if drift["status"] not in {"available", "insufficient", "exceeds_tolerance", "unavailable"} or not isinstance(drift["observed_delta"], (int, float)) or isinstance(drift["observed_delta"], bool) or drift["observed_delta"] < 0: raise EvalPortfolioError("evaluation drift evidence is invalid")
+    if drift["status"] in {"available", "exceeds_tolerance"}:
+        if drift["baseline_ref"] is None or not drift["evidence_refs"]: raise EvalPortfolioError("available drift requires baseline and evidence")
+        _id(drift["baseline_ref"], "evaluation drift baseline_ref")
+    elif drift["baseline_ref"] is not None or drift["evidence_refs"] or drift["observed_delta"] != 0:
+        raise EvalPortfolioError("insufficient or unavailable drift cannot carry useful measurements")
+    _refs(drift["evidence_refs"], "evaluation drift evidence_refs")
     migration = _exact(value["migration"], MIGRATION_FIELDS, "evaluation migration")
     _id(migration["canonical_contract"], "evaluation migration canonical contract"); _refs(migration["legacy_aliases"], "evaluation migration aliases")
     binding = _validate_binding(value["binding"])
@@ -143,12 +184,28 @@ def validate_eval_portfolio(raw: Any, projection: Any | None = None) -> dict[str
             raise EvalPortfolioError("eval portfolio must bind the exact current observatory projection")
     case_set = _exact(value["case_set"], CASE_SET_FIELDS, "eval case set")
     _id(case_set["case_set_id"], "eval case set id"); _id(case_set["version"], "eval case set version")
-    if case_set["refresh_state"] not in {"current_synthetic", "refresh_due", "unknown"} or case_set["production_trace_review"] != "unavailable_no_production_traces":
+    allowed_refresh = {"current_synthetic", "refresh_due", "unknown"} if value["data_class"] != "redacted_evidence" else {"current_synthetic", "current_redacted", "refresh_due", "unknown"}
+    allowed_trace_review = {"unavailable_no_production_traces"} if value["data_class"] != "redacted_evidence" else {"unavailable_no_production_traces", "redacted_production_review"}
+    if case_set["refresh_state"] not in allowed_refresh or case_set["production_trace_review"] not in allowed_trace_review:
         raise EvalPortfolioError("eval case set must preserve synthetic drift posture")
+    if (value["data_class"] == "redacted_evidence") != (case_set["production_trace_review"] == "redacted_production_review"):
+        raise EvalPortfolioError("case set production provenance disagrees with portfolio data class")
+    golden_refs: dict[str, dict[str, Any]] = {}
+    golden_keys: set[tuple[Any, Any, Any]] = set()
+    for raw_golden in case_set["golden_sets"]:
+        golden_set = _exact(raw_golden, GOLDEN_SET_FIELDS, "eval golden set")
+        _id(golden_set["golden_set_ref"], "eval golden set ref"); _id(golden_set["workflow_lane"], "eval golden set workflow lane")
+        if golden_set["risk_class"] not in {f"R{i}" for i in range(7)} or golden_set["split"] not in {"development", "held_out", "canary"} or not isinstance(golden_set["case_ids"], list) or not golden_set["case_ids"]: raise EvalPortfolioError("eval golden set key or membership is invalid")
+        golden_key = (golden_set["workflow_lane"], golden_set["risk_class"], golden_set["split"])
+        if golden_key in golden_keys: raise EvalPortfolioError("eval golden set key is duplicated")
+        golden_keys.add(golden_key)
+        golden_refs[golden_set["golden_set_ref"]] = golden_set
     taxonomy = _exact(value["taxonomy"], TAXONOMY_FIELDS, "eval taxonomy")
     _id(taxonomy["taxonomy_version"], "eval taxonomy version")
-    if taxonomy["refresh_state"] not in {"current_synthetic", "refresh_due", "unknown"} or taxonomy["production_trace_review"] != "unavailable_no_production_traces":
+    if taxonomy["refresh_state"] not in allowed_refresh or taxonomy["production_trace_review"] not in allowed_trace_review or taxonomy["unknown_posture"] != "unclassified_requires_triage":
         raise EvalPortfolioError("eval taxonomy must preserve unavailable production trace review")
+    if (value["data_class"] == "redacted_evidence") != (taxonomy["production_trace_review"] == "redacted_production_review"):
+        raise EvalPortfolioError("taxonomy production provenance disagrees with portfolio data class")
     modes = set()
     if not isinstance(taxonomy["failure_modes"], list) or not taxonomy["failure_modes"]:
         raise EvalPortfolioError("eval taxonomy needs named failure modes")
@@ -162,7 +219,7 @@ def validate_eval_portfolio(raw: Any, projection: Any | None = None) -> dict[str
             raise EvalPortfolioError("failure mode parent must precede and exist")
         _id(mode["class_name"], "failure mode class_name"); _refs(mode["affected_stages"], "failure mode affected_stages")
         _refs(mode["affected_dimensions"], "failure mode affected_dimensions"); _refs(mode["evidence_refs"], "failure mode evidence_refs")
-        if mode["status"] not in {"active", "unclassified", "retired"} or mode["provenance"] not in {"synthetic_fixture", "behavior_audit"} or mode["refresh_state"] not in {"current_synthetic", "refresh_due", "unknown"}:
+        if mode["status"] not in {"active", "unclassified", "retired"} or mode["provenance"] not in {"synthetic_fixture", "behavior_audit", "human_correction", "production_defect", "security_incident", "negative_knowledge", "accepted_outcome"} or mode["refresh_state"] not in allowed_refresh:
             raise EvalPortfolioError("failure mode vocabulary is invalid")
     cases: dict[str, dict[str, Any]] = {}
     if not isinstance(value["cases"], list) or not value["cases"]:
@@ -173,17 +230,41 @@ def validate_eval_portfolio(raw: Any, projection: Any | None = None) -> dict[str
         if case["case_id"] in cases or case["rung"] not in RUNGS:
             raise EvalPortfolioError("eval case id/rung is invalid")
         cases[case["case_id"]] = case
-        _id(case["phase_id"], "eval case phase_id"); _refs(case["job_stages"], "eval case job_stages")
+        _id(case["phase_id"], "eval case phase_id"); _id(case["workflow_lane"], "eval case workflow_lane")
+        if case["risk_class"] not in {f"R{i}" for i in range(7)} or case["split"] not in {"development", "held_out", "canary"} or case["case_provenance"] not in {"synthetic_fixture", "human_correction", "production_defect", "security_incident", "negative_knowledge", "accepted_outcome"} or case["case_kind"] not in {"task", "evaluator_quality"} or case["lifecycle"] not in {"proposed", "triaged", "accepted", "retired"}: raise EvalPortfolioError("eval case lane, split, provenance, or lifecycle is invalid")
+        if case["lifecycle"] in {"proposed", "triaged"}:
+            if case["golden_set_ref"] is not None: raise EvalPortfolioError("proposed or triaged case cannot enter a golden set")
+            if case["target_golden_set_ref"] is not None and case["target_golden_set_ref"] not in golden_refs: raise EvalPortfolioError("case target golden set is unknown")
+        else:
+            if case["golden_set_ref"] not in golden_refs or case["case_id"] not in golden_refs[case["golden_set_ref"]]["case_ids"]: raise EvalPortfolioError("accepted/retired case must bind an existing golden-set membership")
+            if case["target_golden_set_ref"] not in {None, case["golden_set_ref"]}: raise EvalPortfolioError("case target golden set must match accepted membership")
+        golden: dict[str, Any] | None = golden_refs.get(case["golden_set_ref"] or case["target_golden_set_ref"])
+        if golden and (golden["workflow_lane"] != case["workflow_lane"] or golden["risk_class"] != case["risk_class"] or golden["split"] != case["split"]): raise EvalPortfolioError("case lane/risk/split does not match golden set")
+        if case["case_kind"] == "evaluator_quality" and not case["human_label_ref"]: raise EvalPortfolioError("evaluator-quality case must bind a human-labeled sample")
+        if case["case_kind"] == "task" and case["human_label_ref"] is not None: raise EvalPortfolioError("task case cannot claim evaluator-quality human label")
+        if not isinstance(case["lifecycle_history"], list): raise EvalPortfolioError("eval case lifecycle history must be append-only list")
+        state = "proposed"
+        allowed_transitions = {"proposed": {"triaged"}, "triaged": {"accepted"}, "accepted": {"retired"}, "retired": set()}
+        for raw_event in case["lifecycle_history"]:
+            event = _exact(raw_event, LIFECYCLE_EVENT_FIELDS, "eval case lifecycle event")
+            if event["from"] != state or event["to"] not in allowed_transitions[state]: raise EvalPortfolioError("eval case lifecycle transition is invalid")
+            _id(event["evidence_ref"], "eval case lifecycle evidence_ref"); state = event["to"]
+        if state != case["lifecycle"]: raise EvalPortfolioError("eval case lifecycle does not match append-only history")
+        _refs(case["job_stages"], "eval case job_stages")
         if not set(case["job_stages"]).issubset(rubric["stages"]): raise EvalPortfolioError("eval case has unknown workflow rubric stage")
         _validate_adapter(case["adapter_configuration"]); _id(case["evaluator_version"], "eval case evaluator_version"); _refs(case["evidence_refs"], "eval case evidence_refs")
         if case["refresh_state"] not in {"current_synthetic", "refresh_due", "unknown"} or not isinstance(case["diagnosis_required"], bool): raise EvalPortfolioError("eval case refresh/diagnosis is invalid")
-        if case["rung"] == "launch" and case_set["production_trace_review"] != "unavailable_no_production_traces": raise EvalPortfolioError("launch must remain offline representation")
+        if case["split"] == "held_out":
+            forbidden = {"expected_output", "expected_answer", "reference_answer", "golden_answer"}
+            if _contains_key(case, forbidden): raise EvalPortfolioError("held-out expected output leaked into executor-visible case projection")
     results: dict[str, dict[str, Any]] = {}
+    result_cases: set[str] = set()
     for raw_result in value["results"]:
         result = _exact(raw_result, RESULT_FIELDS, "eval result")
         _id(result["result_id"], "eval result id")
-        if result["result_id"] in results or result["case_id"] not in cases or result["rung"] != cases[result["case_id"]]["rung"]: raise EvalPortfolioError("eval result binding is invalid")
+        if result["result_id"] in results or result["case_id"] in result_cases or result["case_id"] not in cases or result["rung"] != cases[result["case_id"]]["rung"]: raise EvalPortfolioError("eval result binding is invalid or has multiple current results")
         results[result["result_id"]] = result; _id(result["attempt_id"], "eval result attempt_id"); _outcome(result["status"], "eval result status")
+        result_cases.add(result["case_id"])
         if result["confidence"] not in {"high", "medium", "low", "unknown"}: raise EvalPortfolioError("eval result confidence is invalid")
         _refs(result["evidence_refs"], "eval result evidence_refs")
         dimensions = set()
@@ -191,6 +272,7 @@ def validate_eval_portfolio(raw: Any, projection: Any | None = None) -> dict[str
             dimension = _exact(raw_dimension, DIMENSION_FIELDS, "eval dimension result"); _id(dimension["dimension_id"], "eval dimension id")
             if dimension["dimension_id"] in dimensions: raise EvalPortfolioError("eval dimensions cannot duplicate")
             dimensions.add(dimension["dimension_id"]); _outcome(dimension["status"], "eval dimension status")
+            if not isinstance(dimension["critical"], bool): raise EvalPortfolioError("eval dimension critical flag is invalid")
             if dimension["direction_vs_baseline"] not in DIRECTIONS: raise EvalPortfolioError("eval dimension direction is invalid")
             _refs(dimension["evidence_refs"], "eval dimension evidence_refs")
         if not dimensions: raise EvalPortfolioError("eval result needs named dimensions, not an aggregate")
@@ -201,6 +283,28 @@ def validate_eval_portfolio(raw: Any, projection: Any | None = None) -> dict[str
             stages.add(stage["stage_id"]); _outcome(stage["status"], "eval stage status"); _refs(stage["dimension_ids"], "eval stage dimensions"); _refs(stage["evidence_refs"], "eval stage evidence_refs")
             if not set(stage["dimension_ids"]).issubset(dimensions): raise EvalPortfolioError("eval stage dimension is not named in result")
         if cases[result["case_id"]]["diagnosis_required"] and (len(stages) < 2 or not stages): raise EvalPortfolioError("final-only evaluation is not diagnosable")
+        if not isinstance(result["evaluator_results"], list) or not result["evaluator_results"]: raise EvalPortfolioError("eval result needs evaluator provenance")
+        evaluator_kinds = set()
+        for raw_evaluator in result["evaluator_results"]:
+            evaluator = _exact(raw_evaluator, EVALUATOR_RESULT_FIELDS, "evaluator result")
+            if evaluator["kind"] not in {"deterministic", "judge", "human_acceptance"} or evaluator["kind"] in evaluator_kinds: raise EvalPortfolioError("evaluator result kind is invalid or duplicated")
+            evaluator_kinds.add(evaluator["kind"]); _id(evaluator["evaluator_ref"], "evaluator result evaluator_ref"); _id(evaluator["rubric_ref"], "evaluator result rubric_ref")
+            if evaluator["provenance"] not in {"synthetic_fixture", "redacted_evidence", "human_labeled_sample"} or evaluator["independence_state"] not in {"independent", "same_actor", "not_required"} or evaluator["status"] not in OUTCOMES or evaluator["confidence"] not in {"high", "medium", "low", "unknown"} or not isinstance(evaluator["critical"], bool) or not isinstance(evaluator["human_accepted"], bool): raise EvalPortfolioError("evaluator result provenance/calibration is invalid")
+            calibration = _exact(evaluator["calibration"], CALIBRATION_FIELDS, "evaluator calibration")
+            if calibration["status"] not in {"calibrated", "uncalibrated", "not_applicable"} or not isinstance(calibration["sample_count"], int) or isinstance(calibration["sample_count"], bool) or calibration["sample_count"] < 0: raise EvalPortfolioError("evaluator calibration is invalid")
+            if calibration["status"] == "calibrated":
+                _id(calibration["calibration_ref"], "evaluator calibration ref")
+                if calibration["sample_count"] == 0: raise EvalPortfolioError("calibrated evaluator needs a positive calibration sample")
+            elif calibration["calibration_ref"] is not None: raise EvalPortfolioError("uncalibrated evaluator cannot name a calibration ref")
+            _refs(evaluator["evidence_refs"], "evaluator result evidence_refs")
+            if evaluator["lower_bound_evidence_ref"] is not None: _id(evaluator["lower_bound_evidence_ref"], "evaluator lower-bound evidence ref")
+            if evaluator["kind"] == "human_acceptance" and ((evaluator["status"] in {"passed"} and evaluator["human_accepted"] is not True) or (evaluator["status"] in {"failed", "blocked", "unknown"} and evaluator["human_accepted"] is not False)): raise EvalPortfolioError("human acceptance evaluator status and acceptance disagree")
+            if evaluator["kind"] == "deterministic" and evaluator["human_accepted"] is not False: raise EvalPortfolioError("deterministic evaluator cannot claim human acceptance")
+        critical_deterministic_failure = any(item["kind"] == "deterministic" and item["critical"] and item["status"] == "failed" for item in result["evaluator_results"])
+        judge_pass = any(item["kind"] == "judge" and item["status"] == "passed" for item in result["evaluator_results"])
+        critical_judge_failure = any(item["kind"] == "judge" and item["critical"] and item["status"] in {"failed", "blocked"} for item in result["evaluator_results"])
+        critical_dimension_failure = any(item["critical"] and item["status"] in {"failed", "blocked"} for item in result["dimension_results"])
+        if (critical_deterministic_failure or critical_judge_failure or critical_dimension_failure) and result["status"] == "passed": raise EvalPortfolioError("critical evaluator or dimension failure cannot be declared passed")
         telemetry = _exact(result["telemetry"], TELEMETRY_FIELDS, "eval telemetry")
         for field in ("latency_ms", "cost_usd", "recovery_count", "intervention_count"): contract._finite_nonnegative(telemetry[field], f"eval telemetry {field}")
         _exact(telemetry["usage"], {"input_tokens", "output_tokens", "cached_input_tokens"}, "eval telemetry usage")
@@ -261,6 +365,62 @@ def cost_curve_gate(portfolio: Any) -> list[dict[str, Any]]:
     return output
 
 
+def _active_case(value: dict[str, Any], case: dict[str, Any]) -> bool:
+    """Return whether a case has current accepted golden-set membership.
+
+    Lifecycle history is retained for audit and validation, but only an
+    accepted case whose case id is still present in its golden set is usable
+    as admission evidence.  Retired cases may remain in the portfolio and in
+    the append-only golden-set history; they are not active evidence.
+    """
+    if case["lifecycle"] != "accepted":
+        return False
+    golden_ref = case["golden_set_ref"]
+    if golden_ref is None:
+        return False
+    golden = next((row for row in value["case_set"]["golden_sets"] if row["golden_set_ref"] == golden_ref), None)
+    return golden is not None and case["case_id"] in golden["case_ids"]
+
+
+def _risk_gate_reasons(value: dict[str, Any], requirement: dict[str, Any], as_of: str | None) -> list[str]:
+    """Apply explicit sample, evaluator, confidence, and critical-failure gates.
+
+    This is intentionally a reason-code projection.  It never emits an
+    aggregate score and it treats immature or missing evidence as unknown.
+    """
+    reasons: list[str] = []
+    active_case_ids = {case["case_id"] for case in value["cases"] if _active_case(value, case)}
+    held_out = [case for case in value["cases"] if case["case_id"] in active_case_ids and case["split"] == "held_out"]
+    if len(held_out) < requirement["min_held_out_cases"]:
+        reasons.append(f"held_out_sample_insufficient:{len(held_out)}<{requirement['min_held_out_cases']}")
+    required_rungs = set(requirement["required_rungs"])
+    relevant = [row for row in value["results"] if row["rung"] in required_rungs and row["case_id"] in active_case_ids]
+    kinds = {item["kind"] for row in relevant for item in row["evaluator_results"]}
+    for kind in requirement["required_evaluator_kinds"]:
+        if kind not in kinds: reasons.append(f"required_evaluator_missing:{kind}")
+    if requirement["independent_review_required"] and not any(item["independence_state"] == "independent" for row in relevant for item in row["evaluator_results"]):
+        reasons.append("independent_review_missing")
+    if requirement["human_acceptance_required"] and not any(item["kind"] == "human_acceptance" and item["human_accepted"] for row in relevant for item in row["evaluator_results"]):
+        reasons.append("human_acceptance_missing")
+    if requirement["confidence_posture"] == "lower_bound_required" and any(row["confidence"] in {"low", "unknown"} for row in relevant):
+        reasons.append("confidence_lower_bound_insufficient")
+    if requirement["confidence_posture"] == "lower_bound_required" and any(item["lower_bound_evidence_ref"] is None for row in relevant for item in row["evaluator_results"]):
+        reasons.append("confidence_lower_bound_evidence_missing")
+    if value["drift"]["status"] in {"insufficient", "unavailable"}:
+        reasons.append("drift_evidence_insufficient")
+    elif value["drift"]["status"] == "exceeds_tolerance" or value["drift"]["observed_delta"] > requirement["drift_tolerance"]:
+        reasons.append("drift_tolerance_exceeded")
+    critical_dimensions = [dimension for row in relevant for dimension in row["dimension_results"] if dimension["critical"]]
+    failed_critical = sum(1 for dimension in critical_dimensions if dimension["status"] == "failed")
+    if failed_critical > requirement["max_critical_failure_count"]:
+        reasons.append(f"critical_failure_count_exceeded:{failed_critical}>{requirement['max_critical_failure_count']}")
+    if critical_dimensions and failed_critical / len(critical_dimensions) > requirement["max_critical_failure_rate"]:
+        reasons.append("critical_failure_rate_exceeded")
+    if requirement["outcome_horizon_maturity"] == "required" and (value["outcome_horizon"]["status"] != "mature" or as_of is None or as_of < value["outcome_horizon"]["matures_at"]):
+        reasons.append("outcome_horizon_immature")
+    return reasons
+
+
 def admission_decision(kernel: Any, *, as_of: str | None = None, visual_gate_report: Any | None = None,
                        design_contract: Any | None = None, policy_learning_assessment: Any | None = None) -> dict[str, Any]:
     """Return a deterministic recommendation with evidence-backed reason codes.
@@ -279,6 +439,8 @@ def admission_decision(kernel: Any, *, as_of: str | None = None, visual_gate_rep
             reasons.append("evidence_stale_or_revalidation_required")
     if requirement is None:
         reasons.append("risk_lifecycle_unmapped_default_deny")
+    else:
+        reasons.extend(_risk_gate_reasons(value, requirement, as_of))
     results_by_case = {row["case_id"]: row for row in value["results"]}
     for rung in requirement["required_rungs"] if requirement else []:
         cases = [case for case in value["cases"] if case["rung"] == rung]
@@ -286,6 +448,9 @@ def admission_decision(kernel: Any, *, as_of: str | None = None, visual_gate_rep
             reasons.append(f"required_rung_missing:{rung}")
             continue
         for case in cases:
+            if not _active_case(value, case):
+                reasons.append(f"required_case_not_active:{case['case_id']}")
+                continue
             result = results_by_case.get(case["case_id"])
             if result is None:
                 reasons.append(f"required_case_not_run:{case['case_id']}")
@@ -302,8 +467,6 @@ def admission_decision(kernel: Any, *, as_of: str | None = None, visual_gate_rep
             reasons.append(f"cost_curve_not_eligible:{comparison['comparison_id']}:{comparison['promotion_state']}")
             for dimension in comparison["blocked_dimensions"]:
                 reasons.append(f"critical_dimension_not_equivalent:{dimension}")
-    if requirement and requirement["independent_review_required"]:
-        reasons.append("independent_review_required")
     if (visual_gate_report is None) != (design_contract is None):
         raise EvalPortfolioError("visual gate report and exact design contract must travel together")
     if visual_gate_report is not None:
@@ -324,12 +487,13 @@ def admission_decision(kernel: Any, *, as_of: str | None = None, visual_gate_rep
             raise EvalPortfolioError(str(exc)) from exc
     if value["provenance"]["source_class"] == "synthetic_only":
         reasons.append("synthetic_evidence_not_controller_promotion")
+    evidence_insufficient = any(reason.startswith(("held_out_sample_insufficient", "outcome_horizon_immature", "required_evaluator_missing", "human_acceptance_missing", "confidence_lower_bound_insufficient", "confidence_lower_bound_evidence_missing", "drift_evidence_insufficient")) for reason in reasons)
     return {
         "schema_version": "carr-evaluation-admission-decision.v1",
         "workflow_id": value["workflow"]["workflow_id"],
         "portfolio_id": value["portfolio_id"],
         "portfolio_digest": contract.canonical_digest(value),
-        "decision": "eligible_for_controller_review" if not reasons else "not_admitted",
+        "decision": "eligible_for_controller_review" if not reasons else ("insufficient_evidence" if evidence_insufficient else "not_admitted"),
         "reason_codes": sorted(set(reasons)),
         "evidence_refs": sorted(set(evidence)),
         "controller_promotion": "not_performed",

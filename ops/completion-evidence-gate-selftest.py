@@ -199,6 +199,7 @@ def authority_family_coverage():
     actions = [
         "accept-workflow", "disable-legacy-schedule", "approve-work-request",
         "accept-outcome-feedback",
+        "issue-execution-envelope", "transition-evaluation-case",
         "propose-cognition-job", "decide-guidance-import-batch",
         "deactivate-guidance-registry",
     ]

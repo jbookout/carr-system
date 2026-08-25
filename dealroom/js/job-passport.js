@@ -7,11 +7,14 @@
 // canonical state before it is wrapped for the wire.
 
 const WIRE_VERSION = "job-passport-wire.v1";
-const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "observatory_projection", "evaluation_kernel", "eval_portfolio", "spatial_surface", "telemetry_measurement", "engineering_passport"]);
+const KINDS = new Set(["execution_envelope", "progress_event", "attempt_receipt", "activation_reliability_projection", "observatory_projection", "evaluation_kernel", "eval_portfolio", "spatial_surface", "telemetry_measurement", "engineering_passport"]);
 const PROGRESS = new Set(["active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"]);
 const LIFECYCLE = new Set(["succeeded", "failed", "timed_out", "cancelled", "partial", "unknown"]);
 const VERIFICATION = new Set(["verified_success", "verified_failure", "partial", "unknown", "not_attempted"]);
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const DISPOSITIONS = new Set(["applied", "not_applicable", "conflicted", "stale", "missing"]);
+const ENVELOPE_CORE_FIELDS = ["schema_version", "envelope_id", "work_request_id", "plan_revision", "agent_session", "issued_at", "expires_at", "request", "server_binding", "handoff", "state_binding", "phase_binding", "evaluation_context"];
+const ENVELOPE_ACTIVATION_FIELDS = ["activation_binding", "reliability_policy_binding", "context_activation_ref", "runtime_profile", "execution_topology", "evaluation_plan"];
 
 function object(value) { return value && typeof value === "object" && !Array.isArray(value); }
 function string(value) { return typeof value === "string" && value.trim().length > 0; }
@@ -20,9 +23,14 @@ function list(value) { return Array.isArray(value); }
 function at(value) { const ms = Date.parse(value || ""); return Number.isFinite(ms) ? ms : 0; }
 function number(value) { return Number.isInteger(value) && value >= 1; }
 function exactKeys(value, keys) { return object(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key)); }
+function compareUtf8(a, b) {
+  const aa = new TextEncoder().encode(a); const bb = new TextEncoder().encode(b);
+  for (let i = 0; i < Math.min(aa.length, bb.length); i += 1) if (aa[i] !== bb[i]) return aa[i] - bb[i];
+  return aa.length - bb.length;
+}
 function canonicalize(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
-  if (object(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(",")}}`;
+  if (object(value)) return `{${Object.keys(value).sort(compareUtf8).map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(",")}}`;
   return JSON.stringify(value);
 }
 
@@ -46,6 +54,56 @@ function sha256(text) {
 }
 function canonicalDigest(value) { return `sha256:${sha256(canonicalize(value))}`; }
 function semanticEqual(a, b) { return canonicalize(a) === canonicalize(b); }
+
+// Browser-side mirror for the additive sections. It accepts only redacted
+// refs/digests and never lets a nested client payload become a visual fact.
+function validActivationReliability(value) {
+  if (!object(value)) return false;
+  if (["raw_transcript", "prompt", "tool_payload", "raw_output"].some((field) => Object.prototype.hasOwnProperty.call(value, field))) return false;
+  const activation = value.knowledge_activation;
+  if (activation !== undefined) {
+      if (!object(activation) || !DIGEST.test(activation.bundle_digest) || !["shadow", "canary", "live", "enforced"].includes(activation.mode)
+      || !list(activation.item_dispositions) || !object(activation.closure) || activation.closure.derived_by !== "server"
+      || !["open", "blocked", "closed", "not_activated"].includes(activation.closure.state)) return false;
+    const binding = activation.canonical_binding;
+    if (!exactKeys(binding, ["work_request_id", "work_request_version", "accepted_plan_digest", "envelope_digest", "activation_binding_ref"])
+      || !validId(binding.work_request_id) || !number(binding.work_request_version)
+      || !DIGEST.test(binding.accepted_plan_digest) || !DIGEST.test(binding.envelope_digest) || !validId(binding.activation_binding_ref)) return false;
+    const refs = new Set();
+    for (const item of activation.item_dispositions) {
+      if (!object(item) || Object.keys(item).some((key) => !["item_ref", "disposition", "evidence_refs", "reason_ref", "stage_ref", "tool_ref"].includes(key))
+        || !Object.prototype.hasOwnProperty.call(item, "item_ref") || !Object.prototype.hasOwnProperty.call(item, "disposition")
+        || !Object.prototype.hasOwnProperty.call(item, "evidence_refs") || !Object.prototype.hasOwnProperty.call(item, "reason_ref")
+        || !validId(item.item_ref) || refs.has(item.item_ref) || !DISPOSITIONS.has(item.disposition)
+        || !list(item.evidence_refs) || item.evidence_refs.some((ref) => !validId(ref)) || !validId(item.reason_ref)
+        || (item.disposition === "applied" && (item.evidence_refs.length === 0 || (!string(item.stage_ref) && !string(item.tool_ref))))) return false;
+      refs.add(item.item_ref);
+    }
+  }
+  const reliability = value.reliability;
+  if (reliability !== undefined) {
+    const required = ["route_digest", "topology_digest", "evaluation_plan_digest", "grounding_sufficiency", "deterministic_checks", "model_judgement", "human_acceptance", "trajectory", "evaluator_results", "corrections", "defects", "incidents", "downstream_outcome", "outcome_horizon", "process_metrics", "eval_candidates", "shadow_comparisons", "learning_disposition", "telemetry", "closure"];
+    const grounding = ["state", "evidence_refs", "required_supplied", "required_used", "required_missing", "advisory_supplied", "advisory_used", "freshness_failures", "retrieval_failures"];
+    const trace = ["sequence", "stage_ref", "parent_event_ref", "decision_class", "tool_class", "result_state", "fallback_state", "guardrail_state", "latency_ms", "evidence_refs"];
+    const evaluator = ["kind", "evaluator_ref", "rubric_ref", "evaluator_version", "evaluator_digest", "status", "confidence", "critical", "independence_state", "held_out_case_count", "check_refs", "dimension_refs", "evidence_refs", "judge_provenance", "calibration_evidence_refs"];
+    if (!exactKeys(reliability, required) || ![reliability.route_digest, reliability.topology_digest, reliability.evaluation_plan_digest].every((digest) => DIGEST.test(digest))
+      || !exactKeys(reliability.grounding_sufficiency, grounding) || !["sufficient", "insufficient", "unknown"].includes(reliability.grounding_sufficiency.state)
+      || !grounding.slice(1).every((field) => list(reliability.grounding_sufficiency[field]) && reliability.grounding_sufficiency[field].every(string))
+      || !list(reliability.deterministic_checks) || !object(reliability.model_judgement) || !object(reliability.human_acceptance)
+      || !list(reliability.trajectory) || !list(reliability.evaluator_results) || reliability.evaluator_results.length === 0
+      || !object(reliability.outcome_horizon) || !["mature", "immature", "unavailable", "stale", "unknown"].includes(reliability.outcome_horizon.state)
+      || !object(reliability.process_metrics) || !list(reliability.telemetry) || !list(reliability.eval_candidates) || !list(reliability.shadow_comparisons)
+      || !exactKeys(reliability.closure, ["state", "reasons", "derived_by"]) || reliability.closure.derived_by !== "server" || !["blocked", "insufficient_evidence", "eligible_for_human_review"].includes(reliability.closure.state) || !list(reliability.closure.reasons)) return false;
+    if (reliability.model_judgement.state === "pass" && (!list(reliability.model_judgement.evidence_refs) || reliability.model_judgement.evidence_refs.length === 0)) return false;
+    if (reliability.human_acceptance.actor_ref === reliability.model_judgement.judge_ref) return false;
+    if (reliability.deterministic_checks.some((check) => !object(check) || !["passed", "failed", "unknown", "not_run"].includes(check.state) || (check.state === "passed" && (!list(check.evidence_refs) || check.evidence_refs.length === 0)))) return false;
+    if (reliability.trajectory.some((row, index) => !exactKeys(row, trace) || row.sequence !== index + 1 || !Number.isInteger(row.latency_ms) || row.latency_ms < 0 || !list(row.evidence_refs) || row.evidence_refs.some((ref) => !string(ref)))) return false;
+    if (reliability.evaluator_results.some((row) => !exactKeys(row, evaluator) || !["deterministic", "judge", "human_acceptance"].includes(row.kind) || !["passed", "failed", "blocked", "unknown", "not_run"].includes(row.status) || !["not_independent", "unknown"].includes(row.independence_state) || !DIGEST.test(row.evaluator_digest) || !Number.isInteger(row.held_out_case_count) || row.held_out_case_count < 0 || !list(row.check_refs) || !list(row.dimension_refs) || !list(row.evidence_refs) || !list(row.calibration_evidence_refs))) return false;
+    if (reliability.eval_candidates.some((candidate) => !object(candidate) || candidate.state !== "proposed" || candidate.promotion_state !== "not_promoted") || reliability.shadow_comparisons.length !== 0) return false;
+    if (reliability.telemetry.length !== 0 || reliability.closure.state === "eligible_for_human_review") return false;
+  }
+  return true;
+}
 
 /** Parse only the explicit wrapper. Other receipts stay ordinary wire traffic. */
 export function parseJobPassportReceipt(body) {
@@ -133,11 +191,64 @@ function validEvidence(value, required = false) {
 function sameSet(a, b) { return list(a) && list(b) && a.length === b.length && [...a].sort().every((item, index) => item === [...b].sort()[index]); }
 function validBinding(value) { return exactKeys(value, ["id", "state_version", "canonical_record_digest"]) && validId(value.id) && number(value.state_version) && DIGEST.test(value.canonical_record_digest); }
 function validPlanRef(value) { return exactKeys(value, ["id", "revision", "digest"]) && validId(value.id) && number(value.revision) && DIGEST.test(value.digest); }
+function validVersionedMetadata(value) { return exactKeys(value, ["ref", "digest"]) && validId(value.ref) && DIGEST.test(value.digest); }
+function validRuntimeMetadata(value) {
+  const optional = ["profile_key", "profile_version", "provider_id", "model_id", "desk", "policy_ref", "policy_digest"];
+  if (!object(value) || !Object.keys(value).every((key) => ["ref", "digest", ...optional].includes(key)) || !validVersionedMetadata({ ref: value.ref, digest: value.digest })) return false;
+  if (value.profile_key !== undefined && !string(value.profile_key)) return false;
+  if (value.profile_version !== undefined && (!Number.isInteger(value.profile_version) || value.profile_version < 1)) return false;
+  for (const key of ["provider_id", "model_id", "desk", "policy_ref"]) if (value[key] !== undefined && !string(value[key])) return false;
+  return value.policy_digest === undefined || DIGEST.test(value.policy_digest);
+}
+function validActivatedRuntimeMetadata(value) {
+  const fields = ["ref", "digest", "profile_key", "profile_version", "provider_id", "model_id", "desk", "policy_ref", "policy_digest", "modality", "reasoning_effort_ref", "sampling_profile_ref", "context_budget", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"];
+  return exactKeys(value, fields) && DIGEST.test(value.digest) && Number.isInteger(value.profile_version) && value.profile_version >= 1 && Number.isInteger(value.context_budget) && value.context_budget >= 1
+    && ["ref", "profile_key", "provider_id", "policy_ref", "modality", "reasoning_effort_ref", "sampling_profile_ref", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"].every((key) => validId(value[key]))
+    && string(value.model_id) && string(value.desk) && DIGEST.test(value.policy_digest);
+}
+function validActivatedTopology(value) {
+  const fields = ["ref", "digest", "kind", "harness_digest", "parallelism", "code_model_step_refs", "fallback_policy_ref", "stop_condition_refs", "context_refresh_policy_ref", "memory_policy_ref", "sandbox_ref", "guardrail_ref", "threat_model_ref"];
+  return exactKeys(value, fields) && DIGEST.test(value.digest) && DIGEST.test(value.harness_digest) && ["fixed_workflow", "single_agent_loop", "multi_agent"].includes(value.kind) && ["sequential", "parallel"].includes(value.parallelism)
+    && ["ref", "kind", "fallback_policy_ref", "context_refresh_policy_ref", "memory_policy_ref", "sandbox_ref", "guardrail_ref", "threat_model_ref"].every((key) => validId(value[key]))
+    && [value.code_model_step_refs, value.stop_condition_refs].every((rows) => list(rows) && rows.every(validId));
+}
+function validActivatedEvaluationPlan(value) {
+  const fields = ["ref", "digest", "lane_ref", "risk_class", "rubric_digest", "case_set_digest", "evaluator_policy_digest", "evaluator_ref", "rubric_ref", "evaluator_version", "evaluator_digest", "required_rungs", "required_deterministic_check_refs", "critical_dimensions", "human_acceptance_required", "outcome_horizon_ref", "outcome_horizon_not_before", "requirements"];
+  const req = value?.requirements;
+  return exactKeys(value, fields) && [value.digest, value.rubric_digest, value.case_set_digest, value.evaluator_policy_digest, value.evaluator_digest].every((digest) => DIGEST.test(digest)) && [value.ref, value.lane_ref, value.evaluator_ref, value.rubric_ref, value.evaluator_version, value.outcome_horizon_ref].every(validId) && /^R[0-6]$/.test(value.risk_class) && timestamp(value.outcome_horizon_not_before)
+    && list(value.required_rungs) && value.required_rungs.every(validId) && list(value.required_deterministic_check_refs) && value.required_deterministic_check_refs.every(validId) && list(value.critical_dimensions) && value.critical_dimensions.every(validId) && typeof value.human_acceptance_required === "boolean"
+    && exactKeys(req, ["required_evaluator_kinds", "minimum_held_out_case_count", "minimum_calibration_ref_count", "maximum_critical_failure_count", "maximum_critical_failure_rate", "confidence_posture", "drift_tolerance", "independent_review_required", "human_acceptance_required", "outcome_horizon_required"])
+    && list(req.required_evaluator_kinds) && req.required_evaluator_kinds.every((kind) => ["deterministic", "judge", "human_acceptance"].includes(kind))
+    && Number.isInteger(req.minimum_held_out_case_count) && req.minimum_held_out_case_count >= 0 && Number.isInteger(req.minimum_calibration_ref_count) && req.minimum_calibration_ref_count >= 0 && Number.isInteger(req.maximum_critical_failure_count) && req.maximum_critical_failure_count >= 0 && typeof req.maximum_critical_failure_rate === "number" && req.maximum_critical_failure_rate >= 0 && req.maximum_critical_failure_rate <= 1
+    && ["none", "lower_bound_required"].includes(req.confidence_posture) && ["no_critical_regression", "bounded"].includes(req.drift_tolerance) && ["independent_review_required", "human_acceptance_required", "outcome_horizon_required"].every((key) => typeof req[key] === "boolean");
+}
+function validActivatedBinding(value) {
+  return exactKeys(value, ["bundle_digest", "item_refs", "mode", "retrieval_policy_version"])
+    && DIGEST.test(value.bundle_digest) && list(value.item_refs) && value.item_refs.every(validId)
+    && ["shadow", "canary", "live", "enforced"].includes(value.mode) && string(value.retrieval_policy_version);
+}
+function validReliabilityPolicyBinding(value) {
+  return exactKeys(value, ["policy_ref", "policy_digest", "risk_class", "mode"])
+    && validId(value.policy_ref) && DIGEST.test(value.policy_digest) && /^R[0-6]$/.test(value.risk_class)
+    && ["shadow", "canary", "live", "enforced"].includes(value.mode);
+}
+function validCanonicalReliabilityRevision(value) {
+  return exactKeys(value, ["authority_fact_count", "learning_event_count", "outcome_horizon_mature"])
+    && Number.isInteger(value.authority_fact_count) && value.authority_fact_count >= 0
+    && Number.isInteger(value.learning_event_count) && value.learning_event_count >= 0
+    && typeof value.outcome_horizon_mature === "boolean";
+}
+function compareCanonicalReliabilityRevision(next, prior) {
+  const nextVector = [next.authority_fact_count, next.learning_event_count, Number(next.outcome_horizon_mature)];
+  const priorVector = [prior.authority_fact_count, prior.learning_event_count, Number(prior.outcome_horizon_mature)];
+  if (nextVector.some((part, index) => part < priorVector[index])) return -1;
+  return nextVector.some((part, index) => part > priorVector[index]) ? 1 : 0;
+}
 function validPlannedCheck(value) { return exactKeys(value, ["check_ref", "failure_condition", "evidence_requirement"]) && validId(value.check_ref) && string(value.failure_condition) && ["redacted_evidence_required", "metadata_only_sufficient"].includes(value.evidence_requirement); }
 function validExecutionEnvelope(value, passport) {
   const identity = value?.server_binding?.identity; const authority = value?.server_binding?.authority; const adapter = value?.server_binding?.adapter;
   const declared = value?.request?.declared_expectations; const state = value?.state_binding; const handoff = value?.handoff; const phase = value?.phase_binding; const evaluation = value?.evaluation_context;
-  if (!exactKeys(value, ["schema_version", "envelope_id", "work_request_id", "plan_revision", "agent_session", "issued_at", "expires_at", "request", "server_binding", "handoff", "state_binding", "phase_binding", "evaluation_context"])
+  if (!object(value) || Object.keys(value).some((key) => !ENVELOPE_CORE_FIELDS.includes(key) && !ENVELOPE_ACTIVATION_FIELDS.includes(key)) || ENVELOPE_CORE_FIELDS.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
     || value.schema_version !== "execution-envelope.v1" || !validId(value.envelope_id) || value.work_request_id !== passport.work_request.id || !validPlanRef(value.plan_revision)
     || !semanticEqual(value.plan_revision, passport.accepted_plan_revision) || !exactKeys(value.agent_session, ["id", "lease_expires_at"]) || !validId(value.agent_session.id) || !timestamp(value.agent_session.lease_expires_at)
     || !timestamp(value.issued_at) || !timestamp(value.expires_at) || !exactKeys(value.request, ["job_ref", "input_digest", "data_class", "allowed_actions", "declared_expectations"]) || !validId(value.request.job_ref) || !DIGEST.test(value.request.input_digest)
@@ -157,6 +268,14 @@ function validExecutionEnvelope(value, passport) {
     || state.canonical_record_digest !== passport.work_request.canonical_record_digest || !DIGEST.test(state.canonical_record_digest) || !list(state.accepted_resource_revisions) || state.accepted_resource_revisions.some((row) => !exactKeys(row, ["resource_ref", "revision_ref", "digest"]) || !validId(row.resource_ref) || !validId(row.revision_ref) || !DIGEST.test(row.digest)) || state.compare_and_swap_required !== true
     || !exactKeys(phase, ["phase_id", "session_affinity", "switch_conditions", "native_session_transfer"]) || !validId(phase.phase_id) || !["same_native_session_required", "same_native_session_preferred", "fresh_native_session_required"].includes(phase.session_affinity) || !list(phase.switch_conditions) || phase.switch_conditions.length === 0 || !phase.switch_conditions.every((condition) => ["verified_checkpoint", "native_session_unavailable", "phase_boundary", "capability_expired"].includes(condition)) || !phase.switch_conditions.includes("verified_checkpoint") || phase.native_session_transfer !== "semantic_state_only"
     || !exactKeys(evaluation, ["experiment_arm", "auditor_mode", "evaluation_kernel_ref", "workflow_rubric_digest", "case_set_digest"]) || !["fixed_native_pair", "same_pair_audited_state", "audited_state_routed_executors", "diverse_auditor"].includes(evaluation.experiment_arm) || !["none", "same_pair_auditor", "diverse_read_only_auditor"].includes(evaluation.auditor_mode) || !validId(evaluation.evaluation_kernel_ref) || !DIGEST.test(evaluation.workflow_rubric_digest) || !DIGEST.test(evaluation.case_set_digest)) return false;
+  const hasActivation = ENVELOPE_ACTIVATION_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(value, field));
+  const runtime = [value.runtime_profile, value.execution_topology, value.evaluation_plan];
+  if (hasActivation) {
+    if (!ENVELOPE_ACTIVATION_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(value, field))
+      || !validActivatedBinding(value.activation_binding) || !validReliabilityPolicyBinding(value.reliability_policy_binding)
+      || value.activation_binding.mode !== value.reliability_policy_binding.mode || !validId(value.context_activation_ref)
+      || !validActivatedRuntimeMetadata(value.runtime_profile) || !validActivatedTopology(value.execution_topology) || !validActivatedEvaluationPlan(value.evaluation_plan)) return false;
+  } else if (runtime.some((item) => item !== undefined) && (!runtime.every((item) => item !== undefined) || !validRuntimeMetadata(value.runtime_profile) || !validVersionedMetadata(value.execution_topology) || !validVersionedMetadata(value.evaluation_plan))) return false;
   return true;
 }
 function validEngineeringPlan(value) {
@@ -258,11 +377,14 @@ function statusFor(projection) {
 export function deriveJobPassports(turns, { now = Date.now() } = {}) {
   const rows = new Map();
   const rejected = [];
-  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0, spatial_surface: 0, telemetry_measurement: 0 };
+  const typedCounts = { execution_envelope: 0, progress_event: 0, attempt_receipt: 0, activation_reliability_projection: 0, observatory_projection: 0, evaluation_kernel: 0, eval_portfolio: 0, spatial_surface: 0, telemetry_measurement: 0 };
   const portfolios = new Map();
   const surfaces = new Map();
   const telemetryByAttempt = new Map();
   const engineering = new Map();
+  const attemptFacts = new Map();
+  const canonicalReliability = new Map();
+  const canonicalReliabilityConflicts = new Map();
   for (const turn of turns || []) {
     if (turn?.kind !== "receipt") continue;
     const parsed = parseJobPassportReceipt(turn.body);
@@ -284,6 +406,38 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       continue;
     }
     typedCounts[parsed.kind] += 1;
+    if (parsed.kind === "activation_reliability_projection") {
+      const value = parsed.payload; const binding = value?.canonical_binding;
+      if (!object(value) || !exactKeys(value, ["canonical_binding", "canonical_revision", "learning", "telemetry", "reliability"]) || !validCanonicalReliabilityRevision(value.canonical_revision) || !object(binding)
+        || !exactKeys(binding, ["work_request_id", "work_request_version", "accepted_plan_digest", "envelope_digest", "attempt_id", "activation_binding_ref"])
+        || !validId(binding.work_request_id) || !number(binding.work_request_version) || !DIGEST.test(binding.accepted_plan_digest) || !DIGEST.test(binding.envelope_digest) || !validId(binding.attempt_id) || !validId(binding.activation_binding_ref)
+        || !object(value.learning) || !["unavailable", "proposed", "triaged", "accepted", "retired", "none"].includes(value.learning.lifecycle)
+        || !Array.isArray(value.learning.candidate_refs) || value.learning.candidate_refs.some((ref) => !validId(ref)) || !Array.isArray(value.telemetry)
+        || !object(value.reliability) || !["blocked", "insufficient_evidence", "eligible_for_human_review"].includes(value.reliability.state) || !Array.isArray(value.reliability.reasons) || value.reliability.reasons.some((reason) => !validId(reason))) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_canonical_activation_reliability" }); continue; }
+      const key = `${binding.attempt_id}|${binding.work_request_id}|${binding.work_request_version}|${binding.accepted_plan_digest}|${binding.envelope_digest}|${binding.activation_binding_ref}`;
+      const prior = canonicalReliability.get(key);
+      const conflictRevision = canonicalReliabilityConflicts.get(key);
+      if (conflictRevision) {
+        const conflictOrder = compareCanonicalReliabilityRevision(value.canonical_revision, conflictRevision);
+        if (conflictOrder > 0) { canonicalReliability.set(key, value); canonicalReliabilityConflicts.delete(key); }
+        else rejected.push({ seq: Number(turn.seq) || 0, reason: conflictOrder < 0 ? "stale_canonical_activation_reliability" : "conflicting_canonical_activation_reliability" });
+      } else if (!prior) canonicalReliability.set(key, value);
+      else if (compareCanonicalReliabilityRevision(value.canonical_revision, prior.canonical_revision) > 0) canonicalReliability.set(key, value);
+      else if (compareCanonicalReliabilityRevision(value.canonical_revision, prior.canonical_revision) < 0) rejected.push({ seq: Number(turn.seq) || 0, reason: "stale_canonical_activation_reliability" });
+      else if (!semanticEqual(prior, value)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "conflicting_canonical_activation_reliability" }); canonicalReliability.set(key, null); canonicalReliabilityConflicts.set(key, prior.canonical_revision); }
+      continue;
+    }
+    if (parsed.kind === "attempt_receipt") {
+      if (!validActivationReliability(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_activation_reliability" }); continue; }
+      const binding = parsed.payload.knowledge_activation?.canonical_binding;
+      if (string(parsed.payload.attempt_id) && binding && (parsed.payload.knowledge_activation || parsed.payload.reliability)) {
+        const key = `${parsed.payload.attempt_id}|${binding.work_request_id}|${binding.work_request_version}|${binding.accepted_plan_digest}|${binding.envelope_digest}|${binding.activation_binding_ref}`;
+        const prior = attemptFacts.get(key);
+        if (prior && JSON.stringify(prior) !== JSON.stringify(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "conflicting_attempt_activation_fact" }); attemptFacts.set(key, null); }
+        else if (!prior) attemptFacts.set(key, parsed.payload);
+      }
+      continue;
+    }
     if (parsed.kind === "evaluation_kernel" || parsed.kind === "eval_portfolio") {
       if (!validEvalPortfolio(parsed.payload)) { rejected.push({ seq: Number(turn.seq) || 0, reason: "invalid_eval_portfolio" }); continue; }
       const prior = portfolios.get(parsed.payload.binding.work_request_id);
@@ -355,6 +509,21 @@ export function deriveJobPassports(turns, { now = Date.now() } = {}) {
       spatial_surface: spatialBound ? spatial : null,
       telemetry_measurements: [...(telemetryByAttempt.get(projection.attempt_lane.attempt_id)?.values() || [])].map((row) => row.payload),
       engineering_passport: engineeringPassport,
+      activation_reliability: (() => {
+        const candidates = [...attemptFacts.values()].filter((fact) => fact && (() => {
+          const binding = fact.knowledge_activation.canonical_binding;
+          return fact.attempt_id === projection.attempt_lane.attempt_id
+            && binding.work_request_id === projection.work_request_id
+            && binding.work_request_version === projection.source_state.state_version
+            && binding.accepted_plan_digest === projection.source_state.plan_revision_digest
+            && fact.result?.job_ref === `job:${projection.work_request_id}`;
+        })());
+        if (candidates.length !== 1) return null;
+        const binding = candidates[0].knowledge_activation.canonical_binding;
+        const key = `${candidates[0].attempt_id}|${binding.work_request_id}|${binding.work_request_version}|${binding.accepted_plan_digest}|${binding.envelope_digest}|${binding.activation_binding_ref}`;
+        const canonical = canonicalReliability.get(key);
+        return { knowledge_activation: candidates[0].knowledge_activation || null, reliability: candidates[0].reliability || null, canonical: canonical || null };
+      })(),
     };
   }).sort((a, b) => b.wire_seq - a.wire_seq);
   return { enabled: passports.length > 0, passports, rejected, typedCounts };

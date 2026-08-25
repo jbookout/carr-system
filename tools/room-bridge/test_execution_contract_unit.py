@@ -61,6 +61,8 @@ def schemas_are_versioned_and_fail_closed():
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert schema["additionalProperties"] is False
         assert schema["properties"]["schema_version"]["const"].endswith(".v1")
+    eval_schema = json.loads((ROOT / "control-room" / "contracts" / "carr-evaluation-kernel.v1.schema.json").read_text())
+    assert "drift" in eval_schema["required"] and eval_schema["properties"]["drift"]["$ref"] == "#/$defs/drift"
     legacy = json.loads((ROOT / "control-room" / "contracts" / "job-passport-eval-portfolio.v1.schema.json").read_text())
     assert legacy["x-carr-migration"]["canonical_schema"] == "carr-evaluation-kernel.v1.schema.json"
 
@@ -361,6 +363,56 @@ def eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regressi
     changed = copy.deepcopy(portfolio)
     changed["results"][2]["stage_results"] = [changed["results"][2]["stage_results"][0]]
     expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "not diagnosable")
+    changed = copy.deepcopy(portfolio)
+    changed["cases"][0]["expected_output"] = "must never reach an executor"
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "unknown fields")
+    changed = copy.deepcopy(portfolio)
+    changed["cases"][0]["lifecycle_history"][0]["to"] = "accepted"
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "lifecycle transition")
+    changed = copy.deepcopy(portfolio)
+    changed["cases"][0]["case_provenance"] = "not-a-valid-provenance"
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "provenance")
+    changed = copy.deepcopy(portfolio)
+    changed["results"][0]["evaluator_results"][0]["calibration"]["status"] = "calibrated"
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "calibration ref")
+    changed = copy.deepcopy(portfolio)
+    changed["results"][5]["status"] = "passed"
+    changed["results"][5]["evaluator_results"].append({"kind":"judge","evaluator_ref":"evaluator:judge-v1","rubric_ref":"rubric:job-passport-visual","provenance":"synthetic_fixture","calibration":{"status":"calibrated","calibration_ref":"calibration:judge-v1","sample_count":10},"lower_bound_evidence_ref":None,"status":"passed","confidence":"high","critical":True,"independence_state":"independent","evidence_refs":["evidence:judge"],"human_accepted":False})
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "critical evaluator or dimension failure")
+    proposal = copy.deepcopy(portfolio["cases"][0])
+    proposal["case_id"] = "case:proposed-from-defect"
+    proposal["case_provenance"] = "production_defect"
+    proposal["case_kind"] = "task"
+    proposal["human_label_ref"] = None
+    proposal["lifecycle"] = "proposed"
+    proposal["lifecycle_history"] = []
+    proposal["golden_set_ref"] = None
+    proposal["target_golden_set_ref"] = "golden:job-passport-r0-heldout"
+    proposed_portfolio = copy.deepcopy(portfolio)
+    proposed_portfolio["cases"].append(proposal)
+    assert evaluation_kernel.validate_evaluation_kernel(proposed_portfolio, projection) == proposed_portfolio
+    redacted = copy.deepcopy(portfolio)
+    redacted["data_class"] = "redacted_evidence"
+    redacted["provenance"]["source_class"] = "production_redacted"
+    redacted["provenance"]["production_trace_review"] = "redacted_production_review"
+    redacted["case_set"]["refresh_state"] = "current_redacted"
+    redacted["case_set"]["production_trace_review"] = "redacted_production_review"
+    redacted["taxonomy"]["refresh_state"] = "current_redacted"
+    redacted["taxonomy"]["production_trace_review"] = "redacted_production_review"
+    assert evaluation_kernel.validate_evaluation_kernel(redacted, projection) == redacted
+    leaked = copy.deepcopy(redacted)
+    leaked["cases"][1]["adapter_configuration"]["native_session_ref"] = {"raw_transcript":"secret"}
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(leaked), "redacted evidence")
+    forged = copy.deepcopy(portfolio)
+    forged["outcome_horizon"]["status"] = "mature"
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(forged), "mature outcome horizon")
+    forged = copy.deepcopy(portfolio)
+    forged["drift"]["baseline_ref"] = None
+    forged["drift"]["evidence_refs"] = []
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(forged), "available drift requires")
+    forged = copy.deepcopy(portfolio)
+    forged["data_class"] = "redacted_evidence"
+    expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(forged), "redacted evidence must declare")
 
 
 def shared_kernel_policy_is_risk_scaled_and_default_deny():
@@ -373,7 +425,9 @@ def shared_kernel_policy_is_risk_scaled_and_default_deny():
     changed["binding"]["lifecycle"] = "launch"
     decision = evaluation_kernel.admission_decision(changed)
     assert "required_case_not_passed:case:launch-representation:blocked" in decision["reason_codes"]
-    assert "independent_review_required" in decision["reason_codes"]
+    assert "independent_review_required" not in decision["reason_codes"]
+    assert "independent_review_missing" not in decision["reason_codes"]
+    assert decision["decision"] == "insufficient_evidence"
     changed = copy.deepcopy(kernel)
     changed["binding"]["risk_class"] = "R6"
     changed["binding"]["lifecycle"] = "launch"
@@ -381,6 +435,19 @@ def shared_kernel_policy_is_risk_scaled_and_default_deny():
     assert "risk_lifecycle_unmapped_default_deny" in decision["reason_codes"]
     decision = evaluation_kernel.admission_decision(kernel, as_of="2026-10-01T00:00:00Z")
     assert "evidence_stale_or_revalidation_required" in decision["reason_codes"]
+    changed = copy.deepcopy(kernel)
+    changed["drift"]["status"] = "insufficient"
+    changed["drift"]["observed_delta"] = 0
+    changed["drift"]["baseline_ref"] = None
+    changed["drift"]["evidence_refs"] = []
+    decision = evaluation_kernel.admission_decision(changed)
+    assert decision["decision"] == "insufficient_evidence"
+    changed["drift"]["status"] = "exceeds_tolerance"
+    changed["drift"]["observed_delta"] = 1
+    changed["drift"]["baseline_ref"] = "baseline:synthetic-v1"
+    changed["drift"]["evidence_refs"] = ["evidence:synthetic-drift"]
+    decision = evaluation_kernel.admission_decision(changed)
+    assert decision["decision"] == "not_admitted"
     changed = copy.deepcopy(kernel)
     changed["workflow"]["rubric_id"] = "rubric:retrieval-only"
     expect_refusal(lambda: evaluation_kernel.validate_evaluation_kernel(changed), "not registered")
@@ -391,6 +458,50 @@ def shared_kernel_policy_is_risk_scaled_and_default_deny():
     assert {"workflow:claude-desktop-readonly", "workflow:codex-desktop-readonly", "workflow:hermes-orchestration", "workflow:grok-x-native-retrieval"}.issubset(rubrics)
     assert len({tuple(sorted(rubrics[key]["critical_dimensions"])) for key in rubrics}) == len(rubrics)
     assert {"visual_comprehension", "telemetry_truth", "layout_authority_separation"}.issubset(rubrics["workflow:job-passport"]["critical_dimensions"])
+
+
+def required_rungs_only_accept_active_golden_membership():
+    fixture = json.loads((FIXTURES / "carr-evaluation-kernel.synthetic.v1.json").read_text())
+    case_id = "case:identity-doc-grok"
+    evidence_ref = "evidence:profile-doc-staffing-grok"
+
+    active = evaluation_kernel.admission_decision(fixture)
+    assert not any(code.startswith(f"required_case_not_active:{case_id}") for code in active["reason_codes"])
+    assert evidence_ref in active["evidence_refs"]
+
+    lifecycle_variants = {
+        "proposed": [],
+        "triaged": [{"from": "proposed", "to": "triaged", "evidence_ref": "evidence:case-triage-only"}],
+        "retired": [
+            {"from": "proposed", "to": "triaged", "evidence_ref": "evidence:case-triage"},
+            {"from": "triaged", "to": "accepted", "evidence_ref": "evidence:case-acceptance"},
+            {"from": "accepted", "to": "retired", "evidence_ref": "evidence:case-retirement"},
+        ],
+    }
+    for lifecycle, history in lifecycle_variants.items():
+        changed = copy.deepcopy(fixture)
+        case = next(row for row in changed["cases"] if row["case_id"] == case_id)
+        case["lifecycle"] = lifecycle
+        case["lifecycle_history"] = history
+        if lifecycle in {"proposed", "triaged"}:
+            case["golden_set_ref"] = None
+        decision = evaluation_kernel.admission_decision(changed)
+        assert f"required_case_not_active:{case_id}" in decision["reason_codes"]
+        assert evidence_ref not in decision["evidence_refs"]
+
+    inactive_membership = copy.deepcopy(fixture)
+    case = next(row for row in inactive_membership["cases"] if row["case_id"] == case_id)
+    case["golden_set_ref"] = "golden:job-passport-r1-heldout"
+    expect_refusal(lambda: evaluation_kernel.admission_decision(inactive_membership), "accepted/retired case must bind")
+
+    triaged_retirement = copy.deepcopy(fixture)
+    case = next(row for row in triaged_retirement["cases"] if row["case_id"] == case_id)
+    case["lifecycle"] = "retired"
+    case["lifecycle_history"] = [
+        {"from": "proposed", "to": "triaged", "evidence_ref": "evidence:case-triage"},
+        {"from": "triaged", "to": "retired", "evidence_ref": "evidence:invalid-shortcut"},
+    ]
+    expect_refusal(lambda: evaluation_kernel.admission_decision(triaged_retirement), "lifecycle transition")
 
 
 def synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire():
@@ -496,6 +607,7 @@ if __name__ == "__main__":
         ("visual extension manifest denies unsafe or untrusted packages", visual_extensions_are_inspectable_but_untrusted_or_unsafe_packages_are_refused),
         ("evaluation ladder is multidimensional and rejects masked critical regression", eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression),
         ("shared kernel policy is risk-scaled and defaults deny", shared_kernel_policy_is_risk_scaled_and_default_deny),
+        ("required rungs accept only active golden membership", required_rungs_only_accept_active_golden_membership),
         ("synthetic read-only rehearsal publishes typed facts on the existing wire", synthetic_read_only_rehearsal_publishes_every_typed_fact_to_the_existing_wire),
         ("self-contained Job Passport artifact has verified content and stale posture", self_contained_job_passport_artifact_binds_content_and_is_stale_visible),
         ("behavior audit fails closed on dangling or non-live verification", behavior_audit_fails_closed_on_dangling_claim_or_fake_live_verification),

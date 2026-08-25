@@ -382,3 +382,285 @@ def offline_candidate_evaluation(raw: Any, *, as_of: str | None = None, max_impo
     if any("signal_not_passed" in reason for reason in reasons):
         return _reasoned_failure(reasons, estimators=estimators)
     return {"schema_version": "carr-policy-learning-assessment.v1", "decision": "eligible_for_human_review", "reason_codes": sorted(set(reasons + ["offline_observational_evidence_only", "human_approval_required_before_any_exploration"])), "estimators": estimators, "causal_claim": "not_established_without_randomized_or_known_assignment"}
+
+
+SHADOW_FIELDS = {
+    "comparison_id", "case_ref", "context_binding", "baseline_route", "candidate_route",
+    "baseline_binding_digest", "candidate_binding_digest", "route_dimensions",
+    "evaluation_dimensions", "dimension_results", "candidate_execution", "outcome_horizon", "result_provenance",
+    "state", "promotion_state", "requested_state", "policy_version_cas",
+    "kill_switch_ref", "rollback_ref", "expires_at", "evidence_refs",
+}
+SHADOW_SHARED_BINDING_FIELDS = {
+    "work_request_id", "input_binding_digest", "context_binding_digest", "case_ref",
+    "case_digest", "case_set_digest", "bounded_metadata", "field_allowlist",
+}
+SHADOW_ROUTE_BINDING_FIELDS = {
+    "route_ref", "runtime_profile", "runtime_binding_digest", "route_binding_digest",
+}
+SHADOW_RUNTIME_PROFILE_FIELDS = {
+    "provider_ref", "model_ref", "reasoning_effort_ref", "topology_digest", "grounding_digest",
+}
+SHADOW_EXECUTION_FIELDS = {
+    "allowed_actions", "external_side_effects", "side_effect_attempted",
+    "capability_refusal_evidence_refs",
+}
+SHADOW_HORIZON_FIELDS = {"state", "ends_at", "evidence_refs"}
+SHADOW_PROVENANCE_FIELDS = {
+    "baseline_evidence_refs", "candidate_evidence_refs", "evaluator_ref", "evaluator_kind",
+    "independence_state", "redaction_class", "raw_content_present", "private_content_present",
+}
+SHADOW_DIMENSION_FIELDS = {
+    "dimension_id", "baseline_status", "candidate_status", "critical", "verifier_kind",
+    "baseline_value", "candidate_value", "direction", "evidence_refs",
+}
+SHADOW_LIFECYCLE = {"observed", "shadow", "eligible_for_human_review", "bounded_exploration", "active"}
+SHADOW_STATUSES = {"passed", "failed", "blocked", "unknown"}
+SHADOW_VERIFIERS = {"deterministic", "judge", "human_acceptance"}
+SHADOW_FORBIDDEN_FIELDS = {
+    "raw_prompt", "raw_transcript", "raw_output", "prompt", "transcript", "tool_payload",
+    "tool_input", "tool_output", "message_content", "business_content", "private_content",
+}
+SHADOW_RUNTIME_DIMENSIONS = {
+    "provider": "provider_ref",
+    "model": "model_ref",
+    "reasoning_effort": "reasoning_effort_ref",
+    "topology": "topology_digest",
+    "grounding": "grounding_digest",
+}
+
+
+def _refs(value: Any, label: str, *, allow_empty: bool = False) -> list[str]:
+    if not isinstance(value, list) or (not allow_empty and not value):
+        raise PolicyLearningError(f"{label} must be a non-empty list of references")
+    output = []
+    for index, item in enumerate(value):
+        output.append(_id(item, f"{label}[{index}]"))
+    if len(set(output)) != len(output):
+        raise PolicyLearningError(f"{label} references must be unique")
+    return output
+
+
+def _bounded_value(value: Any, label: str) -> Any:
+    """Accept only numeric or opaque metadata values, never result content."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise PolicyLearningError(f"{label} must not be boolean")
+    if isinstance(value, (int, float)):
+        if not math.isfinite(float(value)):
+            raise PolicyLearningError(f"{label} must be finite")
+        return value
+    return _id(value, label)
+
+
+def _validate_shadow_shared_binding(value: Any) -> dict[str, Any]:
+    row = _exact(value, SHADOW_SHARED_BINDING_FIELDS, "shadow comparison shared binding")
+    _id(row["work_request_id"], "shadow comparison work_request_id")
+    _id(row["case_ref"], "shadow comparison frozen case_ref")
+    for field in ("input_binding_digest", "context_binding_digest", "case_digest", "case_set_digest"):
+        _digest(row[field], f"shadow comparison {field}")
+    if row["bounded_metadata"] is not True or not isinstance(row["field_allowlist"], list) or not row["field_allowlist"]:
+        raise PolicyLearningError("shadow comparison binding must be bounded metadata")
+    for field in row["field_allowlist"]:
+        if not isinstance(field, str) or not field or field in SHADOW_FORBIDDEN_FIELDS:
+            raise PolicyLearningError("shadow comparison binding refuses raw or private fields")
+    return row
+
+
+def _validate_shadow_route_binding_metadata(value: Any, label: str) -> dict[str, Any]:
+    row = _exact(value, SHADOW_ROUTE_BINDING_FIELDS, f"shadow comparison {label} route binding")
+    _id(row["route_ref"], f"shadow comparison {label} route_ref")
+    profile = _exact(row["runtime_profile"], SHADOW_RUNTIME_PROFILE_FIELDS, f"shadow comparison {label} runtime profile")
+    for field in ("provider_ref", "model_ref", "reasoning_effort_ref"):
+        _id(profile[field], f"shadow comparison {label} {field}")
+    for field in ("topology_digest", "grounding_digest"):
+        _digest(profile[field], f"shadow comparison {label} {field}")
+    _digest(row["runtime_binding_digest"], f"shadow comparison {label} runtime_binding_digest")
+    expected_runtime_digest = canonical_digest({"route_ref": row["route_ref"], "runtime_profile": profile})
+    if row["runtime_binding_digest"] != expected_runtime_digest:
+        raise PolicyLearningError(f"shadow comparison {label} runtime digest is not tied to its route/profile")
+    _digest(row["route_binding_digest"], f"shadow comparison {label} route_binding_digest")
+    expected_route_digest = canonical_digest({"route_ref": row["route_ref"], "runtime_binding_digest": row["runtime_binding_digest"]})
+    if row["route_binding_digest"] != expected_route_digest:
+        raise PolicyLearningError(f"shadow comparison {label} route digest is not tied to its runtime binding")
+    return row
+
+
+def _validate_shadow_binding(value: Any) -> dict[str, Any]:
+    row = _exact(value, {"baseline", "candidate"}, "shadow comparison frozen binding")
+    baseline = _exact(row["baseline"], SHADOW_SHARED_BINDING_FIELDS | SHADOW_ROUTE_BINDING_FIELDS, "shadow comparison baseline binding")
+    candidate = _exact(row["candidate"], SHADOW_SHARED_BINDING_FIELDS | SHADOW_ROUTE_BINDING_FIELDS, "shadow comparison candidate binding")
+    baseline_shared = _validate_shadow_shared_binding({key: baseline[key] for key in SHADOW_SHARED_BINDING_FIELDS})
+    candidate_shared = _validate_shadow_shared_binding({key: candidate[key] for key in SHADOW_SHARED_BINDING_FIELDS})
+    if baseline_shared != candidate_shared:
+        raise PolicyLearningError("baseline and candidate shared Work Request/input/context/case bindings must match")
+    baseline_route = _validate_shadow_route_binding_metadata({key: baseline[key] for key in SHADOW_ROUTE_BINDING_FIELDS}, "baseline")
+    candidate_route = _validate_shadow_route_binding_metadata({key: candidate[key] for key in SHADOW_ROUTE_BINDING_FIELDS}, "candidate")
+    if baseline_route["route_binding_digest"] == candidate_route["route_binding_digest"]:
+        raise PolicyLearningError("baseline and candidate route binding digests must differ")
+    if baseline_route["runtime_binding_digest"] == candidate_route["runtime_binding_digest"]:
+        raise PolicyLearningError("baseline and candidate runtime binding digests must differ")
+    return {"baseline": baseline, "candidate": candidate, "shared": baseline_shared}
+
+
+def _shadow_runtime_changes(binding: dict[str, Any]) -> set[str]:
+    baseline = binding["baseline"]["runtime_profile"]
+    candidate = binding["candidate"]["runtime_profile"]
+    return {dimension for dimension, field in SHADOW_RUNTIME_DIMENSIONS.items() if baseline[field] != candidate[field]}
+
+
+def _validate_shadow_dimension(value: Any, index: int, declared_dimensions: set[str]) -> dict[str, Any]:
+    row = _exact(value, SHADOW_DIMENSION_FIELDS, f"shadow comparison dimension[{index}]")
+    dimension_id = _id(row["dimension_id"], f"shadow comparison dimension[{index}] id")
+    if dimension_id not in declared_dimensions:
+        raise PolicyLearningError("shadow comparison dimension is not declared in route or evaluation dimensions")
+    if row["baseline_status"] not in SHADOW_STATUSES or row["candidate_status"] not in SHADOW_STATUSES:
+        raise PolicyLearningError("shadow comparison dimension status is invalid")
+    if not isinstance(row["critical"], bool) or row["verifier_kind"] not in SHADOW_VERIFIERS:
+        raise PolicyLearningError("shadow comparison dimension verifier/critical flag is invalid")
+    if row["direction"] not in {"higher_is_better", "lower_is_better", "equivalent_only", "not_comparable"}:
+        raise PolicyLearningError("shadow comparison dimension direction is invalid")
+    _bounded_value(row["baseline_value"], f"shadow comparison dimension[{index}] baseline_value")
+    _bounded_value(row["candidate_value"], f"shadow comparison dimension[{index}] candidate_value")
+    _refs(row["evidence_refs"], f"shadow comparison dimension[{index}] evidence_refs")
+    if row["critical"] and row["verifier_kind"] not in {"deterministic", "human_acceptance"}:
+        raise PolicyLearningError("critical shadow dimensions require deterministic or human evidence")
+    return row
+
+
+def validate_shadow_route_binding(comparison: Any, *, as_of: str | None = None) -> dict[str, Any]:
+    """Validate a side-effect-free comparison over one frozen input.
+
+    Both routes point at the same immutable shared input/context/case binding,
+    while each has a distinct, digest-tied route/runtime binding. The candidate
+    is explicitly read-only and every comparison result is redacted, referenced
+    evidence. This function validates the existing policy-learning/CAS seam;
+    it never changes lifecycle state or promotes a route.
+    """
+    if not isinstance(comparison, dict):
+        raise PolicyLearningError("shadow comparison must be an object")
+    if as_of is not None:
+        _timestamp(as_of, "shadow comparison as_of")
+    row = _exact(comparison, SHADOW_FIELDS, "shadow comparison")
+    _id(row["comparison_id"], "shadow comparison id")
+    _id(row["case_ref"], "shadow comparison case_ref")
+    binding = _validate_shadow_binding(row["context_binding"])
+    shared = binding["shared"]
+    if row["case_ref"] != shared["case_ref"]:
+        raise PolicyLearningError("shadow comparison case_ref must match the frozen case binding")
+    for field, side in (("baseline_binding_digest", "baseline"), ("candidate_binding_digest", "candidate")):
+        _digest(row[field], f"shadow comparison {field}")
+        if row[field] != binding[side]["route_binding_digest"]:
+            raise PolicyLearningError(f"shadow comparison {side} route digest does not match its frozen binding")
+    _id(row["baseline_route"], "shadow comparison baseline_route")
+    _id(row["candidate_route"], "shadow comparison candidate_route")
+    if row["baseline_route"] != binding["baseline"]["route_ref"] or row["candidate_route"] != binding["candidate"]["route_ref"]:
+        raise PolicyLearningError("shadow comparison route labels must match their exact route bindings")
+    if row["baseline_route"] == row["candidate_route"]:
+        raise PolicyLearningError("shadow routes must differ")
+    if not isinstance(row["route_dimensions"], list) or not row["route_dimensions"]:
+        raise PolicyLearningError("shadow comparison needs route dimensions")
+    route_dimensions = set()
+    for index, dimension in enumerate(row["route_dimensions"]):
+        dimension_id = _id(dimension, f"shadow comparison route_dimensions[{index}]")
+        if dimension_id in route_dimensions:
+            raise PolicyLearningError("shadow comparison route dimensions must be unique")
+        route_dimensions.add(dimension_id)
+    actual_route_changes = _shadow_runtime_changes(binding)
+    if route_dimensions != actual_route_changes:
+        raise PolicyLearningError("shadow route_dimensions must exactly match changed runtime profile fields")
+    if len(actual_route_changes) != 1:
+        raise PolicyLearningError("shadow comparisons must isolate one changed runtime dimension")
+    if not isinstance(row["evaluation_dimensions"], list) or not row["evaluation_dimensions"]:
+        raise PolicyLearningError("shadow comparison needs evaluation dimensions")
+    evaluation_dimensions = set()
+    for index, dimension in enumerate(row["evaluation_dimensions"]):
+        dimension_id = _id(dimension, f"shadow comparison evaluation_dimensions[{index}]")
+        if dimension_id in evaluation_dimensions or dimension_id in route_dimensions:
+            raise PolicyLearningError("shadow comparison evaluation dimensions must be unique and separate from route dimensions")
+        evaluation_dimensions.add(dimension_id)
+    declared_dimensions = route_dimensions | evaluation_dimensions
+    if not isinstance(row["dimension_results"], list) or not row["dimension_results"]:
+        raise PolicyLearningError("shadow comparison needs independently evidenced dimensions")
+    dimensions = [_validate_shadow_dimension(item, index, declared_dimensions) for index, item in enumerate(row["dimension_results"])]
+    if {item["dimension_id"] for item in dimensions} != declared_dimensions:
+        raise PolicyLearningError("shadow comparison must evidence every declared route/evaluation dimension exactly once")
+    execution = _exact(row["candidate_execution"], SHADOW_EXECUTION_FIELDS, "shadow candidate execution")
+    if execution["allowed_actions"] != []:
+        raise PolicyLearningError("shadow candidate must have allowed_actions=[]")
+    if execution["external_side_effects"] is not False:
+        raise PolicyLearningError("shadow candidate external side effects are forbidden")
+    if not isinstance(execution["side_effect_attempted"], bool):
+        raise PolicyLearningError("shadow candidate side_effect_attempted must be boolean")
+    refusal_refs = _refs(execution["capability_refusal_evidence_refs"], "shadow candidate capability_refusal_evidence_refs", allow_empty=True)
+    if execution["side_effect_attempted"] and not refusal_refs:
+        raise PolicyLearningError("side-effect attempt requires capability refusal security evidence")
+    horizon = _exact(row["outcome_horizon"], SHADOW_HORIZON_FIELDS, "shadow comparison outcome horizon")
+    if horizon["state"] not in {"mature", "immature", "unavailable", "stale"}:
+        raise PolicyLearningError("shadow comparison outcome horizon is invalid")
+    _timestamp(horizon["ends_at"], "shadow comparison outcome horizon ends_at")
+    _refs(horizon["evidence_refs"], "shadow comparison outcome horizon evidence_refs", allow_empty=horizon["state"] != "mature")
+    provenance = _exact(row["result_provenance"], SHADOW_PROVENANCE_FIELDS, "shadow comparison result provenance")
+    _refs(provenance["baseline_evidence_refs"], "shadow baseline evidence_refs")
+    _refs(provenance["candidate_evidence_refs"], "shadow candidate evidence_refs")
+    _id(provenance["evaluator_ref"], "shadow comparison evaluator_ref")
+    if provenance["evaluator_kind"] not in SHADOW_VERIFIERS or provenance["independence_state"] not in {"independent", "not_independent"}:
+        raise PolicyLearningError("shadow comparison evaluator provenance is invalid")
+    if provenance["redaction_class"] not in {"metadata_only", "redacted_evidence"} or provenance["raw_content_present"] is not False or provenance["private_content_present"] is not False:
+        raise PolicyLearningError("shadow comparison provenance must be redacted evidence")
+    if row["state"] not in {"matched", "mismatch", "unknown"} or row["promotion_state"] != "not_promoted":
+        raise PolicyLearningError("shadow comparison state/promotion is invalid")
+    if row["requested_state"] not in {"observed", "shadow", "eligible_for_human_review"}:
+        raise PolicyLearningError("shadow comparison cannot request bounded exploration or active routing")
+    _id(row["policy_version_cas"], "shadow comparison policy_version_cas")
+    _id(row["kill_switch_ref"], "shadow comparison kill_switch_ref")
+    _id(row["rollback_ref"], "shadow comparison rollback_ref")
+    _timestamp(row["expires_at"], "shadow comparison expires_at")
+    _refs(row["evidence_refs"], "shadow comparison evidence_refs")
+    if row["state"] == "matched" and any(_shadow_regression(item) for item in dimensions):
+        raise PolicyLearningError("shadow comparison declares matched despite a critical regression")
+    return row
+
+
+def _shadow_regression(dimension: dict[str, Any]) -> bool:
+    if not dimension["critical"]:
+        return False
+    if dimension["candidate_status"] in {"failed", "blocked", "unknown"}:
+        return True
+    baseline, candidate = dimension["baseline_value"], dimension["candidate_value"]
+    if not isinstance(baseline, (int, float)) or isinstance(baseline, bool) or not isinstance(candidate, (int, float)) or isinstance(candidate, bool):
+        return False
+    if dimension["direction"] == "higher_is_better":
+        return candidate < baseline
+    if dimension["direction"] == "lower_is_better":
+        return candidate > baseline
+    if dimension["direction"] == "equivalent_only":
+        return candidate != baseline
+    return False
+
+
+def evaluate_shadow_comparison(comparison: Any, *, as_of: str | None = None) -> dict[str, Any]:
+    """Return a fail-closed review recommendation without promoting anything."""
+    row = validate_shadow_route_binding(comparison, as_of=as_of)
+    reasons: list[str] = []
+    if as_of is None:
+        reasons.append("insufficient_evidence:as_of_required_for_expiry")
+    elif as_of > row["expires_at"]:
+        reasons.append("insufficient_evidence:comparison_expired")
+    elif row["outcome_horizon"]["state"] == "mature" and as_of < row["outcome_horizon"]["ends_at"]:
+        reasons.append("insufficient_evidence:outcome_horizon_immature")
+    if row["outcome_horizon"]["state"] != "mature":
+        reasons.append("insufficient_evidence:outcome_horizon_" + row["outcome_horizon"]["state"])
+    if row["result_provenance"]["independence_state"] != "independent":
+        reasons.append("insufficient_evidence:non_independent_results")
+    if row["candidate_execution"]["side_effect_attempted"]:
+        reasons.append("security_capability_refusal_observed")
+    for dimension in row["dimension_results"]:
+        if _shadow_regression(dimension):
+            reasons.append("critical_dimension_regression:" + dimension["dimension_id"])
+        elif dimension["candidate_status"] != "passed":
+            reasons.append("dimension_not_passed:" + dimension["dimension_id"])
+    if any(code.startswith("critical_dimension_regression") or code.startswith("security_") or code.startswith("dimension_not_passed") or code.startswith("insufficient_evidence") for code in reasons):
+        return {"decision": "not_eligible", "reason_codes": sorted(set(reasons)), "promotion_state": "not_promoted"}
+    return {"decision": "eligible_for_human_review", "reason_codes": ["human_authority_required_before_any_exploration"], "promotion_state": "not_promoted"}

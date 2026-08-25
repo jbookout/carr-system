@@ -64,6 +64,7 @@ def refuses(names: tuple[str, ...], expected: str) -> None:
 
 def main() -> int:
     actual = tuple(path.name for path in (REPO / "migrations").glob("*.sql"))
+    expected_next = max(next_migration.numbers_from_names(actual)) + 1
     validate_migration_names(actual, require_frozen=True)
 
     report = collision_report(actual)
@@ -288,7 +289,7 @@ def main() -> int:
                 assert "origin/main violates" in stderr.getvalue(), stderr.getvalue()
             else:
                 assert repair_rc == 0, (repair_rc, stdout.getvalue(), stderr.getvalue())
-                assert "next free migration number: 0303" in stdout.getvalue(), stdout.getvalue()
+                assert f"next free migration number: {expected_next:04d}" in stdout.getvalue(), stdout.getvalue()
                 assert "0298_memory_kernel.sql" in stdout.getvalue(), stdout.getvalue()
 
     # The same allocator path refuses if the red remote inventory is missing

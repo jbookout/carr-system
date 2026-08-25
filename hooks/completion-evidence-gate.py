@@ -83,6 +83,8 @@ WRITE_ACTION_EXACT = {
     "observe-memory",  # evidence-backed candidate write; exact because observe-* reads may exist
     "correct-memory",  # immutable successor write; exact transition
     "forget-memory",   # reversible suppression write; exact transition
+    "issue-execution-envelope",  # persists one immutable governed execution envelope
+    "transition-evaluation-case",  # human-authority append-only eval lifecycle write
 }
 NESTED_CARR_CALL = re.compile(r"(?:tools\.)?(mcp__carr(?:_records)?__([A-Za-z0-9_]+))")
 CALL_VERB = re.compile(r"\b(?:verb|name)\s*[:=]\s*['\"]([A-Za-z0-9_-]+)['\"]", re.I)
