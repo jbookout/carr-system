@@ -109,6 +109,73 @@ def _plugin_manifest(provider_key: str) -> dict:
     return manifest
 
 
+def _conformance_observation(
+    provider_ref: str,
+    manifest: dict,
+    observed_at: object,
+    *,
+    run_ref: str,
+    status: str,
+    evidence_refs: list[str],
+) -> dict:
+    observation = {
+        "schema_version": "execution-environment-conformance.v1",
+        "provider_ref": provider_ref,
+        "manifest_digest": manifest["manifest_digest"],
+        "implementation_digest": manifest["implementation_digest"],
+        "package_digest": manifest["package_provenance"]["package_digest"],
+        "configuration_schema_digest": manifest["configuration_schema_digest"],
+        "contract_ref": manifest["conformance_contract_ref"],
+        "contract_digest": manifest["conformance_contract_digest"],
+        "run_ref": run_ref,
+        "status": status,
+        "check_results": {"check:fixture": status == "passed"},
+        "version_ref": "fixture-provider-v1",
+        "backend_kind": manifest["backend_kind"],
+        "evidence_refs": evidence_refs,
+        "contains_secrets": False,
+        "observed_at": observed_at.isoformat(),
+    }
+    digest_body = {key: value for key, value in observation.items() if key != "observed_at"}
+    observation["run_digest"] = "sha256:" + hashlib.sha256(_canonical_json(digest_body).encode()).hexdigest()
+    return observation
+
+
+def _assert_provider_transition_serializes(dsn: str) -> None:
+    """Two authority CAS calls cannot both inspect the same lifecycle head."""
+    first = psycopg.connect(dsn)
+    second = psycopg.connect(dsn)
+    try:
+        first.execute("set session authorization carr_authority_joe")
+        second.execute("set session authorization carr_authority_joe")
+        first.execute(
+            "select * from ops.transition_execution_environment_provider(%s,%s,%s,%s,%s)",
+            (
+                "environment-provider:hermes-local:v1", "active", "disabled",
+                Jsonb(["evidence:concurrent-cas-first"]), uuid.uuid4(),
+            ),
+        ).fetchone()
+        second.execute("set local lock_timeout='200ms'")
+        try:
+            second.execute(
+                "select * from ops.transition_execution_environment_provider(%s,%s,%s,%s,%s)",
+                (
+                    "environment-provider:hermes-local:v1", "active", "retired",
+                    Jsonb(["evidence:concurrent-cas-second"]), uuid.uuid4(),
+                ),
+            ).fetchone()
+        except psycopg.Error as exc:
+            if exc.sqlstate != "55P03":
+                raise RuntimeError(f"concurrent provider CAS failed for the wrong reason: {exc.sqlstate}") from exc
+        else:
+            raise RuntimeError("concurrent provider CAS callers both passed the same lifecycle head")
+    finally:
+        second.rollback()
+        first.rollback()
+        second.close()
+        first.close()
+
+
 def assert_required_item_ref_and_classification_frozen(cur, work_ref: str, plan_ref: str, bundle: dict) -> None:
     """A caller cannot demote or replace a compiler-selected required item."""
     tampered = json.loads(json.dumps(bundle))
@@ -222,6 +289,7 @@ def main() -> int:
         p6 = _program6_helpers()
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             p6.ensure_authority_roles(cur)
+            _assert_provider_transition_serializes(dsn)
             joe_id = cur.execute(
                 "select id from actor where slug='joe' and active and kind='human'"
             ).fetchone()[0]
@@ -369,9 +437,10 @@ def main() -> int:
                 (Jsonb(_plugin_manifest("hermes-local")), uuid.uuid4()),
                 "plugin shadow of protected built-in provider",
             )
+            fixture_manifest = _plugin_manifest("fixture-remote")
             quarantined = cur.execute(
                 "select * from ops.register_execution_environment_provider(%s,%s)",
-                (Jsonb(_plugin_manifest("fixture-remote")), uuid.uuid4()),
+                (Jsonb(fixture_manifest), uuid.uuid4()),
             ).fetchone()
             if quarantined is None or quarantined[2] != "discovered" or quarantined[3] is not False:
                 raise RuntimeError("provider registration did not remain discovered and unpromoted")
@@ -389,17 +458,32 @@ def main() -> int:
             )
             conformance_key = uuid.uuid4()
             passed_at = cur.execute("select clock_timestamp()-interval '1 second'").fetchone()[0]
+            passed_observation = _conformance_observation(
+                quarantined[0], fixture_manifest, passed_at,
+                run_ref="conformance-run:fixture-passed", status="passed",
+                evidence_refs=["evidence:fixture-conformance"],
+            )
             conformance = cur.execute(
-                "select * from ops.attest_execution_environment_conformance(%s,%s,%s,%s,%s,%s,%s,%s)",
-                (quarantined[0], "conformance-run:fixture-passed", "sha256:" + "8" * 64, "passed", Jsonb(["check:fixture"]), Jsonb(["evidence:fixture-conformance"]), passed_at, conformance_key),
+                "select * from ops.attest_execution_environment_conformance(%s,%s,%s)",
+                (quarantined[0], Jsonb(passed_observation), conformance_key),
             ).fetchone()
             if conformance is None or conformance[1] is not False:
                 raise RuntimeError("provider conformance was not appended")
             refusal(
                 cur,
-                "select * from ops.attest_execution_environment_conformance(%s,%s,%s,%s,%s,%s,%s,%s)",
-                (quarantined[0], "conformance-run:fixture-passed", "sha256:" + "8" * 64, "passed", Jsonb(["check:fixture"]), Jsonb(["evidence:changed"]), passed_at, conformance_key),
+                "select * from ops.attest_execution_environment_conformance(%s,%s,%s)",
+                (quarantined[0], Jsonb({**passed_observation, "evidence_refs": ["evidence:changed"]}), conformance_key),
                 "provider conformance idempotency evidence conflict",
+            )
+            forged_observation = json.loads(json.dumps(passed_observation))
+            forged_observation["implementation_digest"] = "sha256:" + "f" * 64
+            forged_body = {key: value for key, value in forged_observation.items() if key not in {"run_digest", "observed_at"}}
+            forged_observation["run_digest"] = "sha256:" + hashlib.sha256(_canonical_json(forged_body).encode()).hexdigest()
+            refusal(
+                cur,
+                "select * from ops.attest_execution_environment_conformance(%s,%s,%s)",
+                (quarantined[0], Jsonb(forged_observation), uuid.uuid4()),
+                "provider conformance with forged implementation digest",
             )
             conformance_passed = cur.execute(
                 "select * from ops.transition_execution_environment_provider(%s,%s,%s,%s,%s)",
@@ -407,9 +491,15 @@ def main() -> int:
             ).fetchone()
             if conformance_passed is None or conformance_passed[1] != "conformance_passed":
                 raise RuntimeError("passed conformance did not permit the human lifecycle transition")
+            failed_at = cur.execute("select clock_timestamp()").fetchone()[0]
+            failed_observation = _conformance_observation(
+                quarantined[0], fixture_manifest, failed_at,
+                run_ref="conformance-run:fixture-regression", status="failed",
+                evidence_refs=["evidence:fixture-regression"],
+            )
             cur.execute(
-                "select * from ops.attest_execution_environment_conformance(%s,%s,%s,%s,%s,%s,%s,%s)",
-                (quarantined[0], "conformance-run:fixture-regression", "sha256:" + "9" * 64, "failed", Jsonb(["check:fixture"]), Jsonb(["evidence:fixture-regression"]), cur.execute("select clock_timestamp()").fetchone()[0], uuid.uuid4()),
+                "select * from ops.attest_execution_environment_conformance(%s,%s,%s)",
+                (quarantined[0], Jsonb(failed_observation), uuid.uuid4()),
             )
             refusal(
                 cur,
@@ -430,6 +520,14 @@ def main() -> int:
             local_provider = next((row for row in providers if row.get("provider_ref") == "environment-provider:hermes-local:v1"), None)
             if not local_provider or local_provider.get("state") != "active" or local_provider.get("conformance", {}).get("state") != "passed" or local_provider.get("grants_authority") is not False:
                 raise RuntimeError(f"reference execution environment provider is not active, conformant, and non-authoritative: {providers}")
+            local_conformance = local_provider["conformance"]
+            if (
+                local_provider.get("manifest_digest") != "sha256:9f1ac4e93a50163aef414f4084046e3e0740332e15c59baca0ef8ed289fcd6c8"
+                or local_conformance.get("run_digest") != "sha256:d85300c2904f9317d559f871dfcbf0c471e736b9e31a54d920f72de1d95efc64"
+                or local_conformance.get("implementation_digest") != "sha256:7d680c252bedc88ff7b80d50a5bfbdb9b926823d8bbc521f606e7b58237cbc1e"
+                or local_conformance.get("manifest_digest") != local_provider.get("manifest_digest")
+            ):
+                raise RuntimeError(f"reference provider database attestation diverged from the exact installed probe: {local_provider}")
             issued_envelope = cur.execute(
                 "select * from ops.issue_execution_envelope_v1(%s,%s,%s)",
                 (ref, replay_first[0], uuid.uuid4()),

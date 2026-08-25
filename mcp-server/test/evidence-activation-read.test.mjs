@@ -71,6 +71,7 @@ test("execution environment registry is a bounded read and lifecycle writes rema
   const { tools, client, calls } = allTools((sql) => {
     if (/read_execution_environment_providers/.test(sql)) return { rows: [{ providers: registry }] };
     if (/register_execution_environment_provider/.test(sql)) return { rows: [{ provider_ref: "environment-provider:fixture:v1", manifest_digest: `sha256:${"a".repeat(64)}`, state: "discovered", replayed: false }] };
+    if (/attest_execution_environment_conformance/.test(sql)) return { rows: [{ conformance_id: "22222222-2222-4222-8222-222222222222", replayed: false }] };
     throw new Error(`unexpected query: ${sql}`);
   });
   assert.equal(tools["register-execution-environment-provider"].humanOnly, true);
@@ -84,6 +85,22 @@ test("execution environment registry is a bounded read and lifecycle writes rema
   assert.equal(response.verb, "register-execution-environment-provider");
   assert.equal(response.result.state, "discovered");
   assert.equal(calls.some(({ sql }) => /register_execution_environment_provider/.test(sql)), true);
+
+  const digest = `sha256:${"a".repeat(64)}`;
+  const observation = {
+    schema_version: "execution-environment-conformance.v1", provider_ref: "environment-provider:fixture:v1",
+    manifest_digest: digest, implementation_digest: digest, package_digest: digest,
+    configuration_schema_digest: digest, contract_ref: "conformance:execution-environment-v1",
+    contract_digest: digest, run_ref: "conformance-run:fixture", status: "passed",
+    check_results: { "check:implementation-digest-exact": true }, version_ref: "fixture-v1",
+    backend_kind: "remote", evidence_refs: ["evidence:fixture"], contains_secrets: false,
+    run_digest: digest, observed_at: "2026-08-25T12:00:00Z",
+  };
+  const attested = await tools["attest-execution-environment-conformance"].handler(client, actor, {
+    provider_ref: observation.provider_ref, observation, idempotency_key: "22222222-2222-4222-8222-222222222222",
+  });
+  assert.equal(attested.result.replayed, false);
+  assert.equal(calls.some(({ sql }) => /attest_execution_environment_conformance\(\$1::text,\$2::jsonb,\$3::uuid\)/.test(sql)), true);
 });
 
 test("malformed provider lifecycle inputs refuse before touching the database", async () => {
@@ -95,6 +112,10 @@ test("malformed provider lifecycle inputs refuse before touching the database", 
   await assert.rejects(
     tools["transition-execution-environment-provider"].handler(client, actor, { provider_ref: "bad", expected_state: "active", target_state: "disabled", evidence_refs: [], idempotency_key: "bad" }),
     (error) => error instanceof TestToolError && error.payload.error === "execution_environment_transition_invalid",
+  );
+  await assert.rejects(
+    tools["attest-execution-environment-conformance"].handler(client, actor, { provider_ref: "environment-provider:fixture:v1", observation: {}, idempotency_key: "11111111-1111-4111-8111-111111111111" }),
+    (error) => error instanceof TestToolError && error.payload.error === "execution_environment_conformance_invalid",
   );
   assert.equal(calls.length, 0);
 });
