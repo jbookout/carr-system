@@ -150,6 +150,12 @@ def _repairs_exact_origin_collision(
         slot: names for slot, names in collision_report(remote_names).items()
         if slot not in FROZEN_COLLISIONS
     }
+    frozen = {
+        slot: names for slot, names in collision_report(remote_names).items()
+        if slot in FROZEN_COLLISIONS
+    }
+    if frozen != FROZEN_COLLISIONS:
+        return False
     if unregistered != TRANSIENT_ORIGIN_COLLISION:
         return False
     if not head_contains_origin or not contents_match:

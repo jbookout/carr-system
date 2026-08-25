@@ -202,17 +202,12 @@ def main() -> int:
     # The only permitted remote-collision repair is the current 0298 incident:
     # preserve the partner-room migration, replace only the memory migration
     # with 0299, and prove the replacement bytes differ only in ordinal labels.
-    exact_remote = [
-        "0169_control_plane_canary_fencing.sql",
-        "0169_hermes_pilot_actor.sql",
-        "0169_program5_release_binding.sql",
+    exact_frozen = [name for names in FROZEN_COLLISIONS.values() for name in names]
+    exact_remote = exact_frozen + [
         "0298_partner_room_origin.sql",
         "0298_memory_kernel.sql",
     ]
-    exact_current = [
-        "0169_control_plane_canary_fencing.sql",
-        "0169_hermes_pilot_actor.sql",
-        "0169_program5_release_binding.sql",
+    exact_current = exact_frozen + [
         "0298_partner_room_origin.sql",
         "0299_memory_kernel.sql",
     ]
@@ -239,6 +234,12 @@ def main() -> int:
     )
     assert not next_migration._repairs_exact_origin_collision(
         exact_remote, exact_current + ["0300_memory_kernel.sql"], True, True
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        [name for name in exact_remote if name != "0169_hermes_pilot_actor.sql"],
+        exact_current,
+        True,
+        True,
     )
 
     # Exercise the actual allocator path with the real migration inventory:
@@ -287,6 +288,42 @@ def main() -> int:
                 assert repair_rc == 0, (repair_rc, stdout.getvalue(), stderr.getvalue())
                 assert "next free migration number: 0300" in stdout.getvalue(), stdout.getvalue()
                 assert "0298_memory_kernel.sql" in stdout.getvalue(), stdout.getvalue()
+
+    # The same allocator path refuses if the red remote inventory is missing
+    # one member of a canonical frozen collision.
+    with tempfile.TemporaryDirectory(prefix="migration-number-contract-0298-frozen-gap-") as tmp:
+        migration_dir = Path(tmp) / "migrations"
+        migration_dir.mkdir()
+        for name in actual:
+            (migration_dir / name).touch()
+        remote_missing_frozen = [
+            name for name in remote_inventory if name != "0169_hermes_pilot_actor.sql"
+        ]
+        original_run = next_migration.run
+        original_worktree_paths = next_migration.worktree_paths
+        original_repo = next_migration.REPO
+        original_head_check = next_migration._head_contains_origin_main
+        original_content_check = next_migration._repair_contents_match
+        try:
+            next_migration.run = lambda args, cwd=None: (
+                "\n".join(f"migrations/{name}" for name in remote_missing_frozen)
+                if args[:3] == ["git", "ls-tree", "--name-only"] else ""
+            )
+            next_migration.worktree_paths = lambda: [tmp]
+            next_migration.REPO = tmp
+            next_migration._head_contains_origin_main = lambda: True
+            next_migration._repair_contents_match = lambda: True
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                frozen_gap_rc = next_migration.main()
+        finally:
+            next_migration.run = original_run
+            next_migration.worktree_paths = original_worktree_paths
+            next_migration.REPO = original_repo
+            next_migration._head_contains_origin_main = original_head_check
+            next_migration._repair_contents_match = original_content_check
+        assert frozen_gap_rc == 1, (frozen_gap_rc, stdout.getvalue(), stderr.getvalue())
+        assert "origin/main violates" in stderr.getvalue(), stderr.getvalue()
 
     # A COLLISION IN SOMEONE ELSE'S WORKTREE WARNS AND STILL RESERVES THE
     # NUMBERS. It does not refuse.
