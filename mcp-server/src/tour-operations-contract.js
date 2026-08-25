@@ -19,9 +19,14 @@ export function validateProjectionFact(fact, assertion, membership, projection, 
   if (fact.display_field_key !== assertion.field_key) throw new Error("PUBLIC_FIELD_RELABEL_REFUSED");
   if (membership.route_version !== fact.route_version || projection.route_version !== fact.route_version) throw new Error("ROUTE_VERSION_MISMATCH");
   const asOf = new Date(projection.as_of), starts = new Date(assertion.effective_from), ends = assertion.effective_to && new Date(assertion.effective_to);
-  if (Number.isNaN(asOf) || starts > asOf || (ends && ends <= asOf)) throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
-  if (rightsReceipt.status !== "active" || rightsReceipt.revoked_at || new Date(rightsReceipt.effective_at) > asOf || (rightsReceipt.expires_at && new Date(rightsReceipt.expires_at) <= asOf) || !rightsReceipt.allowed_use_classes.includes("client_public_display") || !(rightsReceipt.allowed_field_classes.includes(assertion.field_key) || rightsReceipt.allowed_field_classes.includes("*"))) throw new Error("PUBLIC_RIGHTS_REQUIRED");
-  if (receiptLineage.some(item => item.organization_tenant_id === rightsReceipt.organization_tenant_id && item.policy_key === rightsReceipt.policy_key && item.receipt_version > rightsReceipt.receipt_version && new Date(item.effective_at) <= asOf)) throw new Error("PUBLIC_RIGHTS_SUPERSEDED");
+  if ([asOf, starts, ends].filter(Boolean).some(date => Number.isNaN(date.getTime())) || starts > asOf || (ends && ends <= asOf)) throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
+  const rightsEffective = new Date(rightsReceipt.effective_at), rightsExpires = rightsReceipt.expires_at && new Date(rightsReceipt.expires_at);
+  if (rightsReceipt.status !== "active" || rightsReceipt.revoked_at || !Array.isArray(rightsReceipt.allowed_use_classes) || !Array.isArray(rightsReceipt.allowed_field_classes) || Number.isNaN(rightsEffective.getTime()) || (rightsExpires && Number.isNaN(rightsExpires.getTime())) || rightsEffective > asOf || (rightsExpires && rightsExpires <= asOf) || !rightsReceipt.allowed_use_classes.includes("client_public_display") || !(rightsReceipt.allowed_field_classes.includes(assertion.field_key) || rightsReceipt.allowed_field_classes.includes("*"))) throw new Error("PUBLIC_RIGHTS_REQUIRED");
+  if (receiptLineage.some(item => {
+    const effectiveAt = new Date(item.effective_at);
+    if (Number.isNaN(effectiveAt.getTime())) return true;
+    return item.organization_tenant_id === rightsReceipt.organization_tenant_id && item.policy_key === rightsReceipt.policy_key && item.receipt_version > rightsReceipt.receipt_version && effectiveAt <= asOf;
+  })) throw new Error("PUBLIC_RIGHTS_SUPERSEDED");
   if (!publicValueIsSafe(assertion.field_key, assertion.value)) throw new Error("PUBLIC_VALUE_UNSAFE");
   return true;
 }
