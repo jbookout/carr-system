@@ -38,7 +38,7 @@ QUERIES: dict[str, str] = {
     "deal-history.next-slice": """
       select subject_type, subject_id::text, verification, priority, source_class,
              slice_limit, enrichment_subject_count, enrichment_scheduled_for,
-             enrichment_mode
+             enrichment_mode, sizing_state
         from v_control_plane_deal_history_queue
        where verification = 'unverified'
          and enrichment_mode = %s
@@ -213,7 +213,8 @@ def _values(builder: str, rows: Sequence[Mapping[str, Any]], *, expected_mode: s
         counts = {_number(row, "enrichment_subject_count", builder) for row in rows}
         modes = {_text(row, "enrichment_mode", builder) for row in rows}
         scheduled = {_text(row, "enrichment_scheduled_for", builder) for row in rows}
-        if len(counts) != 1 or len(modes) != 1 or len(scheduled) != 1:
+        sizing_states = {_text(row, "sizing_state", builder) for row in rows}
+        if len(counts) != 1 or len(modes) != 1 or len(scheduled) != 1 or sizing_states != {"receipt_bound"}:
             raise InputUnavailable(builder, "deal-history rows disagree on enrichment receipt evidence")
         mode_value = next(iter(modes))
         count = int(next(iter(counts)))
