@@ -3929,12 +3929,13 @@ declare
   migration_hash text;
   migration_count integer;
   attempt_uuid uuid;
+  target_provider_version uuid;
   expected_tag text;
   existing_result ops.staging_restore_only_result%rowtype;
 begin
   if session_user<>'carr_jobs' then raise exception 'restore-only writer requires the carr_jobs session'; end if;
   if p_idempotency_key is null or p_correlation_id is null or p_recovery_attempt_id is null
-     or coalesce(p_release_key,'')='' or coalesce(p_prior_release_key,'')=''
+     or coalesce(p_release_key,'')='' or coalesce(p_prior_release_key,'' )=''
      or coalesce(p_git_sha,'') !~ '^[0-9a-f]{40}$' or p_correlation_id<>p_recovery_attempt_id then
     raise exception 'invalid typed restore-only attempt input';
   end if;
@@ -3947,6 +3948,10 @@ begin
      or current_release.provider<>'cloudflare-workers' or current_release.provider_version_id is null then
     raise exception 'restore-only target is not an exact rollback-ready Production candidate';
   end if;
+  if current_release.provider_version_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    raise exception 'restore-only target provider version is not a canonical UUID';
+  end if;
+  target_provider_version:=current_release.provider_version_id::uuid;
   select * into prior_release from ops.release where release_key=p_prior_release_key;
   if not found or prior_release.id=current_release.id or prior_release.environment<>'production'
      or prior_release.state<>'complete' or prior_release.service_id<>current_release.service_id then
@@ -3977,7 +3982,7 @@ begin
         existing.declared_schema_highest_migration,existing.declared_schema_applied_count,
         existing.declared_schema_ledger_sha256) is distinct from
        (p_correlation_id,p_recovery_attempt_id,current_release.id,prior_release.id,current_release.service_id,
-        p_git_sha,current_release.provider_version_id,current_release.recovery_strategy,
+        p_git_sha,target_provider_version,current_release.recovery_strategy,
         current_release.rollback_plan_ref,current_release.plan_hash,expected_tag,migration_hash,migration_count,
         current_release.schema_highest_migration,current_release.schema_applied_count,
         current_release.schema_ledger_sha256) then
@@ -3994,7 +3999,7 @@ begin
     declared_migration_count,declared_schema_highest_migration,declared_schema_applied_count,
     declared_schema_ledger_sha256,writer_session_user)
   values(p_idempotency_key,p_recovery_attempt_id,p_correlation_id,current_release.id,prior_release.id,
-    current_release.service_id,'staging',p_git_sha,'cloudflare-workers',current_release.provider_version_id,
+    current_release.service_id,'staging',p_git_sha,'cloudflare-workers',target_provider_version,
     current_release.recovery_strategy,current_release.rollback_plan_ref,current_release.plan_hash,expected_tag,
     migration_hash,migration_count,current_release.schema_highest_migration,current_release.schema_applied_count,
     current_release.schema_ledger_sha256,session_user) returning id into attempt_uuid;
@@ -11160,7 +11165,7 @@ CREATE TABLE ops.staging_restore_only_attempt (
     CONSTRAINT staging_restore_only_attempt_declared_migration_count_check CHECK ((declared_migration_count > 0)),
     CONSTRAINT staging_restore_only_attempt_declared_migration_set_sha25_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_restore_only_attempt_declared_schema_applied_coun_check CHECK ((declared_schema_applied_count > 0)),
-    CONSTRAINT staging_restore_only_attempt_declared_schema_highest_migr_check CHECK ((declared_schema_highest_migration ~ '^[0-9]{4}_[a-z0-9_.-]+\\.sql$'::text)),
+    CONSTRAINT staging_restore_only_attempt_declared_schema_highest_migr_check CHECK ((declared_schema_highest_migration ~ '^[0-9]{4}_[a-z0-9_.-]+\.sql$'::text)),
     CONSTRAINT staging_restore_only_attempt_declared_schema_ledger_sha25_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_restore_only_attempt_environment_check CHECK ((environment = 'staging'::text)),
     CONSTRAINT staging_restore_only_attempt_expected_provider_tag_check CHECK ((expected_provider_tag ~ '^carr-staging-[0-9a-f]{32}$'::text)),
@@ -29885,6 +29890,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0294_incident_fingerprint_and_success_clears.sql	f17bfb88bb28decfb414edeaa763df38ae7a9cc0f5362edb0443b1acc96a767e	2026-08-24 16:51:50.703935+00
 0295_staging_restore_only_recovery.sql	0d381ef9d2eb3a833b055bf688185489632faf6aeb568d49d03aa3e0f1b72b8b	2026-08-24 17:04:52.004777+00
 0296_restore_only_recovery_repair.sql	b4e93a9838954dd323487a66ae0ff6a43e33aa9ec811eaf54c7313507e04822d	2026-08-24 17:57:14.358848+00
+0297_restore_only_provider_uuid_repair.sql	591399dd207c62fd5efce9b2a33dc4160eb0e1274010732e7ad557ecbd829afa	2026-08-25 01:41:04.709394+00
 \.
 
 
