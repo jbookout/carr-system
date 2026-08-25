@@ -1,4 +1,4 @@
--- 0297: CARR-native learning memory kernel, Phase 1.
+-- 0298: CARR-native learning memory kernel, Phase 1.
 -- Extends actor/event provenance and the existing profile/rule conventions.
 -- A memory is context, never authority; forgetting suppresses recall but does
 -- not erase evidence. Hermes native memory remains outside this migration.
@@ -218,10 +218,10 @@ revoke delete on memory_item, memory_evidence from carr_reader, carr_writer, car
 do $$
 begin
   if not has_function_privilege('carr_writer', 'public.resolve_memory_plan_anchor(uuid,text)', 'execute') then
-    raise exception '0297 FAILED: carr_writer cannot execute the narrow plan resolver';
+    raise exception '0298 FAILED: carr_writer cannot execute the narrow plan resolver';
   end if;
   if has_table_privilege('carr_writer', 'ops.sourced_work_request_plan', 'select') then
-    raise exception '0297 FAILED: carr_writer gained broad plan-table SELECT';
+    raise exception '0298 FAILED: carr_writer gained broad plan-table SELECT';
   end if;
 end $$;
 

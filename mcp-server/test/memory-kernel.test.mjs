@@ -239,7 +239,7 @@ test("memory lifecycle SQL names exact transition metadata and immutable core fi
   // Migration-level trigger proof is structural here; the live migration CI
   // exercises the trigger against PostgreSQL with illegal rewrites and valid
   // handler transitions.
-  const migration = readFileSync("../migrations/0297_memory_kernel.sql", "utf8");
+  const migration = readFileSync("../migrations/0298_memory_kernel.sql", "utf8");
   assert.match(migration, /memory_item_immutable_core/);
   assert.match(migration, /memory_item_insert_valid/);
   assert.match(migration, /new\.created_at := now\(\)/);
