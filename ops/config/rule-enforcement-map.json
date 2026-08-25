@@ -1933,7 +1933,7 @@
     "5cd8d0f6": {
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
-      "why_unenforceable": "Requires judging whether a blocker is self-servable at all, which depends on the specific refusal and what the session already holds. A predicate could not tell a missing credential apart from a gate that names its own escape hatch. Activated after the 2026-08-14 audit, so it carries no audit row."
+      "why_unenforceable": "Requires judging whether a blocker is self-servable at all, which depends on the specific refusal and what the session already holds. A predicate could not tell a missing credential apart from a gate that names its own escape hatch."
     },
     "1c42d80c": {
       "category": "judgment_advisory",

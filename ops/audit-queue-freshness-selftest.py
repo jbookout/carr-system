@@ -14,6 +14,7 @@ edits a gate, and then the fixture is measuring the repo instead of the check.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -31,7 +32,8 @@ HEADER = "id\tplain_name\tbucket\tenforcement_or_sketch\tevidence\n"
 failures: list[str] = []
 
 
-def build(root: str, rows: list[tuple[str, str, str, str]], artifacts: dict[str, str]) -> None:
+def build(root: str, rows: list[tuple[str, str, str, str]], artifacts: dict[str, str],
+          active_ids: list[str] | None = None) -> None:
     """Write a fake repo: an audit table plus whatever enforcement files."""
     os.makedirs(os.path.join(root, "audits"), exist_ok=True)
     path = os.path.join(root, "audits", "rule-enforceability-audit-2026-08-14.tsv")
@@ -44,6 +46,10 @@ def build(root: str, rows: list[tuple[str, str, str, str]], artifacts: dict[str,
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "w") as fh:
             fh.write(text)
+    os.makedirs(os.path.join(root, "ops", "config"), exist_ok=True)
+    ids = active_ids if active_ids is not None else [row[0] for row in rows]
+    with open(os.path.join(root, "ops", "config", "rule-enforcement-map.json"), "w") as fh:
+        json.dump({"active_rule_ids": {"shared": ids}}, fh)
 
 
 def case(label: str, rows, artifacts, expect_ids: set[str]) -> None:
@@ -139,13 +145,22 @@ case(
 )
 
 # ---------------------------------------------------------------- direction 5
-# PERMITS: no audit table at all exits clean rather than crashing. The audits
-# directory is dated-filename based, so a future rename must degrade to a no-op
-# instead of failing CI for everyone.
+# REFUSES: no audit table means no current assessment at all. A no-op here once
+# let CI report fresh while the only evidence file was absent.
 with tempfile.TemporaryDirectory() as _root:
     _findings, _audit = mod.stale_rows(_root)
     if _audit is not None or _findings:
-        failures.append("missing audit table should be a clean no-op")
+        failures.append("stale_rows should report no findings when no table exists")
+    os.makedirs(os.path.join(_root, "ops", "config"), exist_ok=True)
+    with open(os.path.join(_root, "ops", "config", "rule-enforcement-map.json"), "w") as fh:
+        json.dump({"active_rule_ids": {"shared": ["aaaaaaa5"]}}, fh)
+    _saved = sys.argv
+    sys.argv = ["check", _root]
+    try:
+        if mod.main() != 1:
+            failures.append("missing audit table must fail closed")
+    finally:
+        sys.argv = _saved
 
 # REFUSES: a malformed id column is skipped, not crashed on.
 case(
@@ -194,6 +209,71 @@ with tempfile.TemporaryDirectory() as _root:
     try:
         if mod.main() != 1:
             failures.append("exit code should be 1 when a stale row is found")
+    finally:
+        sys.argv = _saved
+
+# ---------------------------------------------------------------- direction 7
+# The current audit is a join against the reviewed map, not a historical
+# sample. Pin both directions: an added rule needs a row, and an old/retired
+# row must be removed. Also pin the structural fail-closed paths, because a
+# permissive CSV reader would otherwise turn malformed evidence into a green.
+with tempfile.TemporaryDirectory() as _root:
+    build(_root, [("aaaaaaa7", "current", "J", "map says ambient")], {},
+          active_ids=["aaaaaaa7", "bbbbbbb7"])
+    _saved = sys.argv
+    sys.argv = ["check", _root]
+    try:
+        if mod.main() != 1:
+            failures.append("audit missing a current map id must fail")
+    finally:
+        sys.argv = _saved
+
+with tempfile.TemporaryDirectory() as _root:
+    build(_root, [("aaaaaaa7", "current", "J", "map says ambient"),
+                  ("bbbbbbb7", "retired", "J", "old row")], {},
+          active_ids=["aaaaaaa7"])
+    _saved = sys.argv
+    sys.argv = ["check", _root]
+    try:
+        if mod.main() != 1:
+            failures.append("inactive audit extra must fail")
+    finally:
+        sys.argv = _saved
+
+with tempfile.TemporaryDirectory() as _root:
+    build(_root, [("aaaaaaa7", "current", "J", "map says ambient"),
+                  ("aaaaaaa7", "duplicate", "J", "same id")], {},
+          active_ids=["aaaaaaa7"])
+    _saved = sys.argv
+    sys.argv = ["check", _root]
+    try:
+        if mod.main() != 1:
+            failures.append("duplicate audit id must fail")
+    finally:
+        sys.argv = _saved
+
+with tempfile.TemporaryDirectory() as _root:
+    build(_root, [("aaaaaaa7", "current", "J", "map says ambient")], {},
+          active_ids=["aaaaaaa7"])
+    with open(os.path.join(_root, "audits", "rule-enforceability-audit-2026-08-14.tsv"), "w") as fh:
+        fh.write("id\tplain_name\tbucket\tevidence\n")
+        fh.write("aaaaaaa7\tcurrent\tJ\tmissing column\n")
+    _saved = sys.argv
+    sys.argv = ["check", _root]
+    try:
+        if mod.main() != 1:
+            failures.append("malformed audit row/header must fail")
+    finally:
+        sys.argv = _saved
+
+with tempfile.TemporaryDirectory() as _root:
+    build(_root, [("not-an-id", "malformed", "J", "bad id")], {},
+          active_ids=["aaaaaaa7"])
+    _saved = sys.argv
+    sys.argv = ["check", _root]
+    try:
+        if mod.main() != 1:
+            failures.append("malformed audit id must fail")
     finally:
         sys.argv = _saved
 
