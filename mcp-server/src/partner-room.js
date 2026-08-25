@@ -34,6 +34,7 @@ export const ROOM_KINDS = ["turn", "system", "receipt"];
 export const QUEUE_STALE_MS = 120_000;
 const QUEUE_EVENT_KEYS = ["v", "board", "event_id", "event", "task_id", "card", "summary", "projected_at"];
 const QUEUE_CARD_KEYS = ["title", "target", "effective_model", "status", "priority", "cap", "updated_at", "source_seq"];
+const QUEUE_HEALTH_KEYS = ["v", "board", "source", "status", "checked_at", "event_cursor", "projection_digest"];
 
 /** null when the name is not a room slug; the normalized name otherwise. */
 export function normalizeRoomName(value) {
@@ -97,6 +98,32 @@ export function queueEventFromTurn(turn) {
   } catch { return null; }
 }
 
+/** Only a server-attributable Hermes projector receipt can extend queue
+ * freshness. It carries no task/card data and never participates in the task
+ * state map. */
+export function queueProjectionHealthFromTurn(turn) {
+  if (turn?.kind !== "receipt" || turn.seat !== "hermes" ||
+      turn.sponsor !== "joe" ||
+      turn.origin_channel !== "mcp" || turn.origin_actor !== "hermes-pilot" ||
+      typeof turn.body !== "string") return null;
+  try {
+    const outer = JSON.parse(turn.body);
+    const health = outer?.queue_projection_health;
+    if (!exactKeys(outer, ["queue_projection_health"]) ||
+        !exactKeys(health, QUEUE_HEALTH_KEYS) || health.v !== 1 ||
+        health.board !== "carr-build" || health.source !== "hermes-queue-projector.v1" ||
+        health.status !== "ok" || !Number.isInteger(health.event_cursor) ||
+        health.event_cursor < 0 || typeof health.checked_at !== "string" ||
+        !/Z$|\+00:00$/.test(health.checked_at) ||
+        !Number.isFinite(Date.parse(health.checked_at)) ||
+        !/Z$|\+00:00$/.test(String(turn.at || "")) ||
+        !Number.isFinite(Date.parse(turn.at)) || Date.parse(health.checked_at) > Date.parse(turn.at) ||
+        !(health.projection_digest === null || UUID.test(health.projection_digest)) ||
+        ((health.event_cursor === 0) !== (health.projection_digest === null))) return null;
+    return health;
+  } catch { return null; }
+}
+
 /** Shared queue read: latest state-complete event per canonical task. */
 export async function readRoomQueue(c, args = {}, { now = Date.now() } = {}) {
   const room = normalizeRoomName(args.room);
@@ -107,8 +134,16 @@ export async function readRoomQueue(c, args = {}, { now = Date.now() } = {}) {
       order by id desc limit 800 /* partner-room:queue */`, [room],
   );
   const latest = new Map();
+  let projectionHealthAt = null;
+  let latestQueueEventAt = null;
   for (const turn of r.rows) {
+    const health = queueProjectionHealthFromTurn(turn);
+    if (health && (!projectionHealthAt || Date.parse(turn.at) > Date.parse(projectionHealthAt)))
+      projectionHealthAt = turn.at;
     const event = queueEventFromTurn(turn);
+    if (event && Number.isFinite(Date.parse(turn.at)) &&
+        (!latestQueueEventAt || Date.parse(turn.at) > Date.parse(latestQueueEventAt)))
+      latestQueueEventAt = turn.at;
     if (!event || latest.has(event.task_id)) continue;
     latest.set(event.task_id, event);
   }
@@ -116,8 +151,11 @@ export async function readRoomQueue(c, args = {}, { now = Date.now() } = {}) {
     .sort((a, b) => Date.parse(b.card.updated_at) - Date.parse(a.card.updated_at));
   const projectedAt = events.reduce((latestAt, event) =>
     !latestAt || Date.parse(event.projected_at) > Date.parse(latestAt) ? event.projected_at : latestAt, null);
-  return { ok: true, room, events, projected_at: projectedAt,
-    live: Boolean(projectedAt) && now - Date.parse(projectedAt) <= QUEUE_STALE_MS };
+  const healthCanExtend = projectionHealthAt &&
+    (!latestQueueEventAt || Date.parse(projectionHealthAt) > Date.parse(latestQueueEventAt));
+  const freshest = healthCanExtend ? projectionHealthAt : (latestQueueEventAt || projectedAt);
+  return { ok: true, room, events, projected_at: freshest,
+    live: Boolean(freshest) && now >= Date.parse(freshest) && now - Date.parse(freshest) <= QUEUE_STALE_MS };
 }
 
 // THE ONE ROOM APPEND, for the same reason. Sponsor is always resolved by the

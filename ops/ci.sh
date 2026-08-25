@@ -68,6 +68,12 @@ cd "$REPO"
 
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
+# Every gate selftest is an untrusted child: it may exercise a deliberately
+# failing fixture, and a hung fixture must not hold the whole CI run forever.
+# 120s is below the observed 249–317s full-run budget while leaving room for
+# the slowest ordinary selftest and for room-bridge's own 60s suite bound.
+CI_SELFTEST_TIMEOUT_SECONDS=120
+CI_TIMEOUT_HELPER="$REPO/bin/with-timeout.py"
 
 STRICT=0
 ONLY=""
@@ -387,7 +393,7 @@ check_contract() {
 # the ledger-sweep scope gate swallowing its own headline trigger, so they are a
 # promotion gate in their own right rather than developer convenience.
 check_gates() {
-  local failures="" count=0 skiplist=""
+  local failures="" count=0 skiplist="" gates_timed_out=0
 
   # EVERY GATE FIRED IN THIS CLASS IS A FIXTURE, and saying so once here is what
   # keeps the enforcement numbers honest. A selftest drives a real gate with an
@@ -467,7 +473,8 @@ PYEOF
     fi
     count=$((count+1))
     local grc
-    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$t"
+    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$CI_TIMEOUT_HELPER" \
+      "$CI_SELFTEST_TIMEOUT_SECONDS" "$PY" "$t"
     grc=$?
     # EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE. It is EX_CONFIG, and it is
     # already the repo's convention: bin/type-check.sh's header states it and the
@@ -477,7 +484,14 @@ PYEOF
     # past it was CARR_SKIP_CI on every push. Deliberately narrow: ONLY 78 skips,
     # the reason is printed every run, and every other nonzero still fails.
     # ops/ci-selftest.py seeds both cases and fails if this widens.
-    if [ "$grc" -eq 78 ]; then
+    if [ "$grc" -eq 124 ]; then
+      failures="$failures TIMEOUT:$base"
+      gates_timed_out=1
+      printf '        \033[31mTIMEOUT\033[0m  %s — exceeded %ss; aborting remaining gate selftests\n' \
+        "$base" "$CI_SELFTEST_TIMEOUT_SECONDS" >&2
+      tail -12 "$LOGDIR/gate-$base.log" >&2
+      break
+    elif [ "$grc" -eq 78 ]; then
       skiplist="$skiplist $base"
       printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
         "$base" "$(tail -1 "$LOGDIR/gate-$base.log" 2>/dev/null)" >&2
@@ -495,7 +509,7 @@ PYEOF
   # Python wrapper around them would only shell out to the same script.
   # Everything else is identical to the loop above: same exclusion scope, same
   # counting, same captured log and same 12-line tail on failure.
-  for t in tools/test-*.sh; do
+  if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh; do
     [ -f "$t" ] || continue
     local sbase; sbase="$(basename "$t")"
     local swhy; swhy="$(excluded_reason "$sbase")"
@@ -505,10 +519,21 @@ PYEOF
       continue
     fi
     count=$((count+1))
-    run_quiet "$LOGDIR/gate-$sbase.log" "$t" \
-      || { inherited_abort "$sbase" "$t"
-           failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2; }
-  done
+    run_quiet "$LOGDIR/gate-$sbase.log" "$PY" "$CI_TIMEOUT_HELPER" \
+      "$CI_SELFTEST_TIMEOUT_SECONDS" "$t"
+    grc=$?
+    if [ "$grc" -eq 124 ]; then
+      failures="$failures TIMEOUT:$sbase"
+      gates_timed_out=1
+      printf '        \033[31mTIMEOUT\033[0m  %s — exceeded %ss; aborting remaining gate selftests\n' \
+        "$sbase" "$CI_SELFTEST_TIMEOUT_SECONDS" >&2
+      tail -12 "$LOGDIR/gate-$sbase.log" >&2
+      break
+    elif [ "$grc" -ne 0 ]; then
+      inherited_abort "$sbase" "$t"
+      failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2
+    fi
+  done; fi
   # gate-integrity is the baseline check itself: a gate edited without a
   # re-bless in the same commit (rule c0b38d80) fails here.
   #

@@ -12752,14 +12752,14 @@ COMMENT ON TABLE ops.sourced_work_request_plan_acceptance_receipt IS 'Private hu
 
 CREATE TABLE ops.sourced_work_request_plan_shape_binding_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    plan_acceptance_receipt_id uuid NOT NULL,
-    work_request_id uuid NOT NULL,
-    disposition text NOT NULL,
+    plan_acceptance_receipt_id uuid CONSTRAINT sourced_work_request_plan_s_plan_acceptance_receipt_id_not_null NOT NULL,
+    work_request_id uuid CONSTRAINT sourced_work_request_plan_shape_bindin_work_request_id_not_null NOT NULL,
+    disposition text CONSTRAINT sourced_work_request_plan_shape_binding_re_disposition_not_null NOT NULL,
     fixed_surface_ref text,
-    rationale text NOT NULL,
-    decided_by_actor_id uuid NOT NULL,
-    decided_at timestamp with time zone NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    rationale text CONSTRAINT sourced_work_request_plan_shape_binding_rece_rationale_not_null NOT NULL,
+    decided_by_actor_id uuid CONSTRAINT sourced_work_request_plan_shape_bi_decided_by_actor_id_not_null NOT NULL,
+    decided_at timestamp with time zone CONSTRAINT sourced_work_request_plan_shape_binding_rec_decided_at_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_plan_shape_binding_rec_created_at_not_null NOT NULL,
     CONSTRAINT sourced_work_request_plan_shape_binding_recei_disposition_check CHECK ((disposition = ANY (ARRAY['required'::text, 'not_required'::text]))),
     CONSTRAINT sourced_work_request_plan_shape_binding_receipt_check CHECK ((((disposition = 'required'::text) AND (fixed_surface_ref IS NULL)) OR ((disposition = 'not_required'::text) AND (fixed_surface_ref IS NOT NULL) AND (btrim(fixed_surface_ref) <> ''::text)))),
     CONSTRAINT sourced_work_request_plan_shape_binding_receipt_rationale_check CHECK ((btrim(rationale) <> ''::text))
@@ -12779,15 +12779,15 @@ COMMENT ON TABLE ops.sourced_work_request_plan_shape_binding_receipt IS 'Append-
 
 CREATE TABLE ops.sourced_work_request_shape_disposition_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid NOT NULL,
-    idempotency_key uuid NOT NULL,
-    base_version integer NOT NULL,
-    result_version integer NOT NULL,
-    disposition text NOT NULL,
+    work_request_id uuid CONSTRAINT sourced_work_request_shape_disposition_work_request_id_not_null NOT NULL,
+    idempotency_key uuid CONSTRAINT sourced_work_request_shape_disposition_idempotency_key_not_null NOT NULL,
+    base_version integer CONSTRAINT sourced_work_request_shape_disposition_re_base_version_not_null NOT NULL,
+    result_version integer CONSTRAINT sourced_work_request_shape_disposition__result_version_not_null NOT NULL,
+    disposition text CONSTRAINT sourced_work_request_shape_disposition_rec_disposition_not_null NOT NULL,
     fixed_surface_ref text,
-    rationale text NOT NULL,
-    decided_by_actor_id uuid NOT NULL,
-    decided_at timestamp with time zone DEFAULT now() NOT NULL,
+    rationale text CONSTRAINT sourced_work_request_shape_disposition_recei_rationale_not_null NOT NULL,
+    decided_by_actor_id uuid CONSTRAINT sourced_work_request_shape_disposi_decided_by_actor_id_not_null NOT NULL,
+    decided_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_shape_disposition_rece_decided_at_not_null NOT NULL,
     CONSTRAINT sourced_work_request_shape_disposition_rec_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_shape_disposition_recei_base_version_check CHECK ((base_version > 0)),
     CONSTRAINT sourced_work_request_shape_disposition_receip_disposition_check CHECK ((disposition = ANY (ARRAY['required'::text, 'not_required'::text]))),
@@ -32677,7 +32677,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0303_evidence_activation_reliability.sql	4c44113279c9afb0c50cbeda8fd9b70376ebcd9756c1b4abaab7e50ef0744f6d	2026-08-25 09:20:44.463242+00
 0304_hermes_runtime_admission.sql	7a424204f01af73bd98e7c01e9f48a8efd531d088a2e4198e05337ea565b9abe	2026-08-25 11:43:10.83544+00
 0305_deal_history_queue_receipt_missing_visibility.sql	1099b02cfcd47812feaca5b18747190be5e730faf0abb81e0eea3604cda800e4	2026-08-25 13:47:29.212984+00
-0306_sourced_work_shape_disposition.sql	9a205a2c8c2ca50b61d5ee60b8883c0ff66a8138691d822faaf7ce4295ffb7af	2026-08-25 14:10:03.21064+00
+0306_sourced_work_shape_disposition.sql	9a205a2c8c2ca50b61d5ee60b8883c0ff66a8138691d822faaf7ce4295ffb7af	2026-08-25 14:50:55.723919+00
 \.
 
 

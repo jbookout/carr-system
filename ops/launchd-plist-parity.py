@@ -43,6 +43,11 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PREFIX = "com.carr."
 
+sys.path.insert(0, REPO)
+
+from lib.launchd_observation import LaunchdObservationError
+from lib.launchd_observation import loaded_labels as native_loaded_labels
+
 # The three places launchd reads from on this machine, plus the repo itself. A job
 # is "backed" if a plist declaring its label exists in ANY of them — the repo copy
 # is what makes it reproducible, the installed copy is what makes it run.
@@ -56,14 +61,8 @@ PLIST_DIRS = [
 
 
 def loaded_labels():
-    """Labels launchd currently knows, restricted to ours."""
-    out = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
-    labels = set()
-    for line in out.splitlines()[1:]:
-        parts = line.split("\t")
-        if len(parts) >= 3 and parts[2].startswith(PREFIX):
-            labels.add(parts[2].strip())
-    return labels
+    """Labels launchd currently knows, from exact native print reads."""
+    return native_loaded_labels()
 
 
 def backed_labels():
@@ -96,7 +95,11 @@ def backed_labels():
 
 def main():
     quiet = "--quiet" in sys.argv
-    loaded = loaded_labels()
+    try:
+        loaded = loaded_labels()
+    except (LaunchdObservationError, OSError, subprocess.SubprocessError) as exc:
+        print(f"FAIL  launchd state is unreadable: {exc}", file=sys.stderr)
+        return 2
     backed = backed_labels()
 
     unbacked = sorted(loaded - set(backed))

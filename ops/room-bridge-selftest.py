@@ -37,29 +37,51 @@ SUITES = (
     "tools/room-bridge/test_queue_projection_unit.py",
     "tools/room-bridge/test_queue_dispatch_unit.py",
 )
+SUITE_TIMEOUT_SECONDS = 60
 
 
-def main() -> int:
+def _lines(stdout, stderr):
+    values = []
+    for value in (stdout, stderr):
+        if value:
+            if isinstance(value, bytes):
+                value = value.decode(errors="replace")
+            values.extend(str(value).strip().splitlines())
+    return values
+
+
+def run_suite(rel, *, runner=subprocess.run, timeout=SUITE_TIMEOUT_SECONDS):
+    path = REPO / rel
+    if not path.is_file():
+        print(f"FAIL  {rel}: suite file is MISSING — a renamed or deleted "
+              f"suite must be renamed here too, never dropped silently")
+        return False
+    try:
+        result = runner([sys.executable, str(path)], cwd=REPO,
+                        capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        print(f"FAIL  {rel}: timed out after {timeout}s")
+        for line in _lines(exc.stdout, exc.stderr)[-15:]:
+            print(f"      {line}")
+        return False
+    tail = _lines(result.stdout, result.stderr)
+    last = tail[-1] if tail else "(no output)"
+    if result.returncode == 0:
+        print(f"PASS  {rel}: {last}")
+        return True
+    print(f"FAIL  {rel} (exit {result.returncode}): {last}")
+    for line in tail[-15:-1]:
+        print(f"      {line}")
+    return False
+
+
+def main(*, suites=SUITES, runner=subprocess.run, timeout=SUITE_TIMEOUT_SECONDS) -> int:
     failed = []
-    for rel in SUITES:
-        path = REPO / rel
-        if not path.is_file():
-            print(f"FAIL  {rel}: suite file is MISSING — a renamed or deleted "
-                  f"suite must be renamed here too, never dropped silently")
+    suites = tuple(suites)
+    for rel in suites:
+        if not run_suite(rel, runner=runner, timeout=timeout):
             failed.append(rel)
-            continue
-        r = subprocess.run([sys.executable, str(path)], cwd=REPO,
-                           capture_output=True, text=True)
-        tail = (r.stdout or r.stderr or "").strip().splitlines()
-        last = tail[-1] if tail else "(no output)"
-        if r.returncode == 0:
-            print(f"PASS  {rel}: {last}")
-        else:
-            print(f"FAIL  {rel} (exit {r.returncode}): {last}")
-            for line in tail[-15:-1]:
-                print(f"      {line}")
-            failed.append(rel)
-    print(f"room-bridge-selftest: {len(SUITES) - len(failed)}/{len(SUITES)} suites passed")
+    print(f"room-bridge-selftest: {len(suites) - len(failed)}/{len(suites)} suites passed")
     return 1 if failed else 0
 
 

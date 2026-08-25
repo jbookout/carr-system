@@ -40,7 +40,7 @@ def main() -> int:
           "verification":"unverified", "priority":i, "source_class":"canonical_counterparty",
           "slice_limit":15, "enrichment_subject_count":30,
           "enrichment_scheduled_for":"2026-08-13T14:00:00+00:00",
-          "enrichment_mode":"shadow"} for i in range(15)],
+          "enrichment_mode":"shadow", "sizing_state":"receipt_bound"} for i in range(15)],
         "content-fuel.next-rotation": [
           {"lane":"local", "temperature":"local", "source_class":"primary", "freshness_cutoff":"2026-08-01T00:00:00Z", "previous_receipt_state":"absent"},
           {"lane":"cold", "temperature":"cold", "source_class":"primary", "freshness_cutoff":"2026-08-01T00:00:00Z", "previous_receipt_state":"absent"}],
@@ -83,7 +83,7 @@ def main() -> int:
         "verification":"unverified", "priority":i, "source_class":"canonical_counterparty",
         "slice_limit":25, "enrichment_subject_count":12,
         "enrichment_scheduled_for":"2026-08-13T14:00:00+00:00",
-        "enrichment_mode":"shadow"} for i in range(3)]
+        "enrichment_mode":"shadow", "sizing_state":"receipt_bound"} for i in range(3)]
     evidence = CanonicalRecordCollector(FakeReadOnlyAdapter(tail), scheduled_for=instant,
                                         mode="shadow", policies=policies).collect(
         builder_key="deal-history.next-slice", workflow_key="fixture")
@@ -114,6 +114,20 @@ def main() -> int:
     except InputUnavailable: refused = True
     else: refused = False
     check("another mode's Thursday receipt cannot size this job", refused)
+    missing_receipt = dict(rows)
+    missing_receipt["deal-history.next-slice"] = [
+        {**row, "sizing_state":"receipt_missing"} for row in deal_rows
+        if isinstance(row, dict)
+    ]
+    try:
+        CanonicalRecordCollector(FakeReadOnlyAdapter(missing_receipt), scheduled_for=instant,
+                                 mode="shadow", policies=policies).collect(
+            builder_key="deal-history.next-slice", workflow_key="fixture")
+    except InputUnavailable:
+        refused = True
+    else:
+        refused = False
+    check("visible receipt-missing backlog cannot become an execution slice", refused)
     return 0
 
 
