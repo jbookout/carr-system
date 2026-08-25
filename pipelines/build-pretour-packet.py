@@ -45,7 +45,6 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 from lib.client_asset_controls import (AssetControlRefusal, require_asset_tier,
-                                       require_search_commentary,
                                        write_artifact_atomically)
 from lib.drive_recovery import add_recovery_arguments, require_recovery
 
@@ -207,6 +206,45 @@ def card(folder, p):
     </section>'''
 
 
+def require_packet_commentary(c):
+    """A packet is never a bare property list, but the commentary does not have to be
+    a section of its own.
+
+    Joe's rule is that every client search packet includes market commentary rather
+    than just a list of properties. This packet carried that as a "What this search
+    tells you" block of numbered takeaways.
+
+    Dell, 2026-08-25, asking a second time: "remove the last section 'what this
+    search tell you' delete it all." A pre-tour packet is walked through in a car,
+    and he does not want a page of conclusions in a document whose job is the drive.
+
+    The rule still binds, so the check moves to what actually carries the commentary
+    once the block is gone: the comparison table's note, which explains what the
+    monthly figures mean, what Unlisted means, and what a medical fit-out benchmarks
+    at, plus every option's own reasoning in its copy. Both are required here. A
+    packet that lost the note as well WOULD be a bare property list, and that is the
+    thing Joe's rule exists to prevent, so that is what this refuses.
+
+    The confirmations block stays required outright. It is the client's own list of
+    what to check, and nothing else in the document does that job.
+    """
+    client = c.get("client") or {}
+    if not (client.get("confirmations") or []):
+        raise PacketRefusal(
+            'client.confirmations is empty. Every packet tells the client what to '
+            'confirm on their side; nothing else in the document does that job.')
+    if not (c.get("glance") or {}).get("note", "").strip():
+        raise PacketRefusal(
+            'glance.note is empty. With no takeaways section, the comparison note is '
+            'what keeps this from being a bare property list, which is the thing '
+            "Joe's market-commentary rule refuses. Say what the figures mean.")
+    thin = [p["addr"] for p in c["options"] if len((p.get("copy") or "").split()) < 40]
+    if thin:
+        raise PacketRefusal(
+            f'these options carry no real reasoning in their copy, so the packet has '
+            f'no commentary left anywhere: {", ".join(thin)}')
+
+
 def require_option_limit(p):
     """One honest limit per option, carried by the option itself.
 
@@ -306,7 +344,7 @@ def main():
 
     try:
         no_em_dash(c)
-        require_search_commentary(client)
+        require_packet_commentary(c)
         # The honest-limit rule is discharged per option by require_option_limit
         # below, not by a back section. See that function for Joe's rule and Dell's
         # 2026-08-25 instruction removing the section.
@@ -355,8 +393,12 @@ def main():
         tbody += f"<tr>{tds}</tr>"
 
     cards = "".join(card(folder, p) for p in c["options"])
+    # Optional, like the declined block: omitted whole rather than left as a heading
+    # standing over an empty grid.
     take = "".join(f'<div class="tk"><h4>{e(t)}</h4><p>{e(d)}</p></div>'
-                   for t, d in client["findings"])
+                   for t, d in (client.get("findings") or []))
+    take_block = ('<h2><span class="secnum">What this search tells you</span></h2>'
+                  f'<div class="tkgrid">{take}</div>') if take else ""
     conf = "".join(f'<div class="dq"><h4>{e(t)}</h4><p>{e(d)}</p></div>'
                    for t, d in client["confirmations"])
     # Optional now, and omitted entirely rather than rendered as an empty heading
@@ -392,8 +434,7 @@ def main():
   <div class="h2sub">{e(c["options_intro"])}</div>
   {cards}
 
-  <h2><span class="secnum">What this search tells you</span></h2>
-  <div class="tkgrid">{take}</div>
+  {take_block}
 
   <h2><span class="secnum">To confirm on your side</span></h2>
   <div class="dqgrid">{conf}</div>
