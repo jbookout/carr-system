@@ -95,6 +95,21 @@ fi
 
 say "CHANGE current[$CUR] last_audited[$LAST]"
 
+# The pending marker is the once-per-version-pair notification latch.  The
+# audit deliberately owns LAST, so advancing it here would consume an audit;
+# rewriting PENDING every hour would instead train Joe to ignore a true alarm
+# and erase the honest first-detected time.  A different current/last pair is
+# a new obligation and is allowed through.
+if [ -f "$PENDING" ]; then
+  PENDING_CUR="$(awk -F': ' '/^current: /{print $2; exit}' "$PENDING")"
+  PENDING_LAST="$(awk -F': ' '/^last_audited: /{print $2; exit}' "$PENDING")"
+  if [ "$PENDING_CUR" = "$CUR" ] && [ "$PENDING_LAST" = "$LAST" ]; then
+    DETECTED="$(awk -F': ' '/^detected_at: /{print $2; exit}' "$PENDING")"
+    say "OK already notified for this version pair (marker since ${DETECTED:-unknown}) — staying quiet"
+    exit 0
+  fi
+fi
+
 if [ "$DRY" -eq 1 ]; then
   print -r -- "would notify: Claude Code changed — $CUR (last audited: $LAST)"
   exit 0
