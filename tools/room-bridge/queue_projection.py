@@ -120,6 +120,31 @@ def receipt_for(event: dict, task: dict, *, target_catalog: dict, board: str = B
     }}
 
 
+def missing_task_receipt(event: dict, *, board: str = BOARD) -> dict:
+    """Build a redacted receipt for an event whose task row is gone.
+
+    The event is still part of the durable stream, so silently skipping it
+    would make the room projection permanently incomplete.  There is no task
+    document to copy in this case: the card and summary are deliberately fixed
+    safe values, while the event identity remains bound to its deterministic
+    message id.
+    """
+    event_id = int(event["id"])
+    projected_at = _iso(event.get("created_at"))
+    return {"queue_event": {
+        "v": 1, "board": board, "event_id": event_id,
+        "event": str(event.get("kind") or "updated")[:48],
+        "task_id": str(event.get("task_id") or "unknown"),
+        "card": {
+            "title": "Task unavailable", "target": "unassigned",
+            "effective_model": None, "status": "missing", "priority": "P2",
+            "cap": "read", "updated_at": projected_at, "source_seq": None,
+        },
+        "summary": "Task record unavailable.",
+        "projected_at": projected_at,
+    }}
+
+
 def current_cards(tasks: list[dict], *, target_catalog: dict) -> list[dict]:
     return [
         {"task_id": str(task["id"]), **card_for(task, target_catalog=target_catalog,
@@ -148,13 +173,8 @@ def project_once(*, state: dict, add_room_turn, target_catalog: dict,
         for event_row in events:
             event = dict(event_row)
             task_row = conn.execute("select * from tasks where id=?", (event["task_id"],)).fetchone()
-            # A deleted row cannot be projected. It is nonetheless observed so
-            # the cursor does not retry an impossible history forever.
-            if task_row is None:
-                state["queue_event_cursor"] = event["id"]
-                continue
-            task = dict(task_row)
-            receipt = receipt_for(event, task, target_catalog=target_catalog, board=board)
+            receipt = (missing_task_receipt(event, board=board) if task_row is None else
+                       receipt_for(event, dict(task_row), target_catalog=target_catalog, board=board))
             add_room_turn(body=json.dumps(receipt, separators=(",", ":")), seat="hermes",
                           kind="receipt", msg_id=event_msg_id(board, event["id"]))
             # Only a successful, idempotent room append makes this event safe to
