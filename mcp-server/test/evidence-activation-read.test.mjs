@@ -146,3 +146,41 @@ test("context activation installs the derived tenant before compiling the accept
   assert.equal(response.result.replayed, false);
   assert.equal(calls.length, 3);
 });
+
+test("context activation read installs tenant scope in the same statement as the projection", async () => {
+  const activation = { binding_id: "ctx-0123456789abcdef", plan_ref: "PLAN-1befe10dc250-v1" };
+  const { tools, client, calls } = allTools((sql, params) => {
+    assert.match(sql, /set_config\('carr\.organization_tenant_id'/);
+    assert.match(sql, /tenant_scope as materialized/);
+    assert.match(sql, /ops\.read_context_activation/);
+    assert.deepEqual(params, ["carr-internal", "WR-000007", "ctx-0123456789abcdef"]);
+    return { rows: [{ activation }] };
+  });
+
+  const response = await tools["read-context-activation"].handler(client, actor, {
+    human_ref: "WR-000007",
+    binding_id: "ctx-0123456789abcdef",
+  });
+
+  assert.deepEqual(response.activation, activation);
+  assert.equal(calls.length, 1);
+});
+
+test("context activation render installs tenant scope in the same statement as the ephemeral render", async () => {
+  const items = [{ ref: "knowledge:brief", body: "bounded" }];
+  const { tools, client, calls } = allTools((sql, params) => {
+    assert.match(sql, /set_config\('carr\.organization_tenant_id'/);
+    assert.match(sql, /tenant_scope as materialized/);
+    assert.match(sql, /ops\.render_context_activation_for_brief/);
+    assert.deepEqual(params, ["carr-internal", "WR-000007", "ctx-0123456789abcdef"]);
+    return { rows: [{ items }] };
+  });
+
+  const response = await tools["render-context-activation"].handler(client, actor, {
+    human_ref: "WR-000007",
+    binding_id: "ctx-0123456789abcdef",
+  });
+
+  assert.deepEqual(response.items, items);
+  assert.equal(calls.length, 1);
+});
