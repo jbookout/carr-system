@@ -89,8 +89,16 @@ fi
 # Re-render the installed wiring from whatever the checkout now holds. Idempotent
 # by design and the same installer bin/migrate-dell.sh runs; on an already-correct
 # machine it changes nothing.
-if ! CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL=com.carr.fleet-sync \
-    "$PY" "$REPO/ops/config-as-code.py" install --apply </dev/null; then
+# run-scheduled preserves launchd's exact XPC identity before the nested zsh
+# replaces XPC_SERVICE_NAME with `0`.  Only that attested wrapper identity may
+# claim the exemption; a sanctioned manual fleet-sync run remains an external
+# installer and retains authority to reload com.carr.fleet-sync.
+if [ "${CARR_RUN_SCHEDULED_XPC_SERVICE_NAME:-}" = "com.carr.fleet-sync" ]; then
+  export CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL=com.carr.fleet-sync
+else
+  unset CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL
+fi
+if ! "$PY" "$REPO/ops/config-as-code.py" install --apply </dev/null; then
   print -ru2 -- "fleet-sync: config-as-code install --apply failed"
   exit 1
 fi

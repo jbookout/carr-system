@@ -144,6 +144,17 @@ fi
 SERVICE="$1"; shift
 RUN_KEY="$1"; shift
 
+# XPC_SERVICE_NAME belongs to the process launchd starts directly.  A nested
+# interpreter may replace it with `0`, so preserve the exact identity only for
+# the one wrapper/service tuple that needs to avoid unloading itself.  Every
+# other invocation explicitly clears the attestation.
+if [ "$SERVICE" = "fleet-sync" ] \
+    && [ "${XPC_SERVICE_NAME:-}" = "com.carr.fleet-sync" ]; then
+  export CARR_RUN_SCHEDULED_XPC_SERVICE_NAME=com.carr.fleet-sync
+else
+  unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
+fi
+
 REPO="${0:A:h:h}"
 LOG="$REPO/out/run-scheduled.log"
 PY="$REPO/.venv/bin/python"

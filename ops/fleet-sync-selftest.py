@@ -62,7 +62,8 @@ ENV = dict(fixture_env(), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
 STUB = (
     "import os, sys\n"
     "print('stub installer active=' + "
-    "os.environ.get('CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL', ''))\n"
+    "os.environ.get('CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL', '') + "
+    "' xpc=' + os.environ.get('XPC_SERVICE_NAME', ''))\n"
     "sys.exit(0)\n"
 )
 
@@ -74,9 +75,11 @@ def git(cwd, *args):
     return r.stdout.strip()
 
 
-def run_sync(clone):
+def run_sync(clone, extra_env=None):
+    env = dict(ENV)
+    env.update(extra_env or {})
     return subprocess.run(["zsh", os.path.join(clone, "bin", "fleet-sync.sh")],
-                          cwd=clone, capture_output=True, text=True, env=ENV)
+                          cwd=clone, capture_output=True, text=True, env=env)
 
 
 def build(tmp):
@@ -208,6 +211,8 @@ def test_clean_tree_fast_forwards():
         assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}"
         assert "fast-forwarded" in r.stdout, r.stdout
         assert "stub installer" in r.stdout, "must re-render wiring after pulling"
+        assert "stub installer active= xpc=" in r.stdout, \
+            "a manual run must remain an external installer: " + repr(r.stdout)
         assert behind(b) == 0
     print("PASS  clean tree fast-forwards, then re-renders the wiring")
 
@@ -223,6 +228,17 @@ def test_already_current_is_a_noop():
     print("PASS  second run is a clean no-op")
 
 
+def test_non_fleet_xpc_identity_stays_external():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        r = run_sync(b, {"XPC_SERVICE_NAME": "com.carr.some-other-job",
+                         "CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL": "stale-value"})
+        assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert "stub installer active= xpc=" in r.stdout, r.stdout
+        assert "active=com.carr.fleet-sync" not in r.stdout, r.stdout
+    print("PASS  non-fleet XPC identity cannot claim the active-self exemption")
+
+
 def test_active_self_contract_reaches_wrapper_receipt():
     """The fleet child must return so run-scheduled can durably classify it."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -231,7 +247,8 @@ def test_active_self_contract_reaches_wrapper_receipt():
         open(os.path.join(b, "tools", "ops-spool.py"), "w").write(
             "import sys\nprint('stub receipt recorder')\nsys.exit(0)\n"
         )
-        env = dict(ENV, CARR_RUN_SCHEDULED_STATE_DIR=os.path.join(tmp, "state"))
+        env = dict(ENV, CARR_RUN_SCHEDULED_STATE_DIR=os.path.join(tmp, "state"),
+                   XPC_SERVICE_NAME="com.carr.fleet-sync")
         r = subprocess.run([
             "zsh", os.path.join(b, "bin", "run-scheduled.sh"),
             "fleet-sync", "fleet.sync", "zsh", os.path.join(b, "bin", "fleet-sync.sh"),
@@ -250,14 +267,16 @@ def test_active_self_change_failure_reaches_wrapper_receipt():
         b = build(tmp)
         shutil.copy(RUN_SCHEDULED, os.path.join(b, "bin", "run-scheduled.sh"))
         open(os.path.join(b, "ops", "config-as-code.py"), "w").write(
-            "import sys\n"
-            "print('SELF-RELOAD REFUSED; run config-as-code externally')\n"
+            "import os, sys\n"
+            "print('SELF-RELOAD REFUSED; run config-as-code externally; active=' + "
+            "os.environ.get('CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL', ''))\n"
             "sys.exit(1)\n"
         )
         open(os.path.join(b, "tools", "ops-spool.py"), "w").write(
             "import sys\nprint('stub receipt recorder')\nsys.exit(0)\n"
         )
-        env = dict(ENV, CARR_RUN_SCHEDULED_STATE_DIR=os.path.join(tmp, "state"))
+        env = dict(ENV, CARR_RUN_SCHEDULED_STATE_DIR=os.path.join(tmp, "state"),
+                   XPC_SERVICE_NAME="com.carr.fleet-sync")
         r = subprocess.run([
             "zsh", os.path.join(b, "bin", "run-scheduled.sh"),
             "fleet-sync", "fleet.sync", "zsh", os.path.join(b, "bin", "fleet-sync.sh"),
@@ -265,6 +284,7 @@ def test_active_self_change_failure_reaches_wrapper_receipt():
         log = open(os.path.join(b, "out", "run-scheduled.log")).read()
         assert r.returncode == 1, f"{r.returncode}: {r.stdout}{r.stderr}\n{log}"
         assert "SELF-RELOAD REFUSED" in r.stdout, r.stdout
+        assert "active=com.carr.fleet-sync" in r.stdout, r.stdout
         assert "key=fleet.sync service=fleet-sync child_exit=1 state=failed" in log, log
         assert "--failure-class exit_1" in log and "recorder_exit=0" in log, log
     print("PASS  refused active-self reload reaches a durable failed receipt")
@@ -562,6 +582,7 @@ def main():
     test_dirty_tree_refuses()
     test_clean_tree_fast_forwards()
     test_already_current_is_a_noop()
+    test_non_fleet_xpc_identity_stays_external()
     test_active_self_contract_reaches_wrapper_receipt()
     test_active_self_change_failure_reaches_wrapper_receipt()
     test_non_main_branch_refuses()
@@ -584,7 +605,7 @@ def main():
     test_exact_tree_refuses_rename_old_path_resurrection()
     test_exact_tree_accepts_canonical_rename()
     test_exact_tree_accepts_canonical_new_file_patch()
-    print("25/25 fleet-sync cases passed")
+    print("26/26 fleet-sync cases passed")
     return 0
 
 
