@@ -2,7 +2,12 @@
 export const PUBLIC_TOUR_FIELD_KEYS = new Set(["display.name", "display.address", "suite", "property_type", "size", "asking_economics", "availability", "parking", "access", "photos", "floor_plan", "source_attribution", "as_of", "caveat"]);
 const scalar = value => value === null || ["string", "number", "boolean"].includes(typeof value);
 const objectWithOnly = (value, keys) => value && !Array.isArray(value) && typeof value === "object" && Object.entries(value).every(([key, nested]) => keys.has(key) && scalar(nested));
-const requiredTimestamp = value => typeof value === "string" && value.trim().length > 0 && !Number.isNaN(new Date(value).getTime());
+const requiredTimestamp = value => {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return false;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return parsed.toISOString() === value || parsed.toISOString().replace(".000Z", "Z") === value;
+};
 
 export function publicValueIsSafe(fieldKey, value) {
   if (["display.name", "display.address", "suite", "property_type", "availability", "parking", "access", "source_attribution", "as_of", "caveat"].includes(fieldKey)) return typeof value === "string";
@@ -20,8 +25,9 @@ export function validateProjectionFact(fact, assertion, membership, projection, 
   if (fact.field_assertion_id !== assertion.id || assertion.review_state !== "reviewed" || assertion.data_classification !== "public") throw new Error("PUBLIC_ASSERTION_REQUIRED");
   if (fact.display_field_key !== assertion.field_key) throw new Error("PUBLIC_FIELD_RELABEL_REFUSED");
   if (membership.route_version !== fact.route_version || projection.route_version !== fact.route_version) throw new Error("ROUTE_VERSION_MISMATCH");
-  if (!requiredTimestamp(projection.as_of) || !requiredTimestamp(assertion.effective_from) || (assertion.effective_to != null && !requiredTimestamp(assertion.effective_to))) throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
-  const asOf = new Date(projection.as_of), starts = new Date(assertion.effective_from), ends = assertion.effective_to && new Date(assertion.effective_to);
+  if (!requiredTimestamp(projection.as_of) || !requiredTimestamp(membership.selected_at) || !requiredTimestamp(assertion.effective_from) || (assertion.effective_to != null && !requiredTimestamp(assertion.effective_to))) throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
+  const asOf = new Date(projection.as_of), selectedAt = new Date(membership.selected_at), starts = new Date(assertion.effective_from), ends = assertion.effective_to && new Date(assertion.effective_to);
+  if (selectedAt > asOf) throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
   if (starts > asOf || (ends && ends <= asOf)) throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
   if (assertion.rights_receipt_id !== rightsReceipt.id || !requiredTimestamp(rightsReceipt.effective_at) || (rightsReceipt.expires_at != null && !requiredTimestamp(rightsReceipt.expires_at))) throw new Error("PUBLIC_RIGHTS_REQUIRED");
   const rightsEffective = new Date(rightsReceipt.effective_at), rightsExpires = rightsReceipt.expires_at && new Date(rightsReceipt.expires_at);

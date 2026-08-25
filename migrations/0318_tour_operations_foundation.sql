@@ -213,14 +213,36 @@ begin
   return new;
 end $$;
 create or replace function ops.tour_projection_fact_guard() returns trigger language plpgsql as $$
+declare p_tour_id uuid; p ops.tour_public_projection%rowtype;
 begin
   if tg_op <> 'INSERT' then raise exception 'tour_public_projection_fact is append-only'; end if;
-  if not exists (select 1 from ops.tour_public_projection p join ops.tour_field_assertion a on a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id join ops.tour_rights_receipt r on r.id=a.rights_receipt_id and r.organization_tenant_id=a.organization_tenant_id join ops.tour_property_membership m on m.tour_id=p.tour_id and m.property_id=new.property_id and m.organization_tenant_id=new.organization_tenant_id and m.route_version=p.route_version where p.id=new.projection_id and p.organization_tenant_id=new.organization_tenant_id and p.status='draft' and not exists (select 1 from ops.tour_public_projection_seal_receipt seal where seal.organization_tenant_id=p.organization_tenant_id and seal.projection_id=p.id) and new.route_version=p.route_version and a.property_id=new.property_id and a.field_key=new.display_field_key and a.review_state='reviewed' and a.data_classification='public' and m.selected_at <= p.as_of and a.effective_from <= p.as_of and (a.effective_to is null or a.effective_to > p.as_of) and r.status='active' and r.effective_at <= p.as_of and (r.expires_at is null or r.expires_at > p.as_of) and r.revoked_at is null and r.allowed_use_classes ? 'client_public_display' and (r.allowed_field_classes ? a.field_key or r.allowed_field_classes ? '*') and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= p.as_of) and ops.tour_public_value_safe(a.field_key,a.value)) then raise exception 'projection fact lacks current public assertion, rights, or safe value'; end if;
+  select tour_id into p_tour_id from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id;
+  if not found then raise exception 'projection fact projection is unavailable'; end if;
+  perform 1 from ops.tour where id=p_tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  select * into p from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id for update;
+  if not exists (select 1 from ops.tour_field_assertion a join ops.tour_rights_receipt r on r.id=a.rights_receipt_id and r.organization_tenant_id=a.organization_tenant_id join ops.tour_property_membership m on m.tour_id=p.tour_id and m.property_id=new.property_id and m.organization_tenant_id=new.organization_tenant_id and m.route_version=p.route_version where p.status='draft' and not exists (select 1 from ops.tour_public_projection_seal_receipt seal where seal.organization_tenant_id=p.organization_tenant_id and seal.projection_id=p.id) and new.route_version=p.route_version and a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id and a.property_id=new.property_id and a.field_key=new.display_field_key and a.review_state='reviewed' and a.data_classification='public' and m.selected_at <= p.as_of and a.effective_from <= p.as_of and (a.effective_to is null or a.effective_to > p.as_of) and r.status='active' and r.effective_at <= p.as_of and (r.expires_at is null or r.expires_at > p.as_of) and r.revoked_at is null and r.allowed_use_classes ? 'client_public_display' and (r.allowed_field_classes ? a.field_key or r.allowed_field_classes ? '*') and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= p.as_of) and ops.tour_public_value_safe(a.field_key,a.value)) then raise exception 'projection fact lacks current public assertion, rights, or safe value'; end if;
   return new;
 end $$;
 create or replace function ops.tour_membership_seal_guard() returns trigger language plpgsql as $$
 begin
+  perform 1 from ops.tour where id=new.tour_id and organization_tenant_id=new.organization_tenant_id for update;
   if exists (select 1 from ops.tour_public_projection p where p.organization_tenant_id=new.organization_tenant_id and p.tour_id=new.tour_id and p.route_version=new.route_version) then raise exception 'tour route version is sealed by an existing projection'; end if;
+  return new;
+end $$;
+create or replace function ops.tour_projection_creation_guard() returns trigger language plpgsql as $$
+begin
+  perform 1 from ops.tour where id=new.tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  if not exists (select 1 from ops.tour_property_membership m where m.organization_tenant_id=new.organization_tenant_id and m.tour_id=new.tour_id and m.route_version=new.route_version) or exists (select 1 from ops.tour_property_membership m where m.organization_tenant_id=new.organization_tenant_id and m.tour_id=new.tour_id and m.route_version=new.route_version and m.selected_at > new.as_of) then raise exception 'projection requires a complete membership set selected by as_of'; end if;
+  return new;
+end $$;
+create or replace function ops.tour_projection_seal_guard() returns trigger language plpgsql as $$
+declare p_tour_id uuid; p ops.tour_public_projection%rowtype;
+begin
+  select tour_id into p_tour_id from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id;
+  if not found then raise exception 'projection seal target is unavailable'; end if;
+  perform 1 from ops.tour where id=p_tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  select * into p from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id for update;
+  if p.status <> 'draft' or exists (select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id) then raise exception 'projection is not an unsealed draft'; end if;
   return new;
 end $$;
 create trigger tour_source_evidence_append_only before update or delete on ops.tour_source_evidence for each row execute function ops.tour_reject_mutation();
@@ -240,7 +262,9 @@ create trigger tour_conflict_resolution_receipt_append_only before update or del
 create trigger tour_source_rights_guard before insert on ops.tour_source_evidence for each row execute function ops.tour_source_rights_guard();
 create trigger tour_assertion_rights_guard before insert on ops.tour_field_assertion for each row execute function ops.tour_assertion_rights_guard();
 create trigger tour_membership_seal_guard before insert on ops.tour_property_membership for each row execute function ops.tour_membership_seal_guard();
+create trigger tour_projection_creation_guard before insert on ops.tour_public_projection for each row execute function ops.tour_projection_creation_guard();
 create trigger tour_projection_fact_guard before insert or update on ops.tour_public_projection_fact for each row execute function ops.tour_projection_fact_guard();
+create trigger tour_projection_seal_guard before insert on ops.tour_public_projection_seal_receipt for each row execute function ops.tour_projection_seal_guard();
 create trigger tour_rights_lineage_guard before insert on ops.tour_rights_receipt for each row execute function ops.tour_rights_lineage_guard();
 create trigger tour_conflict_participant_guard before insert on ops.tour_fact_conflict_participant for each row execute function ops.tour_conflict_participant_guard();
 create trigger tour_conflict_resolution_guard before insert on ops.tour_conflict_resolution_receipt for each row execute function ops.tour_conflict_resolution_guard();
