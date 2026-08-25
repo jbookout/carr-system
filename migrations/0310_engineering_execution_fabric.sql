@@ -1,4 +1,4 @@
--- 0309_engineering_execution_fabric.sql
+-- 0310_engineering_execution_fabric.sql
 --
 -- The first durable Engineering Passport runtime seam.  This is an execution
 -- proof extension over the existing Work Request, accepted sourced plan,
@@ -421,10 +421,10 @@ begin
      or to_regclass('ops.engineering_execution_envelope') is null
      or to_regclass('ops.engineering_slice_receipt') is null
      or to_regclass('ops.engineering_reviewer_fact') is null then
-    raise exception '0309 FAILED: typed engineering execution tables are missing';
+    raise exception '0310 FAILED: typed engineering execution tables are missing';
   end if;
   if has_table_privilege('carr_jobs','ops.engineering_slice_receipt','update')
      or has_table_privilege('carr_jobs','ops.engineering_slice_receipt','delete') then
-    raise exception '0309 FAILED: carr_jobs can rewrite typed receipts';
+    raise exception '0310 FAILED: carr_jobs can rewrite typed receipts';
   end if;
 end $$;

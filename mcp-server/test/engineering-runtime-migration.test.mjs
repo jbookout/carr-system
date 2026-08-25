@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 
-const migration = fs.readFileSync(new URL("../../migrations/0309_engineering_execution_fabric.sql", import.meta.url), "utf8");
+const migration = fs.readFileSync(new URL("../../migrations/0310_engineering_execution_fabric.sql", import.meta.url), "utf8");
 const runtime = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 const mcp = fs.readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
 const registry = JSON.parse(fs.readFileSync(new URL("../../ops/config/control-plane-workflows.v1.json", import.meta.url), "utf8"));
 
-test("0309 binds the typed fabric to canonical ledgers and keeps evidence append-only", () => {
+test("0310 binds the typed fabric to canonical ledgers and keeps evidence append-only", () => {
   for (const table of ["engineering_slice_plan", "engineering_execution_envelope", "engineering_slice_receipt", "engineering_reviewer_fact"])
     assert.match(migration, new RegExp(`create table if not exists ops\\.${table}`));
   assert.match(migration, /references ops\.job\(id\)/);
@@ -33,7 +33,7 @@ test("0309 binds the typed fabric to canonical ledgers and keeps evidence append
   assert.doesNotMatch(migration, /create table if not exists (?!ops\.)/);
 });
 
-test("0309's receipt insertion requires the claimed lease and concrete attempt", () => {
+test("0310's receipt insertion requires the claimed lease and concrete attempt", () => {
   assert.match(migration, /create or replace function ops\.engineering_record_slice_receipt/);
   assert.match(migration, /attempt_row\.lease_token=p_lease_token and attempt_row\.state='running'/);
   assert.match(migration, /job_attempt_id uuid not null unique references ops\.job_attempt\(id\)/);
@@ -42,7 +42,7 @@ test("0309's receipt insertion requires the claimed lease and concrete attempt",
   assert.match(runtime, /ops\.complete_job\(/, "the runtime uses the existing completion seam");
 });
 
-test("0309 admits dependent slices from the reviewer fact's bound attempt", () => {
+test("0310 admits dependent slices from the reviewer fact's bound attempt", () => {
   assert.match(migration, /v->'fact'->>'attempt_id' = r->>'attempt_id'/);
   assert.match(migration, /v->>'slice_ref' = dep/);
   assert.match(migration, /v->>'state' = 'passed'/);
