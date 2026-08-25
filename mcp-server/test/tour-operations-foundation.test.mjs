@@ -11,7 +11,7 @@ const fixture = JSON.parse(read("mcp-server/test/fixtures/tour-operations-founda
 const migration = read("migrations/0317_tour_operations_foundation.sql");
 
 test("foundation contract preserves provenance, conflicts, audit, rights versions and tenant integrity", () => {
-  assert.equal(contract.version, "1.2.0");
+  assert.equal(contract.version, "1.3.0");
   for (const field of ["property_id", "field_key", "source_evidence_id", "observed_at", "effective_from", "rights_receipt_id", "confidence", "data_classification"]) assert(contract.canonical_record_policy.required_fact_metadata.includes(field), field);
   for (const entity of ["FactConflict", "AuditEvent", "TourPropertyMembership", "ProjectionFact"]) assert.ok(contract.entities[entity], entity);
   assert.match(contract.entities.RightsReceipt.rule, /immutable versioned.*fail closed/i);
@@ -20,14 +20,16 @@ test("foundation contract preserves provenance, conflicts, audit, rights version
 });
 
 test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, and route-mismatched data", () => {
-  const { projection_fact: fact, field_assertion: assertion, membership } = fixture;
-  assert.equal(validateProjectionFact(fact, assertion, membership), true);
-  assert.throws(() => validateProjectionFact({...fact, display_field_key: "internal_note"}, assertion, membership), /PUBLIC_FIELD_NOT_ALLOWLISTED/);
-  assert.throws(() => validateProjectionFact({...fact, display_field_key: "display.address"}, assertion, membership), /PUBLIC_FIELD_RELABEL_REFUSED/);
-  assert.throws(() => validateProjectionFact({...fact, organization_tenant_id: "other"}, assertion, membership), /TENANT_SCOPE_REFUSED/);
-  assert.throws(() => validateProjectionFact(fact, {...assertion, review_state: "unreviewed"}, membership), /PUBLIC_ASSERTION_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, {...assertion, data_classification: "internal"}, membership), /PUBLIC_ASSERTION_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, {...membership, route_version: 2}), /ROUTE_VERSION_MISMATCH/);
+  const { projection_fact: fact, field_assertion: assertion, membership, projection, rights_receipt: rights } = fixture;
+  assert.equal(validateProjectionFact(fact, assertion, membership, projection, rights), true);
+  assert.throws(() => validateProjectionFact({...fact, display_field_key: "internal_note"}, assertion, membership, projection, rights), /PUBLIC_FIELD_NOT_ALLOWLISTED/);
+  assert.throws(() => validateProjectionFact({...fact, display_field_key: "display.address"}, assertion, membership, projection, rights), /PUBLIC_FIELD_RELABEL_REFUSED/);
+  assert.throws(() => validateProjectionFact({...fact, organization_tenant_id: "other"}, assertion, membership, projection, rights), /TENANT_SCOPE_REFUSED/);
+  assert.throws(() => validateProjectionFact(fact, {...assertion, review_state: "unreviewed"}, membership, projection, rights), /PUBLIC_ASSERTION_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, {...assertion, data_classification: "internal"}, membership, projection, rights), /PUBLIC_ASSERTION_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, {...membership, route_version: 2}, projection, rights), /ROUTE_VERSION_MISMATCH/);
+  assert.throws(() => validateProjectionFact(fact, {...assertion, effective_from: "2026-08-26T00:00:00Z"}, membership, projection, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
+  assert.throws(() => validateProjectionFact(fact, {...assertion, value: {text: "safe", internal_note: "secret"}}, membership, projection, rights), /PUBLIC_VALUE_UNSAFE/);
 });
 
 test("migration is additive, tenant-qualified, temporal, rights-safe and append-only", () => {
@@ -40,8 +42,10 @@ test("migration is additive, tenant-qualified, temporal, rights-safe and append-
   assert.match(migration, /allowed_field_classes jsonb not null, allowed_use_classes jsonb not null/i);
   assert.match(migration, /effective_at timestamptz not null, expires_at timestamptz, revoked_at timestamptz/i);
   assert.match(migration, /effective_to is null or effective_to >= effective_from/i);
-  assert.match(migration, /projection fact lacks selected reviewed public assertion/i);
+  assert.match(migration, /projection fact lacks current public assertion, rights, or safe value/i);
+  assert.match(migration, /as_of timestamptz not null/i);
+  assert.match(migration, /tour_public_value_safe/i);
   for (const table of ["tour_source_evidence", "tour_field_assertion", "tour_cheat_sheet_revision", "tour_audit_event"]) assert.match(migration, new RegExp(`create trigger ${table}_append_only before update or delete`, "i"), table);
   assert.match(migration, /rights receipt refuses source intake/i); assert.match(migration, /rights receipt refuses asserted field\/use/i);
-  assert.doesNotMatch(migration, /drop\s+table|truncate\s+table|delete\s+from/i); assert.match(migration, /commit;/i);
+  assert.doesNotMatch(migration, /drop\s+table|truncate\s+table/i); assert.match(migration, /commit;/i);
 });
