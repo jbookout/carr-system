@@ -29,6 +29,29 @@ import os
 import subprocess
 
 
+# These are the two completion banners emitted by bin/nightly.sh.  Keep the
+# success marker distinct from the Healthchecks ping's human-readable
+# "whole chain OK" message: that ping is emitted before the chain's real
+# completion banner and is not a run verdict.
+NIGHTLY_OK_BANNER = "===== nightly chain OK ====="
+NIGHTLY_FAILURE_BANNER = "FINISHED WITH FAILURES"
+
+
+def nightly_completion(line: str) -> bool | None:
+    """Return a chain outcome for a completion line, or ``None`` otherwise.
+
+    Success requires stripped-line equality with the full banner.  A substring
+    test also matches ``hc-ping: whole chain OK -> pinged``; accepting a prefix,
+    suffix, or embedded banner would recreate the same early-close class under
+    different surrounding text.
+    """
+    if line.strip() == NIGHTLY_OK_BANNER:
+        return True
+    if NIGHTLY_FAILURE_BANNER in line:
+        return False
+    return None
+
+
 def changed_lines(diff_text: str) -> set[tuple[str, str]]:
     """The set of (sign, content) pairs a diff actually changes.
 
