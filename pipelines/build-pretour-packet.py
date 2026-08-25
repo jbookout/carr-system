@@ -229,6 +229,15 @@ def require_photo(p):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder", nargs="?", default=".")
+    # Re-rendering over a packet that already exists is a supersession, and the
+    # tombstone gate wants the add-loop UUID that queues the old copy for review.
+    # write_artifact_atomically has always asked for this, but nothing ever put it
+    # on the command line, so the gate was unreachable: the only way past it was to
+    # render into a brand new folder every time. That is where rev2 and rev3 came
+    # from. The flag is the fix; the folders were the symptom.
+    ap.add_argument("--loop-ref", dest="loop_ref",
+                    help="add-loop UUID queueing the superseded artifact; "
+                         "required only when overwriting an existing packet")
     add_recovery_arguments(ap)
     a = ap.parse_args()
     try:
