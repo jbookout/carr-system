@@ -198,7 +198,7 @@ test("agent token resolves to the tool's own actor, never a human", () => {
     via: "agent-token", client_id: null, sponsoring_human_slug: null,
     human_slug: null, sponsor_required: false,
   });
-  // The whole security claim in one line: humanOnly verbs key off actor.human.
+  // This generic agent remains non-human and unsponsored.
   assert.equal(actor.human, false);
   // And it must NOT carry probe/review, which would pin it to a narrow profile.
   assert.equal(actor.probe, undefined);
@@ -259,8 +259,8 @@ test("local token resolves to joe-local, human:false, sponsored to joe", () => {
     via: "local-token", client_id: null, sponsoring_human_slug: "joe",
     human_slug: "joe", sponsor_required: false,
   });
-  // The same security claim as the outside-model agent tokens: humanOnly
-  // verbs key off actor.human, and this is false regardless of the sponsor.
+  // A local token remains non-human and is not one of the approved native
+  // Codex/Claude authority-bearing runtime identities.
   assert.equal(actor.human, false);
   assert.equal(actor.probe, undefined);
   assert.equal(actor.review, undefined);

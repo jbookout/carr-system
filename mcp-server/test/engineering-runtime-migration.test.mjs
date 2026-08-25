@@ -3,6 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 
 const migration = fs.readFileSync(new URL("../../migrations/0310_engineering_execution_fabric.sql", import.meta.url), "utf8");
+const authorityRepair = fs.readFileSync(new URL("../../migrations/0311_sponsored_engineering_executor_authority.sql", import.meta.url), "utf8");
 const runtime = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 const mcp = fs.readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
 const registry = JSON.parse(fs.readFileSync(new URL("../../ops/config/control-plane-workflows.v1.json", import.meta.url), "utf8"));
@@ -48,6 +49,22 @@ test("0310 admits dependent slices from the reviewer fact's bound attempt", () =
   assert.match(migration, /v->>'state' = 'passed'/);
 });
 
+test("0311 replaces stale envelopes immutably and admits a new job generation", () => {
+  assert.match(authorityRepair, /add column if not exists supersedes_envelope_id/);
+  assert.match(authorityRepair, /engineering_envelope_one_successor/);
+  assert.match(authorityRepair, /engineering_envelope_supersession_guard/);
+  assert.match(authorityRepair, /current executable engineering envelope cannot be superseded/);
+  assert.match(authorityRepair, /engineering_enqueue_slice_job\(\s*p_work_request text, p_slice_ref text, p_plan_digest text,\s*p_idempotency_key text, p_generation integer/s);
+  assert.match(authorityRepair, /generation:' \|\| p_generation/);
+  assert.match(authorityRepair, /revoke all on function ops\.engineering_enqueue_slice_job\(text,text,text,text\)\s+from public,carr_reader,carr_writer,carr_jobs,carr_authority/);
+  assert.match(runtime, /supersedes_envelope_id/);
+  assert.match(runtime, /capability:engineering-repository-write/);
+  for (const action of ["repository:create-worktree", "repository:write-declared-scope", "repository:run-checks", "repository:commit", "repository:push-branch", "repository:open-pr"])
+    assert.match(runtime, new RegExp(action));
+  for (const forbidden of ["repository:merge", "repository:deploy", "repository:migrate-production", "repository:independent-review"])
+    assert.doesNotMatch(runtime, new RegExp(forbidden));
+});
+
 test("the reviewed control-plane inventory carries the exact engineering job contract", () => {
   const workflow = registry.workflows.find(item => item.key === "engineering-slice" && item.version === 1);
   assert.ok(workflow);
@@ -61,7 +78,8 @@ test("the reviewed control-plane inventory carries the exact engineering job con
   assert.deepEqual(workflow.filtering, { key: "facts.all_true", spec: { all_of: ["command.registered_args_selected"] }, description: "only the registered fresh Codex adapter is selected" });
   assert.deepEqual(workflow.validation, { key: "facts.all_true", spec: { all_of: ["command.exit_zero", "command.workflow_marker_valid"] }, description: "the bounded adapter succeeds and returns its typed workflow marker" });
   assert.deepEqual(workflow.retry, { max_attempts: 2, backoff: "constant", base_seconds: 30, cap_seconds: 300, timeout_seconds: 1800 });
-  assert.deepEqual(workflow.deduplication, { key_template: "engineering-slice:{plan_digest}:{work_request}:{slice_ref}" });
+  assert.equal(workflow.inventory.authority, "server-derived sponsored Codex execution with a closed repository action allowlist; no caller-selected identity, authority, model, action, or native session");
+  assert.deepEqual(workflow.deduplication, { key_template: "engineering-slice:{plan_digest}:{work_request}:{slice_ref}:generation:{generation}" });
   assert.deepEqual(workflow.completion, { key: "facts.all_true", spec: { all_of: ["command.receipt_persisted", "command.execution_evidence_reconciles"] }, description: "lease-bound typed receipt persists and reconciles to the issued envelope", receipt_kind: "engineering_slice" });
   assert.deepEqual(workflow.legacy_schedule, { provider: "none", status: "disabled", disable_requires: "no scheduler exists; on-demand MCP admission only" });
 });

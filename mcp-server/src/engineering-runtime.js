@@ -12,6 +12,15 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ID = /^[A-Za-z][A-Za-z0-9._:-]{2,127}$/;
 const OUTCOMES = new Set(["claimed_complete", "failed", "blocked", "reopened"]);
+export const ENGINEERING_REPOSITORY_ACTIONS = Object.freeze([
+  "repository:create-worktree",
+  "repository:create-branch",
+  "repository:write-declared-scope",
+  "repository:run-checks",
+  "repository:commit",
+  "repository:push-branch",
+  "repository:open-pr",
+]);
 
 const canonicalize = value => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -140,7 +149,15 @@ function dependenciesSatisfied(facts, plan, slice, ToolError) {
 
 function nowIso() { return new Date().toISOString().replace(/\.\d{3}Z$/, "Z"); }
 
-export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, actor }) {
+function isCurrentRepositoryWriteEnvelope(row) {
+  const envelope = row?.envelope;
+  return Boolean(envelope && Date.parse(envelope.expires_at) > Date.now() &&
+    envelope.server_binding?.authority?.read_only === false &&
+    envelope.server_binding?.authority?.capability_profile === "capability:engineering-repository-write" &&
+    JSON.stringify(envelope.request?.allowed_actions) === JSON.stringify(ENGINEERING_REPOSITORY_ACTIONS));
+}
+
+export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, actor, replacesEnvelope = null }) {
   const issue = nowIso();
   const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
   const resources = slice.declared_resource_refs || [];
@@ -165,7 +182,7 @@ export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, acto
     },
     request: {
       job_ref: `job:${jobId}`, input_digest: canonicalDigest({ work_request: source.work.id, plan: plan.plan_digest, slice: slice.slice_ref }),
-      data_class: "metadata_only", allowed_actions: [],
+      data_class: "metadata_only", allowed_actions: [...ENGINEERING_REPOSITORY_ACTIONS],
       declared_expectations: {
         plan_step_refs: slice.declared_plan_step_refs || [], component_refs: slice.declared_component_refs || [],
         resource_refs: resources, component_dependencies: [],
@@ -177,10 +194,15 @@ export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, acto
         agent_principal_id: "agent:codex", runtime_principal: "runtime:codex", personal_brain_scope: "brain:shared",
         personal_brain_version: "brain:shared-v1", personal_rule_count: 0, derived_by: "server_identity_resolution", client_mutable: false,
       },
-      authority: { environment: "rehearsal", risk_class: slice.risk_class || "R1", capability_profile: "capability:engineering-read-only", capability_grant_ref: "grant:engineering-codex-v1", read_only: true, derived_by: "server_capability_resolution", client_mutable: false },
+      authority: { environment: "rehearsal", risk_class: slice.risk_class || "R1", capability_profile: "capability:engineering-repository-write", capability_grant_ref: `grant:engineering-codex-repository-v1:${sessionId}`, read_only: false, derived_by: "server_capability_resolution", client_mutable: false },
       adapter: { surface: "codex_desktop", adapter_id: "adapter:codex-desktop", adapter_version: "v1", harness_id: "harness:codex", harness_version: "v1", provider_id: "provider:openai", model_id: "model:codex", native_session_ref: `native:codex:${sessionId}`, configuration_fingerprint: canonicalDigest({ adapter: "codex", model: "codex" }) },
     },
-    handoff: { mode: "original", replaces_agent_session_id: null, capability_inherited: false, checkpoint_ref: null, native_session_transfer: "semantic_state_only" },
+    handoff: replacesEnvelope ? {
+      mode: "replacement", replaces_agent_session_id: replacesEnvelope.agent_session.id,
+      capability_inherited: false,
+      checkpoint_ref: `checkpoint:authority-reissue:${replacesEnvelope.envelope_id.replace(/^env:/, "")}`,
+      native_session_transfer: "semantic_state_only",
+    } : { mode: "original", replaces_agent_session_id: null, capability_inherited: false, checkpoint_ref: null, native_session_transfer: "semantic_state_only" },
   };
   return envelope;
 }
@@ -275,10 +297,19 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-slice:${source.plan.digest}:${sliceRef}`]);
   const refreshed = await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRequest]);
   const refreshedFacts = refreshed.rows[0]?.facts;
-  const refreshedEnvelope = (refreshedFacts?.envelopes || []).find(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id);
-  if (refreshedEnvelope) return { ok: true, replayed: true, envelope: refreshedEnvelope.envelope, envelope_id: refreshedEnvelope.id, job_id: refreshedEnvelope.job_id };
-  const existing = (facts.envelopes || []).find(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id);
-  if (existing) return { ok: true, replayed: true, envelope: existing.envelope, envelope_id: existing.id, job_id: existing.job_id };
+  const priorEnvelopes = (refreshedFacts?.envelopes || [])
+    .filter(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id)
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  const priorEnvelope = priorEnvelopes.at(-1) || null;
+  if (isCurrentRepositoryWriteEnvelope(priorEnvelope))
+    return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
+
+  if (priorEnvelope) {
+    await c.query(
+      `update ops.capability_agent_session set state='cancelled', cancelled_at=now(), version=version+1
+        where work_request_id=$1 and state not in ('completed','cancelled')`,
+      [source.work.id.replace(/^wr:/, "")]);
+  }
 
   let sessionResult = await c.query(
     `select id, executor_actor_id, state from ops.capability_agent_session
@@ -298,27 +329,32 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
     session = created.rows[0];
   }
   const job = (await c.query(
-    "select * from ops.engineering_enqueue_slice_job($1::text,$2::text,$3::text,$4::text)",
-    [source.work.ref, sliceRef, plan.plan_digest, args.idempotency_key])).rows[0];
+    "select * from ops.engineering_enqueue_slice_job($1::text,$2::text,$3::text,$4::text,$5::integer)",
+    [source.work.ref, sliceRef, plan.plan_digest, args.idempotency_key, priorEnvelopes.length + 1])).rows[0];
   if (!job) error(ToolError, { error: "engineering_job_admission_failed" });
-  const envelope = buildCodexEnvelope({ source, plan, slice, jobId: job.id, sessionId: session.id, actor });
+  const envelope = buildCodexEnvelope({ source, plan, slice, jobId: job.id, sessionId: session.id, actor,
+    replacesEnvelope: priorEnvelope?.envelope || null });
   const envelopeDigest = canonicalDigest(envelope);
   const inserted = await c.query(
     `insert into ops.engineering_execution_envelope
       (job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,
-       state_version,canonical_record_digest,envelope_digest,envelope,issued_at,expires_at)
+       state_version,canonical_record_digest,envelope_digest,envelope,issued_at,expires_at,
+       supersedes_envelope_id,supersession_reason)
      values ($1,$2,$3,(select id from ops.engineering_slice_plan where accepted_plan_id=$3),$4,$5,
-       $6,$7,$8,$9::jsonb,$10::timestamptz,$11::timestamptz)
+       $6,$7,$8,$9::jsonb,$10::timestamptz,$11::timestamptz,$12,$13)
      returning *`,
     [job.id, source.work.id.replace(/^wr:/, ""), source.plan.record_id, sliceRef, session.id,
       Number(source.work.version), source.work.canonical_record_digest, envelopeDigest,
-      JSON.stringify(envelope), envelope.issued_at, envelope.expires_at]);
+      JSON.stringify(envelope), envelope.issued_at, envelope.expires_at, priorEnvelope?.id || null,
+      priorEnvelope ? "server-derived replacement of expired or non-executable envelope" : null]);
   if (!inserted.rows.length) error(ToolError, { error: "engineering_envelope_admission_failed" });
   const row = inserted.rows[0];
   await writeEvent(c, actor, "admit-engineering-slice", "ops_work_request", source.work.id.replace(/^wr:/, ""), {
-    new: { engineering_job_id: job.id, envelope_id: row.id, slice_ref: sliceRef, plan_digest: plan.plan_digest }, idempotency_key: args.idempotency_key,
+    new: { engineering_job_id: job.id, envelope_id: row.id, supersedes_envelope_id: priorEnvelope?.id || null,
+      slice_ref: sliceRef, plan_digest: plan.plan_digest }, idempotency_key: args.idempotency_key,
   });
-  return { ok: true, replayed: false, job_id: job.id, envelope_id: row.id, envelope_digest: envelopeDigest, agent_session_id: session.id, slice_ref: sliceRef };
+  return { ok: true, replayed: false, job_id: job.id, envelope_id: row.id, envelope_digest: envelopeDigest,
+    supersedes_envelope_id: priorEnvelope?.id || null, agent_session_id: session.id, slice_ref: sliceRef };
 }
 
 export async function claimEngineeringSlice(c, worker, limit = 1) {

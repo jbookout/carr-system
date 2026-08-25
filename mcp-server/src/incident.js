@@ -27,6 +27,7 @@
 // the Python side has no duplicate column to read — see migration 0286.
 
 import { incidentSignature } from "./trace.js";
+import { canExercisePartnerAuthority } from "./partner-authority.js";
 
 /** The watch a recovered service gets before a human may call it resolved.
  * Same 24 hours tools/ops-record.py and trace.js both use: a reader's sense of
@@ -105,16 +106,12 @@ export function occurrenceSourceRef(correlationId) {
  * THE COUNCIL'S LINE, VERBATIM: close-incident is "partner (Joe or Dell, never
  * unsponsored)". Two things have to be true and they are different things:
  *
- *   1. The caller is a HUMAN principal. tools.js's `humanOnly: true` is the
- *      registry-level gate for that and every non-human door — probe, reviewer,
- *      agent token, Hermes, and the LOCAL_TOKENS machine door — refuses there
- *      by construction, because identity.js sets human:false on all of them and
- *      "nothing on the wire can change it".
- *   2. That human is a PARTNER. humanOnly answers "not a machine"; it does not
- *      answer "which person", and the authority this verb carries is Joe's or
- *      Dell's specifically. authorizationClassForActor is the server's own
- *      answer to that question and it is the one used here — never a slug
- *      compared by hand in a handler, and never anything a caller can send.
+ *   1. The server resolves either a verified partner or a sponsored native
+ *      Codex/Claude actor. Probe, reviewer, local-token, and unsponsored doors
+ *      remain refused; nothing on the wire can select a sponsor.
+ *   2. The resolved authority belongs to Joe or Dell specifically. The runtime
+ *      agent remains separately attributable, while the authorization class
+ *      and sponsor come only from the server's identity resolution.
  *
  * This function is the SECOND check and is written to stand alone: passed an
  * unsponsored runtime it refuses even if the humanOnly gate were somehow
@@ -122,15 +119,13 @@ export function occurrenceSourceRef(correlationId) {
  * boundary rather than as a comment about one.
  */
 export function partnerAuthority(actor, authorizationClass) {
-  if (!actor || actor.human !== true)
+  if (!canExercisePartnerAuthority(actor))
     return { ok: false, error: "partner_authority_required", authorization_class: authorizationClass || null,
-      hint: "closing or reclassifying an operational incident is a partner's act — Joe's or Dell's own " +
-            "interactive session. Automation may open an incident and record what it observed; it may " +
-            "never decide that one is over. Report what you would have closed and hand it to a partner." };
-  if (authorizationClass !== "verified_partner")
+      hint: "closing or reclassifying an operational incident requires Joe or Dell, or a server-verified " +
+            "Codex/Claude session sponsored by one of them" };
+  if (authorizationClass !== "verified_partner" && authorizationClass !== "sponsored_agent")
     return { ok: false, error: "partner_authority_required", authorization_class: authorizationClass || null,
-      hint: "this session authenticates as a human but not as Joe or Dell, so it carries no partner " +
-            "authority over the operational ledger" };
+      hint: "this session carries no server-derived partner authority over the operational ledger" };
   return { ok: true, error: null };
 }
 

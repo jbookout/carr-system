@@ -38,6 +38,10 @@ ENVELOPE_OPTIONAL_FIELDS = {
     "runtime_profile", "execution_topology", "evaluation_plan",
 }
 REQUEST_FIELDS = {"job_ref", "input_digest", "data_class", "allowed_actions", "declared_expectations"}
+ENGINEERING_REPOSITORY_ACTIONS = (
+    "repository:create-worktree", "repository:create-branch", "repository:write-declared-scope",
+    "repository:run-checks", "repository:commit", "repository:push-branch", "repository:open-pr",
+)
 CLIENT_REQUEST_FIELDS = {"job_ref", "input_digest", "data_class"}
 DECLARED_EXPECTATION_FIELDS = {"plan_step_refs", "component_refs", "component_dependencies", "resource_refs"}
 COMPONENT_DEPENDENCY_FIELDS = {"component_ref", "depends_on_component_ref"}
@@ -230,8 +234,10 @@ def _validate_request(value: Any) -> dict[str, Any]:
     _digest(request["input_digest"], "envelope request input_digest")
     if request["data_class"] not in {"synthetic_only", "metadata_only"}:
         raise ContractError("envelope request data_class is not supported")
-    if request["allowed_actions"] != []:
-        raise ContractError("execution envelope v1 is read-only and cannot authorize actions")
+    if not isinstance(request["allowed_actions"], list) or any(
+        action not in ENGINEERING_REPOSITORY_ACTIONS for action in request["allowed_actions"]
+    ) or len(set(request["allowed_actions"])) != len(request["allowed_actions"]):
+        raise ContractError("execution envelope contains an unsupported or duplicate allowed action")
     declared = _expect_exact(request["declared_expectations"], DECLARED_EXPECTATION_FIELDS,
                               "envelope declared_expectations")
     for field in DECLARED_EXPECTATION_FIELDS - {"component_dependencies"}:
@@ -270,8 +276,8 @@ def _validate_server_binding(value: Any) -> dict[str, Any]:
         raise ContractError("server_binding authority risk_class is invalid")
     for field in ("capability_profile", "capability_grant_ref"):
         _string(authority[field], f"server_binding authority {field}", identifier=True)
-    if authority["read_only"] is not True:
-        raise ContractError("execution envelope v1 only accepts a server-derived read-only authority")
+    if not isinstance(authority["read_only"], bool):
+        raise ContractError("execution envelope authority read_only must be boolean")
     if authority["derived_by"] != "server_capability_resolution" or authority["client_mutable"] is not False:
         raise ContractError("authority must be server-derived and client immutable")
     _validate_adapter(binding["adapter"])
@@ -401,8 +407,15 @@ def validate_execution_envelope(envelope: Any) -> dict[str, Any]:
     _validate_state_binding(value["state_binding"])
     _validate_phase_binding(value["phase_binding"])
     _validate_evaluation_context(value["evaluation_context"])
-    _validate_request(value["request"])
-    _validate_server_binding(value["server_binding"])
+    request = _validate_request(value["request"])
+    server = _validate_server_binding(value["server_binding"])
+    read_only = server["authority"]["read_only"]
+    if read_only and request["allowed_actions"]:
+        raise ContractError("read-only authority cannot carry allowed actions")
+    if not read_only and not request["allowed_actions"]:
+        raise ContractError("write authority requires at least one allowed action")
+    if not read_only and server["authority"]["capability_profile"] != "capability:engineering-repository-write":
+        raise ContractError("write authority requires the engineering repository capability profile")
     runtime_fields = ("runtime_profile", "execution_topology", "evaluation_plan")
     if any(field in envelope for field in runtime_fields):
         if not all(field in envelope for field in runtime_fields):

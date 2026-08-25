@@ -1,9 +1,10 @@
 // CARR-native learning memory kernel (Phase 1).
 // Memory is evidence-backed context, never authority. Candidates can be
-// observed by an agent; promotion remains an interactive human act. Personal
+// observed by an agent; promotion remains a partner-authority act. Personal
 // scope is resolved from the verified sponsor, never from caller claims.
 
 import { personalScopeForActor, organizationTenantForActor } from "./identity.js";
+import { canExercisePartnerAuthority } from "./partner-authority.js";
 
 const KINDS = ["preference", "fact", "episodic", "procedural"];
 const SCOPES = ["shared", "personal"];
@@ -26,8 +27,8 @@ async function planAnchor(c, actor, planId, ToolError) {
 }
 
 function humanOnlyDirect(actor, ToolError) {
-  if (!actor?.human) throw new ToolError({ error: "human_only",
-    hint: "this memory transition requires an interactive human partner" });
+  if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_only",
+    hint: "this memory transition requires a partner or a server-verified Codex/Claude session sponsored by one" });
 }
 
 function requireUuid(value, field, ToolError) {
