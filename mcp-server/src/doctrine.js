@@ -306,6 +306,36 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
   }
 
+  function validateChangeDoctrineItems(items) {
+    if (!Array.isArray(items))
+      throw new ToolError({ error: "change_set_items_invalid",
+        hint: "items must be an array of section changes" });
+
+    const malformed = [];
+    for (const [index, item] of items.entries()) {
+      const fields = [];
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        malformed.push({ item_index: index, fields: ["item"] });
+        continue;
+      }
+      if (typeof item.section_key !== "string" || !item.section_key.trim())
+        fields.push("section_key");
+      if (typeof item.body_text !== "string" || !item.body_text.trim())
+        fields.push("body_text");
+      if (!Number.isInteger(item.base_version) || item.base_version < 0)
+        fields.push("base_version");
+      if (item.title !== undefined && item.title !== null && typeof item.title !== "string")
+        fields.push("title");
+      if (item.ordinal !== undefined && item.ordinal !== null && !Number.isInteger(item.ordinal))
+        fields.push("ordinal");
+      if (fields.length) malformed.push({ item_index: index, fields });
+    }
+    if (malformed.length)
+      throw new ToolError({ error: "change_set_item_invalid", malformed,
+        hint: "each item requires a non-empty section_key, body_text, and non-negative integer base_version" });
+    return items;
+  }
+
   // ------------------------------------------------------------------ verbs
 
   return {
@@ -720,7 +750,11 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           ordinal: { type: "integer" } },
           required: ["section_key", "body_text", "base_version"] } } },
         required: ["idempotency_key", "document", "items"] },
-      handler: async (c, actor, args) => withEnvelope(c, actor, "change-doctrine-sections", args, async () => {
+      handler: async (c, actor, args) => {
+        // Reject malformed nested input before the envelope opens its transaction
+        // or performs the idempotency read; raw items must never reach the sort.
+        validateChangeDoctrineItems(args.items);
+        return withEnvelope(c, actor, "change-doctrine-sections", args, async () => {
         if (!args.items.length) throw new ToolError({ error: "empty_change_set" });
         const doc = await resolveDoc(c, args.document);
         if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
@@ -802,7 +836,8 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           { new: { sections: results.length, keys: results.map(r => r.section_key) },
             idempotency_key: args.idempotency_key });
         return { ok: true, change_set_id: cs.rows[0].id, sections: results, generation };
-      }),
+        });
+      },
     },
 
     "resolve-doctrine-rules": {
@@ -980,6 +1015,17 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // said out loud, rather than a session that boots with no rules at all.
         const deliveryUsable = plan.length > 0 && selectedShortIds.size > 0;
         const enforcing = deliveryMode === "enforced" && deliveryUsable;
+        // Intro-politics rules deliberately do not belong to the full boot
+        // corpus above, but they DO make up the vendor-intros pack.  Building
+        // selectedShortIds from 219 rows and then filtering only the 205-row
+        // recitation pool made that pack a phantom: reported selected, never
+        // deliverable.  In enforcement only, widen the candidate pool; the
+        // selected ids still decide whether any intro rule actually arrives.
+        const deliveryRulePool = enforcing ? (await c.query(
+          `select statement, human_quote, taught_by, personal_to, scope, id
+             from v_compiled_rules
+            where (personal_to is null or ($1::text is not null and personal_to = $1))
+            order by personal_to nulls first, activated_at, statement`, [who])).rows : allRules;
 
         // TWO SCOPINGS MUST NOT MULTIPLY. When the typed guidance registry is
         // active, `selectedById` above already holds a NARROWED set — constitution
@@ -990,7 +1036,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // filtering. Layer 0 is the floor of a boot in both designs, and a floor
         // that two correct mechanisms can quietly sink through is not a floor.
         if (enforcing) {
-          for (const r of allRules) {
+          for (const r of deliveryRulePool) {
             const id = String(r.id).slice(0, 8).toLowerCase();
             if (selectedShortIds.has(id) && !selectedById.has(id)) selectedById.set(id, r);
           }
