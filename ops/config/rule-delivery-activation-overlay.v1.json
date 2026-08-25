@@ -1,0 +1,15 @@
+{
+  "schema": "rule-delivery-activation-overlay/v1",
+  "base_map_sha256": "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a",
+  "targets": [
+    {"short_id":"25fcddee","scope":"shared","pack":"governance-rules","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
+    {"short_id":"3fa17fa0","scope":"shared","pack":"client-deal","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
+    {"short_id":"72e06bdf","scope":"shared","pack":"client-deal","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
+    {"short_id":"581cb3fe","scope":"shared","pack":"delegation-council","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
+    {"short_id":"113b3833","scope":"joe","pack":"governance-rules","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
+    {"short_id":"57d13061","scope":"joe","pack":"joe-comms","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
+    {"short_id":"c66dc739","scope":"joe","pack":"joe-comms","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
+    {"short_id":"49533583","scope":"joe","pack":"joe-comms","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
+    {"short_id":"557838a5","scope":"joe","pack":"joe-comms","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"}
+  ]
+}
