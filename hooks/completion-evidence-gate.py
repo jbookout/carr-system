@@ -80,6 +80,8 @@ WRITE_ACTION_EXACT = {
     "propose-outcome-feedback", # Program 6 immutable evidence proposal; no self-attestation
     "accept-outcome-feedback",  # Program 6 human-only observational acceptance; never completion
     "review-deal",
+    "review-engineering-slice",  # independent typed review is a persisted verdict;
+                                   # other review-* actions include non-mutating reads
     "observe-memory",  # evidence-backed candidate write; exact because observe-* reads may exist
     "correct-memory",  # immutable successor write; exact transition
     "forget-memory",   # reversible suppression write; exact transition
