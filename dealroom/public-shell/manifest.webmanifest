@@ -1,7 +1,7 @@
 {
-  "name": "The Deal Room",
-  "short_name": "Deal Room",
-  "description": "CARR's private partner Deal Room",
+  "name": "DoctorCRE Workspace",
+  "short_name": "DoctorCRE",
+  "description": "CARR's private partner workspace",
   "id": "/",
   "start_url": "/",
   "scope": "/",

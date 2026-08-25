@@ -3,8 +3,8 @@
 production hostname.
 
 WHY THIS EXISTS, and it is not hypothetical. On 2026-08-13 the first staging
-deploy took over all three production custom domains — api.doctorcre.com,
-api.practicecre.com, dealroom.doctorcre.com — because wrangler treats `routes` as
+deploy took over all four production custom domains — api.doctorcre.com,
+api.practicecre.com, app.doctorcre.com, dealroom.doctorcre.com — because wrangler treats `routes` as
 an INHERITABLE key and the [env.staging] block did not override it. Production
 answered from the staging Worker, bound to the empty staging database, for about
 two minutes.

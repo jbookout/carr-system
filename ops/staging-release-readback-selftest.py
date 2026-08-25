@@ -325,7 +325,7 @@ workers_dev = true
 routes = [{pattern = "api.doctorcre.com", custom_domain = true}]
 [env.staging.vars]
 CARR_ENV = "staging"
-DEALROOM_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
+APP_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
 """
 with tempfile.TemporaryDirectory() as tmp:
     cfg = Path(tmp) / "wrangler.toml"
@@ -517,7 +517,7 @@ assert "exceed the 12-attempt safety bound" in wrapper
 assert "exceeds the 5-second safety bound" in wrapper
 assert 'STAGING_READBACK_ATTEMPT=0' in wrapper
 assert 'staging /release identity was not durably verified; recording VERIFYING only.' in wrapper
-assert "sed -nE 's/^DEALROOM_HOST" not in wrapper
+assert "sed -nE 's/^APP_HOST" not in wrapper
 resume_slice = wrapper[wrapper.index("staging_attempt()"):
                        wrapper.index("# Production promotion is not verified")]
 assert resume_slice.index("staging_attempt prepare") < resume_slice.index("staging_attempt claim")

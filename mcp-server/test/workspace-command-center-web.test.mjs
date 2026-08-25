@@ -25,14 +25,14 @@ const overrides = (email, reader = null) => ({
 });
 const cookie = (response) => (typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [response.headers.get("set-cookie")]).find((value) => value?.startsWith("__Host-dealroom_session=")).split(";", 1)[0];
 
-test("Command Center is a protected same-origin read route and leaves root Deal Room unchanged", async () => {
+test("Command Center is the protected same-origin app root and Deal Room remains /deals", async () => {
   assert.equal(isDealroomRequest(new Request(`https://${HOST}/workspace`), { DEALROOM_HOST: HOST }), true);
   assert.equal(isDealroomRequest(new Request(`https://${HOST}/api/v1/command-center`), { DEALROOM_HOST: HOST }), true);
   const environment = makeEnvironment();
   const handler = createDealroomHandler(overrides("joe.bookout.carr.us@gmail.com"));
   let response = await handler.fetch(new Request(`https://${HOST}/workspace`, { headers: { accept: "text/html" } }), environment, {});
   assert.equal(response.status, 302);
-  assert.match(response.headers.get("location"), /auth\/login\?return_to=%2Fworkspace/);
+  assert.equal(response.headers.get("location"), `https://${HOST}/`);
   response = await handler.fetch(new Request(`https://${HOST}/api/v1/command-center`), environment, {});
   assert.equal(response.status, 401);
   assert.equal((await response.json()).error, "AUTHENTICATION_REQUIRED");
@@ -42,8 +42,8 @@ test("Command Center is a protected same-origin read route and leaves root Deal 
   const callback = await handler.fetch(new Request(`https://${HOST}/auth/callback?state=${google.searchParams.get("state")}&code=stub`, { headers: { cookie: pending, "x-test-email": "joe.bookout.carr.us@gmail.com" } }), environment, {});
   const session = cookie(callback);
   response = await handler.fetch(new Request(`https://${HOST}/workspace`, { headers: { cookie: session, accept: "text/html" } }), environment, {});
-  assert.equal(response.status, 200);
-  assert.match(await response.text(), /CARR Command Center/);
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get("location"), `https://${HOST}/`);
   response = await handler.fetch(new Request(`https://${HOST}/`, { headers: { cookie: session, accept: "text/html" } }), environment, {});
   assert.match(await response.text(), /CARR Command Center/);
   const fallback = await handler.fetch(new Request(`https://${HOST}/`, { headers: { cookie: session, accept: "text/html" } }), { ...environment, WORKSPACE_COMMAND_CENTER_READ_ENABLED: "false" }, {});
@@ -76,10 +76,10 @@ test("disabled Command Center routes do not serve its asset and API query scope 
   const handler = createDealroomHandler(overrides("joe.bookout.carr.us@gmail.com"));
   let response = await handler.fetch(new Request(`https://${HOST}/workspace`, { headers: { accept: "text/html" } }), { ...environment, WORKSPACE_COMMAND_CENTER_READ_ENABLED: "false" }, {});
   assert.equal(response.status, 302);
-  assert.match(response.headers.get("location"), /\/deals$/);
+  assert.match(response.headers.get("location"), /\/$/);
   response = await handler.fetch(new Request(`https://${HOST}/workspace.html`, { headers: { accept: "text/html" } }), { ...environment, WORKSPACE_COMMAND_CENTER_READ_ENABLED: "false" }, {});
   assert.equal(response.status, 302);
-  assert.match(response.headers.get("location"), /\/deals$/);
+  assert.match(response.headers.get("location"), /\/$/);
   response = await handler.fetch(new Request(`https://${HOST}/api/v1/command-center?viewer=dell`), environment, {});
   assert.equal(response.status, 401);
   assert.equal((await response.json()).error, "AUTHENTICATION_REQUIRED");
