@@ -340,6 +340,43 @@ def main() -> int:
             execution_contract.validate_execution_envelope(issued_envelope[2])
             if issued_envelope[2]["runtime_profile"].get("profile_key") != "builder" or issued_envelope[2]["server_binding"]["authority"]["environment"] != "rehearsal":
                 raise RuntimeError("ExecutionEnvelope did not derive its assigned profile/environment")
+            registration = cur.execute(
+                "select ops.hermes_runtime_admission_for_brief(%s,%s,%s,%s,%s)",
+                ("hermes-pilot", "builder", "joe", ref, replay_first[0]),
+            ).fetchone()[0]
+            expected_registration = {
+                "status": "registered",
+                "authorized": True,
+                "registration_scope": "execution_envelope",
+                "runtime_principal": "runtime:builder",
+                "agent_principal_id": "agent:builder",
+                "organization_tenant_id": "carr-internal",
+                "sponsoring_human_slug": "joe",
+                "work_request": ref,
+                "activation_binding_id": replay_first[0],
+                "profile_version": issued_envelope[2]["runtime_profile"]["profile_version"],
+                "surface": "hermes_desktop",
+                "adapter_id": "adapter:hermes-desktop",
+                "read_only": True,
+                "grants_authority": False,
+                "device_binding_status": "not_asserted",
+                "envelope_digest": issued_envelope[1],
+            }
+            for key, expected in expected_registration.items():
+                if registration.get(key) != expected:
+                    raise RuntimeError(f"Hermes runtime admission lost exact {key}: {registration}")
+            for runtime_slug, profile_key, sponsor_slug, expected_status in (
+                ("missing-runtime", "builder", "joe", "not_registered"),
+                ("codex-reviewer", "builder", "joe", "not_registered"),
+                ("hermes-pilot", "deal-steward", "joe", "stale"),
+                ("hermes-pilot", "builder", "dell", "stale"),
+            ):
+                refused = cur.execute(
+                    "select ops.hermes_runtime_admission_for_brief(%s,%s,%s,%s,%s)",
+                    (runtime_slug, profile_key, sponsor_slug, ref, replay_first[0]),
+                ).fetchone()[0]
+                if refused.get("authorized") is not False or refused.get("status") != expected_status:
+                    raise RuntimeError(f"Hermes runtime admission accepted altered server binding: {refused}")
             issued_replay = cur.execute(
                 "select * from ops.issue_execution_envelope_v1(%s,%s,%s)",
                 (ref, replay_first[0], uuid.UUID("11111111-1111-4111-8111-111111111111")),
