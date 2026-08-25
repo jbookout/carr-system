@@ -72,7 +72,8 @@ test("profile and brief never grant authority; local files and memory are non-au
   assert.equal(out.local_markdown_authoritative, false);
   assert.equal(out.local_memory_authoritative, false);
   assert.deepEqual(out.runtime_requirements, {
-    skip_context_files: true, skip_memory: true, ephemeral_system_prompt: true,
+    skip_context_files: true, skip_memory: false,
+    memory_mode: "native_non_authoritative", ephemeral_system_prompt: true,
   });
   assert.equal(out.tool_allowlist_source, "mcp tools/list");
   assert.equal(out.boot_sources.standing_context, "standing-context");

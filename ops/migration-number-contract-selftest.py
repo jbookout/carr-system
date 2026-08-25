@@ -286,7 +286,7 @@ def main() -> int:
                 assert "origin/main violates" in stderr.getvalue(), stderr.getvalue()
             else:
                 assert repair_rc == 0, (repair_rc, stdout.getvalue(), stderr.getvalue())
-                assert "next free migration number: 0300" in stdout.getvalue(), stdout.getvalue()
+                assert "next free migration number: 0301" in stdout.getvalue(), stdout.getvalue()
                 assert "0298_memory_kernel.sql" in stdout.getvalue(), stdout.getvalue()
 
     # The same allocator path refuses if the red remote inventory is missing

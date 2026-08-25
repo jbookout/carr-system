@@ -141,7 +141,12 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
           brief_grants_authority: false,
           runtime_requirements: {
             skip_context_files: true,
-            skip_memory: true,
+            // Hermes' native memory remains enabled during the CARR
+            // transition. It is useful context and a candidate-learning
+            // source, never authority; CARR remains authoritative for
+            // promoted memory and permissions.
+            skip_memory: false,
+            memory_mode: "native_non_authoritative",
             ephemeral_system_prompt: true,
           },
           tool_allowlist_source: "mcp tools/list",
