@@ -44,7 +44,7 @@ NOLOGIN_BUNDLES = [
     "carr_reader", "carr_writer", "carr_exporter", "carr_authority",
     "carr_device_evidence", "carr_calendar_prebrief_jobs",
     "carr_calendar_prebrief_canary_jobs", "carr_calendar_prebrief_attestors",
-    "carr_calendar_prebrief_email_resolver",
+    "carr_calendar_prebrief_email_resolver", "carr_program5_forward_fix_verifiers",
 ]
 EXPECTED_ROLES = [*NOLOGIN_BUNDLES, "carr_jobs"]
 
