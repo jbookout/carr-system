@@ -723,9 +723,9 @@
     "6cfb67f5": {
       "category": "hard_pre_action",
       "enforcement_class": "deny_gate",
-      "binding_moment": "at dispatch of a delegated task to another seat",
+      "binding_moment": "at tools/room-bridge dispatch to a codex-session or codex-live desk",
       "control": "delegation_names_model_and_effort",
-      "exceptions": "claude-session desks - a live person's seat picks its own model"
+      "exceptions": "claude-session desks - a live person's seat picks its own model; delegation through collaboration spawn APIs or any non-room-bridge path is a current uncovered gap"
     },
     "aa411351": {
       "category": "hard_pre_action",
@@ -1951,18 +1951,18 @@
       "why_unenforceable": "The binding condition is recognising that a finding describes an ACQUISITION — a platform filing an entity on an existing practice address, an ownership change, a retirement sale — which is a judgment about what a finding means, not a field any record carries. Nothing can mechanically tell an acquisition from an ordinary entity filing at a shared address. The downstream halves inherit that: cadence and outreach-queue placement would be checkable only once a lead already carried a source-was-an-acquisition flag, and nothing sets one. Reopen as enforceable if the finding lanes ever stamp that provenance on the lead at creation, which would make the nurture-cadence and never-an-outreach-queue halves a predicate."
     },
     "d7f74c93": {
-      "category": "post_action_verification",
-      "enforcement_class": "stop_gate",
-      "binding_moment": "before an outgoing assistant reply justifies denying a model, provider, or agent access to CARR material because it is confidential, private, or sensitive",
+      "category": "session_task_rail",
+      "enforcement_class": "surfacing",
+      "binding_moment": "on the next UserPromptSubmit after chat_lint observes that the preceding reply justified an access denial with confidentiality, privacy, or sensitivity",
       "control": "chat_lint",
-      "exceptions": "explicit corrections that confidentiality is not the boundary, historical or quoted rule text, and real credential/autonomous-execution boundary explanations"
+      "exceptions": "explicit corrections that confidentiality is not the boundary, historical or quoted rule text, and real credential/autonomous-execution boundary explanations; the offending reply has already reached the partner and cannot be prevented by this control"
     },
     "937252fb": {
       "category": "post_action_verification",
       "enforcement_class": "stop_gate",
-      "binding_moment": "before reporting a capability as working, live, deployed, or done",
+      "binding_moment": "at Stop after a tracked mutation, deploy, or multi-file build when the reply uses the gate's completion or delivery claim vocabulary",
       "control": "completion_evidence",
-      "exceptions": "the first real action is a human gate the session cannot perform — a release approval, a browser login, a credential — and the claim says so in the same message"
+      "exceptions": "the first real action is a human gate the session cannot perform and the claim says so; current uncovered gaps are bare working/live claims, capability claims with no tracked mutation, and a fresh read being accepted without proving consumer, trigger, and live-path exercise"
     },
     "bd4a6d22": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "No control can judge whether a human chose a state on purpose, nor whether an acceptance was named narrowly enough to keep the check honest. The fixtures in ops/hermes-autonomy-check-selftest.py prove the discipline for the worked example by failing if the acceptance is ever widened into a pattern, and nothing today notices the skip-checks escape becoming a habit."},
     "e6e0b0e7": {
@@ -2183,7 +2183,6 @@
       "38b15dc6",
       "4402973a",
       "1d50a3bb",
-      "d7f74c93",
       "dcf98880",
       "937252fb"
     ],
@@ -2222,7 +2221,7 @@
       "c66dc739",
       "0156e9fa",
       "49533583",
-      "557838a5", "3fa422b7"
+      "557838a5", "3fa422b7", "d7f74c93"
     ]
   },
     "load_layer_note": "THE DELIVERY HALF of the enforcement recategorization (2026-08-23 rules council, both chairs unanimous). `rule_controls` above says HOW a rule is enforced; this says WHEN its text is delivered to a session. layer0 = recited at every boot, and nothing task-specific belongs here (rule 1fddcffb). control = an installed deny/stop/schema control prints the rule at the moment it binds, so boot recitation is belt-and-suspenders; ops/rule-load-layer-check.py REFUSES this value for any rule whose enforcement_class is not built, which is what stops 'scoped' from meaning 'silently dropped'. pack = delivered when the observed work matches a pack's triggers. A wildcard pack is refused by the same check: grok's warning was that shipping wildcard tags and calling it scoping is how rules go silent on an undeclared session.",
@@ -3565,11 +3564,10 @@
         "why": "An installed schema delivers this at its binding moment."
       },
       "d7f74c93": {
-        "load_layer": "control",
+        "load_layer": "pack",
         "packs": [
           "delegation-council"
-        ],
-        "why": "An installed stop gate delivers this at its binding moment."
+        ]
       },
       "d8c9b1f0": {
         "load_layer": "layer0",
