@@ -714,7 +714,10 @@ export async function dispatch(request, env, ctx, actor) {
             .replace(/\b\w+:\/\/[^\s'"]+/gi, "[redacted]");
           scheduleFailureRecord(env, ctx, {
             routeKey: `mcp:tools/call:${rpc?.params?.name || "unknown"}`,
-            failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE),
+            failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE, {
+              verb: rpc?.params?.name || null,
+              error: e,
+            }),
             detail: cause.slice(0, 300),
           });
           return reply({ isError: true, content: [{ type: "text", text: JSON.stringify({
@@ -742,7 +745,10 @@ export async function dispatch(request, env, ctx, actor) {
     const detail = String(e).slice(0, 300);
     scheduleFailureRecord(env, ctx, {
       routeKey: `mcp:${rpc?.method || "unknown"}${rpc?.params?.name ? ":" + rpc.params.name : ""}`,
-      failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE),
+      failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE, {
+        verb: rpc?.params?.name || null,
+        error: e,
+      }),
       detail,
     });
     return rpcError(-32603, "internal error", detail);
