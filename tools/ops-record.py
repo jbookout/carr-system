@@ -263,7 +263,7 @@ def staging_worker_target(config_path: Path = WRANGLER_CONFIG) -> dict[str, str]
     variables = staging.get("vars") or {}
     account_id = config.get("account_id")
     worker_name = staging.get("name")
-    host = variables.get("DEALROOM_HOST")
+    host = variables.get("APP_HOST")
     if account_id != STAGING_ACCOUNT_ID:
         raise ValueError("staging account_id is not the reviewed account")
     if worker_name != STAGING_WORKER_NAME or staging.get("workers_dev") is not True:

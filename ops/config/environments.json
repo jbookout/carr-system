@@ -58,7 +58,7 @@
         "resolution": "PINNED BY ID, never by name — resolving production by a name somebody could recreate elsewhere is the worst failure this map could have"
       },
       "worker": {"deployed": true, "name": "carr-mcp", "config": "mcp-server/wrangler.toml [top level]"},
-      "domains": ["api.practicecre.com", "api.doctorcre.com", "dealroom.doctorcre.com"],
+      "domains": ["api.practicecre.com", "api.doctorcre.com", "app.doctorcre.com", "dealroom.doctorcre.com"],
       "secrets": {"source": "wrangler secrets and ~/.config/carr/db.env; never in the repository"},
       "telemetry": {"destination": "Cloudflare observability, healthchecks.io dead-man switch, the ops ledger"},
       "who_may_write": "human-gated paths only; tools/db-tap.py is read-only here without break-glass"
@@ -66,7 +66,7 @@
   ],
   "intentional_differences": [
     {
-      "difference": "staging has no custom domain while production has three",
+      "difference": "staging has no custom domain while production has four",
       "why": "A staging hostname on the same zone is one typo and one certificate away from production. workers.dev costs nothing, needs no DNS, and is unmistakably not production at a glance."
     },
     {

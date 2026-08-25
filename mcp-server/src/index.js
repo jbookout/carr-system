@@ -82,7 +82,7 @@ import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
 import { actorFromProps, agentActorForToken, hermesActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
-import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
+import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
 import { appendRoomTurn, DEFAULT_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
 import { createCaptureHandler } from "./capture.js";
@@ -600,6 +600,10 @@ const dealroomHandler = createDealroomHandler({
 // owned by OAuthProvider/defaultHandler.
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
+  // The old Deal Room hostname is a browser bookmark bridge only. Keep it
+  // ahead of machine-token doors so /mcp and other API paths fail closed on
+  // that hostname instead of reaching an unrelated machine surface.
+  if (isLegacyDealroomRequest(request, env)) return dealroomHandler.fetch(request, env, ctx);
   if (url.pathname.startsWith("/capture/")) {
     return captureHandler(env).fetch(request, env, ctx);
   }

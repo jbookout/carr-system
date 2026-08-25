@@ -74,6 +74,7 @@ compatibility_flags = ["global_fetch_strictly_public"]
 routes = [
   { pattern = "api.practicecre.com", custom_domain = true },
   { pattern = "api.doctorcre.com", custom_domain = true },
+  { pattern = "app.doctorcre.com", custom_domain = true },
   { pattern = "dealroom.doctorcre.com", custom_domain = true }
 ]
 
@@ -95,7 +96,8 @@ routes = [
 # that one.
 [vars]
 CARR_ENV = "production"
-DEALROOM_HOST = "dealroom.doctorcre.com"
+APP_HOST = "app.doctorcre.com"
+LEGACY_DEALROOM_HOST = "dealroom.doctorcre.com"
 # A reviewed, public deployment setting. Program 6 is enabled only through the
 # immutable release that fingerprints this exact config value; the shared
 # parser still fails closed for a missing or non-literal value.
@@ -169,7 +171,7 @@ workers_dev = true
 # assumption that declaring no routes meant inheriting none. Wrangler treats
 # `routes` as an INHERITABLE key, so the staging Worker inherited all three
 # production custom domains and took them over on deploy — api.doctorcre.com,
-# api.practicecre.com and dealroom.doctorcre.com all began answering from
+# api.practicecre.com, app.doctorcre.com and dealroom.doctorcre.com all began answering from
 # carr-mcp-staging, which is bound to the EMPTY staging database. /release on
 # api.doctorcre.com returned doctrine_generation null, "doctrine_meta has no row
 # with id=1", for about two minutes until production was redeployed and
@@ -186,7 +188,7 @@ routes = []
 # so a var added there must be repeated here.
 [env.staging.vars]
 CARR_ENV = "staging"
-DEALROOM_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
+APP_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
 DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true"
 WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"
 

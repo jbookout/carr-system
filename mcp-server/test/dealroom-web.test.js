@@ -9,6 +9,7 @@ const WRANGLER_PATH = fileURLToPath(new URL("../wrangler.toml", import.meta.url)
 const INDEX_PATH = fileURLToPath(new URL("../src/index.js", import.meta.url));
 const DEALROOM_INDEX_PATH = fileURLToPath(new URL("../../dealroom/index.html", import.meta.url));
 const PRODUCTION_HOST = "dealroom.doctorcre.com";
+const APP_HOST = "app.doctorcre.com";
 const STAGING_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev";
 
 class MemoryKv {
@@ -91,11 +92,13 @@ function identityHandler(email, clock) {
 
 test("Deal Room host is explicit per environment and request matching fails closed", async () => {
   const wrangler = await readFile(WRANGLER_PATH, "utf8");
-  assert.match(wrangler, /\[vars\]\nCARR_ENV = "production"\nDEALROOM_HOST = "dealroom\.doctorcre\.com"/);
+  assert.match(wrangler, /\[vars\]\nCARR_ENV = "production"\nAPP_HOST = "app\.doctorcre\.com"\nLEGACY_DEALROOM_HOST = "dealroom\.doctorcre\.com"/);
   assert.match(wrangler,
-    /\[env\.staging\.vars\]\nCARR_ENV = "staging"\nDEALROOM_HOST = "carr-mcp-staging\.joe-bookout-carr-us\.workers\.dev"/);
+    /\[env\.staging\.vars\]\nCARR_ENV = "staging"\nAPP_HOST = "carr-mcp-staging\.joe-bookout-carr-us\.workers\.dev"/);
 
   assert.equal(isDealroomRequest(new Request(`https://${PRODUCTION_HOST}/`), { DEALROOM_HOST: PRODUCTION_HOST }), true);
+  assert.equal(isDealroomRequest(new Request(`https://${APP_HOST}/`), { APP_HOST, LEGACY_DEALROOM_HOST: PRODUCTION_HOST }), true);
+  assert.equal(isDealroomRequest(new Request(`https://${PRODUCTION_HOST}/`), { APP_HOST, LEGACY_DEALROOM_HOST: PRODUCTION_HOST }), true);
   assert.equal(isDealroomRequest(new Request(`https://${STAGING_HOST}/`), { DEALROOM_HOST: STAGING_HOST }), true);
   assert.equal(isDealroomRequest(new Request(`https://${STAGING_HOST}/`), { DEALROOM_HOST: PRODUCTION_HOST }), false);
   assert.equal(isDealroomRequest(new Request(`https://${PRODUCTION_HOST}/`), {}), false);
@@ -108,6 +111,23 @@ test("Deal Room host is explicit per environment and request matching fails clos
     ...env(), DEALROOM_HOST: undefined,
   }, {});
   assert.equal(missing.status, 404);
+});
+
+test("legacy Deal Room host redirects only browser document paths to the canonical app", async () => {
+  const environment = { ...env(APP_HOST), APP_HOST, LEGACY_DEALROOM_HOST: PRODUCTION_HOST };
+  const handler = identityHandler("joe.bookout.carr.us@gmail.com");
+  const loginStart = await handler.fetch(new Request(`https://${APP_HOST}/auth/login`), environment, {});
+  assert.equal(new URL(loginStart.headers.get("location")).searchParams.get("redirect_uri"), `https://${APP_HOST}/auth/callback`);
+  for (const method of ["GET", "HEAD"]) {
+    const response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}/?stale=1`, { method }), environment, {});
+    assert.equal(response.status, 302, method);
+    assert.equal(response.headers.get("location"), `https://${APP_HOST}/deals`, method);
+  }
+  for (const [method, path] of [["POST", "/"], ["GET", "/api/system-work/session"], ["POST", "/mcp"], ["GET", "/manifest.webmanifest"]]) {
+    const response = await handler.fetch(new Request(`https://${PRODUCTION_HOST}${path}`, { method }), environment, {});
+    assert.equal(response.status, 404, `${method} ${path} must fail closed`);
+    assert.equal(response.headers.get("location"), null, `${method} ${path} must not redirect`);
+  }
 });
 
 test("shared staging origin routes only exact Deal Room surfaces", () => {
@@ -449,7 +469,7 @@ test("manifest and service worker are public with PWA-safe headers and offline t
   assert.equal(manifestResponse.status, 200);
   assert.match(manifestResponse.headers.get("content-type"), /^application\/manifest\+json/);
   const manifest = await manifestResponse.json();
-  assert.equal(manifest.name, "The Deal Room");
+  assert.equal(manifest.name, "DoctorCRE Workspace");
   assert.equal(manifest.theme_color, "#002F6C");
   assert.equal(manifest.background_color, "#F57F29");
   assert.deepEqual(manifest.icons.map((icon) => icon.sizes), ["192x192", "512x512"]);
