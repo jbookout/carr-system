@@ -1538,7 +1538,7 @@ begin
   reliability := new.receipt->'reliability';
   if jsonb_typeof(reliability) <> 'object'
      or not (reliability ?& array['route_digest','topology_digest','evaluation_plan_digest','grounding_sufficiency','deterministic_checks','model_judgement','human_acceptance','trajectory','evaluator_results','corrections','defects','incidents','downstream_outcome','outcome_horizon','process_metrics','eval_candidates','shadow_comparisons','learning_disposition','telemetry','closure'])
-     or exists (select 1 from jsonb_object_keys(reliability) key where key <> all(array['route_digest','topology_digest','evaluation_plan_digest','grounding_sufficiency','deterministic_checks','model_judgement','human_acceptance','trajectory','evaluator_results','corrections','defects','incidents','downstream_outcome','outcome_horizon','process_metrics','eval_candidates','shadow_comparisons','learning_disposition','telemetry','closure']))
+     or exists (select 1 from jsonb_object_keys(reliability) key where key <> all(array['route_digest','topology_digest','evaluation_plan_digest','grounding_sufficiency','deterministic_checks','model_judgement','human_acceptance','trajectory','evaluator_results','corrections','defects','incidents','downstream_outcome','outcome_horizon','process_metrics','eval_candidates','shadow_comparisons','learning_disposition','telemetry','closure','environment_binding_digest','environment_evidence']))
      or jsonb_typeof(reliability->'deterministic_checks') <> 'array'
      or exists (select 1 from jsonb_array_elements(reliability->'deterministic_checks') check_row where jsonb_typeof(check_row) <> 'object' or not (check_row ?& array['check_id','state','critical','evidence_refs']) or check_row->>'check_id' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$' or check_row->>'state' not in ('passed','failed','unknown','not_run') or jsonb_typeof(check_row->'critical')<>'boolean' or jsonb_typeof(check_row->'evidence_refs')<>'array')
      or jsonb_typeof(reliability->'trajectory') <> 'array'
@@ -1742,6 +1742,65 @@ end $_$;
 
 
 --
+-- Name: attest_execution_environment_conformance(text, jsonb, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.attest_execution_environment_conformance(p_provider_ref text, p_observation jsonb, p_idempotency_key uuid) RETURNS TABLE(conformance_id uuid, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare actor_row actor%rowtype; provider ops.execution_environment_provider%rowtype; existing ops.execution_environment_conformance%rowtype;
+  allowed text[] := array['schema_version','provider_ref','manifest_digest','implementation_digest','package_digest','package_revision_ref','configuration_schema_digest','contract_ref','contract_digest','run_ref','status','check_results','version_ref','backend_kind','evidence_refs','contains_secrets','run_digest','observed_at'];
+  derived_run_digest text; observed_at_value timestamptz;
+begin
+  if session_user !~ '^carr_authority_' then raise exception 'environment conformance attestation requires human authority'; end if;
+  select * into actor_row from actor where slug=regexp_replace(session_user,'^carr_authority_','') and kind='human' and active;
+  select * into provider from ops.execution_environment_provider p where p_provider_ref='environment-provider:'||p.provider_key||':v'||p.provider_version for share;
+  begin observed_at_value := (p_observation->>'observed_at')::timestamptz; exception when others then raise exception 'environment conformance observed_at is invalid'; end;
+  derived_run_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(p_observation-'run_digest'-'observed_at'),'sha256'),'hex');
+  if actor_row.id is null or provider.id is null or jsonb_typeof(p_observation)<>'object'
+     or not (p_observation ?& allowed) or exists(select 1 from jsonb_object_keys(p_observation) k where k<>all(allowed))
+     or p_observation->>'schema_version'<>'execution-environment-conformance.v1'
+     or p_observation->>'provider_ref'<>p_provider_ref
+     or p_observation->>'manifest_digest'<>provider.manifest_digest
+     or p_observation->>'implementation_digest' !~ '^sha256:[0-9a-f]{64}$'
+     or (p_observation->>'implementation_digest'<>provider.manifest->>'implementation_digest' and not (p_observation->>'status'='failed' and p_observation->'check_results'->'check:implementation-digest-exact'='false'::jsonb))
+     or p_observation->>'package_digest' !~ '^sha256:[0-9a-f]{64}$'
+     or (p_observation->>'package_digest'<>provider.manifest->'package_provenance'->>'package_digest' and not (p_observation->>'status'='failed' and p_observation->'check_results'->'check:package-provenance-exact'='false'::jsonb))
+     or p_observation->>'package_revision_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+     or p_observation->>'configuration_schema_digest'<>provider.manifest->>'configuration_schema_digest'
+     or p_observation->>'contract_ref'<>provider.manifest->>'conformance_contract_ref'
+     or p_observation->>'contract_digest'<>provider.manifest->>'conformance_contract_digest'
+     or p_observation->>'run_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+     or p_observation->>'run_digest' is distinct from derived_run_digest
+     or p_observation->>'status' not in ('passed','failed')
+     or p_observation->>'backend_kind' not in ('none','local','container','remote','cloud','unknown')
+     or (p_observation->>'backend_kind'<>provider.backend_kind and not (p_observation->>'status'='failed' and p_observation->'check_results'->'check:terminal-backend-local'='false'::jsonb))
+     or p_observation->>'version_ref' !~ '^[^[:cntrl:]]{1,160}$'
+     or p_observation->>'contains_secrets' not in ('true','false')
+     or (p_observation->>'contains_secrets'='true' and not (p_observation->>'status'='failed' and p_observation->'check_results'->'check:source-secret-scan'='false'::jsonb))
+     or jsonb_typeof(p_observation->'check_results')<>'object' or p_observation->'check_results'='{}'::jsonb
+     or exists(select 1 from jsonb_each(p_observation->'check_results') c where c.key !~ '^check:[a-z0-9-]+$' or jsonb_typeof(c.value)<>'boolean')
+     or (p_observation->>'status'='passed' and exists(select 1 from jsonb_each(p_observation->'check_results') c where c.value<>'true'::jsonb))
+     or (p_observation->>'status'='failed' and not exists(select 1 from jsonb_each(p_observation->'check_results') c where c.value='false'::jsonb))
+     or jsonb_typeof(p_observation->'evidence_refs')<>'array' or jsonb_array_length(p_observation->'evidence_refs')=0
+     or exists(select 1 from jsonb_array_elements_text(p_observation->'evidence_refs') value where value !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$')
+     or observed_at_value>clock_timestamp() then
+    raise exception 'environment conformance attestation is invalid';
+  end if;
+  select * into existing from ops.execution_environment_conformance where idempotency_key=p_idempotency_key for share;
+  if found then
+    if existing.provider_id<>provider.id or existing.observation is distinct from p_observation then raise exception 'environment conformance idempotency conflict'; end if;
+    return query select existing.id,true; return;
+  end if;
+  insert into ops.execution_environment_conformance(provider_id,contract_ref,contract_digest,run_ref,run_digest,manifest_digest,implementation_digest,package_digest,configuration_schema_digest,status,check_refs,evidence_refs,observation,observed_at,recorded_by_actor_id,idempotency_key)
+  values(provider.id,provider.manifest->>'conformance_contract_ref',provider.manifest->>'conformance_contract_digest',p_observation->>'run_ref',derived_run_digest,provider.manifest_digest,p_observation->>'implementation_digest',p_observation->>'package_digest',p_observation->>'configuration_schema_digest',p_observation->>'status',to_jsonb(array(select key from jsonb_each(p_observation->'check_results') order by key)),p_observation->'evidence_refs',p_observation,observed_at_value,actor_row.id,p_idempotency_key)
+  returning id into conformance_id;
+  return query select conformance_id,false;
+end $_$;
+
+
+--
 -- Name: authority_actor_slug(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -1755,6 +1814,71 @@ begin
     when 'carr_authority_dell' then return 'dell';
     else raise exception 'authority session user % is not an admitted human authority principal', session_user;
   end case;
+end $$;
+
+
+--
+-- Name: bind_execution_environment_to_assignment(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.bind_execution_environment_to_assignment() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare provider ops.execution_environment_provider%rowtype; conformance ops.execution_environment_conformance%rowtype;
+  requirement jsonb; configuration jsonb; requirement_digest text; configuration_digest text; binding jsonb; binding_digest text;
+begin
+  select p.* into provider from ops.execution_environment_provider p
+   where p.provider_key='hermes-local' and ops.execution_environment_provider_current_state(p.id)='active'
+   order by p.provider_version desc limit 1;
+  select c.* into conformance from ops.execution_environment_conformance c
+   where c.provider_id=provider.id order by c.observed_at desc,c.id desc limit 1;
+  if provider.id is null or conformance.id is null or conformance.status<>'passed' then raise exception 'no admitted execution environment provider satisfies the route'; end if;
+  requirement := jsonb_build_object('authority_capability_ref','capability:metadata-only','required_operation_refs',jsonb_build_array('operation:health'),'selection_policy_ref','selection:server-active-provider-v1','side_effect_policy_ref','side-effects:none','network_policy_ref','egress:denied-by-capability');
+  configuration := jsonb_build_object('backend','local','persistent_shell',false,'timeout_seconds',180,'resource_policy_ref',provider.manifest->>'resource_policy_ref','secret_forwarding','none');
+  requirement_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(requirement),'sha256'),'hex');
+  configuration_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(configuration),'sha256'),'hex');
+  binding := jsonb_build_object('provider_ref','environment-provider:'||provider.provider_key||':v'||provider.provider_version,'provider_version',provider.provider_version,'provider_digest',provider.manifest_digest,'requirement_digest',requirement_digest,'configuration_digest',configuration_digest,'backend_kind',provider.backend_kind,'source_class',provider.source_class,'isolation_class',provider.manifest->>'isolation_class','capability_refs',provider.manifest->'capability_refs','conformance_ref',conformance.run_ref,'conformance_digest',conformance.run_digest);
+  binding_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(binding),'sha256'),'hex');
+  binding := binding||jsonb_build_object('binding_digest',binding_digest);
+  insert into ops.work_request_execution_environment_binding(assignment_id,provider_id,conformance_id,requirement,requirement_digest,configuration,configuration_digest,binding,binding_digest)
+  values(new.id,provider.id,conformance.id,requirement,requirement_digest,configuration,configuration_digest,binding,binding_digest);
+  return new;
+end $$;
+
+
+--
+-- Name: bind_execution_environment_to_envelope(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.bind_execution_environment_to_envelope() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare route ops.work_request_execution_environment_binding%rowtype; provider ops.execution_environment_provider%rowtype; runtime jsonb; topology jsonb;
+begin
+  select eb.* into route from ops.work_request_execution_assignment a join ops.work_request_execution_environment_binding eb on eb.assignment_id=a.id where a.work_request_id=new.work_request_id;
+  select * into provider from ops.execution_environment_provider where id=route.provider_id;
+  if route.id is null or provider.id is null or ops.execution_environment_provider_current_state(provider.id)<>'active'
+     or route.conformance_id is distinct from (select c.id from ops.execution_environment_conformance c where c.provider_id=provider.id order by c.observed_at desc,c.id desc limit 1)
+     or not exists(select 1 from ops.execution_environment_conformance c where c.id=route.conformance_id and c.status='passed') then
+    raise exception 'execution envelope requires an active conformance-passed environment provider binding';
+  end if;
+  runtime := (new.runtime_profile-'digest')||jsonb_build_object(
+    'environment_provider_ref',route.binding->>'provider_ref','environment_provider_version',(route.binding->>'provider_version')::integer,
+    'environment_provider_digest',route.binding->>'provider_digest','environment_requirement_digest',route.requirement_digest,
+    'environment_configuration_digest',route.configuration_digest,'environment_backend_kind',route.binding->>'backend_kind',
+    'environment_source_class',route.binding->>'source_class','environment_isolation_class',route.binding->>'isolation_class',
+    'environment_capability_refs',route.binding->'capability_refs','environment_conformance_ref',route.binding->>'conformance_ref',
+    'environment_conformance_digest',route.binding->>'conformance_digest','environment_binding_digest',route.binding_digest);
+  new.runtime_profile := runtime||jsonb_build_object('digest','sha256:'||encode(public.digest(ops.guidance_import_canonical_json(runtime),'sha256'),'hex'));
+  topology := (new.execution_topology-'digest')||jsonb_build_object('sandbox_ref',route.binding->>'provider_ref');
+  new.execution_topology := topology||jsonb_build_object('digest','sha256:'||encode(public.digest(ops.guidance_import_canonical_json(topology),'sha256'),'hex'));
+  new.configuration_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(new.runtime_profile||new.execution_topology||new.evaluation_plan),'sha256'),'hex');
+  new.envelope := jsonb_set(jsonb_set(new.envelope,'{runtime_profile}',new.runtime_profile,true),'{execution_topology}',new.execution_topology,true);
+  new.envelope := jsonb_set(new.envelope,'{server_binding,adapter,configuration_fingerprint}',to_jsonb(new.configuration_digest),true);
+  new.envelope_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(new.envelope),'sha256'),'hex');
+  return new;
 end $$;
 
 
@@ -3664,6 +3788,31 @@ end $$;
 
 
 --
+-- Name: execution_environment_append_only_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.execution_environment_append_only_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'execution environment evidence is append-only; append a lifecycle event instead';
+end $$;
+
+
+--
+-- Name: execution_environment_provider_current_state(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.execution_environment_provider_current_state(p_provider_id uuid) RETURNS text
+    LANGUAGE sql STABLE
+    SET search_path TO 'ops', 'pg_temp'
+    AS $$
+  select e.to_state from ops.execution_environment_provider_event e
+   where e.provider_id=p_provider_id order by e.created_at desc,e.id desc limit 1
+$$;
+
+
+--
 -- Name: fail_job(uuid, uuid, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -3936,6 +4085,81 @@ end $$;
 --
 
 CREATE FUNCTION ops.hermes_runtime_admission_for_brief(p_runtime_slug text, p_profile_key text, p_sponsor_slug text, p_work_request text, p_binding_id text) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  base jsonb;
+  tenant text := current_setting('carr.organization_tenant_id',true);
+  runtime jsonb;
+  route ops.work_request_execution_environment_binding%rowtype;
+  provider ops.execution_environment_provider%rowtype;
+  conformance ops.execution_environment_conformance%rowtype;
+begin
+  base := ops.hermes_runtime_admission_for_brief_v1(
+    p_runtime_slug,p_profile_key,p_sponsor_slug,p_work_request,p_binding_id);
+  if coalesce((base->>'authorized')::boolean,false) is not true then return base; end if;
+
+  select e.runtime_profile
+    into runtime
+    from ops.execution_envelope_v1 e
+    join ops.context_activation_binding b on b.id=e.activation_binding_id
+    join ops.work_request w on w.id=b.work_request_id
+   where e.organization_tenant_id=tenant and b.organization_tenant_id=tenant
+     and w.organization_tenant_id=tenant and w.ref=p_work_request
+     and b.binding_id=p_binding_id and e.activation_binding_id=b.id
+     and b.expires_at>now() and e.expires_at>now() and w.version=b.work_request_version;
+  if not found then
+    return jsonb_build_object('status','stale','authorized',false,'reason','execution_environment_binding_not_exact');
+  end if;
+  select eb.* into route
+    from ops.context_activation_binding b
+    join ops.work_request_execution_assignment a on a.work_request_id=b.work_request_id
+    join ops.work_request_execution_environment_binding eb on eb.assignment_id=a.id
+   where b.binding_id=p_binding_id and b.organization_tenant_id=tenant;
+  select * into provider from ops.execution_environment_provider where id=route.provider_id;
+  select * into conformance from ops.execution_environment_conformance where id=route.conformance_id;
+  if route.id is null or provider.id is null or conformance.id is null
+     or ops.execution_environment_provider_current_state(provider.id)<>'active' or conformance.status<>'passed'
+     or conformance.id is distinct from (select c.id from ops.execution_environment_conformance c where c.provider_id=provider.id order by c.observed_at desc,c.id desc limit 1)
+     or runtime->>'environment_provider_ref' is distinct from route.binding->>'provider_ref'
+     or runtime->>'environment_provider_version' is distinct from route.binding->>'provider_version'
+     or runtime->>'environment_provider_digest' is distinct from provider.manifest_digest
+     or runtime->>'environment_requirement_digest' is distinct from route.requirement_digest
+     or runtime->>'environment_configuration_digest' is distinct from route.configuration_digest
+     or runtime->>'environment_backend_kind' is distinct from provider.backend_kind
+     or runtime->>'environment_source_class' is distinct from provider.source_class
+     or runtime->>'environment_isolation_class' is distinct from provider.manifest->>'isolation_class'
+     or runtime->'environment_capability_refs' is distinct from provider.manifest->'capability_refs'
+     or runtime->>'environment_conformance_ref' is distinct from conformance.run_ref
+     or runtime->>'environment_conformance_digest' is distinct from conformance.run_digest
+     or runtime->>'environment_binding_digest' is distinct from route.binding_digest then
+    return jsonb_build_object('status','stale','authorized',false,'reason','execution_environment_binding_not_exact');
+  end if;
+
+  return base||jsonb_build_object(
+    'environment_provider_ref',runtime->>'environment_provider_ref',
+    'environment_provider_version',(runtime->>'environment_provider_version')::integer,
+    'environment_provider_digest',runtime->>'environment_provider_digest',
+    'environment_requirement_digest',runtime->>'environment_requirement_digest',
+    'environment_configuration_digest',runtime->>'environment_configuration_digest',
+    'environment_backend_kind',runtime->>'environment_backend_kind',
+    'environment_source_class',runtime->>'environment_source_class',
+    'environment_isolation_class',runtime->>'environment_isolation_class',
+    'environment_capability_refs',runtime->'environment_capability_refs',
+    'environment_conformance_ref',runtime->>'environment_conformance_ref',
+    'environment_conformance_digest',runtime->>'environment_conformance_digest',
+    'environment_binding_digest',runtime->>'environment_binding_digest',
+    'execution_environment_operator_surface','job-passport:route-and-agent-topology',
+    'execution_environment_telemetry_ref','observatory:execution-environment:'||provider.provider_key);
+end $$;
+
+
+--
+-- Name: hermes_runtime_admission_for_brief_v1(text, text, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.hermes_runtime_admission_for_brief_v1(p_runtime_slug text, p_profile_key text, p_sponsor_slug text, p_work_request text, p_binding_id text) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'ops', 'public', 'pg_temp'
     AS $$
@@ -4556,6 +4780,35 @@ end $$;
 --
 
 CREATE FUNCTION ops.issue_execution_envelope_v1(p_work_request text, p_binding_id text, p_idempotency_key uuid) RETURNS TABLE(envelope_id uuid, envelope_digest text, envelope jsonb, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare tenant text := current_setting('carr.organization_tenant_id',true); provider_id uuid; provider_state text;
+begin
+  select eb.provider_id into provider_id
+    from ops.context_activation_binding b
+    join ops.work_request w on w.id=b.work_request_id
+    join ops.work_request_execution_assignment a on a.work_request_id=w.id
+    join ops.work_request_execution_environment_binding eb on eb.assignment_id=a.id
+    join ops.execution_environment_conformance c on c.id=eb.conformance_id and c.status='passed'
+   where b.binding_id=p_binding_id and b.organization_tenant_id=tenant
+     and w.ref=p_work_request and w.organization_tenant_id=tenant
+     and b.expires_at>now() and w.version=b.work_request_version
+     and c.id=(select latest.id from ops.execution_environment_conformance latest where latest.provider_id=eb.provider_id order by latest.observed_at desc,latest.id desc limit 1);
+  provider_state := ops.execution_environment_provider_current_state(provider_id);
+  if provider_id is null or provider_state<>'active' then
+    raise exception 'execution envelope requires an active conformance-passed environment provider binding';
+  end if;
+  return query select * from ops.issue_execution_envelope_v1_without_environment_gate(
+    p_work_request,p_binding_id,p_idempotency_key);
+end $$;
+
+
+--
+-- Name: issue_execution_envelope_v1_without_environment_gate(text, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.issue_execution_envelope_v1_without_environment_gate(p_work_request text, p_binding_id text, p_idempotency_key uuid) RETURNS TABLE(envelope_id uuid, envelope_digest text, envelope jsonb, replayed boolean)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
@@ -5587,6 +5840,39 @@ CREATE FUNCTION ops.read_context_activation(p_work_request text, p_binding_id te
    where b.organization_tenant_id=current_setting('carr.organization_tenant_id', true)
      and b.binding_id=p_binding_id and b.work_request_id=(select id from ops.work_request where ref=p_work_request and organization_tenant_id=current_setting('carr.organization_tenant_id', true))
    group by b.id;
+$$;
+
+
+--
+-- Name: read_execution_environment_providers(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.read_execution_environment_providers() RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'provider_ref','environment-provider:'||p.provider_key||':v'||p.provider_version,
+    'display_name',p.manifest->>'display_name','source_class',p.source_class,'backend_kind',p.backend_kind,
+    'manifest_digest',p.manifest_digest,'state',ops.execution_environment_provider_current_state(p.id),
+    'capability_refs',p.manifest->'capability_refs','isolation_class',p.manifest->>'isolation_class',
+    'conformance',case when c.id is null then jsonb_build_object('state','unavailable') else jsonb_build_object(
+      'state',c.status,'run_ref',c.run_ref,'run_digest',c.run_digest,'observed_at',c.observed_at,
+      'manifest_digest',c.manifest_digest,'implementation_digest',c.implementation_digest,
+      'package_digest',c.package_digest,'package_revision_ref',c.observation->>'package_revision_ref',
+      'configuration_schema_digest',c.configuration_schema_digest) end,
+    'evidence_register',jsonb_build_object(
+      'source_ref',p.manifest->>'implementation_ref','source_digest',p.manifest->>'implementation_digest',
+      'consumer_ref','consumer:hermes-bot-brief+execution-envelope','trigger_ref','trigger:work-request-execution-assignment',
+      'admission_ref','admission:active+conformance-passed','retrieval_ref','tool:read-execution-environment-providers',
+      'enforcement_ref','enforcement:assignment+envelope+receipt-db-triggers',
+      'operator_surface','job-passport:route-and-agent-topology','telemetry_ref','observatory:execution-environment:'||p.provider_key,
+      'canary',case when c.id is null then jsonb_build_object('state','unavailable') else jsonb_build_object('state',c.status,'evidence_refs',c.evidence_refs) end,
+      'rollback_ref','rollback:human-active-to-disabled','freshness',case when c.id is null then jsonb_build_object('state','unavailable') else jsonb_build_object('state','observed','observed_at',c.observed_at) end),
+    'operator_surface','job-passport:route-and-agent-topology','telemetry_ref','observatory:execution-environment:'||p.provider_key,
+    'rollback','active-to-disabled-human-only','grants_authority',false) order by p.provider_key,p.provider_version),'[]'::jsonb)
+  from ops.execution_environment_provider p
+  left join lateral (select c.* from ops.execution_environment_conformance c where c.provider_id=p.id order by c.observed_at desc,c.id desc limit 1) c on true
 $$;
 
 
@@ -6891,6 +7177,78 @@ CREATE FUNCTION ops.refuse_staging_release_approval_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 begin raise exception 'staging release approval evidence is append-only'; end $$;
+
+
+--
+-- Name: register_execution_environment_provider(jsonb, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.register_execution_environment_provider(p_manifest jsonb, p_idempotency_key uuid) RETURNS TABLE(provider_ref text, manifest_digest text, state text, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare actor_row actor%rowtype; existing ops.execution_environment_provider%rowtype;
+  row_out ops.execution_environment_provider%rowtype; digest_value text; allowed text[] := array[
+    'schema_version','provider_key','provider_version','display_name','source_class','backend_kind',
+    'implementation_ref','implementation_digest','capability_refs','operation_refs','isolation_class',
+    'egress_policy_ref','secret_policy_ref','persistence_mode','resource_policy_ref','cleanup_policy_ref',
+    'threat_model_ref','conformance_contract_ref','conformance_contract_digest','configuration_schema_digest',
+    'package_provenance','collision_policy','contains_secrets','manifest_digest'];
+begin
+  if session_user !~ '^carr_authority_' then raise exception 'provider registration requires human authority'; end if;
+  select * into actor_row from actor where slug=regexp_replace(session_user,'^carr_authority_','') and kind='human' and active;
+  if actor_row.id is null or jsonb_typeof(p_manifest)<>'object'
+     or not (p_manifest ?& allowed)
+     or exists(select 1 from jsonb_object_keys(p_manifest) k where k<>all(allowed))
+     or p_manifest->>'schema_version'<>'execution-environment-provider.v1'
+     or p_manifest->>'source_class'<>'plugin' or p_manifest->>'collision_policy'<>'digest_pinned'
+     or p_manifest->>'contains_secrets'<>'false'
+     or p_manifest->>'provider_key' !~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+     or p_manifest->>'provider_key'=any(array['hermes-local','hermes-docker','hermes-ssh','hermes-singularity','hermes-modal','hermes-daytona','hermes-vercel-sandbox'])
+     or coalesce((p_manifest->>'provider_version')::integer,0)<1
+     or p_manifest->>'backend_kind' not in ('none','local','container','remote','cloud')
+     or p_manifest->>'isolation_class' not in ('none','host_process','container','microvm','remote_host')
+     or jsonb_typeof(p_manifest->'capability_refs')<>'array' or jsonb_array_length(p_manifest->'capability_refs')=0
+     or jsonb_typeof(p_manifest->'operation_refs')<>'array'
+     or not (p_manifest->'operation_refs' ?& array['operation:create','operation:exec','operation:cancel','operation:destroy','operation:health'])
+     or jsonb_typeof(p_manifest->'package_provenance')<>'object'
+     or not (p_manifest->'package_provenance' ?& array['package_ref','package_digest','signature_ref','sbom_ref'])
+     or exists(select 1 from jsonb_object_keys(p_manifest->'package_provenance') k where k<>all(array['package_ref','package_digest','signature_ref','sbom_ref']))
+     or p_manifest->>'display_name' !~ '^.{1,80}$'
+     or p_manifest->>'display_name' ~ '[[:cntrl:]]'
+     or p_manifest->>'implementation_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+     or p_manifest->>'implementation_digest' !~ '^sha256:[0-9a-f]{64}$'
+     or p_manifest->>'conformance_contract_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+     or p_manifest->>'conformance_contract_digest' !~ '^sha256:[0-9a-f]{64}$'
+     or p_manifest->>'configuration_schema_digest' !~ '^sha256:[0-9a-f]{64}$'
+     or p_manifest->'package_provenance'->>'package_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+     or p_manifest->'package_provenance'->>'package_digest' !~ '^sha256:[0-9a-f]{64}$'
+     or p_manifest->'package_provenance'->>'signature_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+     or p_manifest->'package_provenance'->>'sbom_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+     or p_manifest->>'persistence_mode' not in ('none','command_scoped','session_scoped','durable_workspace')
+     or exists(select 1 from unnest(array['egress_policy_ref','secret_policy_ref','resource_policy_ref','cleanup_policy_ref','threat_model_ref']) field where p_manifest->>field !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$')
+     or exists(select 1 from jsonb_array_elements_text(p_manifest->'operation_refs') op where op !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$')
+     or (select count(*) from jsonb_array_elements_text(p_manifest->'operation_refs'))<>(select count(distinct op) from jsonb_array_elements_text(p_manifest->'operation_refs') op)
+     or (select count(*) from jsonb_array_elements_text(p_manifest->'capability_refs'))<>(select count(distinct cap) from jsonb_array_elements_text(p_manifest->'capability_refs') cap)
+     or exists(select 1 from jsonb_array_elements_text(p_manifest->'capability_refs') c where c not in ('environment:none','environment:exec','environment:filesystem','environment:process','environment:network-governed','environment:snapshot','environment:transfer','environment:persistent-workspace')) then
+    raise exception 'execution environment plugin manifest is not closed, safe, or complete';
+  end if;
+  digest_value := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(p_manifest-'manifest_digest'),'sha256'),'hex');
+  if p_manifest->>'manifest_digest' is distinct from digest_value then raise exception 'execution environment plugin manifest digest mismatch'; end if;
+  select * into existing from ops.execution_environment_provider where idempotency_key=p_idempotency_key for share;
+  if found then
+    if existing.manifest is distinct from p_manifest then raise exception 'execution environment provider idempotency conflict'; end if;
+    return query select 'environment-provider:'||existing.provider_key||':v'||existing.provider_version,existing.manifest_digest,ops.execution_environment_provider_current_state(existing.id),true; return;
+  end if;
+  if exists(select 1 from ops.execution_environment_provider p where p.provider_key=p_manifest->>'provider_key' and (p.protected_builtin or p.provider_version>=(p_manifest->>'provider_version')::integer)) then
+    raise exception 'execution environment provider key/version is protected, stale, or already registered';
+  end if;
+  insert into ops.execution_environment_provider(provider_key,provider_version,source_class,backend_kind,manifest_digest,manifest,protected_builtin,created_by_actor_id,idempotency_key)
+  values(p_manifest->>'provider_key',(p_manifest->>'provider_version')::integer,'plugin',p_manifest->>'backend_kind',digest_value,p_manifest,false,actor_row.id,p_idempotency_key) returning * into row_out;
+  insert into ops.execution_environment_provider_event(provider_id,from_state,to_state,evidence_refs,ruled_by_actor_id,idempotency_key)
+  values(row_out.id,null,'discovered',jsonb_build_array('evidence:human-provider-registration'),actor_row.id,p_idempotency_key);
+  return query select 'environment-provider:'||row_out.provider_key||':v'||row_out.provider_version,row_out.manifest_digest,'discovered',false;
+end $_$;
 
 
 --
@@ -8694,6 +9052,53 @@ end $$;
 
 
 --
+-- Name: transition_execution_environment_provider(text, text, text, jsonb, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.transition_execution_environment_provider(p_provider_ref text, p_expected_state text, p_target_state text, p_evidence_refs jsonb, p_idempotency_key uuid) RETURNS TABLE(provider_ref text, state text, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare actor_row actor%rowtype; provider ops.execution_environment_provider%rowtype; current_state text; existing ops.execution_environment_provider_event%rowtype;
+begin
+  if session_user !~ '^carr_authority_' then raise exception 'environment provider transition requires human authority'; end if;
+  select * into actor_row from actor where slug=regexp_replace(session_user,'^carr_authority_','') and kind='human' and active;
+  -- The immutable provider row is the lifecycle stream's serialization head.
+  -- The second concurrent CAS caller cannot inspect state until the first
+  -- commits, so it must then fail the expected-state comparison below.
+  select * into provider from ops.execution_environment_provider p where p_provider_ref='environment-provider:'||p.provider_key||':v'||p.provider_version for update;
+  if actor_row.id is null or provider.id is null or jsonb_typeof(p_evidence_refs)<>'array' or jsonb_array_length(p_evidence_refs)=0
+     or exists(select 1 from jsonb_array_elements_text(p_evidence_refs) value where value !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$') then
+    raise exception 'environment provider transition lacks valid authority, provider, or evidence';
+  end if;
+  select * into existing from ops.execution_environment_provider_event where idempotency_key=p_idempotency_key for share;
+  if found then
+    if existing.provider_id<>provider.id or existing.from_state is distinct from p_expected_state or existing.to_state<>p_target_state or existing.evidence_refs is distinct from p_evidence_refs then raise exception 'environment provider transition idempotency conflict'; end if;
+    return query select p_provider_ref,existing.to_state,true; return;
+  end if;
+  current_state := ops.execution_environment_provider_current_state(provider.id);
+  if current_state is distinct from p_expected_state
+     or not ((p_expected_state='discovered' and p_target_state='quarantined')
+       or (p_expected_state='quarantined' and p_target_state='conformance_passed')
+       or (p_expected_state='conformance_passed' and p_target_state='shadow')
+       or (p_expected_state='shadow' and p_target_state='canary')
+       or (p_expected_state='canary' and p_target_state='active')
+       or (p_expected_state='active' and p_target_state='disabled')
+       or (p_expected_state='disabled' and p_target_state='canary')
+       or (p_expected_state<>'retired' and p_target_state='retired')) then
+    raise exception 'environment provider transition is stale or forbidden';
+  end if;
+  if p_target_state in ('conformance_passed','shadow','canary','active') and coalesce((
+    select c.status from ops.execution_environment_conformance c where c.provider_id=provider.id order by c.observed_at desc,c.id desc limit 1),'unavailable')<>'passed' then
+    raise exception 'environment provider cannot advance without passed conformance';
+  end if;
+  insert into ops.execution_environment_provider_event(provider_id,from_state,to_state,evidence_refs,ruled_by_actor_id,idempotency_key)
+  values(provider.id,p_expected_state,p_target_state,p_evidence_refs,actor_row.id,p_idempotency_key);
+  return query select p_provider_ref,p_target_state,false;
+end $_$;
+
+
+--
 -- Name: transition_proposed_eval_candidate(text, text, text, jsonb, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -8822,6 +9227,45 @@ $_$;
 --
 
 COMMENT ON FUNCTION ops.triage_sourced_work_request(p_work_request text, p_base_version integer, p_classification text, p_idempotency_key uuid) IS 'Human-only Program 6 review. The reviewer is derived from session_user through authority_actor_slug(); no caller actor, tenant, state, assignment, dispatch, approval, or execution field is accepted.';
+
+
+--
+-- Name: validate_attempt_environment_evidence(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.validate_attempt_environment_evidence() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare runtime jsonb; evidence jsonb; allowed text[] := array['binding_digest','session_ref','lease_state','operation_count','policy_refusal_refs','security_event_refs','cleanup_state','cleanup_evidence_refs','side_effect_state','resource_usage','evidence_refs'];
+begin
+  select e.runtime_profile into runtime from ops.execution_envelope_v1 e where e.id=new.execution_envelope_id;
+  if runtime ? 'environment_binding_digest' then
+    evidence := new.receipt->'reliability'->'environment_evidence';
+    if new.receipt->'reliability'->>'environment_binding_digest' is distinct from runtime->>'environment_binding_digest'
+       or jsonb_typeof(evidence)<>'object' or not (evidence ?& allowed)
+       or exists(select 1 from jsonb_object_keys(evidence) k where k<>all(allowed))
+       or evidence->>'binding_digest' is distinct from runtime->>'environment_binding_digest'
+       or evidence->>'session_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+       or evidence->>'lease_state' not in ('active','released','expired','failed','unknown')
+       or jsonb_typeof(evidence->'operation_count')<>'number' or evidence->>'operation_count' !~ '^[0-9]+$'
+       or evidence->>'cleanup_state' not in ('not_required','pending','verified','failed','unknown')
+       or evidence->>'side_effect_state' not in ('none','attempted','refused','observed','unknown')
+       or exists(select 1 from unnest(array['policy_refusal_refs','security_event_refs','cleanup_evidence_refs','evidence_refs']) field
+         where jsonb_typeof(evidence->field)<>'array' or exists(select 1 from jsonb_array_elements_text(evidence->field) value where value !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'))
+       or jsonb_typeof(evidence->'evidence_refs')<>'array' or jsonb_array_length(evidence->'evidence_refs')=0
+       or (evidence->>'cleanup_state' in ('verified','failed') and (jsonb_typeof(evidence->'cleanup_evidence_refs')<>'array' or jsonb_array_length(evidence->'cleanup_evidence_refs')=0))
+       or jsonb_typeof(evidence->'resource_usage')<>'object'
+       or not (evidence->'resource_usage' ?& array['cpu_ms','memory_peak_mb','disk_peak_mb','network_egress_bytes'])
+       or exists(select 1 from jsonb_object_keys(evidence->'resource_usage') key where key<>all(array['cpu_ms','memory_peak_mb','disk_peak_mb','network_egress_bytes']))
+       or exists(select 1 from jsonb_each(evidence->'resource_usage') metric where jsonb_typeof(metric.value)<>'number' or metric.value#>>'{}' !~ '^[0-9]+$') then
+      raise exception 'AttemptReceipt environment evidence does not bind the issued provider and cleanup contract';
+    end if;
+  elsif new.receipt->'reliability' ?| array['environment_binding_digest','environment_evidence'] then
+    raise exception 'legacy ExecutionEnvelope cannot accept execution environment evidence';
+  end if;
+  return new;
+end $_$;
 
 
 --
@@ -11191,6 +11635,85 @@ CREATE TABLE ops.execution_envelope_v1 (
     CONSTRAINT execution_envelope_v1_execution_topology_check CHECK ((jsonb_typeof(execution_topology) = 'object'::text)),
     CONSTRAINT execution_envelope_v1_plan_hash_check CHECK ((plan_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT execution_envelope_v1_runtime_profile_check CHECK ((jsonb_typeof(runtime_profile) = 'object'::text))
+);
+
+
+--
+-- Name: execution_environment_conformance; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.execution_environment_conformance (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    provider_id uuid NOT NULL,
+    contract_ref text NOT NULL,
+    contract_digest text NOT NULL,
+    run_ref text NOT NULL,
+    run_digest text NOT NULL,
+    manifest_digest text NOT NULL,
+    implementation_digest text CONSTRAINT execution_environment_conformanc_implementation_digest_not_null NOT NULL,
+    package_digest text NOT NULL,
+    configuration_schema_digest text CONSTRAINT execution_environment_confo_configuration_schema_diges_not_null NOT NULL,
+    status text NOT NULL,
+    check_refs jsonb NOT NULL,
+    evidence_refs jsonb NOT NULL,
+    observation jsonb NOT NULL,
+    observed_at timestamp with time zone NOT NULL,
+    recorded_by_actor_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT execution_environment_conform_configuration_schema_digest_check CHECK ((configuration_schema_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT execution_environment_conformance_check_refs_check CHECK (((jsonb_typeof(check_refs) = 'array'::text) AND (jsonb_array_length(check_refs) > 0))),
+    CONSTRAINT execution_environment_conformance_contract_digest_check CHECK ((contract_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT execution_environment_conformance_evidence_refs_check CHECK (((jsonb_typeof(evidence_refs) = 'array'::text) AND (jsonb_array_length(evidence_refs) > 0))),
+    CONSTRAINT execution_environment_conformance_implementation_digest_check CHECK ((implementation_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT execution_environment_conformance_manifest_digest_check CHECK ((manifest_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT execution_environment_conformance_observation_check CHECK ((jsonb_typeof(observation) = 'object'::text)),
+    CONSTRAINT execution_environment_conformance_package_digest_check CHECK ((package_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT execution_environment_conformance_run_digest_check CHECK ((run_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT execution_environment_conformance_status_check CHECK ((status = ANY (ARRAY['passed'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: execution_environment_provider; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.execution_environment_provider (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    provider_key text NOT NULL,
+    provider_version integer NOT NULL,
+    source_class text NOT NULL,
+    backend_kind text NOT NULL,
+    manifest_digest text NOT NULL,
+    manifest jsonb NOT NULL,
+    protected_builtin boolean NOT NULL,
+    created_by_actor_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT execution_environment_provider_backend_kind_check CHECK ((backend_kind = ANY (ARRAY['none'::text, 'local'::text, 'container'::text, 'remote'::text, 'cloud'::text]))),
+    CONSTRAINT execution_environment_provider_manifest_check CHECK (((jsonb_typeof(manifest) = 'object'::text) AND ((manifest ->> 'schema_version'::text) = 'execution-environment-provider.v1'::text) AND ((manifest ->> 'contains_secrets'::text) = 'false'::text))),
+    CONSTRAINT execution_environment_provider_manifest_digest_check CHECK ((manifest_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT execution_environment_provider_provider_key_check CHECK ((provider_key ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'::text)),
+    CONSTRAINT execution_environment_provider_provider_version_check CHECK ((provider_version > 0)),
+    CONSTRAINT execution_environment_provider_source_class_check CHECK ((source_class = ANY (ARRAY['built_in'::text, 'plugin'::text])))
+);
+
+
+--
+-- Name: execution_environment_provider_event; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.execution_environment_provider_event (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    provider_id uuid NOT NULL,
+    from_state text,
+    to_state text NOT NULL,
+    evidence_refs jsonb NOT NULL,
+    ruled_by_actor_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT execution_environment_provider_event_evidence_refs_check CHECK (((jsonb_typeof(evidence_refs) = 'array'::text) AND (jsonb_array_length(evidence_refs) > 0))),
+    CONSTRAINT execution_environment_provider_event_to_state_check CHECK ((to_state = ANY (ARRAY['discovered'::text, 'quarantined'::text, 'conformance_passed'::text, 'shadow'::text, 'canary'::text, 'active'::text, 'disabled'::text, 'retired'::text])))
 );
 
 
@@ -14857,6 +15380,31 @@ CREATE TABLE ops.work_request_execution_assignment (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT work_request_execution_assignment_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
     CONSTRAINT work_request_execution_assignment_policy_digest_check CHECK ((policy_digest ~ '^sha256:[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: work_request_execution_environment_binding; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.work_request_execution_environment_binding (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    assignment_id uuid CONSTRAINT work_request_execution_environment_bindi_assignment_id_not_null NOT NULL,
+    provider_id uuid NOT NULL,
+    conformance_id uuid CONSTRAINT work_request_execution_environment_bind_conformance_id_not_null NOT NULL,
+    requirement jsonb NOT NULL,
+    requirement_digest text CONSTRAINT work_request_execution_environment__requirement_digest_not_null NOT NULL,
+    configuration jsonb CONSTRAINT work_request_execution_environment_bindi_configuration_not_null NOT NULL,
+    configuration_digest text CONSTRAINT work_request_execution_environmen_configuration_digest_not_null NOT NULL,
+    binding jsonb NOT NULL,
+    binding_digest text CONSTRAINT work_request_execution_environment_bind_binding_digest_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT work_request_execution_environment_b_configuration_digest_check CHECK ((configuration_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT work_request_execution_environment_bin_requirement_digest_check CHECK ((requirement_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT work_request_execution_environment_binding_binding_check CHECK ((jsonb_typeof(binding) = 'object'::text)),
+    CONSTRAINT work_request_execution_environment_binding_binding_digest_check CHECK ((binding_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT work_request_execution_environment_binding_configuration_check CHECK ((jsonb_typeof(configuration) = 'object'::text)),
+    CONSTRAINT work_request_execution_environment_binding_requirement_check CHECK ((jsonb_typeof(requirement) = 'object'::text))
 );
 
 
@@ -22802,6 +23350,78 @@ ALTER TABLE ONLY ops.execution_envelope_v1
 
 
 --
+-- Name: execution_environment_conformance execution_environment_conform_provider_id_run_ref_run_diges_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_conformance
+    ADD CONSTRAINT execution_environment_conform_provider_id_run_ref_run_diges_key UNIQUE (provider_id, run_ref, run_digest);
+
+
+--
+-- Name: execution_environment_conformance execution_environment_conformance_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_conformance
+    ADD CONSTRAINT execution_environment_conformance_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: execution_environment_conformance execution_environment_conformance_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_conformance
+    ADD CONSTRAINT execution_environment_conformance_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: execution_environment_provider execution_environment_provide_provider_key_provider_version_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider
+    ADD CONSTRAINT execution_environment_provide_provider_key_provider_version_key UNIQUE (provider_key, provider_version);
+
+
+--
+-- Name: execution_environment_provider_event execution_environment_provider_event_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider_event
+    ADD CONSTRAINT execution_environment_provider_event_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: execution_environment_provider_event execution_environment_provider_event_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider_event
+    ADD CONSTRAINT execution_environment_provider_event_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: execution_environment_provider execution_environment_provider_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider
+    ADD CONSTRAINT execution_environment_provider_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: execution_environment_provider execution_environment_provider_manifest_digest_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider
+    ADD CONSTRAINT execution_environment_provider_manifest_digest_key UNIQUE (manifest_digest);
+
+
+--
+-- Name: execution_environment_provider execution_environment_provider_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider
+    ADD CONSTRAINT execution_environment_provider_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: guidance_authority_binding guidance_authority_binding_authority_receipt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -24299,6 +24919,22 @@ ALTER TABLE ONLY ops.work_request_execution_assignment
 
 ALTER TABLE ONLY ops.work_request_execution_assignment
     ADD CONSTRAINT work_request_execution_assignment_work_request_id_key UNIQUE (work_request_id);
+
+
+--
+-- Name: work_request_execution_environment_binding work_request_execution_environment_binding_assignment_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_execution_environment_binding
+    ADD CONSTRAINT work_request_execution_environment_binding_assignment_id_key UNIQUE (assignment_id);
+
+
+--
+-- Name: work_request_execution_environment_binding work_request_execution_environment_binding_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_execution_environment_binding
+    ADD CONSTRAINT work_request_execution_environment_binding_pkey PRIMARY KEY (id);
 
 
 --
@@ -25862,6 +26498,13 @@ CREATE INDEX deployment_release_idx ON ops.deployment USING btree (release_id);
 
 
 --
+-- Name: execution_environment_provider_event_latest_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX execution_environment_provider_event_latest_idx ON ops.execution_environment_provider_event USING btree (provider_id, created_at DESC, id DESC);
+
+
+--
 -- Name: guidance_one_primary_per_rule; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -26907,6 +27550,13 @@ CREATE TRIGGER attempt_receipt_binding_valid BEFORE INSERT ON ops.attempt_receip
 
 
 --
+-- Name: attempt_receipt attempt_receipt_environment_evidence; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER attempt_receipt_environment_evidence BEFORE INSERT ON ops.attempt_receipt FOR EACH ROW EXECUTE FUNCTION ops.validate_attempt_environment_evidence();
+
+
+--
 -- Name: attempt_receipt_evaluation_attestation attempt_receipt_evaluation_attestation_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -27082,10 +27732,38 @@ CREATE TRIGGER device_evidence_receipt_append_only BEFORE DELETE OR UPDATE ON op
 
 
 --
+-- Name: execution_envelope_v1 execution_envelope_environment_binding; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER execution_envelope_environment_binding BEFORE INSERT ON ops.execution_envelope_v1 FOR EACH ROW EXECUTE FUNCTION ops.bind_execution_environment_to_envelope();
+
+
+--
 -- Name: execution_envelope_v1 execution_envelope_v1_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
 CREATE TRIGGER execution_envelope_v1_append_only BEFORE DELETE OR UPDATE ON ops.execution_envelope_v1 FOR EACH ROW EXECUTE FUNCTION ops.evidence_activation_append_only();
+
+
+--
+-- Name: execution_environment_conformance execution_environment_conformance_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER execution_environment_conformance_append_only BEFORE DELETE OR UPDATE ON ops.execution_environment_conformance FOR EACH ROW EXECUTE FUNCTION ops.execution_environment_append_only_guard();
+
+
+--
+-- Name: execution_environment_provider execution_environment_provider_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER execution_environment_provider_append_only BEFORE DELETE OR UPDATE ON ops.execution_environment_provider FOR EACH ROW EXECUTE FUNCTION ops.execution_environment_append_only_guard();
+
+
+--
+-- Name: execution_environment_provider_event execution_environment_provider_event_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER execution_environment_provider_event_append_only BEFORE DELETE OR UPDATE ON ops.execution_environment_provider_event FOR EACH ROW EXECUTE FUNCTION ops.execution_environment_append_only_guard();
 
 
 --
@@ -27569,6 +28247,20 @@ CREATE TRIGGER validate_recovery_rehearsal_run BEFORE INSERT OR UPDATE OF recove
 --
 
 CREATE TRIGGER work_in_progress_limit BEFORE INSERT OR UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.enforce_work_in_progress_limit();
+
+
+--
+-- Name: work_request_execution_assignment work_request_execution_environment_bind; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER work_request_execution_environment_bind AFTER INSERT ON ops.work_request_execution_assignment FOR EACH ROW EXECUTE FUNCTION ops.bind_execution_environment_to_assignment();
+
+
+--
+-- Name: work_request_execution_environment_binding work_request_execution_environment_binding_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER work_request_execution_environment_binding_append_only BEFORE DELETE OR UPDATE ON ops.work_request_execution_environment_binding FOR EACH ROW EXECUTE FUNCTION ops.execution_environment_append_only_guard();
 
 
 --
@@ -28293,6 +28985,46 @@ ALTER TABLE ONLY ops.execution_envelope_v1
 
 ALTER TABLE ONLY ops.execution_envelope_v1
     ADD CONSTRAINT execution_envelope_v1_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: execution_environment_conformance execution_environment_conformance_provider_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_conformance
+    ADD CONSTRAINT execution_environment_conformance_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES ops.execution_environment_provider(id);
+
+
+--
+-- Name: execution_environment_conformance execution_environment_conformance_recorded_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_conformance
+    ADD CONSTRAINT execution_environment_conformance_recorded_by_actor_id_fkey FOREIGN KEY (recorded_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: execution_environment_provider execution_environment_provider_created_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider
+    ADD CONSTRAINT execution_environment_provider_created_by_actor_id_fkey FOREIGN KEY (created_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: execution_environment_provider_event execution_environment_provider_event_provider_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider_event
+    ADD CONSTRAINT execution_environment_provider_event_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES ops.execution_environment_provider(id);
+
+
+--
+-- Name: execution_environment_provider_event execution_environment_provider_event_ruled_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.execution_environment_provider_event
+    ADD CONSTRAINT execution_environment_provider_event_ruled_by_actor_id_fkey FOREIGN KEY (ruled_by_actor_id) REFERENCES public.actor(id);
 
 
 --
@@ -29445,6 +30177,30 @@ ALTER TABLE ONLY ops.work_request_execution_assignment
 
 ALTER TABLE ONLY ops.work_request_execution_assignment
     ADD CONSTRAINT work_request_execution_assignment_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: work_request_execution_environment_binding work_request_execution_environment_binding_assignment_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_execution_environment_binding
+    ADD CONSTRAINT work_request_execution_environment_binding_assignment_id_fkey FOREIGN KEY (assignment_id) REFERENCES ops.work_request_execution_assignment(id);
+
+
+--
+-- Name: work_request_execution_environment_binding work_request_execution_environment_binding_conformance_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_execution_environment_binding
+    ADD CONSTRAINT work_request_execution_environment_binding_conformance_id_fkey FOREIGN KEY (conformance_id) REFERENCES ops.execution_environment_conformance(id);
+
+
+--
+-- Name: work_request_execution_environment_binding work_request_execution_environment_binding_provider_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_execution_environment_binding
+    ADD CONSTRAINT work_request_execution_environment_binding_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES ops.execution_environment_provider(id);
 
 
 --
@@ -31642,6 +32398,7 @@ revoke all on function ops.assert_guidance_registry_coverage() from public;
 revoke all on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) from public;
 revoke all on function ops.attempt_receipt_contains_raw_content(p_value jsonb) from public;
 revoke all on function ops.attest_attempt_receipt_evaluation(p_attempt_id text, p_evaluator_kind text, p_check_ref text, p_dimension_refs jsonb, p_status text, p_independent boolean, p_evidence_refs jsonb, p_evaluation_metadata jsonb, p_outcome_feedback_ref text, p_outcome_feedback_hash text, p_idempotency_key uuid) from public;
+revoke all on function ops.attest_execution_environment_conformance(p_provider_ref text, p_observation jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.authority_actor_slug() from public;
 revoke all on function ops.calendar_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.calendar_prebrief_attestor_sponsor() from public;
@@ -31680,14 +32437,14 @@ revoke all on function ops.guidance_import_manifest_digest(p_manifest_text text)
 revoke all on function ops.guidance_import_split_group_id(p_key text) from public;
 revoke all on function ops.guidance_revision_contract_hash(p_revision_id uuid) from public;
 revoke all on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) from public;
-revoke all on function ops.hermes_runtime_admission_for_brief(p_runtime_slug text, p_profile_key text, p_sponsor_slug text, p_work_request text, p_binding_id text) from public;
+revoke all on function ops.hermes_runtime_admission_for_brief_v1(p_runtime_slug text, p_profile_key text, p_sponsor_slug text, p_work_request text, p_binding_id text) from public;
 revoke all on function ops.ingest_calendar_prebrief_canary_projection(p_job_id uuid, p_lease uuid, p_destination text, p_observed_calendar_keys text[], p_events jsonb) from public;
 revoke all on function ops.ingest_calendar_prebrief_projection(p_job_id uuid, p_lease uuid, p_observed_calendar_keys text[], p_events jsonb) from public;
 revoke all on function ops.ingest_renewal_signed_snapshot(p_job_id uuid, p_lease uuid, p_snapshot_id uuid, p_provider text, p_key_fingerprint text, p_source_observed_at timestamp with time zone, p_payload_sha256 text, p_signature_sha256 text, p_rows jsonb) from public;
 revoke all on function ops.invalidate_cognition_cache(p_dependency_ref text) from public;
 revoke all on function ops.invalidate_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_dependency_ref text) from public;
 revoke all on function ops.issue_calendar_prebrief_capture_contract(p_job_id uuid, p_lease uuid) from public;
-revoke all on function ops.issue_execution_envelope_v1(p_work_request text, p_binding_id text, p_idempotency_key uuid) from public;
+revoke all on function ops.issue_execution_envelope_v1_without_environment_gate(p_work_request text, p_binding_id text, p_idempotency_key uuid) from public;
 revoke all on function ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) from public;
@@ -31703,6 +32460,7 @@ revoke all on function ops.put_cognition_cache_for_job(p_job_id uuid, p_lease_to
 revoke all on function ops.read_attempt_receipt_reliability(p_attempt_id text) from public;
 revoke all on function ops.read_calendar_prebrief_joe_activation(p_id uuid) from public;
 revoke all on function ops.read_context_activation(p_work_request text, p_binding_id text) from public;
+revoke all on function ops.read_execution_environment_providers() from public;
 revoke all on function ops.reap_expired_jobs() from public;
 revoke all on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
@@ -31723,6 +32481,7 @@ revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mod
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text, p_actor text) from public;
 revoke all on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) from public;
 revoke all on function ops.refuse_guidance_history_rewrite() from public;
+revoke all on function ops.register_execution_environment_provider(p_manifest jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) from public;
 revoke all on function ops.render_context_activation_for_brief(p_work_request text, p_binding_id text) from public;
 revoke all on function ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool) from public;
@@ -31746,6 +32505,7 @@ revoke all on function ops.stage_guidance_import_batch(p_manifest_digest text, p
 revoke all on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) from public;
 revoke all on function ops.sync_system_rule_control_bindings() from public;
 revoke all on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) from public;
+revoke all on function ops.transition_execution_environment_provider(p_provider_ref text, p_expected_state text, p_target_state text, p_evidence_refs jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.transition_proposed_eval_candidate(p_work_request text, p_candidate_ref text, p_next_state text, p_decision_basis jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.triage_sourced_work_request(p_work_request text, p_base_version integer, p_classification text, p_idempotency_key uuid) from public;
 revoke all on function ops.validate_guidance_authority_binding() from public;
@@ -31812,6 +32572,9 @@ grant select on table ops.enforcement_control_catalog to carr_authority;
 grant select on table ops.enforcement_control_catalog to carr_jobs;
 grant select on table ops.enforcement_control_catalog to carr_reader;
 grant select on table ops.enforcement_control_catalog to carr_writer;
+grant select on table ops.execution_environment_conformance to carr_authority;
+grant select on table ops.execution_environment_provider to carr_authority;
+grant select on table ops.execution_environment_provider_event to carr_authority;
 grant select on table ops.guidance_authority_binding to carr_reader;
 grant select on table ops.guidance_authority_binding to carr_writer;
 grant select on table ops.guidance_import_apply_event to carr_authority;
@@ -32035,6 +32798,7 @@ grant select on table ops.v_work_shape_current to carr_reader;
 grant select on table ops.v_work_shape_current to carr_writer;
 grant select on table ops.work_request to carr_reader;
 grant select, update on table ops.work_request to carr_writer;
+grant select on table ops.work_request_execution_environment_binding to carr_authority;
 grant select on table ops.work_shape_revision to carr_reader;
 grant insert, select on table ops.work_shape_revision to carr_writer;
 grant select on table ops.workflow_acceptance to carr_jobs;
@@ -32441,6 +33205,7 @@ grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.attest_attempt_receipt_evaluation(p_attempt_id text, p_evaluator_kind text, p_check_ref text, p_dimension_refs jsonb, p_status text, p_independent boolean, p_evidence_refs jsonb, p_evaluation_metadata jsonb, p_outcome_feedback_ref text, p_outcome_feedback_hash text, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.attest_execution_environment_conformance(p_provider_ref text, p_observation jsonb, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.authority_actor_slug() to carr_authority;
 grant execute on function ops.calendar_prebrief_joe_live_due_at(p_now timestamp with time zone) to carr_jobs;
 grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) to carr_writer;
@@ -32501,6 +33266,9 @@ grant execute on function ops.read_attempt_receipt_reliability(p_attempt_id text
 grant execute on function ops.read_calendar_prebrief_joe_activation(p_id uuid) to carr_authority;
 grant execute on function ops.read_context_activation(p_work_request text, p_binding_id text) to carr_reader;
 grant execute on function ops.read_context_activation(p_work_request text, p_binding_id text) to carr_writer;
+grant execute on function ops.read_execution_environment_providers() to carr_authority;
+grant execute on function ops.read_execution_environment_providers() to carr_reader;
+grant execute on function ops.read_execution_environment_providers() to carr_writer;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
 grant execute on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
@@ -32518,6 +33286,7 @@ grant execute on function ops.record_staging_release_readback(p_idempotency_key 
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.register_execution_environment_provider(p_manifest jsonb, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
 grant execute on function ops.render_context_activation_for_brief(p_work_request text, p_binding_id text) to carr_reader;
 grant execute on function ops.render_context_activation_for_brief(p_work_request text, p_binding_id text) to carr_writer;
@@ -32542,6 +33311,7 @@ grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) to carr_jobs;
+grant execute on function ops.transition_execution_environment_provider(p_provider_ref text, p_expected_state text, p_target_state text, p_evidence_refs jsonb, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.transition_proposed_eval_candidate(p_work_request text, p_candidate_ref text, p_next_state text, p_decision_basis jsonb, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.triage_sourced_work_request(p_work_request text, p_base_version integer, p_classification text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) to carr_reader;
@@ -32842,6 +33612,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0306_sourced_work_shape_disposition.sql	9a205a2c8c2ca50b61d5ee60b8883c0ff66a8138691d822faaf7ce4295ffb7af	2026-08-25 14:50:55.723919+00
 0307_calendar_prebrief_joe_schedule_time_and_failure.sql	686279a0ec797be4a7ddd36906bea175d2ae9bed89d1f54069520ae8525f2ef0	2026-08-25 15:28:07.424335+00
 0308_calendar_prebrief_service_health.sql	d4339ed5e43218806c0366adb5c19cb66c2cf8f51e3ce4622fa786448b49ef6c	2026-08-25 16:03:16.887415+00
+0309_governed_execution_environment_providers.sql	e2d738f00ef8e2cbce8d77ad2f6fb5596dc1951de7f0e918a927ccc25b32eb47	2026-08-25 16:19:58.553035+00
 \.
 
 
