@@ -54,6 +54,7 @@ def main() -> int:
     check("installer has no concrete user home", not CONCRETE_HOME.search(installer), failures)
     check("installer refuses unresolved tokens", r"grep -Eq '\{\{[^}]+\}\}'" in installer, failures)
     check("installer exposes a render-only seam", "--render-only" in installer, failures)
+    check("installer exposes a named plist validator", "validate_plist()" in installer, failures)
 
     # Exercise the same placeholder contract with paths containing spaces. The
     # installer separately escapes sed replacement metacharacters; plist XML
@@ -83,6 +84,9 @@ def main() -> int:
     install = installer.index("/usr/bin/install")
     check("unresolved-token refusal precedes destination install",
           refusal >= 0 and refusal < install, failures)
+    validator = installer.index("validate_plist \"$TMP\"")
+    check("plist validation precedes destination install",
+          validator >= 0 and validator < install, failures)
 
     # Exercise the actual zsh/sed renderer, not a Python reimplementation.
     # A valid spaced HOME must produce a parseable plist and never touch the
@@ -109,6 +113,36 @@ def main() -> int:
         check("render-only does not create LaunchAgents",
               not (Path(valid_home) / "Library" / "LaunchAgents").exists(), failures)
 
+        # Force the portable Python validator even on macOS, where plutil is
+        # present, so hosted Linux and local runs exercise the same seam.
+        python_env = dict(valid_env, CARR_ROOM_BRIDGE_PLIST_VALIDATOR="python")
+        python_run = subprocess.run(
+            ["/bin/zsh", str(INSTALLER), "--render-only"],
+            cwd=REPO, env=python_env, capture_output=True, text=True,
+        )
+        check("forced Python plist fallback succeeds", python_run.returncode == 0, failures)
+        try:
+            plistlib.loads(python_run.stdout.encode("utf-8"))
+            python_output_ok = True
+        except Exception:
+            python_output_ok = False
+        check("forced Python fallback emits valid plist only", python_output_ok, failures)
+
+        # An explicitly empty override is not the same as an unset variable:
+        # only the named auto/python choices are accepted, so configuration
+        # corruption fails closed before the destination can be created.
+        empty_env = dict(valid_env, CARR_ROOM_BRIDGE_PLIST_VALIDATOR="")
+        empty_run = subprocess.run(
+            ["/bin/zsh", str(INSTALLER)],
+            cwd=REPO, env=empty_env, capture_output=True, text=True,
+        )
+        check("empty validator override fails closed", empty_run.returncode != 0, failures)
+        check("empty validator override emits no plist", empty_run.stdout == "", failures)
+        check("empty validator override names validation refusal",
+              "failed validation; refusing installation" in empty_run.stderr, failures)
+        check("empty validator override leaves LaunchAgents untouched",
+              not (Path(valid_home) / "Library" / "LaunchAgents").exists(), failures)
+
     # An ampersand is legal in a filesystem path but needs XML escaping before
     # it can become a plist string. The current smallest safe behavior is an
     # explicit validation refusal before mkdir/install/launchctl. Include the
@@ -116,7 +150,8 @@ def main() -> int:
     # silently dropped or interpreted by the renderer.
     bad_home = tempfile.mkdtemp(prefix="room bridge &| \\")
     try:
-        bad_env = dict(os.environ, HOME=bad_home)
+        bad_env = dict(os.environ, HOME=bad_home,
+                       CARR_ROOM_BRIDGE_PLIST_VALIDATOR="python")
         refused = subprocess.run(
             ["/bin/zsh", str(INSTALLER)],
             cwd=REPO, env=bad_env, capture_output=True, text=True,

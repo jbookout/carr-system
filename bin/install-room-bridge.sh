@@ -38,6 +38,36 @@ fi
 escape_sed_replacement() {
   print -r -- "$1" | /usr/bin/sed 's/[\\&|]/\\&/g'
 }
+
+# macOS ships plutil at /usr/bin; hosted Linux runners do not. Keep one named
+# validation seam so both environments reject malformed XML before any
+# LaunchAgents directory or launchd state is touched. The override exists only
+# for hermetic coverage of the portable fallback; production defaults to auto.
+validate_plist() {
+  local plist_path="$1"
+  local validator="${CARR_ROOM_BRIDGE_PLIST_VALIDATOR-auto}"
+  if [ "$validator" = "python" ] || {
+       [ "$validator" = "auto" ] && [ ! -x /usr/bin/plutil ]
+     }; then
+    local python_bin
+    python_bin="$(command -v python3 || true)"
+    [ -n "$python_bin" ] || return 1
+    "$python_bin" - "$plist_path" >/dev/null <<'PY'
+import plistlib
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        plistlib.load(handle)
+except Exception:
+    raise SystemExit(1)
+PY
+    return $?
+  fi
+  [ "$validator" = "auto" ] || return 1
+  /usr/bin/plutil -lint "$plist_path" >/dev/null 2>&1
+}
+
 REPO_REPLACEMENT="$(escape_sed_replacement "$REPO")"
 HOME_REPLACEMENT="$(escape_sed_replacement "$HOME")"
 /usr/bin/sed -e "s|{{REPO}}|$REPO_REPLACEMENT|g" \
@@ -51,7 +81,7 @@ if /usr/bin/grep -Eq '\{\{[^}]+\}\}' "$TMP"; then
   print -u2 -- "install-room-bridge: rendered plist still contains an unresolved template token"
   exit 1
 fi
-if ! /usr/bin/plutil -lint "$TMP" >/dev/null; then
+if ! validate_plist "$TMP"; then
   print -u2 -- "install-room-bridge: rendered plist failed validation; refusing installation"
   exit 1
 fi
