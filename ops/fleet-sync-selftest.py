@@ -45,6 +45,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_env import fixture_env  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "tools"))
+from fleet_sync_safety import submodule_tree_is_exact_patch  # noqa: E402
+from health_submodule import (  # noqa: E402
+    patches_dir_for,
+    submodule_dirt_is_tracked_patch,
+)
+
 SCRIPT = os.path.join(REPO, "bin", "fleet-sync.sh")
 SAFETY = os.path.join(REPO, "tools", "fleet_sync_safety.py")
 HEALTH_SUBMODULE = os.path.join(REPO, "tools", "health_submodule.py")
@@ -121,7 +128,10 @@ def add_expected_quill_patch(tmp, clone):
     git(quill_remote, "init", "-q", "--bare")
     git(tmp, "clone", "-q", quill_remote, "quill-source")
     open(os.path.join(quill_source, "quill.txt"), "w").write("base\n")
-    git(quill_source, "add", "quill.txt")
+    open(os.path.join(quill_source, "other.txt"), "w").write("base\n")
+    open(os.path.join(quill_source, "blob.bin"), "wb").write(b"\x00base\n")
+    open(os.path.join(quill_source, "script.sh"), "w").write("#!/bin/sh\nexit 0\n")
+    git(quill_source, "add", "quill.txt", "other.txt", "blob.bin", "script.sh")
     git(quill_source, "commit", "-qm", "quill base")
     git(quill_source, "branch", "-M", "main")
     git(quill_source, "push", "-q", "origin", "main")
@@ -152,6 +162,17 @@ def add_expected_quill_patch(tmp, clone):
 def behind(clone):
     git(clone, "fetch", "-q", "origin", "main")
     return int(git(clone, "rev-list", "--count", "HEAD..origin/main"))
+
+
+def line_classifier_accepts(quill):
+    diff = git(quill, "diff")
+    return submodule_dirt_is_tracked_patch(diff, patches_dir_for(quill))
+
+
+def require_exact_refusal(repo, expected_reason="tracked Quill tree differs"):
+    exact, reason = submodule_tree_is_exact_patch(repo)
+    assert not exact, "exact Git tree proof accepted a non-canonical Quill tree"
+    assert expected_reason in reason, reason
 
 
 def test_dirty_tree_refuses():
@@ -341,6 +362,69 @@ def test_incoming_gitmodules_change_refuses():
     print("PASS  incoming .gitmodules change refuses")
 
 
+def test_exact_tree_refuses_duplicate_changed_line():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        open(os.path.join(quill, "quill.txt"), "w").write("patched\npatched\n")
+        assert line_classifier_accepts(quill), "precondition: line-set classifier accepts duplicate"
+        require_exact_refusal(b)
+    print("PASS  exact Git tree refuses duplicate changed line")
+
+
+def test_exact_tree_refuses_wrong_file_relocation():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        open(os.path.join(quill, "quill.txt"), "w").write("base\n")
+        open(os.path.join(quill, "other.txt"), "w").write("patched\n")
+        assert line_classifier_accepts(quill), "precondition: line-set classifier loses paths"
+        require_exact_refusal(b)
+    print("PASS  exact Git tree refuses changed lines relocated to wrong file")
+
+
+def test_exact_tree_refuses_binary_edit():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        open(os.path.join(quill, "blob.bin"), "wb").write(b"\x00changed\n")
+        assert line_classifier_accepts(quill), "precondition: line-set classifier loses binary dirt"
+        require_exact_refusal(b)
+    print("PASS  exact Git tree refuses binary edit")
+
+
+def test_exact_tree_refuses_executable_mode_edit():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        os.chmod(os.path.join(quill, "script.sh"), 0o755)
+        assert line_classifier_accepts(quill), "precondition: line-set classifier loses mode dirt"
+        require_exact_refusal(b)
+    print("PASS  exact Git tree refuses executable-mode edit")
+
+
+def test_exact_tree_refuses_local_submodule_head_mismatch():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        open(os.path.join(quill, "local-head.txt"), "w").write("local commit\n")
+        git(quill, "add", "local-head.txt")
+        git(quill, "commit", "-qm", "move local submodule head")
+        require_exact_refusal(b, "checked-out Quill HEAD differs")
+    print("PASS  exact Git tree refuses local submodule HEAD mismatch")
+
+
+def test_exact_tree_ignores_untracked_submodule_scratch():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        scratch = os.path.join(quill, "untracked-build-output.bin")
+        open(scratch, "wb").write(b"scratch")
+        exact, reason = submodule_tree_is_exact_patch(b)
+        assert exact, reason
+    print("PASS  exact Git tree intentionally ignores untracked submodule scratch")
+
+
 def main():
     if not os.path.exists(SCRIPT):
         print(f"fleet-sync-selftest: {SCRIPT} missing", file=sys.stderr)
@@ -358,7 +442,13 @@ def main():
     test_moved_quill_gitlink_refuses()
     test_incoming_quill_gitlink_refuses()
     test_incoming_gitmodules_change_refuses()
-    print("13/13 fleet-sync cases passed")
+    test_exact_tree_refuses_duplicate_changed_line()
+    test_exact_tree_refuses_wrong_file_relocation()
+    test_exact_tree_refuses_binary_edit()
+    test_exact_tree_refuses_executable_mode_edit()
+    test_exact_tree_refuses_local_submodule_head_mismatch()
+    test_exact_tree_ignores_untracked_submodule_scratch()
+    print("19/19 fleet-sync cases passed")
     return 0
 
 
