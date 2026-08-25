@@ -117,7 +117,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
                   ts_rank(search_vector, plainto_tsquery('english',$1)) as relevance
              from memory_item
             where organization_tenant_id=$3 and status='promoted'
-              and (scope='shared' or (scope='personal' and owner_actor_id=(select id from actor where slug=$2)))
+              and (scope='shared' or (scope='personal' and owner_actor_id=public.retrieval_visibility_actor_id($2)))
               and search_vector @@ plainto_tsquery('english',$1)
             order by (ts_rank(search_vector, plainto_tsquery('english',$1)) +
                       0.5 * ts_rank(to_tsvector('english', coalesce(context,'')), plainto_tsquery('english',coalesce($4,'')))) desc,
@@ -138,7 +138,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
           `select m.*, coalesce(jsonb_agg(to_jsonb(e) order by e.observed_at desc) filter (where e.id is not null),'[]'::jsonb) as evidence
              from memory_item m left join memory_evidence e on e.memory_id=m.id
             where m.id=$1 and m.organization_tenant_id=$2
-              and (m.scope='shared' or (m.scope='personal' and m.owner_actor_id=(select id from actor where slug=$3)))
+              and (m.scope='shared' or (m.scope='personal' and m.owner_actor_id=public.retrieval_visibility_actor_id($3)))
             group by m.id`, [args.memory_id, organizationTenantForActor(actor), scope.sponsor]);
         if (!r.rows.length) throw new ToolError({ error: "memory_not_found_or_forbidden" });
         const memory = r.rows[0]; const evidence = memory.evidence || []; delete memory.evidence;

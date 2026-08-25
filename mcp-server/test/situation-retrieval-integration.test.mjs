@@ -11,6 +11,16 @@ const sponsored = (runtime, sponsor, via = "local-token") => ({
   sponsoring_human_slug: sponsor, human_slug: sponsor, sponsor_required: false,
 });
 
+// memory.js is mixed read/write code. Only these two current write SQL literal
+// shapes may use the actor table; classification is content-based so a future
+// read-shaped literal in that file cannot hide behind a filename allowlist.
+const MEMORY_WRITE_LITERAL_PATTERNS = [
+  /insert into memory_item[\s\S]*select id from actor where slug=\$10/i,
+  /update memory_item[\s\S]*select id from actor where slug=\$6/i,
+];
+const memoryWriteLiteralClassified = literal =>
+  MEMORY_WRITE_LITERAL_PATTERNS.some(pattern => pattern.test(literal));
+
 test("registered search-doctrine resolves joe-local sponsorship to Joe's human actor", async () => {
   const calls = [];
   const client = {
@@ -161,7 +171,6 @@ test("no read verb filters the actor table on a column carr_reader cannot read",
   const CLASSIFIED = {
     "capability-program.js": "start-capability-project and siblings — write:true",
     "investigation.js": "ownedOpenRun, reached only by investigation write verbs",
-    "memory.js": "memory lifecycle writes; actor lookup is server-attributed and every memory handler is write-scoped",
     "tools.js": "set-national-account-owner, resolve-post-call-candidate, deal-room field update — all write:true",
   };
 
@@ -197,13 +206,14 @@ test("no read verb filters the actor table on a column carr_reader cannot read",
     for (const m of text.matchAll(LITERAL)) {
       if (!ACTOR.test(m[0]) || !PREDICATE.test(m[0])) continue;
       const lineNo = text.slice(0, m.index).split("\n").length;
-      found.push({ name, lineNo, text: m[0].replace(/\s+/g, " ").trim().slice(0, 90) });
+      found.push({ name, lineNo, literal: m[0], text: m[0].replace(/\s+/g, " ").trim().slice(0, 90) });
     }
   }
 
   assert.ok(found.length > 0, "the scanner itself must still match something, or it has silently rotted");
 
-  const unclassified = found.filter(f => !CLASSIFIED[f.name]);
+  const unclassified = found.filter(f =>
+    !(CLASSIFIED[f.name] || (f.name === "memory.js" && memoryWriteLiteralClassified(f.literal))));
   assert.deepEqual(unclassified, [],
     `these filter the actor table on kind or active and are not classified as write-only paths. ` +
     `If any belongs to a READ verb it is the outage of 2026-08-17 again: ` +
@@ -212,6 +222,16 @@ test("no read verb filters the actor table on a column carr_reader cannot read",
   // The read path specifically must never appear here at all.
   assert.equal(found.some(f => f.name === "situation-retrieval.js"), false,
     "doctrine search must resolve its sponsor through retrieval_visibility_actor_id, not the table");
+});
+
+test("memory actor classification is literal-specific, not filename-wide", () => {
+  const writeInsert = "insert into memory_item (kind) values ((select id from actor where slug=$10 and kind='human'))";
+  const writeUpdate = "update memory_item set owner_actor_id=(select id from actor where slug=$6 and active)";
+  const readShape = "select id from actor where slug=$1 and kind='human' and active=true";
+  assert.equal(memoryWriteLiteralClassified(writeInsert), true);
+  assert.equal(memoryWriteLiteralClassified(writeUpdate), true);
+  assert.equal(memoryWriteLiteralClassified(readShape), false,
+    "a future memory read literal must remain unclassified and fail the architectural gate");
 });
 
 // The contract above is only worth its allowlist if the scanner cannot be

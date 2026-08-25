@@ -78,6 +78,8 @@ test("recall is contextual and includes shared plus sponsor personal memories", 
     assert.match(sql, /status='promoted'|status in \('promoted'/);
     assert.match(sql, /organization_tenant_id/);
     assert.match(sql, /context/);
+    assert.match(sql, /public\.retrieval_visibility_actor_id/);
+    assert.doesNotMatch(sql, /from actor|join actor/);
     assert.ok(params.includes("joe"));
     return { rows: [{ id: MEMORY_ID, status: "promoted", statement: "Concise summaries", scope: "personal", confidence: 0.9, relevance: 2 }] };
   } };
@@ -91,7 +93,7 @@ test("recall is contextual and includes shared plus sponsor personal memories", 
 
 test("candidate review returns evidence and current version, while authority fields cause zero queries", async () => {
   let queries = 0;
-  const client = { query: async (sql) => { queries++; assert.match(sql, /memory_evidence/); return { rows: [{ id: MEMORY_ID, status: "candidate", version: 2, evidence: [{ source_type: "conversation" }] }] }; } };
+  const client = { query: async (sql) => { queries++; assert.match(sql, /memory_evidence/); assert.match(sql, /public\.retrieval_visibility_actor_id/); assert.doesNotMatch(sql, /from actor|join actor/); return { rows: [{ id: MEMORY_ID, status: "candidate", version: 2, evidence: [{ source_type: "conversation" }] }] }; } };
   const out = await TOOLS["review-memory"].handler(client, { slug: "joe", human: true }, { memory_id: MEMORY_ID });
   assert.equal(out.memory.status, "candidate");
   assert.equal(out.memory.version, 2);
