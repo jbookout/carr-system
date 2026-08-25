@@ -219,6 +219,20 @@
       "legacy_schedule": {"provider": "claude-code", "status": "enabled", "disable_requires": "accepted shadow and canary receipts"}
     },
     {
+      "key": "engineering-slice", "version": 1, "enabled": true, "risk": "yellow",
+      "recurrence": {"kind": "on_demand", "schedule": null},
+      "execution": {"kind": "deterministic", "entrypoint": "mcp-server/src/engineering-runtime.js#runCodexSlice"},
+      "state": {"owner": "ops.job", "initial": "queued"},
+      "inventory": {"kind": "engineering-passport-slice", "data_class": "metadata_only"},
+      "routing": {"adapter": "codex_desktop", "fresh_native_session_required": true},
+      "filtering": {"server_selected": true, "client_selectors": []},
+      "validation": {"typed_envelope": true, "typed_receipt": true, "independent_review": true},
+      "retry": {"max_attempts": 2, "backoff": "constant", "base_seconds": 30, "cap_seconds": 300, "timeout_seconds": 1800},
+      "deduplication": {"key": "engineering_slice_idempotency"},
+      "completion": {"completion": "typed_receipt_and_independent_review"},
+      "legacy_schedule": {}
+    },
+    {
       "key": "health-audit-monthly", "version": 1, "enabled": true, "risk": "green",
       "recurrence": {"cron": "0 9 6-10 * *", "timezone": "America/Chicago", "source": "services registry; ledger gate collapses window"},
       "execution": {"kind": "cognition", "cognition_job": "audit.proposal", "input_builder": "system-health.monthly-evidence"},

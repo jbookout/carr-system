@@ -5,6 +5,7 @@ import fs from "node:fs";
 const migration = fs.readFileSync(new URL("../../migrations/0308_engineering_execution_fabric.sql", import.meta.url), "utf8");
 const runtime = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 const mcp = fs.readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
+const registry = JSON.parse(fs.readFileSync(new URL("../../ops/config/control-plane-workflows.v1.json", import.meta.url), "utf8"));
 
 test("0308 binds the typed fabric to canonical ledgers and keeps evidence append-only", () => {
   for (const table of ["engineering_slice_plan", "engineering_execution_envelope", "engineering_slice_receipt", "engineering_reviewer_fact"])
@@ -45,6 +46,23 @@ test("0308 admits dependent slices from the reviewer fact's bound attempt", () =
   assert.match(migration, /v->'fact'->>'attempt_id' = r->>'attempt_id'/);
   assert.match(migration, /v->>'slice_ref' = dep/);
   assert.match(migration, /v->>'state' = 'passed'/);
+});
+
+test("the reviewed control-plane inventory carries the exact engineering job contract", () => {
+  const workflow = registry.workflows.find(item => item.key === "engineering-slice" && item.version === 1);
+  assert.ok(workflow);
+  assert.equal(workflow.enabled, true);
+  assert.equal(workflow.risk, "yellow");
+  assert.deepEqual(workflow.execution, { kind: "deterministic", entrypoint: "mcp-server/src/engineering-runtime.js#runCodexSlice" });
+  assert.deepEqual(workflow.inventory, { kind: "engineering-passport-slice", data_class: "metadata_only" });
+  assert.deepEqual(workflow.recurrence, { kind: "on_demand", schedule: null });
+  assert.deepEqual(workflow.routing, { adapter: "codex_desktop", fresh_native_session_required: true });
+  assert.deepEqual(workflow.filtering, { server_selected: true, client_selectors: [] });
+  assert.deepEqual(workflow.validation, { typed_envelope: true, typed_receipt: true, independent_review: true });
+  assert.deepEqual(workflow.retry, { max_attempts: 2, backoff: "constant", base_seconds: 30, cap_seconds: 300, timeout_seconds: 1800 });
+  assert.deepEqual(workflow.deduplication, { key: "engineering_slice_idempotency" });
+  assert.deepEqual(workflow.completion, { completion: "typed_receipt_and_independent_review" });
+  assert.deepEqual(workflow.legacy_schedule, {});
 });
 
 test("Hermes keeps execution controller-only while retaining its existing capture allowlist", () => {
