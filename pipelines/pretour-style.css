@@ -153,3 +153,55 @@ footer{background:var(--navy);color:#fff;padding:26px 44px 30px;margin-top:34px}
   .snap{break-after:avoid;page-break-after:avoid}
   .tk,.dq{break-inside:avoid;page-break-inside:avoid}
 }
+
+/* ---- stranded-page fix, 2026-08-25 ----
+   Dell, on the first PDF of the Hughes packet: the format is different on the PDF
+   than the HTML. It was, and the cause was the rule above applied one level too high.
+
+   The 2026-08-21 fix correctly stopped treating a whole CARD as atomic. It then made
+   the fact grid, the comparison table and the intro line atomic instead, which
+   reproduces the same failure one level down: a block that cannot fit in what is left
+   of the sheet jumps whole and leaves the remainder white. On the 22 page render that
+   was page 1 carrying only a heading and half a sentence while the comparison table
+   sat alone on page 2, and card 02 stopping mid-card with half a sheet blank because
+   its 16 cell fact grid would not fit beside the photo.
+
+   The principle the earlier fix was reaching for, stated properly: protect the
+   SMALLEST thing that must not be split, never the container that holds it. A break
+   must not land inside one fact cell, one table row, or one photograph. It may land
+   between them. */
+@media print{
+  .factgrid{break-inside:auto;page-break-inside:auto}
+  .f{break-inside:avoid;page-break-inside:avoid}
+
+  .tblwrap{break-inside:auto;page-break-inside:auto}
+  table{break-inside:auto;page-break-inside:auto}
+  thead{display:table-header-group}   /* column headings repeat on the next sheet */
+  tr{break-inside:avoid;page-break-inside:avoid}
+
+  /* an intro line splitting across sheets orphaned "then back north to Freeport." */
+  .h2sub{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
+}
+
+/* ---- print geometry matches the screen, 2026-08-25 ----
+   Dell: "check the format on this report. it is differnct on the pdf than the html."
+   It was, and this is why. On screen the packet is a 1040px sheet centred on a tinted
+   background with 44px of padding down each side. The print block threw both away:
+   max-width:none let it run the full width of the paper, and padding-left/right:0 on
+   header and main pushed the navy masthead and every card out to the paper's edge, so
+   the printed document had a different measure and a different margin from the one
+   approved on screen.
+
+   Tried and rejected on the way here: forcing every option onto its own sheet. It
+   reads well in principle and it is what the 18 August packet did, but these cards are
+   taller than a page, so each one spilled onto a second sheet that was mostly white.
+   That took the render to 23 pages at 59% blank, against 20 pages at 36% for simply
+   letting them flow. The measurement is why it is not in this file.
+
+   Print keeps the screen's measure instead: same maximum width, same side padding, so
+   the PDF is the HTML on paper rather than a second layout. */
+@media print{
+  .wrap{max-width:1040px;margin:0 auto}
+  header{padding-left:44px;padding-right:44px}
+  main{padding-left:44px;padding-right:44px}
+}
