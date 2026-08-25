@@ -84,7 +84,7 @@ export function humanSourceLabel(source) {
 }
 
 export function primaryHomeAction(payload, { now = () => Date.now(), unauthorized = false } = {}) {
-  if (unauthorized) return { label: "Sign in", href: "/auth/login?return_to=%2Fworkspace", state: "unauthorized" };
+  if (unauthorized) return { label: "Sign in", href: "/auth/login?return_to=%2F", state: "unauthorized" };
   const summary = summarizeWorkspacePayload(payload, now);
   if (summary.state === "attention") return { label: "Review flagged deals", href: FALLBACK_DESTINATION, state: "attention" };
   if (summary.state === "empty") return { label: "Open Lead Board", href: "/leads", state: "empty" };

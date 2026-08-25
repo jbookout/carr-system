@@ -1,4 +1,5 @@
-// Browser entrypoint for the configured production or staging Deal Room host.
+// Browser entrypoint for the configured production app host (with a narrow
+// legacy Deal Room compatibility door).
 //
 // Google proves identity; identity.js reduces it to one of the two partner
 // actors; an opaque, server-side session lets the installed PWA reuse that
@@ -71,6 +72,10 @@ const DEALROOM_ROUTE_ASSETS = new Map([
   ["/workspace", "/workspace.html"],
 ]);
 const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", COMMAND_CENTER_API_PREFIX, "/css/", "/js/", "/data/", "/icons/"];
+const LEGACY_BROWSER_REDIRECT_PATHS = new Set([
+  "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html",
+  "/system-work.html", "/room.html", "/queue.html", "/auth/login", "/auth/reauth",
+]);
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -115,7 +120,13 @@ async function sha256(value) {
 // the exact deployment that owns the session.  A missing or malformed setting
 // deliberately closes the Deal Room route rather than falling back to prod.
 function dealroomOrigin(env) {
-  const host = env?.DEALROOM_HOST;
+  const host = env?.APP_HOST || env?.DEALROOM_HOST;
+  if (typeof host !== "string" || !DEALROOM_HOST_PATTERN.test(host)) return null;
+  return `https://${host}`;
+}
+
+function legacyDealroomOrigin(env) {
+  const host = env?.LEGACY_DEALROOM_HOST;
   if (typeof host !== "string" || !DEALROOM_HOST_PATTERN.test(host)) return null;
   return `https://${host}`;
 }
@@ -698,6 +709,19 @@ export function createDealroomHandler(overrides = {}) {
 
 async function handleRequest(request, env, ctx, dependencies) {
       const origin = dealroomOrigin(env);
+      const legacyOrigin = legacyDealroomOrigin(env);
+      if (legacyOrigin && requestMatchesDealroomOrigin(request, legacyOrigin)) {
+        const legacyUrl = new URL(request.url);
+        // The old hostname is a browser bookmark bridge only.  Do not carry
+        // query input (including stale return_to values) across origins, and
+        // never let API, machine, asset, or mutation requests become HTML
+        // redirects by accident.
+        if ((request.method === "GET" || request.method === "HEAD") &&
+            LEGACY_BROWSER_REDIRECT_PATHS.has(legacyUrl.pathname) && origin) {
+          return redirect(`${origin}/deals`);
+        }
+        return json({ error: "not_found" }, 404);
+      }
       if (!origin || !requestMatchesDealroomOrigin(request, origin)) return json({ error: "not_found" }, 404);
       const url = new URL(request.url);
       const publicResponse = await publicShellAsset(env, request, url.pathname);
@@ -709,7 +733,7 @@ async function handleRequest(request, env, ctx, dependencies) {
       // it a quiet 404 so stale browser bundles cannot reach a second read.
       if (url.pathname.startsWith("/api/v1/") && url.pathname !== COMMAND_CENTER_PATH) return json({ error: "not_found" }, 404);
       if (url.pathname === COMMAND_CENTER_PATH && !workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
-      if (!workspaceCommandCenterEnabled(env) && (url.pathname === "/workspace" || url.pathname === "/workspace.html")) return redirect(`${origin}/deals`);
+      if (url.pathname === "/workspace" || url.pathname === "/workspace.html") return redirect(`${origin}/`);
 
       if (url.pathname === "/auth/signout") {
         if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
@@ -773,6 +797,8 @@ async function handleRequest(request, env, ctx, dependencies) {
 
 export function isDealroomRequest(request, env) {
   const origin = dealroomOrigin(env);
+  const legacyOrigin = legacyDealroomOrigin(env);
+  if (requestMatchesDealroomOrigin(request, legacyOrigin)) return true;
   if (!requestMatchesDealroomOrigin(request, origin)) return false;
   const pathname = new URL(request.url).pathname;
   if (pathname === SYSTEM_WORK_PREFIX || DEALROOM_EXACT_PATHS.has(pathname) ||
@@ -786,4 +812,8 @@ export function isDealroomRequest(request, env) {
     return !request.headers.get("authorization") && Boolean(cookieValue(request, SESSION_COOKIE));
   }
   return false;
+}
+
+export function isLegacyDealroomRequest(request, env) {
+  return requestMatchesDealroomOrigin(request, legacyDealroomOrigin(env));
 }

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { REVIEWED_DEALROOM_HOSTS, resolveDealroomBoot } from "../../dealroom/js/boot-mode.js";
 
-const PRODUCTION = "https://dealroom.doctorcre.com/";
+const PRODUCTION = "https://app.doctorcre.com/";
 const STAGING = "https://carr-mcp-staging.joe-bookout-carr-us.workers.dev/";
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -36,7 +36,7 @@ test("fixture overrides are limited to local or unreviewed hosts", () => {
 
 test("browser reviewed hosts, Wrangler declarations, and service catalog cannot drift", async () => {
   const wrangler = await readFile(`${ROOT}mcp-server/wrangler.toml`, "utf8");
-  const configuredHosts = [...wrangler.matchAll(/^DEALROOM_HOST = "([^"]+)"$/gm)].map((match) => match[1]);
+  const configuredHosts = [...wrangler.matchAll(/^(?:APP_HOST|DEALROOM_HOST) = "([^"]+)"$/gm)].map((match) => match[1]);
   assert.deepEqual([...REVIEWED_DEALROOM_HOSTS].sort(), configuredHosts.sort());
 
   const services = JSON.parse(await readFile(`${ROOT}ops/config/services.json`, "utf8"));

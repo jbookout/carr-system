@@ -79,7 +79,7 @@ test("Home primary action resolves from verified deal freshness and count", () =
   assert.deepEqual(primaryHomeAction(zero, { now: () => Date.parse("2099-08-24T15:00:30.000Z") }), { label: "Open Lead Board", href: "/leads", state: "empty" });
   assert.deepEqual(primaryHomeAction(payload(), { now: () => Date.parse("2099-08-24T15:02:00.000Z") }), { label: "Open Deal Room", href: "/deals", state: "stale" });
   assert.deepEqual(primaryHomeAction({}, {}), { label: "Open Deal Room", href: "/deals", state: "unavailable" });
-  assert.deepEqual(primaryHomeAction(null, { unauthorized: true }), { label: "Sign in", href: "/auth/login?return_to=%2Fworkspace", state: "unauthorized" });
+  assert.deepEqual(primaryHomeAction(null, { unauthorized: true }), { label: "Sign in", href: "/auth/login?return_to=%2F", state: "unauthorized" });
 });
 
 test("Home uses human source labels", () => {

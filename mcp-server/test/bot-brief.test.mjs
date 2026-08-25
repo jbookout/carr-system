@@ -174,6 +174,154 @@ test("governed bot brief refuses a mismatched assigned profile or unavailable re
   assert.equal(brief.bound_context.items[0].retrieval_tool, "render-context-activation");
 });
 
+const hermes = { id: "hermes-pilot-id", slug: "hermes-pilot", human: false, hermes: true,
+  via: "hermes-token", sponsoring_human_slug: "joe", human_slug: "joe",
+  authorization_class: "sponsored_agent", operational_profile: "hermes" };
+
+function hermesClient(registration) {
+  const calls = [];
+  return {
+    calls,
+    query: async (sql, params = []) => {
+      calls.push({ sql, params });
+      if (/from agent_profile/.test(sql)) return { rows: [profile({
+        profile_key: "deal-steward", display_name: "Deal Steward", status: "active",
+        current_model: "xai-oauth/grok-4.6", current_desk: "hermes-desktop", version: "4",
+      })] };
+      if (/from doctrine_meta/.test(sql)) return { rows: [{ generation: "42" }] };
+      if (/rule_delivery_policy/.test(sql)) return { rows: [{ mode: "shadow" }] };
+      if (/rule_pack_index/.test(sql)) return { rows: [] };
+      if (/set_config/.test(sql)) return { rows: [] };
+      if (/hermes_runtime_admission_for_brief/.test(sql)) return { rows: [{ registration }] };
+      if (/context_activation_brief_assignment/.test(sql)) return { rows: [{ profile_key: "deal-steward" }] };
+      if (/render_context_activation_for_brief/.test(sql)) return { rows: [{ items: [] }] };
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+}
+
+test("Hermes Bot-Brief uses server-derived envelope identity only with an exact activation binding", async () => {
+  const registration = {
+    status: "registered", authorized: true, reason: "exact_server_envelope",
+    registration_scope: "execution_envelope", grants_authority: false,
+    runtime_registration_id: "envelope:00000000-0000-4000-8000-000000000000",
+    runtime_principal: "runtime:deal-steward",
+    agent_principal_id: "agent:deal-steward", organization_tenant_id: "carr-internal",
+    sponsoring_human_slug: "joe", work_request: "WR-7", profile_version: 4,
+    native_session_ref: "native:profile-deal-steward", surface: "hermes_desktop",
+    adapter_id: "adapter:hermes-desktop", adapter_version: "v1",
+    provider_id: "provider:xai-oauth", model_id: "model:xai-oauth/grok-4.6",
+    configuration_fingerprint: `sha256:${"b".repeat(64)}`,
+    capability_profile: "capability:metadata-only",
+    read_only: true, envelope_digest: `sha256:${"a".repeat(64)}`,
+    activation_binding_id: "ctx-0123456789abcdef", expires_at: "2099-08-25T12:00:00Z",
+    device_binding_status: "not_asserted",
+    operator_surface: "job-passport:context-activation",
+    telemetry_ref: "observatory:activation-reliability:ctx-0123456789abcdef",
+    credential: "must-not-cross-the-wire",
+  };
+  const out = await TOOLS["bot-brief"].handler(hermesClient(registration), hermes, {
+    profile_key: "deal-steward", work_request: "WR-7", activation_binding_id: "ctx-0123456789abcdef",
+  });
+  assert.equal(out.identity.runtime_principal, "hermes-pilot");
+  assert.equal(out.runtime_registration.runtime_principal, "runtime:deal-steward");
+  assert.equal(out.runtime_registration.authorized, true);
+  assert.equal(out.runtime_registration.surface, "hermes_desktop");
+  assert.equal(out.runtime_registration.read_only, true);
+  assert.equal(out.runtime_registration.grants_authority, false);
+  assert.equal(out.runtime_registration.device_binding_status, "not_asserted");
+  assert.equal(out.runtime_registration.credential, undefined);
+  assert.equal(out.runtime_registration.activation_binding_id, "ctx-0123456789abcdef");
+  assert.equal(out.profile.model, "xai-oauth/grok-4.6");
+});
+
+test("Hermes runtime admission fails closed for unknown, stale, or missing exact binding", async () => {
+  for (const registration of [
+    { status: "not_registered", authorized: false, reason: "runtime_or_activation_missing" },
+    { status: "stale", authorized: false, reason: "activation_or_envelope_not_exact" },
+  ]) {
+    await assert.rejects(
+      TOOLS["bot-brief"].handler(hermesClient(registration), hermes, {
+        profile_key: "deal-steward", work_request: "WR-7", activation_binding_id: "ctx-0123456789abcdef",
+      }),
+      error => error instanceof ToolError && error.payload.error === "hermes_runtime_registration_refused",
+    );
+  }
+  const unbound = await TOOLS["bot-brief"].handler(hermesClient({}), hermes, { profile_key: "deal-steward" });
+  assert.deepEqual(unbound.runtime_registration, { status: "not_registered", authorized: false });
+});
+
+test("Hermes rejects a registered-looking projection that mismatches authenticated server identity", async () => {
+  const base = {
+    status: "registered", authorized: true, reason: "exact_server_envelope",
+    registration_scope: "execution_envelope", grants_authority: false,
+    runtime_registration_id: "envelope:00000000-0000-4000-8000-000000000000",
+    runtime_principal: "runtime:deal-steward",
+    agent_principal_id: "agent:deal-steward", organization_tenant_id: "other-tenant",
+    sponsoring_human_slug: "joe", work_request: "WR-7", profile_version: 4,
+    native_session_ref: "native:profile-deal-steward", surface: "hermes_desktop",
+    adapter_id: "adapter:hermes-desktop", adapter_version: "v1",
+    provider_id: "provider:xai-oauth", model_id: "model:xai-oauth/grok-4.6",
+    configuration_fingerprint: `sha256:${"b".repeat(64)}`,
+    capability_profile: "capability:metadata-only", read_only: true,
+    envelope_digest: `sha256:${"a".repeat(64)}`,
+    activation_binding_id: "ctx-0123456789abcdef", expires_at: "2099-08-25T12:00:00Z",
+    device_binding_status: "not_asserted",
+    operator_surface: "job-passport:context-activation",
+    telemetry_ref: "observatory:activation-reliability:ctx-0123456789abcdef",
+  };
+  await assert.rejects(
+    TOOLS["bot-brief"].handler(hermesClient(base), hermes, {
+      profile_key: "deal-steward", work_request: "WR-7", activation_binding_id: "ctx-0123456789abcdef",
+    }),
+    error => error instanceof ToolError && error.payload.error === "hermes_runtime_registration_refused" &&
+      error.payload.reason === "server_projection_invalid",
+  );
+});
+
+test("Hermes rejects stale expiry or a profile version other than the live Bot-Brief profile", async () => {
+  const valid = {
+    status: "registered", authorized: true, registration_scope: "execution_envelope",
+    grants_authority: false,
+    runtime_registration_id: "envelope:00000000-0000-4000-8000-000000000000",
+    runtime_principal: "runtime:deal-steward", agent_principal_id: "agent:deal-steward",
+    organization_tenant_id: "carr-internal", sponsoring_human_slug: "joe",
+    work_request: "WR-7", profile_version: 4,
+    activation_binding_id: "ctx-0123456789abcdef",
+    native_session_ref: "native:profile-deal-steward", surface: "hermes_desktop",
+    adapter_id: "adapter:hermes-desktop", adapter_version: "v1",
+    provider_id: "provider:xai-oauth", model_id: "model:xai-oauth/grok-4.6",
+    configuration_fingerprint: `sha256:${"b".repeat(64)}`,
+    capability_profile: "capability:metadata-only", read_only: true,
+    envelope_digest: `sha256:${"a".repeat(64)}`,
+    device_binding_status: "not_asserted", operator_surface: "job-passport:context-activation",
+    telemetry_ref: "observatory:activation-reliability:ctx-0123456789abcdef",
+    expires_at: "2099-08-25T12:00:00Z",
+  };
+  for (const registration of [
+    { ...valid, profile_version: 3 },
+    { ...valid, expires_at: "2020-01-01T00:00:00Z" },
+    { ...valid, expires_at: "not-a-timestamp" },
+  ]) await assert.rejects(
+    TOOLS["bot-brief"].handler(hermesClient(registration), hermes, {
+      profile_key: "deal-steward", work_request: "WR-7", activation_binding_id: "ctx-0123456789abcdef",
+    }),
+    error => error instanceof ToolError && error.payload.error === "hermes_runtime_registration_refused",
+  );
+});
+
+test("Hermes cannot spoof sponsor, device, runtime, or activation authority before any query", async () => {
+  const client = hermesClient({});
+  await assert.rejects(
+    TOOLS["bot-brief"].handler(client, hermes, {
+      profile_key: "deal-steward", work_request: "WR-7", activation_binding_id: "ctx-0123456789abcdef",
+      sponsor: "dell", device_id: "other-device", runtime: "runtime:other", authority: "full",
+    }),
+    error => error instanceof ToolError,
+  );
+  assert.equal(client.calls.length, 0);
+});
+
 test("bot-brief performs no database write", async () => {
   const client = clientFor();
   await TOOLS["bot-brief"].handler(client, joe, { profile_key: "doc" });

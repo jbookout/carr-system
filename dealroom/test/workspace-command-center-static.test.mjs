@@ -58,6 +58,8 @@ test("Home asset is a dark, visual, responsive workstation with honest states", 
 
 test("Home has one first-region primary action, one workspace directory, and secondary flow", async () => {
   const html = await readFile(`${ROOT}/workspace.html`, "utf8");
+  assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest">/);
+  assert.match(html, /<link rel="apple-touch-icon" href="\/icons\/dealroom-192\.png">/);
   assert.match(html, /<h1[^>]*>Home<\/h1>/);
   assert.doesNotMatch(html, /read-only overview|<h1[^>]*>Command Center<\/h1>/i);
   const primaryRegion = html.match(/<section[^>]+data-home-primary-region[\s\S]*?<\/section>/)?.[0] || "";
@@ -70,7 +72,7 @@ test("Home has one first-region primary action, one workspace directory, and sec
 
 test("all six authenticated surfaces expose deterministic global navigation", async () => {
   const expectations = {
-    "workspace.html": ["/workspace", "Home"],
+    "workspace.html": ["/", "Home"],
     "index.html": ["/deals", "Deals"],
     "leads.html": ["/leads", "Leads"],
     "room.html": ["/room.html", "Observatory"],
@@ -79,7 +81,7 @@ test("all six authenticated surfaces expose deterministic global navigation", as
   };
   for (const [file, [activeHref, activeLabel]] of Object.entries(expectations)) {
     const html = await readFile(`${ROOT}/${file}`, "utf8");
-    assert.match(html, /href="\/workspace"[^>]*>Home<\/a>/);
+    assert.match(html, /href="\/"[^>]*>Home<\/a>/);
     assert.match(html, /href="\/leads"[^>]*>Leads<\/a>/);
     assert.match(html, /href="\/deals"[^>]*>Deals<\/a>/);
     assert.match(html, /href="\/system-work\.html"[^>]*>System work<\/a>/);
