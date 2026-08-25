@@ -1231,8 +1231,11 @@ try:
             _blocked.append(_ln.split("  BLOCKED  ", 1)[1].strip())
         elif "  TOMBSTONE  " in _ln:
             _tombs.append(_ln.split("  TOMBSTONE  ", 1)[1].strip())
-        elif "chain OK" in _ln or "FINISHED WITH FAILURES" in _ln:
-            _done.append(("chain OK" in _ln, _pending, _blocked, _tombs))
+        else:
+            _outcome = _health_sub.nightly_completion(_ln)
+            if _outcome is None:
+                continue
+            _done.append((_outcome, _pending, _blocked, _tombs))
             _pending = []
             _blocked = []
             _tombs = []
