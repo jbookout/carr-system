@@ -64,7 +64,7 @@ RESOURCE_REVISION_FIELDS = {"resource_ref", "revision_ref", "digest"}
 PHASE_BINDING_FIELDS = {"phase_id", "session_affinity", "switch_conditions", "native_session_transfer"}
 EVALUATION_CONTEXT_FIELDS = {"experiment_arm", "auditor_mode", "evaluation_kernel_ref", "workflow_rubric_digest", "case_set_digest"}
 VERSIONED_METADATA_FIELDS = {"ref", "digest"}
-RUNTIME_METADATA_OPTIONAL_FIELDS = {"profile_key", "profile_version", "provider_id", "model_id", "desk", "policy_ref", "policy_digest", "modality", "reasoning_effort_ref", "sampling_profile_ref", "context_budget", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"}
+RUNTIME_METADATA_OPTIONAL_FIELDS = {"profile_key", "profile_version", "provider_id", "model_id", "desk", "policy_ref", "policy_digest", "modality", "reasoning_effort_ref", "sampling_profile_ref", "context_budget", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode", "environment_provider_ref", "environment_provider_version", "environment_provider_digest", "environment_requirement_digest", "environment_configuration_digest", "environment_backend_kind", "environment_source_class", "environment_isolation_class", "environment_capability_refs", "environment_conformance_ref", "environment_conformance_digest", "environment_binding_digest"}
 TOPOLOGY_METADATA_FIELDS = {"kind", "harness_digest", "parallelism", "code_model_step_refs", "fallback_policy_ref", "stop_condition_refs", "context_refresh_policy_ref", "memory_policy_ref", "sandbox_ref", "guardrail_ref", "threat_model_ref"}
 EVALUATION_METADATA_FIELDS = {"lane_ref", "risk_class", "rubric_digest", "case_set_digest", "evaluator_policy_digest", "evaluator_ref", "rubric_ref", "evaluator_version", "evaluator_digest", "required_rungs", "required_deterministic_check_refs", "critical_dimensions", "human_acceptance_required", "outcome_horizon_ref", "outcome_horizon_not_before", "requirements"}
 
@@ -339,6 +339,31 @@ def _validate_versioned_metadata(value: Any, label: str) -> dict[str, Any]:
         if "profile_version" in value and (not isinstance(value["profile_version"], int) or value["profile_version"] < 1):
             raise ContractError("execution runtime_profile profile_version must be positive")
         if "policy_digest" in value: _digest(value["policy_digest"], "execution runtime_profile policy_digest")
+        environment_fields = {
+            "environment_provider_ref", "environment_provider_version", "environment_provider_digest",
+            "environment_requirement_digest", "environment_configuration_digest", "environment_backend_kind",
+            "environment_source_class", "environment_isolation_class", "environment_capability_refs",
+            "environment_conformance_ref", "environment_conformance_digest", "environment_binding_digest",
+        }
+        present = environment_fields & set(value)
+        if present and present != environment_fields:
+            raise ContractError("execution runtime_profile environment binding must be complete")
+        if present:
+            import execution_environment
+            execution_environment.validate_environment_binding({
+                "provider_ref": value["environment_provider_ref"],
+                "provider_version": value["environment_provider_version"],
+                "provider_digest": value["environment_provider_digest"],
+                "requirement_digest": value["environment_requirement_digest"],
+                "configuration_digest": value["environment_configuration_digest"],
+                "backend_kind": value["environment_backend_kind"],
+                "source_class": value["environment_source_class"],
+                "isolation_class": value["environment_isolation_class"],
+                "capability_refs": value["environment_capability_refs"],
+                "conformance_ref": value["environment_conformance_ref"],
+                "conformance_digest": value["environment_conformance_digest"],
+                "binding_digest": value["environment_binding_digest"],
+            })
     return row
 
 

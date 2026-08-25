@@ -83,17 +83,34 @@ function validActivationReliability(value) {
   const reliability = value.reliability;
   if (reliability !== undefined) {
     const required = ["route_digest", "topology_digest", "evaluation_plan_digest", "grounding_sufficiency", "deterministic_checks", "model_judgement", "human_acceptance", "trajectory", "evaluator_results", "corrections", "defects", "incidents", "downstream_outcome", "outcome_horizon", "process_metrics", "eval_candidates", "shadow_comparisons", "learning_disposition", "telemetry", "closure"];
+    const environmentFields = ["environment_binding_digest", "environment_evidence"];
+    const hasEnvironment = environmentFields.some((key) => Object.prototype.hasOwnProperty.call(reliability, key));
     const grounding = ["state", "evidence_refs", "required_supplied", "required_used", "required_missing", "advisory_supplied", "advisory_used", "freshness_failures", "retrieval_failures"];
     const trace = ["sequence", "stage_ref", "parent_event_ref", "decision_class", "tool_class", "result_state", "fallback_state", "guardrail_state", "latency_ms", "evidence_refs"];
     const evaluator = ["kind", "evaluator_ref", "rubric_ref", "evaluator_version", "evaluator_digest", "status", "confidence", "critical", "independence_state", "held_out_case_count", "check_refs", "dimension_refs", "evidence_refs", "judge_provenance", "calibration_evidence_refs"];
-    if (!exactKeys(reliability, required) || ![reliability.route_digest, reliability.topology_digest, reliability.evaluation_plan_digest].every((digest) => DIGEST.test(digest))
+    const environmentEvidenceFields = ["binding_digest", "session_ref", "lease_state", "operation_count", "policy_refusal_refs", "security_event_refs", "cleanup_state", "cleanup_evidence_refs", "side_effect_state", "resource_usage", "evidence_refs"];
+    const resourceUsageFields = ["cpu_ms", "memory_peak_mb", "disk_peak_mb", "network_egress_bytes"];
+    if (!exactKeys(reliability, hasEnvironment ? [...required, ...environmentFields] : required) || ![reliability.route_digest, reliability.topology_digest, reliability.evaluation_plan_digest].every((digest) => DIGEST.test(digest))
       || !exactKeys(reliability.grounding_sufficiency, grounding) || !["sufficient", "insufficient", "unknown"].includes(reliability.grounding_sufficiency.state)
       || !grounding.slice(1).every((field) => list(reliability.grounding_sufficiency[field]) && reliability.grounding_sufficiency[field].every(string))
       || !list(reliability.deterministic_checks) || !object(reliability.model_judgement) || !object(reliability.human_acceptance)
       || !list(reliability.trajectory) || !list(reliability.evaluator_results) || reliability.evaluator_results.length === 0
       || !object(reliability.outcome_horizon) || !["mature", "immature", "unavailable", "stale", "unknown"].includes(reliability.outcome_horizon.state)
       || !object(reliability.process_metrics) || !list(reliability.telemetry) || !list(reliability.eval_candidates) || !list(reliability.shadow_comparisons)
-      || !exactKeys(reliability.closure, ["state", "reasons", "derived_by"]) || reliability.closure.derived_by !== "server" || !["blocked", "insufficient_evidence", "eligible_for_human_review"].includes(reliability.closure.state) || !list(reliability.closure.reasons)) return false;
+      || !exactKeys(reliability.closure, ["state", "reasons", "derived_by"]) || reliability.closure.derived_by !== "server" || !["blocked", "insufficient_evidence", "eligible_for_human_review"].includes(reliability.closure.state) || !list(reliability.closure.reasons)
+      || (hasEnvironment && (!DIGEST.test(reliability.environment_binding_digest)
+        || !exactKeys(reliability.environment_evidence, environmentEvidenceFields)
+        || reliability.environment_evidence.binding_digest !== reliability.environment_binding_digest
+        || !validId(reliability.environment_evidence.session_ref)
+        || !["active", "released", "expired", "failed", "unknown"].includes(reliability.environment_evidence.lease_state)
+        || !Number.isInteger(reliability.environment_evidence.operation_count) || reliability.environment_evidence.operation_count < 0
+        || !["policy_refusal_refs", "security_event_refs", "cleanup_evidence_refs", "evidence_refs"].every((field) => list(reliability.environment_evidence[field]) && reliability.environment_evidence[field].every(validId))
+        || !["not_required", "pending", "verified", "failed", "unknown"].includes(reliability.environment_evidence.cleanup_state)
+        || (["verified", "failed"].includes(reliability.environment_evidence.cleanup_state) && reliability.environment_evidence.cleanup_evidence_refs.length === 0)
+        || !["none", "attempted", "refused", "observed", "unknown"].includes(reliability.environment_evidence.side_effect_state)
+        || !exactKeys(reliability.environment_evidence.resource_usage, resourceUsageFields)
+        || Object.values(reliability.environment_evidence.resource_usage).some((metric) => !Number.isInteger(metric) || metric < 0)
+        || reliability.environment_evidence.evidence_refs.length === 0))) return false;
     if (reliability.model_judgement.state === "pass" && (!list(reliability.model_judgement.evidence_refs) || reliability.model_judgement.evidence_refs.length === 0)) return false;
     if (reliability.human_acceptance.actor_ref === reliability.model_judgement.judge_ref) return false;
     if (reliability.deterministic_checks.some((check) => !object(check) || !["passed", "failed", "unknown", "not_run"].includes(check.state) || (check.state === "passed" && (!list(check.evidence_refs) || check.evidence_refs.length === 0)))) return false;
@@ -202,9 +219,18 @@ function validRuntimeMetadata(value) {
 }
 function validActivatedRuntimeMetadata(value) {
   const fields = ["ref", "digest", "profile_key", "profile_version", "provider_id", "model_id", "desk", "policy_ref", "policy_digest", "modality", "reasoning_effort_ref", "sampling_profile_ref", "context_budget", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"];
-  return exactKeys(value, fields) && DIGEST.test(value.digest) && Number.isInteger(value.profile_version) && value.profile_version >= 1 && Number.isInteger(value.context_budget) && value.context_budget >= 1
+  const environmentFields = ["environment_provider_ref", "environment_provider_version", "environment_provider_digest", "environment_requirement_digest", "environment_configuration_digest", "environment_backend_kind", "environment_source_class", "environment_isolation_class", "environment_capability_refs", "environment_conformance_ref", "environment_conformance_digest", "environment_binding_digest"];
+  const hasEnvironment = environmentFields.some((key) => Object.prototype.hasOwnProperty.call(value || {}, key));
+  return exactKeys(value, hasEnvironment ? [...fields, ...environmentFields] : fields) && DIGEST.test(value.digest) && Number.isInteger(value.profile_version) && value.profile_version >= 1 && Number.isInteger(value.context_budget) && value.context_budget >= 1
     && ["ref", "profile_key", "provider_id", "policy_ref", "modality", "reasoning_effort_ref", "sampling_profile_ref", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"].every((key) => validId(value[key]))
-    && string(value.model_id) && string(value.desk) && DIGEST.test(value.policy_digest);
+    && string(value.model_id) && string(value.desk) && DIGEST.test(value.policy_digest)
+    && (!hasEnvironment || (Number.isInteger(value.environment_provider_version) && value.environment_provider_version >= 1
+      && [value.environment_provider_ref, value.environment_conformance_ref].every(validId)
+      && [value.environment_provider_digest, value.environment_requirement_digest, value.environment_configuration_digest, value.environment_conformance_digest, value.environment_binding_digest].every((digest) => DIGEST.test(digest))
+      && ["none", "local", "container", "remote", "cloud"].includes(value.environment_backend_kind)
+      && ["built_in", "plugin"].includes(value.environment_source_class)
+      && ["none", "host_process", "container", "microvm", "remote_host"].includes(value.environment_isolation_class)
+      && list(value.environment_capability_refs) && value.environment_capability_refs.length > 0 && value.environment_capability_refs.every(validId)));
 }
 function validActivatedTopology(value) {
   const fields = ["ref", "digest", "kind", "harness_digest", "parallelism", "code_model_step_refs", "fallback_policy_ref", "stop_condition_refs", "context_refresh_policy_ref", "memory_policy_ref", "sandbox_ref", "guardrail_ref", "threat_model_ref"];

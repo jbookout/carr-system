@@ -74,6 +74,41 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _plugin_manifest(provider_key: str) -> dict:
+    manifest = {
+        "schema_version": "execution-environment-provider.v1",
+        "provider_key": provider_key,
+        "provider_version": 1,
+        "display_name": "Fixture Environment Provider",
+        "source_class": "plugin",
+        "backend_kind": "remote",
+        "implementation_ref": "fixture.environment.Provider",
+        "implementation_digest": "sha256:" + "1" * 64,
+        "capability_refs": ["environment:exec"],
+        "operation_refs": ["operation:create", "operation:exec", "operation:cancel", "operation:destroy", "operation:health"],
+        "isolation_class": "remote_host",
+        "egress_policy_ref": "egress:deny-default",
+        "secret_policy_ref": "secrets:brokered-only",
+        "persistence_mode": "command_scoped",
+        "resource_policy_ref": "resources:fixture-v1",
+        "cleanup_policy_ref": "cleanup:fixture-v1",
+        "threat_model_ref": "threat-model:fixture-v1",
+        "conformance_contract_ref": "conformance:execution-environment-v1",
+        "conformance_contract_digest": "sha256:" + "2" * 64,
+        "configuration_schema_digest": "sha256:" + "3" * 64,
+        "package_provenance": {
+            "package_ref": "package:fixture-provider",
+            "package_digest": "sha256:" + "4" * 64,
+            "signature_ref": "signature:fixture-provider",
+            "sbom_ref": "sbom:fixture-provider",
+        },
+        "collision_policy": "digest_pinned",
+        "contains_secrets": False,
+    }
+    manifest["manifest_digest"] = "sha256:" + hashlib.sha256(_canonical_json(manifest).encode()).hexdigest()
+    return manifest
+
+
 def assert_required_item_ref_and_classification_frozen(cur, work_ref: str, plan_ref: str, bundle: dict) -> None:
     """A caller cannot demote or replace a compiler-selected required item."""
     tampered = json.loads(json.dumps(bundle))
@@ -319,9 +354,69 @@ def main() -> int:
                 (ref, "builder", "rehearsal", "policy:execution-lane-v1", "sha256:" + "c" * 64, uuid.uuid4()),
                 "non-authority execution profile assignment",
             )
+            refusal(
+                cur,
+                "select * from ops.register_execution_environment_provider(%s,%s)",
+                (Jsonb(_plugin_manifest("fixture-remote")), uuid.uuid4()),
+                "non-authority execution environment registration",
+            )
             cur.execute("reset session authorization")
             cur.execute("set session authorization carr_authority_joe")
             cur.execute("select set_config('carr.organization_tenant_id','carr-internal',true)")
+            refusal(
+                cur,
+                "select * from ops.register_execution_environment_provider(%s,%s)",
+                (Jsonb(_plugin_manifest("hermes-local")), uuid.uuid4()),
+                "plugin shadow of protected built-in provider",
+            )
+            quarantined = cur.execute(
+                "select * from ops.register_execution_environment_provider(%s,%s)",
+                (Jsonb(_plugin_manifest("fixture-remote")), uuid.uuid4()),
+            ).fetchone()
+            if quarantined is None or quarantined[2] != "discovered" or quarantined[3] is not False:
+                raise RuntimeError("provider registration did not remain discovered and unpromoted")
+            quarantined_transition = cur.execute(
+                "select * from ops.transition_execution_environment_provider(%s,%s,%s,%s,%s)",
+                (quarantined[0], "discovered", "quarantined", Jsonb(["evidence:fixture-review"]), uuid.uuid4()),
+            ).fetchone()
+            if quarantined_transition is None or quarantined_transition[1] != "quarantined":
+                raise RuntimeError("provider did not enter quarantine before conformance")
+            refusal(
+                cur,
+                "select * from ops.transition_execution_environment_provider(%s,%s,%s,%s,%s)",
+                (quarantined[0], "quarantined", "conformance_passed", Jsonb(["evidence:fixture-review"]), uuid.uuid4()),
+                "provider promotion without passed conformance",
+            )
+            conformance_key = uuid.uuid4()
+            passed_at = cur.execute("select clock_timestamp()-interval '1 second'").fetchone()[0]
+            conformance = cur.execute(
+                "select * from ops.attest_execution_environment_conformance(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (quarantined[0], "conformance-run:fixture-passed", "sha256:" + "8" * 64, "passed", Jsonb(["check:fixture"]), Jsonb(["evidence:fixture-conformance"]), passed_at, conformance_key),
+            ).fetchone()
+            if conformance is None or conformance[1] is not False:
+                raise RuntimeError("provider conformance was not appended")
+            refusal(
+                cur,
+                "select * from ops.attest_execution_environment_conformance(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (quarantined[0], "conformance-run:fixture-passed", "sha256:" + "8" * 64, "passed", Jsonb(["check:fixture"]), Jsonb(["evidence:changed"]), passed_at, conformance_key),
+                "provider conformance idempotency evidence conflict",
+            )
+            conformance_passed = cur.execute(
+                "select * from ops.transition_execution_environment_provider(%s,%s,%s,%s,%s)",
+                (quarantined[0], "quarantined", "conformance_passed", Jsonb(["evidence:fixture-conformance"]), uuid.uuid4()),
+            ).fetchone()
+            if conformance_passed is None or conformance_passed[1] != "conformance_passed":
+                raise RuntimeError("passed conformance did not permit the human lifecycle transition")
+            cur.execute(
+                "select * from ops.attest_execution_environment_conformance(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (quarantined[0], "conformance-run:fixture-regression", "sha256:" + "9" * 64, "failed", Jsonb(["check:fixture"]), Jsonb(["evidence:fixture-regression"]), cur.execute("select clock_timestamp()").fetchone()[0], uuid.uuid4()),
+            )
+            refusal(
+                cur,
+                "select * from ops.transition_execution_environment_provider(%s,%s,%s,%s,%s)",
+                (quarantined[0], "conformance_passed", "shadow", Jsonb(["evidence:fixture-regression"]), uuid.uuid4()),
+                "provider promotion after latest conformance regression",
+            )
             assignment = cur.execute(
                 "select * from ops.assign_execution_profile(%s,%s,%s,%s,%s,%s)",
                 (ref, "builder", "rehearsal", "policy:execution-lane-v1", "sha256:" + "c" * 64, uuid.uuid4()),
@@ -331,6 +426,10 @@ def main() -> int:
             cur.execute("select set_config('carr.organization_tenant_id','carr-internal',true)")
             if assignment is None or assignment[1] is not False:
                 raise RuntimeError("authoritative policy gateway did not create execution assignment")
+            providers = cur.execute("select ops.read_execution_environment_providers()").fetchone()[0]
+            local_provider = next((row for row in providers if row.get("provider_ref") == "environment-provider:hermes-local:v1"), None)
+            if not local_provider or local_provider.get("state") != "active" or local_provider.get("conformance", {}).get("state") != "passed" or local_provider.get("grants_authority") is not False:
+                raise RuntimeError(f"reference execution environment provider is not active, conformant, and non-authoritative: {providers}")
             issued_envelope = cur.execute(
                 "select * from ops.issue_execution_envelope_v1(%s,%s,%s)",
                 (ref, replay_first[0], uuid.uuid4()),
@@ -340,6 +439,9 @@ def main() -> int:
             execution_contract.validate_execution_envelope(issued_envelope[2])
             if issued_envelope[2]["runtime_profile"].get("profile_key") != "builder" or issued_envelope[2]["server_binding"]["authority"]["environment"] != "rehearsal":
                 raise RuntimeError("ExecutionEnvelope did not derive its assigned profile/environment")
+            runtime_environment = issued_envelope[2]["runtime_profile"]
+            if runtime_environment.get("environment_provider_ref") != "environment-provider:hermes-local:v1" or runtime_environment.get("environment_source_class") != "built_in" or runtime_environment.get("environment_binding_digest") is None:
+                raise RuntimeError("ExecutionEnvelope did not bind the exact admitted execution environment")
             registration = cur.execute(
                 "select ops.hermes_runtime_admission_for_brief(%s,%s,%s,%s,%s)",
                 ("hermes-pilot", "builder", "joe", ref, replay_first[0]),
@@ -361,6 +463,9 @@ def main() -> int:
                 "grants_authority": False,
                 "device_binding_status": "not_asserted",
                 "envelope_digest": issued_envelope[1],
+                "environment_provider_ref": runtime_environment["environment_provider_ref"],
+                "environment_binding_digest": runtime_environment["environment_binding_digest"],
+                "environment_conformance_digest": runtime_environment["environment_conformance_digest"],
             }
             for key, expected in expected_registration.items():
                 if registration.get(key) != expected:
@@ -444,6 +549,20 @@ def main() -> int:
                 "route_digest": issued_envelope[2]["runtime_profile"]["digest"],
                 "topology_digest": issued_envelope[2]["execution_topology"]["digest"],
                 "evaluation_plan_digest": issued_envelope[2]["evaluation_plan"]["digest"],
+                "environment_binding_digest": runtime_environment["environment_binding_digest"],
+                "environment_evidence": {
+                    "binding_digest": runtime_environment["environment_binding_digest"],
+                    "session_ref": "environment-session:activation-canary",
+                    "lease_state": "released",
+                    "operation_count": 1,
+                    "policy_refusal_refs": [],
+                    "security_event_refs": [],
+                    "cleanup_state": "verified",
+                    "cleanup_evidence_refs": ["evidence:environment-cleanup"],
+                    "side_effect_state": "none",
+                    "resource_usage": {"cpu_ms": 1, "memory_peak_mb": 1, "disk_peak_mb": 0, "network_egress_bytes": 0},
+                    "evidence_refs": ["evidence:environment-session"],
+                },
                 "learning_disposition": "none", "closure": {"state": "insufficient_evidence", "reasons": ["reason:authority_evaluation_evidence_missing"], "derived_by": "server"},
             }
             # Raw tables stay unavailable to application writers; return to
@@ -458,6 +577,42 @@ def main() -> int:
             ).fetchone()
             if recorded[1] != receipt["attempt_id"] or recorded[2] is not False:
                 raise RuntimeError("existing AttemptReceipt was not persisted by the strict door")
+            forged_environment = json.loads(json.dumps(receipt))
+            forged_environment["attempt_id"] = "attempt:evidence-activation-forged-environment"
+            forged_environment["reliability"]["environment_evidence"]["binding_digest"] = "sha256:" + "f" * 64
+            refusal(
+                cur,
+                "select * from ops.record_attempt_receipt(%s,%s,%s,%s,%s,%s)",
+                (ref, proposal[2], receipt["envelope_digest"], binding_pk, Jsonb(forged_environment), uuid.uuid4()),
+                "forged execution environment binding",
+            )
+            missing_cleanup = json.loads(json.dumps(receipt))
+            missing_cleanup["attempt_id"] = "attempt:evidence-activation-missing-cleanup"
+            missing_cleanup["reliability"]["environment_evidence"]["cleanup_evidence_refs"] = []
+            refusal(
+                cur,
+                "select * from ops.record_attempt_receipt(%s,%s,%s,%s,%s,%s)",
+                (ref, proposal[2], receipt["envelope_digest"], binding_pk, Jsonb(missing_cleanup), uuid.uuid4()),
+                "verified environment cleanup without evidence",
+            )
+            forged_resource = json.loads(json.dumps(receipt))
+            forged_resource["attempt_id"] = "attempt:evidence-activation-forged-resource"
+            forged_resource["reliability"]["environment_evidence"]["resource_usage"]["cpu_ms"] = 1.5
+            refusal(
+                cur,
+                "select * from ops.record_attempt_receipt(%s,%s,%s,%s,%s,%s)",
+                (ref, proposal[2], receipt["envelope_digest"], binding_pk, Jsonb(forged_resource), uuid.uuid4()),
+                "fractional execution environment resource evidence",
+            )
+            raw_environment_ref = json.loads(json.dumps(receipt))
+            raw_environment_ref["attempt_id"] = "attempt:evidence-activation-raw-environment-ref"
+            raw_environment_ref["reliability"]["environment_evidence"]["policy_refusal_refs"] = ["raw provider refusal sentence"]
+            refusal(
+                cur,
+                "select * from ops.record_attempt_receipt(%s,%s,%s,%s,%s,%s)",
+                (ref, proposal[2], receipt["envelope_digest"], binding_pk, Jsonb(raw_environment_ref), uuid.uuid4()),
+                "raw execution environment evidence reference",
+            )
             initial_reliability = cur.execute(
                 "select ops.read_attempt_receipt_reliability(%s)", (receipt["attempt_id"],)
             ).fetchone()[0]
@@ -731,6 +886,34 @@ def main() -> int:
                 if authority_posture["reliability"]["state"] != "blocked" or authority_posture["reliability"]["reasons"] != ["reason:critical_authority_evaluator_or_human_rejection"]:
                     raise RuntimeError(f"{evaluator_kind} authority failure did not block canonical reliability posture")
             cur.execute("reset role")
+            cur.execute("savepoint execution_environment_disable")
+            try:
+                cur.execute("set session authorization carr_authority_joe")
+                disabled = cur.execute(
+                    "select * from ops.transition_execution_environment_provider(%s,%s,%s,%s,%s)",
+                    ("environment-provider:hermes-local:v1", "active", "disabled", Jsonb(["evidence:rollback-canary"]), uuid.uuid4()),
+                ).fetchone()
+                if disabled is None or disabled[1] != "disabled":
+                    raise RuntimeError("human rollback did not disable the active provider")
+                cur.execute("reset session authorization")
+                set_local_role(cur, "carr_writer")
+                cur.execute("select set_config('carr.organization_tenant_id','carr-internal',true)")
+                refusal(
+                    cur,
+                    "select * from ops.issue_execution_envelope_v1(%s,%s,%s)",
+                    (ref, replay_first[0], uuid.uuid4()),
+                    "disabled execution environment provider",
+                )
+                refused_registration = cur.execute(
+                    "select ops.hermes_runtime_admission_for_brief(%s,%s,%s,%s,%s)",
+                    ("hermes-pilot", "builder", "joe", ref, replay_first[0]),
+                ).fetchone()[0]
+                if refused_registration.get("authorized") is not False:
+                    raise RuntimeError("Hermes Bot-Brief admitted a disabled execution environment provider")
+            finally:
+                cur.execute("reset role")
+                cur.execute("reset session authorization")
+                cur.execute("rollback to savepoint execution_environment_disable")
             telemetry_count = cur.execute("select count(*) from ops.activation_reliability_telemetry where attempt_receipt_id=%s", (recorded[0],)).fetchone()[0]
             if telemetry_count != 1:
                 raise RuntimeError("accepted AttemptReceipt did not project canonical action-bound telemetry")

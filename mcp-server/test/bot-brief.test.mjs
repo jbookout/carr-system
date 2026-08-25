@@ -200,6 +200,28 @@ function hermesClient(registration) {
   };
 }
 
+async function environmentRegistration() {
+  const binding = {
+    provider_ref: "environment-provider:hermes-local:v1", provider_version: 1,
+    provider_digest: `sha256:${"1".repeat(64)}`, requirement_digest: `sha256:${"2".repeat(64)}`,
+    configuration_digest: `sha256:${"3".repeat(64)}`, backend_kind: "local",
+    source_class: "built_in", isolation_class: "host_process",
+    capability_refs: ["environment:exec", "environment:filesystem", "environment:process"],
+    conformance_ref: "conformance-run:hermes-local-v1", conformance_digest: `sha256:${"4".repeat(64)}`,
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(Object.keys(binding).sort().reduce((out, key) => ({ ...out, [key]: binding[key] }), {})));
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  const bindingDigest = `sha256:${[...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+  return {
+    environment_provider_ref: binding.provider_ref, environment_provider_version: binding.provider_version,
+    environment_provider_digest: binding.provider_digest, environment_requirement_digest: binding.requirement_digest,
+    environment_configuration_digest: binding.configuration_digest, environment_backend_kind: binding.backend_kind,
+    environment_source_class: binding.source_class, environment_isolation_class: binding.isolation_class,
+    environment_capability_refs: binding.capability_refs, environment_conformance_ref: binding.conformance_ref,
+    environment_conformance_digest: binding.conformance_digest, environment_binding_digest: bindingDigest,
+  };
+}
+
 test("Hermes Bot-Brief uses server-derived envelope identity only with an exact activation binding", async () => {
   const registration = {
     status: "registered", authorized: true, reason: "exact_server_envelope",
@@ -218,6 +240,7 @@ test("Hermes Bot-Brief uses server-derived envelope identity only with an exact 
     device_binding_status: "not_asserted",
     operator_surface: "job-passport:context-activation",
     telemetry_ref: "observatory:activation-reliability:ctx-0123456789abcdef",
+    ...await environmentRegistration(),
     credential: "must-not-cross-the-wire",
   };
   const out = await TOOLS["bot-brief"].handler(hermesClient(registration), hermes, {
@@ -269,6 +292,7 @@ test("Hermes rejects a registered-looking projection that mismatches authenticat
     device_binding_status: "not_asserted",
     operator_surface: "job-passport:context-activation",
     telemetry_ref: "observatory:activation-reliability:ctx-0123456789abcdef",
+    ...await environmentRegistration(),
   };
   await assert.rejects(
     TOOLS["bot-brief"].handler(hermesClient(base), hermes, {
@@ -297,6 +321,7 @@ test("Hermes rejects stale expiry or a profile version other than the live Bot-B
     device_binding_status: "not_asserted", operator_surface: "job-passport:context-activation",
     telemetry_ref: "observatory:activation-reliability:ctx-0123456789abcdef",
     expires_at: "2099-08-25T12:00:00Z",
+    ...await environmentRegistration(),
   };
   for (const registration of [
     { ...valid, profile_version: 3 },
@@ -308,6 +333,27 @@ test("Hermes rejects stale expiry or a profile version other than the live Bot-B
     }),
     error => error instanceof ToolError && error.payload.error === "hermes_runtime_registration_refused",
   );
+});
+
+test("Hermes refuses a forged execution-environment provider binding", async () => {
+  const environment = await environmentRegistration();
+  const registration = {
+    status: "registered", authorized: true, registration_scope: "execution_envelope", grants_authority: false,
+    runtime_registration_id: "envelope:00000000-0000-4000-8000-000000000000",
+    runtime_principal: "runtime:deal-steward", agent_principal_id: "agent:deal-steward",
+    organization_tenant_id: "carr-internal", sponsoring_human_slug: "joe", work_request: "WR-7", profile_version: 4,
+    activation_binding_id: "ctx-0123456789abcdef", native_session_ref: "native:profile-deal-steward",
+    surface: "hermes_desktop", adapter_id: "adapter:hermes-desktop", adapter_version: "v1",
+    provider_id: "provider:xai-oauth", model_id: "model:xai-oauth/grok-4.6",
+    configuration_fingerprint: `sha256:${"b".repeat(64)}`, capability_profile: "capability:metadata-only",
+    read_only: true, envelope_digest: `sha256:${"a".repeat(64)}`, device_binding_status: "not_asserted",
+    operator_surface: "job-passport:context-activation", telemetry_ref: "observatory:activation-reliability:ctx-0123456789abcdef",
+    expires_at: "2099-08-25T12:00:00Z", ...environment,
+    environment_provider_ref: "environment-provider:attacker:v1",
+  };
+  await assert.rejects(TOOLS["bot-brief"].handler(hermesClient(registration), hermes, {
+    profile_key: "deal-steward", work_request: "WR-7", activation_binding_id: "ctx-0123456789abcdef",
+  }), error => error instanceof ToolError && error.payload.error === "hermes_runtime_registration_refused");
 });
 
 test("Hermes cannot spoof sponsor, device, runtime, or activation authority before any query", async () => {

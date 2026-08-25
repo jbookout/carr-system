@@ -14,6 +14,7 @@ sys.path.insert(0, str(HERE))
 
 import activation_reliability as ar  # noqa: E402
 import execution_contract as contract  # noqa: E402
+import execution_environment as environment  # noqa: E402
 
 FIXTURES = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric"
 
@@ -61,13 +62,16 @@ def bound_envelope(b):
     env["activation_binding"] = {"bundle_digest": b["bundle_digest"], "item_refs": ["rule:scope", "memory:prior"], "mode": "canary", "retrieval_policy_version": "v1"}
     env["context_activation_ref"] = "ctx:synthetic"
     env["reliability_policy_binding"] = {"policy_ref": "policy:reliability-v1", "policy_digest": "sha256:" + "4" * 64, "risk_class": "R2", "mode": "canary"}
-    env["runtime_profile"] = {"ref": "profile:runtime-v1", "digest": "sha256:" + "5" * 64, "profile_key": "profile:runtime", "profile_version": 1, "provider_id": "provider:synthetic", "model_id": "model:synthetic", "desk": "desk:synthetic", "policy_ref": "policy:reliability-v1", "policy_digest": "sha256:" + "4" * 64, "modality": "modality:text", "reasoning_effort_ref": "effort:standard", "sampling_profile_ref": "sampling:fixed", "context_budget": 8192, "cache_policy_ref": "cache:bounded", "knowledge_cutoff_posture": "cutoff:declared", "tool_calling_mode": "tool-mode:governed"}
+    environment_binding = {"provider_ref": "environment-provider:hermes-local:v1", "provider_version": 1, "provider_digest": "sha256:" + "1" * 64, "requirement_digest": "sha256:" + "2" * 64, "configuration_digest": "sha256:" + "3" * 64, "backend_kind": "local", "source_class": "built_in", "isolation_class": "host_process", "capability_refs": ["environment:exec", "environment:filesystem", "environment:process"], "conformance_ref": "conformance-run:hermes-local-v1", "conformance_digest": "sha256:" + "4" * 64}
+    environment_binding["binding_digest"] = environment.environment_binding_digest(environment_binding)
+    env["runtime_profile"] = {"ref": "profile:runtime-v1", "digest": "sha256:" + "5" * 64, "profile_key": "profile:runtime", "profile_version": 1, "provider_id": "provider:synthetic", "model_id": "model:synthetic", "desk": "desk:synthetic", "policy_ref": "policy:reliability-v1", "policy_digest": "sha256:" + "4" * 64, "modality": "modality:text", "reasoning_effort_ref": "effort:standard", "sampling_profile_ref": "sampling:fixed", "context_budget": 8192, "cache_policy_ref": "cache:bounded", "knowledge_cutoff_posture": "cutoff:declared", "tool_calling_mode": "tool-mode:governed", "environment_provider_ref": environment_binding["provider_ref"], "environment_provider_version": environment_binding["provider_version"], "environment_provider_digest": environment_binding["provider_digest"], "environment_requirement_digest": environment_binding["requirement_digest"], "environment_configuration_digest": environment_binding["configuration_digest"], "environment_backend_kind": environment_binding["backend_kind"], "environment_source_class": environment_binding["source_class"], "environment_isolation_class": environment_binding["isolation_class"], "environment_capability_refs": environment_binding["capability_refs"], "environment_conformance_ref": environment_binding["conformance_ref"], "environment_conformance_digest": environment_binding["conformance_digest"], "environment_binding_digest": environment_binding["binding_digest"]}
     env["execution_topology"] = {"ref": "topology:single-agent-v1", "digest": "sha256:" + "6" * 64, "kind": "single_agent_loop", "harness_digest": "sha256:" + "8" * 64, "parallelism": "sequential", "code_model_step_refs": ["step:model"], "fallback_policy_ref": "fallback:stop", "stop_condition_refs": ["stop:complete"], "context_refresh_policy_ref": "refresh:bounded", "memory_policy_ref": "memory:context-only", "sandbox_ref": "sandbox:metadata", "guardrail_ref": "guardrail:default", "threat_model_ref": "threat:default"}
     env["evaluation_plan"] = {"ref": "plan:evaluation-v1", "digest": "sha256:" + "7" * 64, "lane_ref": "lane:synthetic", "risk_class": "R2", "rubric_digest": "sha256:" + "9" * 64, "case_set_digest": "sha256:" + "a" * 64, "evaluator_policy_digest": "sha256:" + "b" * 64, "evaluator_ref": "evaluator:authority", "rubric_ref": "rubric:synthetic", "evaluator_version": "version:v1", "evaluator_digest": "sha256:" + "c" * 64, "required_rungs": ["rung:smoke", "rung:regression"], "required_deterministic_check_refs": ["check:binding"], "critical_dimensions": ["dimension:correctness"], "human_acceptance_required": True, "outcome_horizon_ref": "horizon:synthetic", "outcome_horizon_not_before": "2026-08-24T12:00:00Z", "requirements": {"required_evaluator_kinds": ["deterministic", "judge", "human_acceptance"], "minimum_held_out_case_count": 1, "minimum_calibration_ref_count": 1, "maximum_critical_failure_count": 0, "maximum_critical_failure_rate": 0, "confidence_posture": "lower_bound_required", "drift_tolerance": "no_critical_regression", "independent_review_required": True, "human_acceptance_required": True, "outcome_horizon_required": True}}
     return env
 
 
 def reliability():
+    environment_binding = bound_envelope(bundle())["runtime_profile"]
     return {
         "route_digest": "sha256:" + "5" * 64, "topology_digest": "sha256:" + "6" * 64, "evaluation_plan_digest": "sha256:" + "7" * 64,
         "grounding_sufficiency": {"state": "sufficient", "evidence_refs": ["evidence:grounding"], "required_supplied": ["rule:scope"], "required_used": ["rule:scope"], "required_missing": [], "advisory_supplied": ["memory:prior"], "advisory_used": [], "freshness_failures": [], "retrieval_failures": []},
@@ -82,6 +86,8 @@ def reliability():
         "process_metrics": {"latency_ms": 1, "cost_usd": 0, "input_tokens": 1, "output_tokens": 1, "cached_input_tokens": 0, "retry_count": 0, "recovery_count": 0, "context_reconstruction_ms": 0, "human_intervention_count": 0, "security_event_refs": []},
         "eval_candidates": [],
         "shadow_comparisons": [],
+        "environment_binding_digest": environment_binding["environment_binding_digest"],
+        "environment_evidence": {"binding_digest": environment_binding["environment_binding_digest"], "session_ref": "environment-session:synthetic", "lease_state": "released", "operation_count": 1, "policy_refusal_refs": [], "security_event_refs": [], "cleanup_state": "verified", "cleanup_evidence_refs": ["evidence:cleanup"], "side_effect_state": "none", "resource_usage": {"cpu_ms": 1, "memory_peak_mb": 1, "disk_peak_mb": 0, "network_egress_bytes": 0}, "evidence_refs": ["evidence:environment"]},
         "telemetry": [],
         "learning_disposition": "none", "closure": {"state": "insufficient_evidence", "reasons": ["reason:authority_evaluation_evidence_missing"], "derived_by": "server"},
     }
@@ -165,6 +171,17 @@ def test_existing_attempt_receipt_embeds_both_sections_and_binds_exact_envelope(
     wrong["header"]["accepted_plan_digest"] = "sha256:" + "9" * 64
     wrong["bundle_digest"] = ar.context_bundle_digest(wrong)
     expect_refusal(lambda: contract.validate_attempt_receipt(receipt, env, wrong), "does not bind")
+
+
+def test_environment_receipt_must_bind_exact_provider_and_cleanup_evidence():
+    b = bundle(); env = bound_envelope(b); value = reliability()
+    ar.validate_reliability(value, envelope=env)
+    forged = copy.deepcopy(value)
+    forged["environment_binding_digest"] = "sha256:" + "f" * 64
+    expect_refusal(lambda: ar.validate_reliability(forged, envelope=env), "does not bind envelope")
+    missing = copy.deepcopy(value)
+    del missing["environment_evidence"]
+    expect_refusal(lambda: ar.validate_reliability(missing, envelope=env), "requires receipt environment evidence")
 
 
 def test_legacy_receipt_posture_is_not_activated():
