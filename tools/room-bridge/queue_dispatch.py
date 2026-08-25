@@ -40,6 +40,7 @@ RETRYABLE_DISPATCH_STATUSES = {
     "timed_out": "provider_unavailable",
     "failed": "provider_unavailable",
 }
+DESK_UNAVAILABLE_WAIT_S = 60.0
 
 
 class QueueDispatchError(ValueError):
@@ -182,6 +183,8 @@ class QueueDeskExecutor:
     def __init__(self, *, catalog: dict, adapter):
         self.catalog = validate_execution_catalog(catalog)
         self.adapter = adapter
+        self.last_ready_task_ids: set[str] = set()
+        self.last_ready_scan_complete = False
 
     def _target(self, alias: str) -> dict | None:
         target = self.catalog["targets"].get(alias)
@@ -227,8 +230,12 @@ class QueueDeskExecutor:
 
     def start(self, target_alias: str, *, dispatch_call: Callable[[str], dict],
               desk_busy: bool = False, retry_at: dict[str, str] | None = None,
-              now: str | None = None) -> dict:
+              now: str | None = None, desk_live: bool = True,
+              unavailable_since: dict[str, str] | str | None = None,
+              unavailable_wait_s: float = DESK_UNAVAILABLE_WAIT_S) -> dict:
         target = self._target(target_alias)
+        self.last_ready_task_ids = set()
+        self.last_ready_scan_complete = False
         if target is None or target.get("adapter") != "desk" or not target.get("enabled"):
             return {"outcome": "not_desk_target", "target": target_alias}
         if desk_busy:
@@ -236,11 +243,14 @@ class QueueDeskExecutor:
 
         candidates = []
         for row in self.adapter.ready_for(target["assignee"]):
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"].startswith("t_"):
+                self.last_ready_task_ids.add(row["id"])
             try:
                 parsed = parse_queue_task(row, target_alias, target)
             except QueueDispatchError:
                 continue
             candidates.append((int(row.get("created_at") or 0), parsed["task_id"], parsed))
+        self.last_ready_scan_complete = True
         if not candidates:
             return {"outcome": "idle", "target": target_alias}
         current_time = _now(now)
@@ -268,6 +278,36 @@ class QueueDeskExecutor:
             return {"outcome": "retry_wait", "task_id": candidate[1], "target": target_alias,
                     "retry_at": scheduled_at}
         _created, task_id, parsed = min(ready_candidates)
+
+        # A socket-backed desk that is known dead gets a timing-only grace
+        # window.  Crucially this happens before claim, so no Hermes attempt,
+        # dispatch, retry, or reassignment is manufactured while waiting.
+        if desk_live is False:
+            task_unavailable_since = (
+                unavailable_since.get(task_id) if isinstance(unavailable_since, dict)
+                else unavailable_since
+            )
+            if not isinstance(unavailable_wait_s, (int, float)) or isinstance(unavailable_wait_s, bool) \
+                    or unavailable_wait_s <= 0 or unavailable_wait_s > 3600:
+                self.adapter.block(task_id, "queue_unavailable", kind="transient")
+                return {"outcome": "blocked", "task_id": task_id, "code": "queue_unavailable"}
+            if task_unavailable_since is None:
+                return {"outcome": "desk_unavailable_wait", "task_id": task_id,
+                        "target": target_alias, "unavailable_since": _now(now).isoformat()}
+            try:
+                first_dead = _now(task_unavailable_since)
+            except (TypeError, ValueError, OverflowError):
+                self.adapter.block(task_id, "queue_unavailable", kind="transient")
+                return {"outcome": "blocked", "task_id": task_id, "code": "queue_unavailable"}
+            elapsed = (_now(now) - first_dead).total_seconds()
+            if elapsed < 0:
+                self.adapter.block(task_id, "queue_unavailable", kind="transient")
+                return {"outcome": "blocked", "task_id": task_id, "code": "queue_unavailable"}
+            if elapsed < unavailable_wait_s:
+                return {"outcome": "desk_unavailable_wait", "task_id": task_id,
+                        "target": target_alias, "unavailable_since": task_unavailable_since}
+            self.adapter.block(task_id, "desk_unavailable", kind="transient")
+            return {"outcome": "blocked", "task_id": task_id, "code": "desk_unavailable"}
 
         # The canonical claim is the race boundary. No dispatch happens first.
         try:

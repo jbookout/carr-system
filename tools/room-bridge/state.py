@@ -65,6 +65,7 @@ from pathlib import Path
 
 DELIVERED_CAP = 4000  # per desk; oldest dropped first — a dedup memory, not an audit log
 QUEUE_RETRY_CAP = 400  # timing hints only; canonical attempt evidence remains in Hermes
+QUEUE_UNAVAILABLE_CAP = 128  # bounded migration-safe task -> first-known-dead time
 
 
 def default_state() -> dict:
@@ -74,7 +75,7 @@ def default_state() -> dict:
             "queue_projection_checked_at": None,
             "queue_projection_last_success_at": None,
             "queue_projection_error": None,
-            "queue_retry_at": {}}
+            "queue_retry_at": {}, "queue_unavailable_since": {}}
 
 
 def load_state(path: Path) -> dict:
@@ -95,6 +96,19 @@ def load_state(path: Path) -> dict:
     data.setdefault("queue_projection_checked_at", None)
     data.setdefault("queue_projection_last_success_at", None)
     data.setdefault("queue_projection_error", None)
+    unavailable = data.get("queue_unavailable_since")
+    if not isinstance(unavailable, dict):
+        unavailable = {}
+    # Keep only the intentionally tiny migration field.  Timestamps are
+    # validated at the dispatch boundary as well; malformed values must never
+    # become an immediate deadline.
+    data["queue_unavailable_since"] = {
+        desk: value for desk, value in unavailable.items()
+        if isinstance(desk, str) and len(desk) <= 80
+        and isinstance(value, str) and len(value) <= 64
+    }
+    while len(data["queue_unavailable_since"]) > QUEUE_UNAVAILABLE_CAP:
+        data["queue_unavailable_since"].pop(next(iter(data["queue_unavailable_since"])))
     retry_at = data.get("queue_retry_at")
     if not isinstance(retry_at, dict):
         retry_at = {}
@@ -120,6 +134,28 @@ def set_queue_retry_at(state: dict, task_id: str, retry_at: str) -> None:
 def clear_queue_retry_at(state: dict, task_id: str | None) -> None:
     if isinstance(task_id, str):
         state["queue_retry_at"].pop(task_id, None)
+
+
+def set_queue_unavailable_since(state: dict, desk_name: str, when: str) -> None:
+    values = state.setdefault("queue_unavailable_since", {})
+    if not isinstance(values, dict):
+        state["queue_unavailable_since"] = values = {}
+    values[desk_name] = when
+    while len(values) > QUEUE_UNAVAILABLE_CAP:
+        values.pop(next(iter(values)))
+
+
+def clear_queue_unavailable_since(state: dict, task_id: str | None) -> None:
+    if isinstance(task_id, str):
+        state.setdefault("queue_unavailable_since", {}).pop(task_id, None)
+
+
+def prune_queue_unavailable_since(state: dict, ready_task_ids: set[str]) -> None:
+    values = state.setdefault("queue_unavailable_since", {})
+    if isinstance(values, dict):
+        for task_id in list(values):
+            if task_id not in ready_task_ids:
+                values.pop(task_id, None)
 
 
 def get_heartbeat_at(state: dict) -> str | None:

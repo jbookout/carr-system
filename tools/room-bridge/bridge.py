@@ -586,7 +586,18 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         auth_by_desk[name] = probe_auth(entry)
         registry_ext.stamp_auth(name, auth=auth_by_desk[name], path=registry.path)
 
+    # Exactly one socket liveness answer per desk per cycle.  Queue admission
+    # and the heartbeat below must consume this same fact; probing again after
+    # dispatch can otherwise turn one cycle into two contradictory truths.
+    live_by_desk = {name: probe_live(entry) for name, entry in desk_entries.items()}
+
     delivered: list[dict] = []
+    # Global stale-timer pruning is safe only after reconciliation succeeded
+    # and every configured enabled desk target was actually scanned.
+    queue_scan_complete = queue_executor is not None and not queue_reconciliation_failed
+    queue_ready_task_ids: set[str] = set()
+    queue_scanned_desks: set[str] = set()
+    required_queue_desks = set(desk_queue_targets)
     for name, entry in desk_entries.items():
         seat = entry.get("room_seat")
         if not seat:
@@ -601,9 +612,13 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             )
             if pending_outcome:
                 delivered.append(pending_outcome)
+            if (name in desk_queue_targets and state_mod.get_pending(state, name) is not None):
+                queue_scan_complete = False
             if state_mod.get_pending(state, name) is None:
                 next_queued = state_mod.pop_next_queued(state, name)
                 if next_queued is not None:
+                    if name in desk_queue_targets:
+                        queue_scan_complete = False
                     delivered.append(deliver(
                         name, entry, seat, next_queued, state=state, registry=registry,
                         results_path=results_path, add_room_turn=add_room_turn,
@@ -622,12 +637,30 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         desk_queue_targets[name], dispatch_call=dispatch_queue,
                         desk_busy=state_mod.has_queued(state, name),
                         retry_at=state["queue_retry_at"], now=now_fn(),
+                        desk_live=live_by_desk.get(name, True),
+                        unavailable_since=state.get("queue_unavailable_since", {}),
                     )
+                    queue_scan_complete = queue_scan_complete and bool(
+                        getattr(queue_executor, "last_ready_scan_complete", False))
+                    if getattr(queue_executor, "last_ready_scan_complete", False):
+                        queue_scanned_desks.add(name)
+                    queue_ready_task_ids.update(
+                        getattr(queue_executor, "last_ready_task_ids", set()))
                     if queue_outcome.get("outcome") == "retry_scheduled":
                         state_mod.set_queue_retry_at(
                             state, queue_outcome["task_id"], queue_outcome["retry_at"])
                     elif queue_outcome.get("outcome") not in {"retry_wait", "idle"}:
                         state_mod.clear_queue_retry_at(state, queue_outcome.get("task_id"))
+                    if queue_outcome.get("outcome") == "desk_unavailable_wait":
+                        state_mod.set_queue_unavailable_since(
+                            state, str(queue_outcome["task_id"]),
+                            str(queue_outcome["unavailable_since"]))
+                    elif live_by_desk.get(name, True) or queue_outcome.get("outcome") == "idle":
+                        state_mod.clear_queue_unavailable_since(
+                            state, queue_outcome.get("task_id"))
+                    elif queue_outcome.get("outcome") == "blocked":
+                        state_mod.clear_queue_unavailable_since(
+                            state, queue_outcome.get("task_id"))
                     pending = queue_outcome.get("pending")
                     if isinstance(pending, dict):
                         state_mod.set_pending(
@@ -645,16 +678,26 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         )
                     if queue_outcome.get("outcome") != "idle":
                         delivered.append({"desk": name, **queue_outcome})
-            registry_ext.stamp_heartbeat(name, live=probe_live(entry), path=registry.path)
+            registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
         except desks.DeskError as e:
+            if name in required_queue_desks:
+                queue_scan_complete = False
             code = e.code
             errors.append({"desk": name, "error": code, "detail": str(e)[:500]})
             registry_ext.stamp_heartbeat(name, live=False, path=registry.path)
         except (kanban_adapter.QueueError, queue_dispatch.QueueDispatchError) as e:
+            queue_scan_complete = False
             code = getattr(e, "code", "queue_dispatch_failed")
             errors.append({"desk": name, "error": code, "detail": str(e)[:500]})
             # A queue outage says nothing about whether the named desk is live.
-            registry_ext.stamp_heartbeat(name, live=probe_live(entry), path=registry.path)
+            registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
+
+    # A complete ready-card scan across every relevant desk makes disappearance
+    # or terminal transition observable. Never prune on a busy/failed scan.
+    if (queue_executor is not None and required_queue_desks
+            and queue_scan_complete
+            and queue_scanned_desks == required_queue_desks):
+        state_mod.prune_queue_unavailable_since(state, queue_ready_task_ids)
 
     restarts = settle_restarts(desk_entries, auth_by_desk, state,
                                 add_room_turn=add_room_turn, registry=registry,
