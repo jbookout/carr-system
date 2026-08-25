@@ -46,6 +46,7 @@ import subprocess
 import sys
 
 from migration_number_contract import (
+    FROZEN_COLLISIONS,
     MigrationNumberError,
     collision_report,
     validate_migration_names,
@@ -91,9 +92,84 @@ def worktree_paths():
     return paths or [REPO]
 
 
+TRANSIENT_ORIGIN_COLLISION = {
+    "0298": (
+        "0298_memory_kernel.sql",
+        "0298_partner_room_origin.sql",
+    ),
+}
+TRANSIENT_MEMORY_OLD = "0298_memory_kernel.sql"
+TRANSIENT_MEMORY_NEW = "0299_memory_kernel.sql"
+TRANSIENT_PARTNER = "0298_partner_room_origin.sql"
+
+
+def _head_contains_origin_main() -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+            cwd=REPO,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _repair_contents_match() -> bool:
+    """Require the 0299 memory file to be 0298 with only ordinal labels changed."""
+    try:
+        old_blob = subprocess.run(
+            ["git", "show", f"origin/main:migrations/{TRANSIENT_MEMORY_OLD}"],
+            cwd=REPO,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        ).stdout
+        with open(os.path.join(REPO, "migrations", TRANSIENT_MEMORY_NEW), "rb") as fh:
+            new_blob = fh.read()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if old_blob.count(b"0298") != 3 or new_blob.count(b"0299") != 3:
+        return False
+    expected = old_blob.replace(b"0298", b"0299")
+    return expected == new_blob
+
+
+def _repairs_exact_origin_collision(
+    remote_names: list[str],
+    current_names: list[str],
+    contents_match: bool,
+    head_contains_origin: bool,
+) -> bool:
+    """Admit only this self-expiring 0298 memory migration repair state."""
+    current = set(current_names)
+    unregistered = {
+        slot: names for slot, names in collision_report(remote_names).items()
+        if slot not in FROZEN_COLLISIONS
+    }
+    if unregistered != TRANSIENT_ORIGIN_COLLISION:
+        return False
+    if not head_contains_origin or not contents_match:
+        return False
+    if TRANSIENT_PARTNER not in remote or TRANSIENT_PARTNER not in current:
+        return False
+    if TRANSIENT_MEMORY_OLD not in remote or TRANSIENT_MEMORY_OLD in current:
+        return False
+    if TRANSIENT_MEMORY_NEW not in current:
+        return False
+    # No unrelated migration from origin/main may disappear in the repair.
+    return remote - {TRANSIENT_MEMORY_OLD} <= current
+
+
 def main():
     quiet = "--quiet" in sys.argv[1:]
     claims = {}
+    try:
+        current_names = os.listdir(os.path.join(REPO, "migrations"))
+    except OSError:
+        current_names = []
 
     # 1. everything merged on the remote
     remote = run(["git", "ls-tree", "--name-only", "origin/main", "migrations/"])
@@ -106,9 +182,27 @@ def main():
         try:
             validate_migration_names(remote_names, require_frozen=True)
         except MigrationNumberError as exc:
-            print(f"ERROR: origin/main violates the migration-number contract: {exc}",
-                  file=sys.stderr)
-            return 1
+            try:
+                validate_migration_names(current_names, require_frozen=True)
+                current_tree_valid = True
+            except MigrationNumberError:
+                current_tree_valid = False
+            exact_repair = (
+                current_tree_valid
+                and _head_contains_origin_main()
+                and _repairs_exact_origin_collision(
+                    remote_names, current_names, _repair_contents_match(), True
+                )
+            )
+            if not exact_repair:
+                print(f"ERROR: origin/main violates the migration-number contract: {exc}",
+                      file=sys.stderr)
+                return 1
+            print(
+                "WARNING: origin/main has the exact 0298 memory/partner collision; "
+                "this descendant preserves partner-room and carries memory as 0299.",
+                file=sys.stderr,
+            )
 
     # 2 & 3. every worktree's migrations/ directory, on disk, committed or not
     here = os.path.realpath(REPO)

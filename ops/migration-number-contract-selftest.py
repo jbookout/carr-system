@@ -199,6 +199,92 @@ def main() -> int:
     assert "frozen numeric collisions on origin/main" in allocation, allocation
     assert "0169: " + ", ".join(FROZEN_0169) in allocation, allocation
 
+    # The only permitted remote-collision repair is the current 0298 incident:
+    # preserve the partner-room migration, replace only the memory migration
+    # with 0299, and prove the replacement bytes differ only in ordinal labels.
+    exact_remote = [
+        "0169_control_plane_canary_fencing.sql",
+        "0169_hermes_pilot_actor.sql",
+        "0169_program5_release_binding.sql",
+        "0298_partner_room_origin.sql",
+        "0298_memory_kernel.sql",
+    ]
+    exact_current = [
+        "0169_control_plane_canary_fencing.sql",
+        "0169_hermes_pilot_actor.sql",
+        "0169_program5_release_binding.sql",
+        "0298_partner_room_origin.sql",
+        "0299_memory_kernel.sql",
+    ]
+    assert next_migration._repairs_exact_origin_collision(
+        exact_remote, exact_current, True, True
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        exact_remote + ["0298_unrelated.sql"], exact_current, True, True
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        exact_remote, exact_current[:-1], True, True
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        exact_remote, exact_current[1:], True, True
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        exact_remote, exact_current, False, True
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        exact_remote, exact_remote, True, True
+    )
+    assert not next_migration._repairs_exact_origin_collision(
+        exact_remote, exact_current, True, False
+    )
+
+    # Exercise the actual allocator path with the real migration inventory:
+    # red origin/main plus a clean checked tree succeeds and reserves 0298,
+    # while a checked tree that still contains both 0298 files refuses.
+    remote_inventory = [
+        name if name != "0299_memory_kernel.sql" else "0298_memory_kernel.sql"
+        for name in actual
+    ]
+    for colliding_current in (False, True):
+        with tempfile.TemporaryDirectory(prefix="migration-number-contract-0298-repair-") as tmp:
+            migration_dir = Path(tmp) / "migrations"
+            migration_dir.mkdir()
+            current_inventory = list(actual)
+            if colliding_current:
+                current_inventory.append("0298_memory_kernel.sql")
+            for name in current_inventory:
+                (migration_dir / name).touch()
+            original_run = next_migration.run
+            original_worktree_paths = next_migration.worktree_paths
+            original_repo = next_migration.REPO
+            original_head_check = next_migration._head_contains_origin_main
+            original_content_check = next_migration._repair_contents_match
+            try:
+                next_migration.run = lambda args, cwd=None: (
+                    "\n".join(f"migrations/{name}" for name in remote_inventory)
+                    if args[:3] == ["git", "ls-tree", "--name-only"] else ""
+                )
+                next_migration.worktree_paths = lambda: [tmp]
+                next_migration.REPO = tmp
+                next_migration._head_contains_origin_main = lambda: True
+                next_migration._repair_contents_match = lambda: True
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    repair_rc = next_migration.main()
+            finally:
+                next_migration.run = original_run
+                next_migration.worktree_paths = original_worktree_paths
+                next_migration.REPO = original_repo
+                next_migration._head_contains_origin_main = original_head_check
+                next_migration._repair_contents_match = original_content_check
+            if colliding_current:
+                assert repair_rc == 1, (repair_rc, stdout.getvalue(), stderr.getvalue())
+                assert "origin/main violates" in stderr.getvalue(), stderr.getvalue()
+            else:
+                assert repair_rc == 0, (repair_rc, stdout.getvalue(), stderr.getvalue())
+                assert "next free migration number: 0300" in stdout.getvalue(), stdout.getvalue()
+                assert "0298_memory_kernel.sql" in stdout.getvalue(), stdout.getvalue()
+
     # A COLLISION IN SOMEONE ELSE'S WORKTREE WARNS AND STILL RESERVES THE
     # NUMBERS. It does not refuse.
     #
