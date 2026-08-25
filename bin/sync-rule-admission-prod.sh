@@ -126,7 +126,7 @@ if (( ! APPLY )); then
     stamp "BLOCKED read-only delivery: the delivery tables are absent"
     print ""
     print "the delivery tables are not in this database yet, so there is nothing"
-    print "to audit. Apply migration 0288 (./bin/migrate-prod.sh), then re-run."
+    print "to audit. Apply migration 0291 (./bin/migrate-prod.sh), then re-run."
   else
     stamp "GAP read-only delivery rc=$drc"
     print ""

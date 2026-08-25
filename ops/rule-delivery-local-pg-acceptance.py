@@ -66,12 +66,22 @@ def main() -> int:
     data = json.loads(MAP.read_text())
     layers = data["rule_load_layers"]
     scope_by_id = {rid: scope for scope, ids in data["active_rule_ids"].items() for rid in ids}
+    # Scope is durable rule state, not reviewed-map configuration. Deliberately
+    # make one map-shared rule Dell-personal to prove the compiler reads
+    # rule.personal_to and the audit checks the installed result.
+    store_scope_by_id = dict(scope_by_id)
+    synthetic_dell = data["active_rule_ids"]["shared"][0]
+    store_scope_by_id[synthetic_dell] = "dell"
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")
         cur.execute("select id from actor where slug='joe'")
         joe = one(cur)[0]
+        cur.execute("""insert into actor (slug,kind,display_name) values ('dell','human','Dell')
+                       on conflict (slug) do nothing returning id""")
+        cur.execute("select id from actor where slug='dell'")
+        dell = one(cur)[0]
         # THE SEED TURNS OFF THE RULE LIFECYCLE TRIGGERS, ON A THROWAWAY DATABASE,
         # AND SAYS SO. Activating a rule for real requires the whole Joe approval
         # chain migration 0228 built — an admission contract, installed controls,
@@ -86,13 +96,13 @@ def main() -> int:
         cur.execute("delete from ops.rule_load_layer")
         cur.execute("delete from ops.rule_pack")
         cur.execute("delete from rule where statement like 'delivery acceptance %'")
-        for short, scope in sorted(scope_by_id.items()):
+        for short, scope in sorted(store_scope_by_id.items()):
             cur.execute("""insert into rule (id,statement,taught_by,status,activated_by,
                                              personal_to)
                            values (%s,%s,%s,'active',%s,%s)
                            on conflict (id) do nothing""",
                         (uuid_for(short), f"delivery acceptance {short}", joe, joe,
-                         joe if scope == "joe" else None))
+                         joe if scope == "joe" else dell if scope == "dell" else None))
 
         # ── the backfill installs exactly what the map says ──────────────────
         result = run("tools/sync-rule-load-layers.py", dsn)
@@ -112,14 +122,22 @@ def main() -> int:
         layer0 = one(cur)[0]
         expected_layer0 = sum(1 for s, e in layers.items()
                               if e["load_layer"] == "layer0"
-                              and scope_by_id[s] in ("shared", "joe"))
+                              and store_scope_by_id[s] in ("shared", "joe"))
         check("an undeclared boot selects exactly Layer 0",
               layer0 == expected_layer0, f"{layer0} != {expected_layer0}")
         check("an undeclared boot is never empty", layer0 > 0)
         cur.execute("select count(*) from ops.rule_delivery_plan('joe')")
         check("the plan still reports every in-scope rule, which is what shadow "
               "mode compares against",
-              one(cur)[0] == len(layers))
+              one(cur)[0] == sum(store_scope_by_id[s] in ("shared", "joe") for s in layers))
+
+        cur.execute("select count(*) from ops.rule_delivery_plan('dell')")
+        check("Dell's plan contains shared plus Dell-personal rules only",
+              one(cur)[0] == sum(store_scope_by_id[s] in ("shared", "dell") for s in layers))
+
+        cur.execute("select count(*) from ops.rule_delivery_plan(null)")
+        check("an unsponsored plan contains shared rules only",
+              one(cur)[0] == sum(store_scope_by_id[s] == "shared" for s in layers))
 
         cur.execute("""select count(*) from ops.rule_delivery_plan('joe', array['engineering-git'])
                         where selected""")
@@ -129,6 +147,10 @@ def main() -> int:
         cur.execute("select count(*) from ops.rule_delivery_plan(null) where scope='joe'")
         check("an unsponsored runtime gets no partner's personal rules",
               one(cur)[0] == 0)
+        cur.execute("select count(*) from ops.rule_delivery_plan('joe') where scope='dell'")
+        check("Joe's plan contains no Dell-personal rules", one(cur)[0] == 0)
+        cur.execute("select count(*) from ops.rule_delivery_plan('dell') where scope='joe'")
+        check("Dell's plan contains no Joe-personal rules", one(cur)[0] == 0)
 
         cur.execute("select count(*) from ops.rule_pack_index() where rule_count = 0")
         check("no pack in the index is empty", one(cur)[0] == 0)
@@ -137,6 +159,17 @@ def main() -> int:
 
         cur.execute("select mode from ops.rule_delivery_policy")
         check("delivery starts in shadow mode", one(cur)[0] == "shadow")
+
+        # A scope-only corruption used to pass both the backfill and audit.
+        victim = synthetic_dell
+        cur.execute("update ops.rule_load_layer set scope='shared' where short_id=%s", (victim,))
+        audit = run("ops/rule-delivery-audit.py", dsn)
+        check("the audit fails closed on a personal-scope mismatch",
+              audit.returncode != 0 and "scope_mismatch=1" in audit.stdout,
+              audit.stdout.strip())
+        result = run("tools/sync-rule-load-layers.py", dsn)
+        check("the reviewed backfill repairs a corrupted installed scope",
+              result.returncode == 0, result.stderr.strip()[-300:])
 
         # ── the refusals are real ────────────────────────────────────────────
         for label, packs, expect_fail in (

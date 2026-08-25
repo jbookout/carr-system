@@ -69,6 +69,27 @@ check("every pack has at least one rule in it",
       all(MEMBERS.get(name) for name in TRIGGERS),
       str(sorted(set(TRIGGERS) - set(MEMBERS))))
 
+# The recorder must be installed on every interactive client that consumes the
+# standing-context payload. A parity check alone cannot catch a source contract
+# that forgot one client: source and machine would agree on the same omission.
+claude_hooks = json.loads((REPO / "ops" / "config" / "hooks.json").read_text())
+codex_hooks = json.loads((REPO / "ops" / "config" / "codex-hooks.json").read_text())
+
+
+def stop_commands(document):
+    hooks = document.get("hooks", document)
+    return [hook.get("command", "")
+            for group in hooks.get("Stop", [])
+            for hook in group.get("hooks", [])]
+
+
+check("Claude Stop set carries the rule-pack drift recorder",
+      any("hooks/rule-pack-drift-gate.py" in command
+          for command in stop_commands(claude_hooks)))
+check("Codex Stop set carries the rule-pack drift recorder",
+      any("hooks/rule-pack-drift-gate.py" in command
+          for command in stop_commands(codex_hooks)))
+
 # ── the case the gate was built for: declared one thing, did another ────────
 drifted = run([
     user("clean up the loop board please"),
@@ -171,4 +192,4 @@ if FAILURES:
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-pack-drift-gate-selftest: 19 cases passed")
+print("rule-pack-drift-gate-selftest: 21 cases passed")

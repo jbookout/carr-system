@@ -930,7 +930,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
             if (wanted.has(id)) selectedById.set(id, r);
           }
         }
-        // ── THE DELIVERY PLAN (2026-08-23 rules council, migration 0288) ──────
+        // ── THE DELIVERY PLAN (2026-08-23 rules council, migration 0291) ──────
         //
         // Until now this verb had ONE mode: recite every active rule into every
         // session, whatever that session turned out to be doing. Rule 1fddcffb
@@ -951,7 +951,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // scoped set. No deploy sits between the decision and the behaviour, in
         // either direction.
         //
-        // EVERY QUERY HERE FAILS SOFT. A worker running ahead of migration 0288
+        // EVERY QUERY HERE FAILS SOFT. A worker running ahead of migration 0291
         // must behave exactly as it did before, not error at the one verb every
         // session calls first.
         const requestedPacks = [...new Set(
