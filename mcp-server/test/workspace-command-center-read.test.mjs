@@ -25,6 +25,7 @@ test("Command Center returns the contract-shaped aggregate read with canonical f
   assert.equal(queries[1].params[1], "needs_joe");
   assert.match(queries[1].sql, /awaiting_release/);
   assert.match(queries[1].sql, /released/);
+  assert.match(queries[1].sql, /updated_at\s*>=\s*now\(\)\s*-\s*interval '7 days'/);
   assert.doesNotMatch(queries[1].sql, /select\s+.*title|select\s+.*notes/i);
 });
 
@@ -39,12 +40,18 @@ test("needs_you_now is bound to the authenticated viewer", async () => {
   assert.equal(joe.needs_you_now[1].kind, "needs_joe_work");
 });
 
-test("legacy unscoped work withholds work cards but keeps deal metrics available", async () => {
+test("a relevant tenant-null row withholds work cards but keeps deal metrics available", async () => {
   const result = await readCommandCenterSummary({ client: clientFor({ legacy_unscoped_held: "1" }), actor: { slug: "joe" }, correlationId: "corr-legacy" });
   assert.equal(result.metrics[0].owned_active_deals, 2);
   assert.equal(result.doc_at_work[0].state, "unavailable");
   assert.equal(result.recent_activity[0].state, "unavailable");
   assert.deepEqual(result.needs_you_now, [{ kind: "owned_flagged_deals", count: 1, destination: "/deals?workspace=team&filter=flagged&owner=me" }]);
+});
+
+test("ordinary historical unscoped work outside the held and seven-day windows does not make the aggregate stale", async () => {
+  const result = await readCommandCenterSummary({ client: clientFor(), actor: { slug: "joe" }, correlationId: "corr-ordinary" });
+  assert.equal(result.doc_at_work[0].source.freshness, "fresh");
+  assert.equal(result.recent_activity[0].source.freshness, "fresh");
 });
 
 test("correlation id is required and read failures stay typed", async () => {
