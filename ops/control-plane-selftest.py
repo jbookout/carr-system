@@ -55,6 +55,20 @@ def main() -> int:
     errors = validate_manifest(manifest, repo=REPO)
     check("manifest validates", not errors, "; ".join(errors[:5]))
 
+    engineering = next(w for w in manifest["workflows"] if w["key"] == "engineering-slice")
+    check("an enabled on-demand workflow is explicit and has no scheduler",
+          engineering["recurrence"].get("kind") == "on_demand"
+          and engineering["recurrence"].get("schedule") is None
+          and engineering["recurrence"].get("cron") is None)
+    forged_on_demand = deepcopy(manifest)
+    forged_engineering = next(w for w in forged_on_demand["workflows"]
+                              if w["key"] == "engineering-slice")
+    forged_engineering["recurrence"].pop("kind")
+    forged_errors = validate_manifest(forged_on_demand, repo=REPO)
+    check("an enabled scheduleless workflow without on-demand posture is refused",
+          any("requires recurrence.cron or an explicit on_demand contract" in error
+              for error in forged_errors))
+
     forged_canary = deepcopy(manifest)
     deterministic = next(w for w in forged_canary["workflows"]
                          if w["execution"]["kind"] == "deterministic")

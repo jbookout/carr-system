@@ -183,7 +183,8 @@ def validate_manifest(manifest: dict[str, Any], *, repo: Path | None = None) -> 
         if not isinstance(recurrence, dict) or not recurrence.get("timezone"):
             errors.append(f"{prefix}.recurrence.timezone is required")
         if workflow.get("enabled") and not recurrence.get("cron"):
-            errors.append(f"{prefix}.enabled workflow requires recurrence.cron")
+            if recurrence.get("kind") != "on_demand" or recurrence.get("schedule") is not None:
+                errors.append(f"{prefix}.enabled workflow requires recurrence.cron or an explicit on_demand contract")
 
         execution = workflow.get("execution", {})
         kind = execution.get("kind") if isinstance(execution, dict) else None

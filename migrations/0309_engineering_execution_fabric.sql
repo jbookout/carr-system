@@ -1,4 +1,4 @@
--- 0308_engineering_execution_fabric.sql
+-- 0309_engineering_execution_fabric.sql
 --
 -- The first durable Engineering Passport runtime seam.  This is an execution
 -- proof extension over the existing Work Request, accepted sourced plan,
@@ -96,19 +96,20 @@ insert into ops.job_definition
   (key,version,enabled,risk,owner_actor,execution_kind,execution_contract,
    inventory_contract,state_contract,routing_contract,filtering_contract,
    recurrence,
-   validation_contract,retry_policy,deduplication,completion_contract)
+   validation_contract,retry_policy,deduplication,completion_contract,legacy_schedule)
 values
   ('engineering-slice',1,true,'yellow','hermes','deterministic',
-   '{"entrypoint":"mcp-server/src/engineering-runtime.js#runCodexSlice"}'::jsonb,
-   '{"kind":"engineering-passport-slice","data_class":"metadata_only"}'::jsonb,
+   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runCodexSlice","args":[],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
+   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["Codex Desktop fresh-native-session adapter"],"authority":"server-derived shadow execution only; no caller-selected identity, model, authority, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
    '{"states":["queued","running","succeeded","failed","timed_out"]}'::jsonb,
-   '{"adapter":"codex_desktop","fresh_native_session_required":true}'::jsonb,
-   '{"server_selected":true,"client_selectors":[]}'::jsonb,
-   '{"kind":"on_demand","schedule":null}'::jsonb,
-   '{"typed_envelope":true,"typed_receipt":true,"independent_review":true}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["capability.candidate_admitted","runner.identity_bound"]},"description":"an accepted capability candidate and bound runner identity admit the slice"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["command.registered_args_selected"]},"description":"only the registered fresh Codex adapter is selected"}'::jsonb,
+   '{"kind":"on_demand","schedule":null,"cron":null,"timezone":"America/Chicago","source":"MCP admit-engineering-slice only"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["command.exit_zero","command.workflow_marker_valid"]},"description":"the bounded adapter succeeds and returns its typed workflow marker"}'::jsonb,
    '{"max_attempts":2,"backoff":"constant","base_seconds":30,"cap_seconds":300,"timeout_seconds":1800}'::jsonb,
-   '{"key":"engineering_slice_idempotency"}'::jsonb,
-   '{"completion":"typed_receipt_and_independent_review"}'::jsonb)
+   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["command.receipt_persisted","command.execution_evidence_reconciles"]},"description":"lease-bound typed receipt persists and reconciles to the issued envelope","receipt_kind":"engineering_slice"}'::jsonb,
+   '{"provider":"none","status":"disabled","disable_requires":"no scheduler exists; on-demand MCP admission only"}'::jsonb)
 on conflict (key,version) do update set
   execution_contract=excluded.execution_contract,
   inventory_contract=excluded.inventory_contract,
@@ -120,6 +121,7 @@ on conflict (key,version) do update set
   retry_policy=excluded.retry_policy,
   deduplication=excluded.deduplication,
   completion_contract=excluded.completion_contract,
+  legacy_schedule=excluded.legacy_schedule,
   enabled=true,
   updated_at=now();
 
@@ -419,10 +421,10 @@ begin
      or to_regclass('ops.engineering_execution_envelope') is null
      or to_regclass('ops.engineering_slice_receipt') is null
      or to_regclass('ops.engineering_reviewer_fact') is null then
-    raise exception '0308 FAILED: typed engineering execution tables are missing';
+    raise exception '0309 FAILED: typed engineering execution tables are missing';
   end if;
   if has_table_privilege('carr_jobs','ops.engineering_slice_receipt','update')
      or has_table_privilege('carr_jobs','ops.engineering_slice_receipt','delete') then
-    raise exception '0308 FAILED: carr_jobs can rewrite typed receipts';
+    raise exception '0309 FAILED: carr_jobs can rewrite typed receipts';
   end if;
 end $$;
