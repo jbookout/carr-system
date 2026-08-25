@@ -17,6 +17,7 @@ CAPABILITIES = frozenset({
     "external-send", "destructive", "credential",
 })
 HUMAN_ONLY = frozenset({"merge-approve", "production", "external-send", "destructive", "credential"})
+TRUSTED_BROWSER_ACTORS = frozenset({"joe", "dell"})
 STATUSES = frozenset({"triage", "todo", "ready", "scheduled", "running", "review", "blocked", "done"})
 PRIORITIES = {f"P{n}": 4 - n for n in range(5)}
 SLUG = re.compile(r"^[a-z][a-z0-9-]{0,79}$")
@@ -72,6 +73,17 @@ def _target(fields: dict, catalog: dict) -> tuple[dict | None, ParseResult | Non
     return entry, None
 
 
+def _origin(turn: dict) -> tuple[str | None, ParseResult | None]:
+    """Classify authority from server-owned room provenance, never `seat`."""
+    channel = turn.get("origin_channel")
+    actor = turn.get("origin_actor")
+    if channel == "mcp" and isinstance(actor, str) and actor:
+        return "model", None
+    if channel == "browser-human" and actor in TRUSTED_BROWSER_ACTORS:
+        return "browser-human", None
+    return None, _reject("origin_untrusted", "queue enqueue requires server-derived MCP or authenticated browser-human provenance")
+
+
 def _parse_enqueue(turn: dict, head: str, body: str, catalog: dict) -> ParseResult:
     if head.count("::") != 1:
         return _reject("enqueue_malformed", "enqueue requires exactly one '::' before its title")
@@ -96,10 +108,17 @@ def _parse_enqueue(turn: dict, head: str, body: str, catalog: dict) -> ParseResu
         return rejected
     assert entry is not None
     cap = fields["cap"]
+    if cap not in CAPABILITIES:
+        return _reject("capability_unsupported", f"capability {cap!r} is not supported")
+    origin, rejected = _origin(turn)
+    if rejected:
+        return rejected
+    assert origin is not None
     if cap in HUMAN_ONLY:
-        return _reject("capability_human_only", f"capability {cap!r} is human-only")
-    if cap not in CAPABILITIES or cap != "read":
-        return _reject("capability_unsupported", "Slice 1 accepts cap=read only")
+        if origin != "browser-human":
+            return _reject("capability_human_only", f"capability {cap!r} is human-only")
+        if fields["target"] != "joe" or entry.get("adapter") != "manual":
+            return _reject("capability_human_lane_required", f"capability {cap!r} may only be queued to the Joe manual lane")
     if cap not in entry.get("capabilities", []):
         return _reject("capability_target_refused", f"target {fields['target']!r} does not accept cap={cap}")
     priority = fields.get("priority", "P2")
@@ -114,7 +133,7 @@ def _parse_enqueue(turn: dict, head: str, body: str, catalog: dict) -> ParseResu
     after = fields.get("after")
     if after is not None and not TASK_ID.fullmatch(after):
         return _reject("after_invalid", "after must be one Hermes task id")
-    finish = fields.get("finish", "done")
+    finish = fields.get("finish", "done" if cap == "read" else "review")
     if finish not in {"done", "review"}:
         return _reject("finish_invalid", "finish must be done or review")
     msg_id = str(turn.get("msg_id") or "")
@@ -126,6 +145,7 @@ def _parse_enqueue(turn: dict, head: str, body: str, catalog: dict) -> ParseResu
         "target": fields["target"], "cap": cap, "priority": PRIORITIES[priority],
         "priority_label": priority, "runtime": runtime, "key": key, "after": after,
         "finish": finish, "title": title, "body": body, "idempotency_key": idempotency,
+        "manual": bool(entry.get("adapter") == "manual" and cap in HUMAN_ONLY),
     })
 
 
@@ -162,6 +182,9 @@ def parse(turn: dict, catalog: dict) -> ParseResult:
     if head == "@queue targets":
         if body:
             return _reject("targets_malformed", "@queue targets cannot have a body")
+        _trusted, rejected = _origin(turn)
+        if rejected:
+            return rejected
         return ParseResult("targets")
     if head.startswith("@queue enqueue"):
         return _parse_enqueue(turn, head, body, catalog)

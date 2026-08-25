@@ -113,6 +113,10 @@ class KanbanAdapter:
             argv.extend(["--model", target["model"]])
         if target.get("provider"):
             argv.extend(["--provider", target["provider"]])
+        if command.get("manual"):
+            # Hermes creates this manual card blocked atomically.  It can never
+            # appear in a ready list between a create and a later transition.
+            argv.extend(["--initial-status", "blocked"])
         argv.extend(["--json", command["title"]])
         raw = self.runner(argv)
         task_id = _find_task_id(raw)
@@ -245,7 +249,8 @@ class QueueService:
             return {"handled": True, "kind": "accepted", "receipt": {"queue_accepted": {
                 **source, "task_id": created["task_id"], "target": command["target"],
                 "cap": command["cap"], "idempotency_key": command["idempotency_key"],
-                "status": "created" if created["created"] else "duplicate",
+                "status": "blocked" if command.get("manual") and created["created"] else
+                          ("created" if created["created"] else "duplicate"),
             }}}
         except QueueError as exc:
             return {"handled": True, "kind": "rejected", "receipt": {"queue_rejected": {

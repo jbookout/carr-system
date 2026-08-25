@@ -42,7 +42,7 @@ CATALOG: dict = {
             "assignee": "desk:joe-desk",
             "desk": "joe-desk",
             "effective_model": "claude",
-            "capabilities": ["read"],
+            "capabilities": ["read", "repo-write", "record-write"],
         },
         "grok": {
             "enabled": True,
@@ -51,16 +51,23 @@ CATALOG: dict = {
             "effective_model": "Grok 4.6",
             "capabilities": ["read"],
         },
+        "joe": {
+            "enabled": True,
+            "adapter": "manual",
+            "assignee": "human:joe",
+            "effective_model": "Joe manual lane",
+            "capabilities": ["merge-approve", "production", "external-send", "destructive", "credential"],
+        },
     },
 }
 
 
 def task(task_id: str = "t_queue0001", *, target: str = "sol", created_at: int = 2,
-         finish: str = "done", body: str = "Inspect locally.") -> dict:
+         finish: str = "done", cap: str = "read", body: str = "Inspect locally.") -> dict:
     meta = {
         "v": 1,
         "target": target,
-        "cap": "read",
+        "cap": cap,
         "source_seq": 81,
         "source_msg_id": "11111111-1111-4111-8111-111111111111",
         "finish": finish,
@@ -77,8 +84,13 @@ def task(task_id: str = "t_queue0001", *, target: str = "sol", created_at: int =
 
 
 def result(task_id: str = "t_queue0001", *, outcome: str = "success",
-           summary: str = "Local attestation complete.") -> str:
+           summary: str = "Local attestation complete.", code: str | None = None,
+           record_evidence: dict | None = None) -> str:
     payload = {"v": 1, "task_id": task_id, "outcome": outcome, "summary": summary}
+    if code is not None:
+        payload["code"] = code
+    if record_evidence is not None:
+        payload.update(record_evidence)
     return "Human-readable text stays at the desk.\nCARR_QUEUE_RESULT " + json.dumps(payload, separators=(",", ":"))
 
 
@@ -166,6 +178,13 @@ class QueueDispatchTests(unittest.TestCase):
                          {"outcome": "not_desk_target", "target": "grok"})
         self.assertEqual(adapter.calls, [])
 
+    def test_manual_human_lane_can_never_be_auto_dispatched(self):
+        adapter = FakeAdapter([task(target="joe", cap="merge-approve")])
+        outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "joe", dispatch_call=lambda _prompt: self.fail("manual work must never dispatch"))
+        self.assertEqual(outcome, {"outcome": "not_desk_target", "target": "joe"})
+        self.assertEqual(adapter.calls, [])
+
     def test_busy_desk_is_not_claimed_or_interrupted(self):
         adapter = FakeAdapter([task()])
         controller = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter)
@@ -249,6 +268,44 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertFalse(any("claude" in json.dumps(call) or "grok" in json.dumps(call)
                              for call in adapter.calls))
 
+    def test_capability_escalation_blocks_canonically_without_retargeting(self):
+        adapter = FakeAdapter([task()])
+        outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", dispatch_call=lambda _prompt: {
+                "status": "completed", "result": result(outcome="blocked", code="capability_escalation_required",
+                                                         summary="This needs record-write."),
+            })
+        self.assertEqual(outcome["outcome"], "blocked")
+        self.assertIn(("block", "t_queue0001", "capability_escalation_required", "needs_input"), adapter.calls)
+        self.assertFalse(any(call[0] in {"complete", "request_review", "ready_for"} and "joe" in json.dumps(call)
+                             for call in adapter.calls))
+
+    def test_record_write_success_needs_bounded_verb_and_readback_evidence(self):
+        evidence = {"mcp_verb": "update-lead", "record_id": "lead:123",
+                    "readback_verb": "read-lead", "readback_record_id": "lead:123"}
+        missing = FakeAdapter([task(target="claude", cap="record-write", finish="done")])
+        refused = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=missing).start(
+            "claude", dispatch_call=lambda _prompt: {"status": "completed", "result": result()})
+        self.assertEqual(refused["outcome"], "record_write_evidence_missing")
+        self.assertIn(("block", "t_queue0001", "record_write_evidence_missing", "needs_input"), missing.calls)
+        review = FakeAdapter([task(target="claude", cap="record-write", finish="review")])
+        reviewed = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=review).start(
+            "claude", dispatch_call=lambda _prompt: {"status": "completed", "result": result()})
+        self.assertEqual(reviewed["outcome"], "review")
+        review_call = next(call for call in review.calls if call[0] == "request_review")
+        self.assertEqual(review_call[3]["outcome"], "unverified")
+        verified = FakeAdapter([task(target="claude", cap="record-write", finish="done")])
+        completed = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=verified).start(
+            "claude", dispatch_call=lambda _prompt: {"status": "completed", "result": result(record_evidence=evidence)})
+        self.assertEqual(completed["outcome"], "done")
+        complete = next(call for call in verified.calls if call[0] == "complete")
+        self.assertEqual(complete[3]["record_write"], evidence)
+        mismatch = FakeAdapter([task(target="claude", cap="record-write", finish="done")])
+        mismatched = {**evidence, "readback_record_id": "lead:other"}
+        out = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=mismatch).start(
+            "claude", dispatch_call=lambda _prompt: {"status": "completed", "result": result(record_evidence=mismatched)})
+        self.assertEqual(out["outcome"], "record_write_evidence_missing")
+
     def test_queue_pending_result_never_reenters_room_as_a_turn(self):
         state = state_mod.default_state()
         state_mod.set_pending(
@@ -305,5 +362,10 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertLess(source.index("state_mod.pop_next_queued"), source.index("queue_executor.start"))
 
 
+def main() -> int:
+    result = unittest.main(module=__name__, exit=False)
+    return 0 if result.result.wasSuccessful() else 1
+
+
 if __name__ == "__main__":
-    unittest.main()
+    raise SystemExit(main())

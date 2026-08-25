@@ -206,7 +206,7 @@ def set_pending(state: dict, desk_name: str, *, dispatch_msg_id: str,
                  log_offset: int, injected_at: str, source_msg_id: str,
                  source_seq, origin_kind: str = "room",
                  kanban_task_id: str | None = None, target: str | None = None,
-                 finish: str | None = None) -> None:
+                 finish: str | None = None, cap: str | None = None) -> None:
     slot = _desk_slot(state, desk_name)
     slot["pending"] = {
         "dispatch_msg_id": dispatch_msg_id,
@@ -221,6 +221,7 @@ def set_pending(state: dict, desk_name: str, *, dispatch_msg_id: str,
             "kanban_task_id": kanban_task_id,
             "target": target,
             "finish": finish,
+            "cap": cap,
         })
 
 

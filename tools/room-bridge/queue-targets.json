@@ -15,7 +15,7 @@
       "assignee": "desk:joe-desk",
       "desk": "joe-desk",
       "effective_model": "claude",
-      "capabilities": ["read"]
+      "capabilities": ["read", "repo-write", "record-write"]
     },
     "ox-alpha": {
       "enabled": false,
@@ -53,7 +53,7 @@
       "adapter": "manual",
       "assignee": "human:joe",
       "effective_model": "Joe manual lane",
-      "capabilities": ["read"]
+      "capabilities": ["merge-approve", "production", "external-send", "destructive", "credential"]
     }
   }
 }
