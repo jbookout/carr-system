@@ -465,6 +465,24 @@ def test_exact_tree_refuses_rename_old_path_resurrection():
     print("PASS  exact Git tree refuses rename old-path resurrection")
 
 
+def test_exact_tree_accepts_canonical_rename():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        quill, _ = add_expected_quill_patch(tmp, b)
+        add_fixture_patch(
+            b, "0002-rename-other.patch",
+            "diff --git a/other.txt b/renamed.txt\n"
+            "similarity index 100%\n"
+            "rename from other.txt\n"
+            "rename to renamed.txt\n",
+        )
+        open(os.path.join(quill, "renamed.txt"), "w").write("base\n")
+        os.unlink(os.path.join(quill, "other.txt"))
+        exact, reason = submodule_tree_is_exact_patch(b)
+        assert exact, reason
+    print("PASS  exact Git tree accepts canonical rename")
+
+
 def test_exact_tree_accepts_canonical_new_file_patch():
     with tempfile.TemporaryDirectory() as tmp:
         b = build(tmp)
@@ -509,8 +527,9 @@ def main():
     test_exact_tree_ignores_untracked_submodule_scratch()
     test_exact_tree_refuses_deleted_file_resurrection()
     test_exact_tree_refuses_rename_old_path_resurrection()
+    test_exact_tree_accepts_canonical_rename()
     test_exact_tree_accepts_canonical_new_file_patch()
-    print("22/22 fleet-sync cases passed")
+    print("23/23 fleet-sync cases passed")
     return 0
 
 

@@ -94,8 +94,8 @@ def submodule_tree_is_exact_patch(repo: str) -> tuple[bool, str]:
             return False, "could not stage live HEAD-tracked Quill paths"
 
         additions = _git_with_index(
-            quill, index, "diff", "--name-only", "-z", "--diff-filter=A",
-            "HEAD", expected.stdout.strip(), "--")
+            quill, index, "diff", "--name-only", "-z", "--no-renames",
+            "--diff-filter=A", "HEAD", expected.stdout.strip(), "--")
         if additions.returncode != 0:
             return False, "could not enumerate canonical patch-added paths"
         raw_additions = additions.stdout
