@@ -448,6 +448,95 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertIn("queue_executor.start", source)
         self.assertLess(source.index("state_mod.pop_next_queued"), source.index("queue_executor.start"))
 
+    def test_dead_socket_waits_without_claim_dispatch_or_retry_then_blocks_once(self):
+        adapter = FakeAdapter([task()])
+        dispatched = []
+        controller = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter)
+        first = controller.start("sol", desk_live=False, now="2026-08-24T12:00:00+00:00",
+                                 unavailable_wait_s=60, dispatch_call=lambda p: dispatched.append(p))
+        self.assertEqual(first["outcome"], "desk_unavailable_wait")
+        self.assertFalse(dispatched or any(c[0] in {"claim", "reclaim"} for c in adapter.calls))
+        second = controller.start("sol", desk_live=False,
+                                  unavailable_since={first["task_id"]: first["unavailable_since"]},
+                                  now="2026-08-24T12:01:00+00:00", unavailable_wait_s=60,
+                                  dispatch_call=lambda p: dispatched.append(p))
+        self.assertEqual(second, {"outcome": "blocked", "task_id": "t_queue0001", "code": "desk_unavailable"})
+        adapter.tasks = []  # Hermes no longer returns a terminal card as ready.
+        third = controller.start("sol", desk_live=False,
+                                 unavailable_since={first["task_id"]: first["unavailable_since"]},
+                                 now="2026-08-24T12:02:00+00:00", unavailable_wait_s=60,
+                                 dispatch_call=lambda p: dispatched.append(p))
+        self.assertEqual(third["outcome"], "idle")
+        self.assertEqual(sum(c[0] == "block" for c in adapter.calls), 1)
+
+    def test_task_timer_does_not_transfer_when_old_card_disappears_and_fifo_recovers(self):
+        adapter = FakeAdapter([task(task_id="t_queue0002", created_at=2)])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter)
+        out = controller.start("sol", desk_live=False,
+                               unavailable_since={"t_queue0001": "2026-08-24T11:00:00+00:00"},
+                               now="2026-08-24T12:00:00+00:00", unavailable_wait_s=60,
+                               dispatch_call=lambda _p: None)
+        self.assertEqual(out["task_id"], "t_queue0002")
+        self.assertEqual(out["outcome"], "desk_unavailable_wait")
+        recovered = controller.start("sol", desk_live=True, dispatch_call=lambda _p: {
+            "status": "completed", "result": result("t_queue0002")})
+        self.assertEqual(recovered["outcome"], "done")
+
+    def test_malformed_or_future_unavailable_time_fails_closed(self):
+        for value in ("not-a-time", "2026-08-24T13:00:00+00:00"):
+            adapter = FakeAdapter([task()])
+            out = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+                "sol", desk_live=False, unavailable_since={"t_queue0001": value},
+                now="2026-08-24T12:00:00+00:00", dispatch_call=lambda _p: None)
+            self.assertEqual(out, {"outcome": "blocked", "task_id": "t_queue0001", "code": "queue_unavailable"})
+            self.assertFalse(any(c[0] in {"claim", "reclaim"} for c in adapter.calls))
+
+    def test_codex_session_desk_bypasses_socket_liveness_gate(self):
+        adapter = FakeAdapter([task()])
+        out = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", desk_live=True, dispatch_call=lambda _p: {
+                "status": "completed", "result": result()})
+        self.assertEqual(out["outcome"], "done")
+        self.assertIn(("claim", "t_queue0001"), adapter.calls)
+
+    def test_busy_desk_preserves_fifo_without_queue_mutation(self):
+        adapter = FakeAdapter([task(task_id="t_queue0001", created_at=1),
+                               task(task_id="t_queue0002", created_at=2)])
+        out = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", desk_busy=True, dispatch_call=lambda _p: None)
+        self.assertEqual(out["outcome"], "desk_busy")
+        self.assertFalse(any(c[0] in {"claim", "block", "reclaim"} for c in adapter.calls))
+
+    def test_unavailable_timer_persists_across_restart(self):
+        state = state_mod.default_state()
+        state_mod.set_queue_unavailable_since(state, "t_queue0001", "2026-08-24T12:00:00+00:00")
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "state.json"
+            state_mod.save_state(path, state)
+            restored = state_mod.load_state(path)
+        self.assertEqual(restored["queue_unavailable_since"], {
+            "t_queue0001": "2026-08-24T12:00:00+00:00"})
+
+    def test_cycle_has_one_liveness_probe_source_and_reuses_result(self):
+        source = inspect.getsource(bridge.run_once)
+        self.assertEqual(source.count("probe_live("), 1)
+        self.assertGreaterEqual(source.count("live_by_desk"), 3)
+        self.assertLess(source.index("live_by_desk ="), source.index("queue_executor.start"))
+
+    def test_disappeared_task_timer_is_pruned_only_after_complete_ready_scan(self):
+        state = state_mod.default_state()
+        state_mod.set_queue_unavailable_since(state, "t_queue0001", "2026-08-24T12:00:00+00:00")
+        state_mod.prune_queue_unavailable_since(state, {"t_queue0002"})
+        self.assertNotIn("t_queue0001", state["queue_unavailable_since"])
+
+    def test_pruning_requires_reconciliation_and_every_configured_desk_scan(self):
+        source = inspect.getsource(bridge.run_once)
+        self.assertIn("not queue_reconciliation_failed", source)
+        self.assertIn("queue_scanned_desks == required_queue_desks", source)
+        self.assertIn("queue_scan_complete = False", source)
+        self.assertIn("if name in required_queue_desks", source)
+        self.assertIn("and required_queue_desks", source)
+
 
 def main() -> int:
     result = unittest.main(module=__name__, exit=False)
