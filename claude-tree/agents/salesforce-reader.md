@@ -116,8 +116,12 @@ Four obstacles the script already handles, each of which cost real time to find:
 
 **3. Verify before trusting.** `SF.totals()` must match the report header figures (Total Records,
 Total Commission, Total Out of Market Deal), and `SF.missing(N)` must be `[]`. If rows are short,
-call `SF.go()` again; it is additive. Save the concatenated TSV to
-`Automation/salesforce-deals-latest.tsv`.
+call `SF.go()` again; it is additive. **Before overwriting the TSV, read the existing file and count
+its data rows (exclude the header), then compare that count with `SF.status().rows`. If the new
+capture has fewer rows, do not write it even when the capture says `done:true`: report both counts
+and stop.** A genuinely smaller report needs reconciliation, not silent replacement. Only after the
+totals, missing-row check and non-decreasing row-count guard all pass may you save the concatenated
+TSV to `Automation/salesforce-deals-latest.tsv`.
 
 **4. Reconcile.**
 
@@ -149,6 +153,8 @@ denied.
 - **Chrome is granted** because Joe's Salesforce session lives there and the capture script needs the javascript tool against the report iframe. Salesforce has no block on the extension; CoStar's rule does not apply here and must not be confused with it.
 - **The desktop Browser pane is denied** so the two platform surfaces never blur. One agent, one browser.
 - **Write is granted for exactly one file:** `Automation/salesforce-deals-latest.tsv`. Nothing else.
+  That grant does not bypass the read-and-count guard above; a partial capture never replaces the
+  last complete one.
 - **Bash is granted** to run `salesforce-diff` and to inspect the TSV.
 - **`Agent` is denied and you hold no record-layer write verbs.** Per the standing constraint an agent that can spawn does not carry write verbs; you carry neither, because every write this run implies is either a Joe-gated `--apply` or a confirm-this suggestion that a human has to rule on.
 

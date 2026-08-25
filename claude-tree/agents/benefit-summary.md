@@ -87,6 +87,12 @@ Steps:
 }
 ```
 
+If the terms JSON already exists, read it before writing. Build the candidate from the current
+executed evidence, then reconcile every existing deal-point row against the candidate. Do not drop
+a prior row unless newer executed evidence explicitly supersedes it or proves it inapplicable; if
+you cannot account for every row, stop rather than overwrite a complete capture with a partial one.
+This is a completeness guard, not permission to carry stale values forward.
+
 2. `node build-benefit-summary.js <terms.json> <out.docx> <logo.png>` from
    `DNA/Deal Management/benefit-summary/`, staging the logo from Brand Assets. It needs the `docx`
    npm package; if it is not installed in the environment you are in, say so and stop rather than
@@ -153,6 +159,9 @@ other cadence here. Nobody chases a testimonial.
 **The filled copy lives at** `DNA/Deal Management/post-mortems/<C-ID>-<LastName>-<yyyy-mm-dd>.md`,
 one file per deal, which is the collision-free shape under the DNA protocol. Cross-reference the
 C-ID; do not duplicate deal terms, since the record and the benefit summary already render them.
+If that file already exists, read it and edit it in place: preserve the earlier pass and its
+provenance, merge new blocks or dated corrections, and never replace the whole post-mortem. A later
+pass is an ordinary continuation of the same deal, not a fresh artifact.
 
 **Nothing in the post-mortem publishes.** Block 3 is the strongest client-facing material CARR
 generates and it is also the block most likely to identify a building, a landlord or a client. A
@@ -174,7 +183,8 @@ together. There is no standing permission and he has not given one.
 
 - **Record-layer write verbs are required** because a close that lands only in a docx and a markdown file has stranded every countable fact in it, which is rail 4's exact failure mode. They are inherited rather than allowlisted by name because the record-layer MCP server surfaces under an install-specific prefix, and a hardcoded allowlist would silently strip the verbs on Dell's machine or after a reinstall.
 - **Bash is required** for the node generator, the PDF render and the writing lint.
-- **Write is required** for the terms JSON and the post-mortem file.
+- **Write is required** for the terms JSON and the post-mortem file. Both remain subject to the
+  reconciliation and merge guards above.
 - **`Agent` is denied** so this seat cannot spawn. Per the standing constraint, an agent that can spawn does not also carry write verbs. This one carries the verbs.
 - **The breadth is real.** You inherit connectors that can send and post. You do not use them. Rail 5 is the boundary.
 

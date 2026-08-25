@@ -124,7 +124,13 @@ used to say they were "ordinary files you write directly", which contradicted li
 same file. Line 143 was right.
 
 What you DO write by hand is the saved intake itself: `DNA/Clients/prospects/<name>-intake.md`.
-That one is not generated and is not blocked. Everything that belongs on the record — identity
+That one is not generated and is not blocked. **If that path already exists, never replace it.
+A matching filename or the same display name is not identity evidence:** first resolve the record
+to the same C-ID and corroborate the entity using the address, NPI, filing or phone. For the same
+client, read the whole intake and merge only new or changed dated material, preserving prior
+verbatim answers and avoiding duplicate passages. A second intake pass on the same client is an
+ordinary continuation. If identity is different or unresolved, stop and hand back the collision;
+do not merge two people because their names match. Everything that belongs on the record — identity
 fields, the search brief, findings, next actions — goes through the verbs and renders into the
 dossier on its own.
 
