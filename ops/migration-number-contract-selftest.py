@@ -244,7 +244,9 @@ def main() -> int:
 
     # Exercise the actual allocator path with the real migration inventory:
     # red origin/main plus a clean checked tree succeeds and reserves 0298,
-    # while a checked tree that still contains both 0298 files refuses.
+    # while a checked tree that still contains both 0298 files refuses. The
+    # real inventory now also carries the 0301/0302 provenance migrations, so
+    # the next available number after the repair is 0303.
     remote_inventory = [
         name if name != "0299_memory_kernel.sql" else "0298_memory_kernel.sql"
         for name in actual
@@ -286,7 +288,7 @@ def main() -> int:
                 assert "origin/main violates" in stderr.getvalue(), stderr.getvalue()
             else:
                 assert repair_rc == 0, (repair_rc, stdout.getvalue(), stderr.getvalue())
-                assert "next free migration number: 0301" in stdout.getvalue(), stdout.getvalue()
+                assert "next free migration number: 0303" in stdout.getvalue(), stdout.getvalue()
                 assert "0298_memory_kernel.sql" in stdout.getvalue(), stdout.getvalue()
 
     # The same allocator path refuses if the red remote inventory is missing
