@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Prove the Joe calendar-prebrief LaunchAgent is representable in operations.
 
 The service catalog is the source of truth; ``tools/ops-record.py sync-registry``
