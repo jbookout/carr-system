@@ -18,6 +18,7 @@ import { agentProfileTools } from "./agent-profiles.js";
 import { botBriefTools } from "./bot-brief.js";
 import { memoryTools } from "./memory.js";
 import { incidentTools } from "./incident.js";
+import { evidenceActivationTools } from "./evidence-activation.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -8244,6 +8245,7 @@ Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));
 Object.assign(TOOLS, partnerRoomTools({ withEnvelope, ToolError }));
 Object.assign(TOOLS, agentProfileTools({ withEnvelope, writeEvent, ToolError }));
 Object.assign(TOOLS, botBriefTools({ ToolError, assertNoCallerAuthorityFields }));
+Object.assign(TOOLS, evidenceActivationTools({ withEnvelope, ToolError }));
 // Phase 1 CARR-native learning memory: evidence-backed context with explicit
 // candidate/promotion/correction/forgetting lifecycle. Memory never grants
 // authority; actor and sponsor scope are resolved by the server.

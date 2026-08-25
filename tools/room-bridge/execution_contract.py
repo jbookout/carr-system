@@ -30,11 +30,19 @@ ENVELOPE_FIELDS = {
     "issued_at", "expires_at", "state_binding", "phase_binding", "evaluation_context", "request",
     "server_binding", "handoff",
 }
+ENVELOPE_OPTIONAL_FIELDS = {
+    # Additive v1 activation/reliability bindings.  Legacy envelopes remain
+    # readable and are explicitly treated as not activated by the receipt
+    # posture helper; new server-issued envelopes populate these fields.
+    "activation_binding", "reliability_policy_binding", "context_activation_ref",
+    "runtime_profile", "execution_topology", "evaluation_plan",
+}
 REQUEST_FIELDS = {"job_ref", "input_digest", "data_class", "allowed_actions", "declared_expectations"}
 CLIENT_REQUEST_FIELDS = {"job_ref", "input_digest", "data_class"}
 DECLARED_EXPECTATION_FIELDS = {"plan_step_refs", "component_refs", "component_dependencies", "resource_refs"}
 COMPONENT_DEPENDENCY_FIELDS = {"component_ref", "depends_on_component_ref"}
 PLAN_FIELDS = {"id", "revision", "digest"}
+PLAN_OPTIONAL_FIELDS = {"context_binding"}
 SESSION_FIELDS = {"id", "lease_expires_at"}
 SERVER_BINDING_FIELDS = {"identity", "authority", "adapter"}
 IDENTITY_FIELDS = {
@@ -55,12 +63,17 @@ STATE_BINDING_FIELDS = {"state_version", "canonical_record_digest", "accepted_re
 RESOURCE_REVISION_FIELDS = {"resource_ref", "revision_ref", "digest"}
 PHASE_BINDING_FIELDS = {"phase_id", "session_affinity", "switch_conditions", "native_session_transfer"}
 EVALUATION_CONTEXT_FIELDS = {"experiment_arm", "auditor_mode", "evaluation_kernel_ref", "workflow_rubric_digest", "case_set_digest"}
+VERSIONED_METADATA_FIELDS = {"ref", "digest"}
+RUNTIME_METADATA_OPTIONAL_FIELDS = {"profile_key", "profile_version", "provider_id", "model_id", "desk", "policy_ref", "policy_digest", "modality", "reasoning_effort_ref", "sampling_profile_ref", "context_budget", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"}
+TOPOLOGY_METADATA_FIELDS = {"kind", "harness_digest", "parallelism", "code_model_step_refs", "fallback_policy_ref", "stop_condition_refs", "context_refresh_policy_ref", "memory_policy_ref", "sandbox_ref", "guardrail_ref", "threat_model_ref"}
+EVALUATION_METADATA_FIELDS = {"lane_ref", "risk_class", "rubric_digest", "case_set_digest", "evaluator_policy_digest", "evaluator_ref", "rubric_ref", "evaluator_version", "evaluator_digest", "required_rungs", "required_deterministic_check_refs", "critical_dimensions", "human_acceptance_required", "outcome_horizon_ref", "outcome_horizon_not_before", "requirements"}
 
 RECEIPT_FIELDS = {
     "schema_version", "attempt_id", "envelope_digest", "attempt_ordinal", "adapter", "lifecycle",
     "result", "attestation", "negative_knowledge", "telemetry", "tool_event_summaries", "observation",
     "interventions", "handoff_proposal", "visual_artifacts", "evaluation_binding",
 }
+RECEIPT_OPTIONAL_FIELDS = {"knowledge_activation", "reliability"}
 RECEIPT_EVALUATION_BINDING_FIELDS = {"evaluation_kernel_ref", "workflow_rubric_digest", "case_set_digest", "evidence_refs"}
 LIFECYCLE_FIELDS = {"started_at", "ended_at", "state", "retry_count", "recovery_count", "failure_class"}
 RESULT_FIELDS = {"job_ref", "outcome", "verification_state", "artifact_refs", "evidence_refs", "validation_results"}
@@ -311,17 +324,50 @@ def _validate_evaluation_context(value: Any) -> dict[str, Any]:
     return context
 
 
+def _validate_versioned_metadata(value: Any, label: str) -> dict[str, Any]:
+    """Validate a server-issued metadata binding without accepting secrets."""
+    extra = RUNTIME_METADATA_OPTIONAL_FIELDS if label == "execution runtime_profile" else (TOPOLOGY_METADATA_FIELDS if label == "execution execution_topology" else (EVALUATION_METADATA_FIELDS if label == "execution evaluation_plan" else set()))
+    allowed = VERSIONED_METADATA_FIELDS | extra
+    if not isinstance(value, dict) or set(value) - allowed:
+        raise ContractError(f"{label} has unknown fields")
+    row = _expect_exact({key: value[key] for key in VERSIONED_METADATA_FIELDS}, VERSIONED_METADATA_FIELDS, label)
+    _string(row["ref"], f"{label} ref", identifier=True)
+    _digest(row["digest"], f"{label} digest")
+    if label == "execution runtime_profile":
+        for field in ("profile_key", "provider_id", "model_id", "desk", "policy_ref", "modality", "reasoning_effort_ref", "sampling_profile_ref", "cache_policy_ref", "knowledge_cutoff_posture", "tool_calling_mode"):
+            if field in value: _string(value[field], f"{label} {field}")
+        if "profile_version" in value and (not isinstance(value["profile_version"], int) or value["profile_version"] < 1):
+            raise ContractError("execution runtime_profile profile_version must be positive")
+        if "policy_digest" in value: _digest(value["policy_digest"], "execution runtime_profile policy_digest")
+    return row
+
+
 def validate_execution_envelope(envelope: Any) -> dict[str, Any]:
-    value = _expect_exact(envelope, ENVELOPE_FIELDS, "execution envelope")
+    if not isinstance(envelope, dict):
+        raise ContractError("execution envelope must be an object")
+    unknown = sorted(set(envelope) - (ENVELOPE_FIELDS | ENVELOPE_OPTIONAL_FIELDS))
+    if unknown:
+        raise ContractError(f"execution envelope has unknown fields: {', '.join(unknown)}")
+    value = _expect_exact({key: envelope[key] for key in ENVELOPE_FIELDS}, ENVELOPE_FIELDS, "execution envelope")
+    value.update({key: envelope[key] for key in ENVELOPE_OPTIONAL_FIELDS if key in envelope})
     if value["schema_version"] != "execution-envelope.v1":
         raise ContractError("unsupported execution envelope schema_version")
     for field in ("envelope_id", "work_request_id"):
         _string(value[field], f"execution envelope {field}", identifier=True)
-    plan = _expect_exact(value["plan_revision"], PLAN_FIELDS, "plan_revision")
+    raw_plan = value["plan_revision"]
+    if not isinstance(raw_plan, dict):
+        raise ContractError("plan_revision must be an object")
+    unknown_plan = sorted(set(raw_plan) - (PLAN_FIELDS | PLAN_OPTIONAL_FIELDS))
+    if unknown_plan:
+        raise ContractError(f"plan_revision has unknown fields: {', '.join(unknown_plan)}")
+    plan = _expect_exact({key: raw_plan[key] for key in PLAN_FIELDS}, PLAN_FIELDS, "plan_revision")
     _string(plan["id"], "plan_revision id", identifier=True)
     if not isinstance(plan["revision"], int) or isinstance(plan["revision"], bool) or plan["revision"] < 1:
         raise ContractError("plan_revision revision must be a positive integer")
     _digest(plan["digest"], "plan_revision digest")
+    if "context_binding" in raw_plan:
+        import activation_reliability
+        activation_reliability.validate_plan_context_binding(raw_plan["context_binding"])
     session = _expect_exact(value["agent_session"], SESSION_FIELDS, "agent_session")
     _string(session["id"], "agent_session id", identifier=True)
     _timestamp(session["lease_expires_at"], "agent_session lease_expires_at")
@@ -332,6 +378,19 @@ def validate_execution_envelope(envelope: Any) -> dict[str, Any]:
     _validate_evaluation_context(value["evaluation_context"])
     _validate_request(value["request"])
     _validate_server_binding(value["server_binding"])
+    runtime_fields = ("runtime_profile", "execution_topology", "evaluation_plan")
+    if any(field in envelope for field in runtime_fields):
+        if not all(field in envelope for field in runtime_fields):
+            raise ContractError("activation envelope requires runtime, topology, and evaluation bindings together")
+        for field in runtime_fields:
+            _validate_versioned_metadata(envelope[field], f"execution {field}")
+    if "activation_binding" in envelope or "reliability_policy_binding" in envelope:
+        # Import lazily: activation_reliability imports this module's strict
+        # primitives, so a module-level import would create a cycle.
+        import activation_reliability
+        activation_reliability.validate_envelope_bindings(envelope)
+        if not all(field in envelope for field in runtime_fields):
+            raise ContractError("activated envelope requires exact runtime, topology, and evaluation bindings")
     handoff = _expect_exact(value["handoff"], HANDOFF_FIELDS | {"checkpoint_ref", "native_session_transfer"}, "handoff")
     if handoff["mode"] not in {"original", "replacement"}:
         raise ContractError("handoff mode is invalid")
@@ -491,10 +550,31 @@ def _validate_observation(value: Any) -> dict[str, Any]:
     return observation
 
 
-def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[str, Any]:
-    value = _expect_exact(receipt, RECEIPT_FIELDS, "attempt receipt")
+def validate_attempt_receipt(receipt: Any, envelope: Any | None = None, context_bundle: Any | None = None) -> dict[str, Any]:
+    if not isinstance(receipt, dict):
+        raise ContractError("attempt receipt must be an object")
+    unknown = sorted(set(receipt) - (RECEIPT_FIELDS | RECEIPT_OPTIONAL_FIELDS))
+    if unknown:
+        raise ContractError(f"attempt receipt has unknown fields: {', '.join(unknown)}")
+    value = _expect_exact({key: receipt[key] for key in RECEIPT_FIELDS}, RECEIPT_FIELDS, "attempt receipt")
     if value["schema_version"] != "attempt-receipt.v1":
         raise ContractError("unsupported attempt receipt schema_version")
+    # This projection carries only refs, enums, and bounded metrics.  Reject
+    # raw model/tool material recursively even when it is nested under an
+    # otherwise recognized receipt field.
+    raw_keys = {"raw_prompt", "raw_transcript", "tool_payload", "raw_output", "prompt", "transcript", "expected_output", "expected_answer", "held_out_expected_output", "held_out_answer"}
+    def contains_raw(value: Any) -> bool:
+        if isinstance(value, str):
+            # Receipt strings are references, enums, timestamps, or digests;
+            # no arbitrary prose body belongs in this durable projection.
+            return len(value) > 127 or bool(re.search(r"\s", value))
+        if isinstance(value, list):
+            return any(contains_raw(item) for item in value)
+        if isinstance(value, dict):
+            return any(key in raw_keys or contains_raw(item) for key, item in value.items())
+        return False
+    if contains_raw(receipt):
+        raise ContractError("attempt receipt contains raw prompt, transcript, tool, or held-out content")
     _string(value["attempt_id"], "attempt receipt attempt_id", identifier=True)
     _digest(value["envelope_digest"], "attempt receipt envelope_digest")
     evaluation_binding = _expect_exact(value["evaluation_binding"], RECEIPT_EVALUATION_BINDING_FIELDS, "attempt receipt evaluation_binding")
@@ -536,12 +616,12 @@ def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[
         if intervention["kind"] not in {"human", "automatic_recovery", "policy_refusal"}:
             raise ContractError("receipt intervention kind is invalid")
         _timestamp(intervention["occurred_at"], "receipt intervention occurred_at")
-        _string(intervention["summary"], "receipt intervention summary")
+        _string(intervention["summary"], "receipt intervention summary", identifier=True)
     proposal = _expect_exact(value["handoff_proposal"], HANDOFF_PROPOSAL_FIELDS, "receipt handoff_proposal")
     if not isinstance(proposal["proposed"], bool):
         raise ContractError("receipt handoff_proposal proposed must be boolean")
     if proposal["proposed"]:
-        _string(proposal["reason"], "receipt handoff_proposal reason")
+        _string(proposal["reason"], "receipt handoff_proposal reason", identifier=True)
         _string(proposal["replacement_session_ref"], "receipt handoff_proposal replacement_session_ref", identifier=True)
         _string(proposal["checkpoint_ref"], "receipt handoff_proposal checkpoint_ref", identifier=True)
         if proposal["requires_independent_verification"] is not True:
@@ -550,6 +630,14 @@ def validate_attempt_receipt(receipt: Any, envelope: Any | None = None) -> dict[
         raise ContractError("non-proposed handoff cannot name a reason, checkpoint, or replacement")
     if envelope is not None:
         bound = validate_execution_envelope(envelope)
+        if "knowledge_activation" in receipt or "reliability" in receipt:
+            import activation_reliability
+            if "knowledge_activation" in receipt:
+                if context_bundle is None:
+                    raise ContractError("knowledge activation requires an exact context bundle")
+                activation_reliability.validate_knowledge_activation(receipt["knowledge_activation"], context_bundle, envelope=bound, attempt_id=value["attempt_id"])
+            if "reliability" in receipt:
+                activation_reliability.validate_reliability(receipt["reliability"], envelope=bound, attempt_id=value["attempt_id"])
         _validate_visual_artifacts(value["visual_artifacts"], bound, value["attempt_id"])
         if value["envelope_digest"] != execution_envelope_digest(bound):
             raise ContractError("attempt receipt does not bind the exact execution envelope")

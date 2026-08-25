@@ -1098,7 +1098,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
       return
     fi
 
-    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate(s) pass"
+    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate program(s) pass (each program reports its own assertions)"
   else
     tail -15 "$LOGDIR/migration-grants.log" >&2
     bad migration "the app roles' grants did not survive into the built database"

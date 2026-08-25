@@ -42,6 +42,9 @@ function requestedPacks(args) {
   return [...new Set(args.packs.map(pack => pack.trim().toLowerCase()).filter(Boolean))].sort();
 }
 
+// Hermes consumes the server-issued bundle as a bounded reference list. This
+// helper is intentionally pure so the caller can attach it to the existing
+// bot brief after admission; it never accepts or renders raw context bodies.
 export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
   return {
     "bot-brief": {
@@ -52,6 +55,8 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
         properties: {
           profile_key: { type: "string", description: "Named profile from read-profiles." },
           packs: { type: "array", items: { type: "string" }, description: "Optional rule-delivery pack names to report." },
+          work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$" },
+          activation_binding_id: { type: "string", pattern: "^ctx-[0-9a-f]{16}$" },
         },
         required: ["profile_key"],
       },
@@ -73,6 +78,8 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
         const packs = requestedPacks(args);
         if (packs === null)
           throw new ToolError({ error: "packs_invalid", hint: "packs must be an array of strings" });
+        if ((args.work_request === undefined) !== (args.activation_binding_id === undefined))
+          throw new ToolError({ error: "activation_binding_pair_required" });
 
         const profileResult = await c.query(
           `select profile_key, display_name, charter, current_model, current_desk,
@@ -109,6 +116,19 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
           operational_profile: actor?.operational_profile || "full",
           human_only_authority: actor?.human === true,
         };
+        let boundContext = null;
+        if (args.work_request) {
+          await c.query("select set_config('carr.organization_tenant_id',$1::text,true)", [identity.organization_tenant_id]);
+          const assignment = await c.query("select ops.context_activation_brief_assignment($1::text,$2::text) as profile_key", [args.work_request, args.activation_binding_id]);
+          if (assignment.rows[0]?.profile_key !== profileKey) throw new ToolError({ error: "activation_profile_binding_mismatch" });
+          const rendered = await c.query("select ops.render_context_activation_for_brief($1::text,$2::text) as items", [args.work_request, args.activation_binding_id]);
+          if (!Array.isArray(rendered.rows[0]?.items)) throw new ToolError({ error: "required_context_render_refused" });
+          boundContext = { work_request: args.work_request, binding_id: args.activation_binding_id, ephemeral: true, items: rendered.rows[0].items.map((item) => {
+            if (item.delivery_mode === "inline") return item;
+            const { content, ...reference } = item;
+            return item.delivery_mode === "on_demand_tool" ? { ...reference, retrieval_tool: "render-context-activation" } : reference;
+          }) };
+        }
 
         const profile = {
           key: row.profile_key,
@@ -155,6 +175,7 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
           requested_packs: packs,
           unknown_packs: unknownPacks,
           runtime_registration: { status: "not_registered", authorized: false },
+          bound_context: boundContext,
         };
       },
     },

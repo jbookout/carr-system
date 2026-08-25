@@ -1,0 +1,22 @@
+{
+  "schema_version": "evidence-activation-acceptance-map.v1",
+  "version": "1.0.0",
+  "status": "phase1_contract_active_with_db_admission",
+  "promotion_posture": "human_review_only",
+  "cases": [
+    {"id":"required_rule_omitted_blocks","evidence":[{"file":"tools/room-bridge/test_activation_reliability.py","assertion":"test_required_omission_stale_conflict_block_and_advisory_not_applicable"}]},
+    {"id":"demotion_or_replacement_refused","evidence":[{"file":"ops/evidence-activation-db-gate.py","assertion":"assert_required_item_ref_and_classification_frozen"}]},
+    {"id":"advisory_na_reason_accepted","evidence":[{"file":"tools/room-bridge/test_activation_reliability.py","assertion":"test_required_omission_stale_conflict_block_and_advisory_not_applicable"}]},
+    {"id":"old_revision_exact_or_stale","evidence":[{"file":"ops/evidence-activation-db-gate.py","assertion":"assert_frozen_revisions_render_exactly"}]},
+    {"id":"applied_without_evidence_or_stage_blocks","evidence":[{"file":"ops/evidence-activation-db-gate.py","assertion":"applied activation missing independently checkable stage"}]},
+    {"id":"judge_cannot_override_critical_deterministic_failure","evidence":[{"file":"ops/evidence-activation-db-gate.py","assertion":"judge cannot override critical deterministic failure"}]},
+    {"id":"cheaper_critical_regression_ineligible","evidence":[{"file":"tools/room-bridge/test_execution_contract_unit.py","assertion":"eval_portfolio_is_multidimensional_bound_and_rejects_cheap_critical_regression"}]},
+    {"id":"immature_horizon_insufficient","evidence":[{"file":"tools/room-bridge/test_activation_reliability.py","assertion":"test_risk_policy_keeps_immature_evidence_insufficient"}]},
+    {"id":"deduped_proposal_never_auto_golden","evidence":[{"file":"ops/evidence-activation-db-gate.py","assertion":"exactly one replay-safe proposed eval case"}]},
+    {"id":"shadow_side_effect_security_refused","evidence":[{"file":"tools/room-bridge/test_activation_reliability.py","assertion":"test_eval_candidates_and_telemetry_are_action_bound_and_never_promoted"},{"file":"tools/test-policy-learning-envelope.py","assertion":"shadow side effects require refusal evidence"}]},
+    {"id":"heldout_output_leak_refused","evidence":[{"file":"mcp-server/test/job-passport-panel.test.mjs","assertion":"heldoutLeak"}]},
+    {"id":"cross_tenant_refused","evidence":[{"file":"ops/evidence-activation-db-gate.py","assertion":"cross-tenant activation/evaluation read leaked"}]},
+    {"id":"raw_prompt_transcript_tool_sentence_refused","evidence":[{"file":"tools/room-bridge/test_activation_reliability.py","assertion":"test_python_receipt_admission_refuses_raw_sentences"}]},
+    {"id":"one_wr_canary_joined_path","evidence":[{"file":"ops/evidence-activation-db-gate.py","assertion":"assert_joined_mcp_db_browser_path"},{"file":"mcp-server/test/job-passport-panel.test.mjs","assertion":"joined_activation_reliability_wire_and_model_room_path"}]}
+  ]
+}

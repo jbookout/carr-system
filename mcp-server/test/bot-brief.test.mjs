@@ -153,6 +153,27 @@ test("parked profile preserves null model and status, and reports unknown packs"
   assert.deepEqual(out.unknown_packs, ["missing"]);
 });
 
+test("governed bot brief refuses a mismatched assigned profile or unavailable required context", async () => {
+  const governedClient = (assignment, rendered) => ({
+    query: async (sql) => {
+      if (/from agent_profile/.test(sql)) return { rows: [profile()] };
+      if (/from doctrine_meta/.test(sql)) return { rows: [{ generation: "42" }] };
+      if (/rule_delivery_policy/.test(sql)) return { rows: [{ mode: "shadow" }] };
+      if (/rule_pack_index/.test(sql)) return { rows: [] };
+      if (/set_config/.test(sql)) return { rows: [] };
+      if (/context_activation_brief_assignment/.test(sql)) return { rows: [{ profile_key: assignment }] };
+      if (/render_context_activation_for_brief/.test(sql)) return { rows: [{ items: rendered }] };
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  });
+  const args = { profile_key: "doc", work_request: "WR-7", activation_binding_id: "ctx-0123456789abcdef" };
+  await assert.rejects(TOOLS["bot-brief"].handler(governedClient("other", []), joe, args), error => error.payload.error === "activation_profile_binding_mismatch");
+  await assert.rejects(TOOLS["bot-brief"].handler(governedClient("doc", null), joe, args), error => error.payload.error === "required_context_render_refused");
+  const brief = await TOOLS["bot-brief"].handler(governedClient("doc", [{ canonical_ref: "rule:one", delivery_mode: "on_demand_tool", content: "must not be inline" }]), joe, args);
+  assert.equal(brief.bound_context.items[0].content, undefined);
+  assert.equal(brief.bound_context.items[0].retrieval_tool, "render-context-activation");
+});
+
 test("bot-brief performs no database write", async () => {
   const client = clientFor();
   await TOOLS["bot-brief"].handler(client, joe, { profile_key: "doc" });
