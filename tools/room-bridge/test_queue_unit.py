@@ -21,6 +21,7 @@ import bridge  # noqa: E402
 import grammar  # noqa: E402
 import kanban_adapter  # noqa: E402
 import queue_grammar  # noqa: E402
+import queue_projection  # noqa: E402
 import state as state_mod  # noqa: E402
 
 
@@ -428,6 +429,40 @@ def test_projector_health_records_a_successful_empty_check():
     assert saved["queue_projection_error"] is None
 
 
+def test_bridge_passes_one_cycle_stamp_to_projector_for_idle_health_receipt():
+    class FakeQueue:
+        catalog = {"targets": {}}
+
+        def handle(self, _incoming, *, room):
+            return {"handled": False}
+
+    projector_calls = []
+    posted = []
+
+    def projector(**kwargs):
+        projector_calls.append(kwargs)
+        health = queue_projection.projection_health_receipt(
+            checked_at=kwargs["checked_at"], cursor=0, projection_digest=None)
+        kwargs["add_room_turn"](
+            body=json.dumps(health, separators=(",", ":")), seat="hermes",
+            kind="receipt", msg_id=queue_projection.health_msg_id("carr-build", 0, kwargs["checked_at"]))
+        return []
+
+    with tempfile.TemporaryDirectory() as root:
+        state_path = Path(root) / "state.json"
+        bridge.run_once(
+            state_path=state_path, read_room=lambda *_a, **_k: {"turns": []},
+            add_room_turn=lambda **kwargs: posted.append(kwargs) or {"seq": 1},
+            registry=type("Registry", (), {"entries": lambda self: {}, "path": Path(root) / "desks.json"})(),
+            queue_service=FakeQueue(), queue_projector=projector,
+            now_fn=lambda: "2026-08-24T12:00:00+00:00", read_profiles=lambda: [], log=lambda _msg: None,
+        )
+        saved = json.loads(state_path.read_text())
+    assert projector_calls[0]["checked_at"] == "2026-08-24T12:00:00+00:00"
+    assert json.loads(posted[0]["body"])["queue_projection_health"]["status"] == "ok"
+    assert saved["queue_projection_last_success_at"] == "2026-08-24T12:00:00+00:00"
+
+
 def test_corrupt_retry_timing_is_migration_safe_and_bounded():
     with tempfile.TemporaryDirectory() as root:
         state_path = Path(root) / "state.json"
@@ -523,6 +558,7 @@ def main():
     check("invalid reconciliation shape fences queue dispatch", test_bridge_invalid_reconciliation_shape_fails_closed)
     check("projector health persists a redacted failure", test_projector_health_is_persisted_and_redacts_failure_detail)
     check("projector health records a successful empty check", test_projector_health_records_a_successful_empty_check)
+    check("bridge passes one cycle stamp to idle projector", test_bridge_passes_one_cycle_stamp_to_projector_for_idle_health_receipt)
     check("retry timing migration is safe and bounded", test_corrupt_retry_timing_is_migration_safe_and_bounded)
     check("mutation guard: consumption order", test_mutation_guard_queue_parse_precedes_route_turn)
     check("disabled target reconciliation is exact and terminal-safe", test_disabled_target_reconciliation_is_exact_and_terminal_safe)
