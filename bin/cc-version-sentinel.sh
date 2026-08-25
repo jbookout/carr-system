@@ -43,6 +43,8 @@ TASK_DIR="$HOME/.claude/scheduled-tasks/cc-update-audit"
 SENTINEL="$TASK_DIR/last-audited-version.txt"
 PENDING="$TASK_DIR/pending-version.txt"
 LOG="$REPO/out/cc-version-sentinel.log"
+NOTIFY_COMMAND="${CARR_CC_VERSION_NOTIFY_COMMAND:-/usr/bin/osascript}"
+LOG="${CARR_CC_VERSION_SENTINEL_LOG:-$LOG}"
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
@@ -95,6 +97,21 @@ fi
 
 say "CHANGE current[$CUR] last_audited[$LAST]"
 
+# Latch notifications to one per distinct (current, last-audited) pair.  The
+# sentinel runs hourly and deliberately leaves last-audited-version.txt alone
+# until the audit completes; without this guard one still-pending update creates
+# a notification storm.  Preserve the first marker's detected_at so the audit
+# age remains truthful.  A different pair replaces the marker and notifies.
+if [ -f "$PENDING" ]; then
+  PENDING_CUR="$(awk -F': ' '/^current: /{print $2; exit}' "$PENDING")"
+  PENDING_LAST="$(awk -F': ' '/^last_audited: /{print $2; exit}' "$PENDING")"
+  if [ "$PENDING_CUR" = "$CUR" ] && [ "$PENDING_LAST" = "$LAST" ]; then
+    PENDING_AT="$(awk -F': ' '/^detected_at: /{print $2; exit}' "$PENDING")"
+    say "OK already notified for this change (marker since ${PENDING_AT:-unknown}) — staying quiet"
+    exit 0
+  fi
+fi
+
 if [ "$DRY" -eq 1 ]; then
   print -r -- "would notify: Claude Code changed — $CUR (last audited: $LAST)"
   exit 0
@@ -109,7 +126,7 @@ detected_at: $(date -u +%FT%TZ)" > "$PENDING"
 TITLE="Claude Code updated"
 SUBTITLE="$CUR"
 MESSAGE="Last audited: $LAST — the update audit is owed. It runs Monday, or ask for it now."
-/usr/bin/osascript -e "display notification \"$MESSAGE\" with title \"$TITLE\" subtitle \"$SUBTITLE\"" \
-  >/dev/null 2>&1 || say "WARN notification failed (osascript)"
+"$NOTIFY_COMMAND" -e "display notification \"$MESSAGE\" with title \"$TITLE\" subtitle \"$SUBTITLE\"" \
+  >/dev/null 2>&1 || say "WARN notification failed ($NOTIFY_COMMAND)"
 
 say "OK marker written, Joe notified"
