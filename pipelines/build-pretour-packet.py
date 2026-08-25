@@ -45,7 +45,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 from lib.client_asset_controls import (AssetControlRefusal, require_asset_tier,
-                                       require_declined_and_why, require_search_commentary,
+                                       require_search_commentary,
                                        write_artifact_atomically)
 from lib.drive_recovery import add_recovery_arguments, require_recovery
 
@@ -127,9 +127,28 @@ def notes_block(note, lines=3):
             + '<div class="noteline"></div>' * lines + "</div>")
 
 
+FACT_COLUMNS = 4  # .factgrid is repeat(4,1fr), collapsing to 2 under 760px
+
+
 def facts(rows):
-    return "".join(f'<div class="f"><span class="fk">{e(k)}</span>'
-                   f'<span class="fv">{e(v)}</span></div>' for k, v in rows)
+    """The fact grid draws its own rules by letting the container colour show through
+    1px gaps, which works only while every row is full. A last row that stops short
+    leaves the remaining track painted in line grey, so the card ends in a slab of
+    colour hanging off the end of the data.
+
+    Eight of the ten cards in the Hughes packet did this. Padding the row out with
+    empty cells restores it: a grid with a few blanks at the end reads as a table
+    that ran out of rows, which is what it is.
+
+    Padding to four also satisfies the two-column mobile grid, since four divides by
+    two. Anything that changes .factgrid's column count has to change FACT_COLUMNS
+    with it, which is why the number is named here rather than written inline.
+    """
+    cells = [f'<div class="f"><span class="fk">{e(k)}</span>'
+             f'<span class="fv">{e(v)}</span></div>' for k, v in rows]
+    if cells:
+        cells += ['<div class="f" aria-hidden="true"></div>'] * (-len(cells) % FACT_COLUMNS)
+    return "".join(cells)
 
 
 def media(folder, p):
@@ -186,6 +205,40 @@ def card(folder, p):
       {notes_block(p.get("note", ""))}
       {agent_line(p)}
     </section>'''
+
+
+def require_option_limit(p):
+    """One honest limit per option, carried by the option itself.
+
+    Joe's rule is that every client-facing recommendation names at least one thing
+    we would not do and why, as "one honest limit per option, stated in the document
+    rather than saved for the meeting," and it names search packets and tour
+    shortlists explicitly. Until now this packet discharged that with a back section
+    listing properties we had ruled out.
+
+    Dell, 2026-08-25: "please remove the entire last section of the report. do not
+    give additional opinion and especially on a properrty that has been deleted and
+    we arent even touring." He is right that the back section was not what the rule
+    asks for. The rule wants the limit attached to the option being recommended,
+    where the client meets it while deciding, rather than opinions about properties
+    that are not on the drive.
+
+    So the requirement moves rather than relaxes, and gets stricter in moving: every
+    option must name its limit in a `limit` field, and that text must appear verbatim
+    in the card's own copy. The field is a pointer to a sentence the client actually
+    reads, never a second version of it that can drift away from the page.
+    """
+    limit = (p.get("limit") or "").strip()
+    if not limit:
+        raise PacketRefusal(
+            f'{p["addr"]}: no limit. Every option names one honest thing against it, '
+            f'in the client\'s own words on the card (Joe\'s rule). Add "limit" with '
+            f'the sentence from this option\'s copy that states the catch.')
+    if limit not in (p.get("copy") or ""):
+        raise PacketRefusal(
+            f'{p["addr"]}: the "limit" text does not appear in this option\'s copy. '
+            f'It must quote the card verbatim, so the limit the client reads and the '
+            f'limit we claim to have given cannot drift apart. Got: {limit!r}')
 
 
 def require_photo(p):
@@ -254,12 +307,15 @@ def main():
     try:
         no_em_dash(c)
         require_search_commentary(client)
-        require_declined_and_why(client)
+        # The honest-limit rule is discharged per option by require_option_limit
+        # below, not by a back section. See that function for Joe's rule and Dell's
+        # 2026-08-25 instruction removing the section.
         require_asset_tier(c.get("asset") or {})
         for p in c["options"]:
             address_line(p)
             agent_line(p)
             require_photo(p)
+            require_option_limit(p)
     except (AssetControlRefusal, PacketRefusal) as exc:
         print(f"STOP: {exc}", file=sys.stderr)
         return 2
@@ -303,8 +359,12 @@ def main():
                    for t, d in client["findings"])
     conf = "".join(f'<div class="dq"><h4>{e(t)}</h4><p>{e(d)}</p></div>'
                    for t, d in client["confirmations"])
+    # Optional now, and omitted entirely rather than rendered as an empty heading
+    # over an empty grid.
     decl = "".join(f'<div class="dq"><h4>{e(t)}</h4><p>{e(d)}</p></div>'
-                   for t, d in client["declined_and_why"])
+                   for t, d in (client.get("declined_and_why") or []))
+    decl_block = (f'<h2><span class="secnum">What we would not do, and why</span></h2>'
+                  f'<div class="dqgrid">{decl}</div>') if decl else ""
 
     doc = f'''<!DOCTYPE html>
 <html lang="en"><head>
@@ -338,8 +398,7 @@ def main():
   <h2><span class="secnum">To confirm on your side</span></h2>
   <div class="dqgrid">{conf}</div>
 
-  <h2><span class="secnum">What we would not do, and why</span></h2>
-  <div class="dqgrid">{decl}</div>
+  {decl_block}
 </main>
 <footer>
   <div class="sig"><div>
