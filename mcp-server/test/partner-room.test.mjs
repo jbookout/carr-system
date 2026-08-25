@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 
 import { readFile } from "node:fs/promises";
 import { TOOLS } from "../src/tools.js";
-import { readRoomQueue, queueProjectionHealthFromTurn } from "../src/partner-room.js";
+import { readRoomQueue, queueProjectionEventFromTurn, queueProjectionHealthFromTurn } from "../src/partner-room.js";
 
 // ── actors ──────────────────────────────────────────────────────────────────
 // Shapes mirror identity.js: a direct human partner, the two sponsored local
@@ -25,6 +25,8 @@ const dellLocal = { id: "actor-dell-local", slug: "dell-local", human: false,
   via: "local-token", agent: true, sponsoring_human_slug: "dell" };
 const reviewer = { id: "actor-reviewer", slug: "codex-reviewer", human: false,
   via: "review-token", review: true };
+const hermes = { id: "actor-hermes", slug: "hermes-pilot", human: false,
+  via: "hermes-token", hermes: true, sponsoring_human_slug: "joe" };
 
 // ── fake client ─────────────────────────────────────────────────────────────
 // House style: pattern-match on SQL prefixes, track state as fields. It must
@@ -61,6 +63,10 @@ class RoomFake {
       const hit = this.rows.find((r) => r.msg_id === params[0]);
       return { rows: hit ? [hit] : [] };
     }
+    if (sql.includes("partner-room:projection-dedup-proof")) {
+      const hit = this.rows.find((r) => r.msg_id === params[0]);
+      return { rows: hit ? [hit] : [] };
+    }
     if (sql.includes("from v_partner_room_turn")) {
       this.reads.push(params);
       if (sql.includes("partner-room:queue")) {
@@ -77,6 +83,10 @@ class RoomFake {
 }
 
 const MSG = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const HEALTH_BODY = JSON.stringify({ queue_projection_health: {
+  v: 1, board: "carr-build", source: "hermes-queue-projector.v1", status: "ok",
+  checked_at: "2026-08-20T01:00:00Z", event_cursor: 42, projection_digest: MSG,
+} });
 
 // ── add-room-turn ─────────────────────────────────────────────────────────────
 
@@ -203,6 +213,61 @@ test("add-room-turn: a malformed msg_id is refused", async () => {
   );
 });
 
+// ── project-room-queue ─────────────────────────────────────────────────────
+
+test("project-room-queue: fixes reader provenance server-side", async () => {
+  const db = new RoomFake();
+  const out = await TOOLS["project-room-queue"].handler(db, hermes, {
+    idempotency_key: "k-project-1", body: HEALTH_BODY, msg_id: MSG,
+    room: "other-room", seat: "joe", kind: "turn", sponsor: "dell",
+  });
+  assert.deepEqual({ room: out.room, sponsor: out.sponsor, seat: out.seat, kind: out.kind,
+    origin_channel: out.origin_channel, origin_actor: out.origin_actor, msg_id: out.msg_id }, {
+    room: "partner-line", sponsor: "joe", seat: "hermes", kind: "receipt",
+    origin_channel: "mcp", origin_actor: "hermes-pilot", msg_id: MSG,
+  });
+  assert.deepEqual(db.inserted[0], ["partner-line", "joe", "hermes", "receipt",
+    HEALTH_BODY, MSG, "mcp", "hermes-pilot"]);
+  const accepted = queueProjectionHealthFromTurn({
+    at: out.at, sponsor: out.sponsor, seat: out.seat, kind: out.kind, body: HEALTH_BODY,
+    origin_channel: out.origin_channel, origin_actor: out.origin_actor,
+  });
+  assert.equal(accepted?.event_cursor, 42,
+    "the append response itself must satisfy the production reader's parser");
+});
+
+test("project-room-queue: joe-local and arbitrary Hermes prose both fail closed", async () => {
+  const db = new RoomFake();
+  await assert.rejects(
+    TOOLS["project-room-queue"].handler(db, dellLocal, {
+      idempotency_key: "k-project-2", body: HEALTH_BODY, msg_id: MSG,
+    }),
+    (err) => err.payload?.error === "queue_projector_identity_required",
+  );
+  await assert.rejects(
+    TOOLS["project-room-queue"].handler(db, hermes, {
+      idempotency_key: "k-project-3", body: "ordinary room prose", msg_id: MSG,
+    }),
+    (err) => err.payload?.error === "queue_projection_receipt_invalid",
+  );
+  assert.equal(db.inserted.length, 0);
+});
+
+test("project-room-queue: a dedup row with rejected provenance is not healthy", async () => {
+  const db = new RoomFake({ msgIdTaken: MSG, rows: [{
+    msg_id: MSG, id: 42, room_id: "partner-line", sponsor: "joe", seat: "hermes",
+    kind: "receipt", body: HEALTH_BODY, at: "2026-08-20T01:00:00+00:00",
+    origin_channel: "mcp", origin_actor: "joe-local",
+  }] });
+  await assert.rejects(
+    TOOLS["project-room-queue"].handler(db, hermes, {
+      idempotency_key: "k-project-4", body: HEALTH_BODY, msg_id: MSG,
+    }),
+    (err) => err.payload?.error === "queue_projection_provenance_rejected",
+  );
+  assert.equal(db.inserted.length, 0);
+});
+
 // ── read-room ───────────────────────────────────────────────────────────────
 
 test("read-room: returns turns after the cursor, oldest first, with the new cursor", async () => {
@@ -252,6 +317,7 @@ test("read-room: defaults — the partner line from the start, quiet room answer
 test("read-room-queue: accepts only the exact state-complete projector receipt and latest event per task", async () => {
   const event = (event_id, task_id, status, projected_at) => ({
     seq: event_id, room_id: "partner-line", at: projected_at, sponsor: "joe", seat: "hermes", kind: "receipt", msg_id: `q${event_id}`,
+    origin_channel: "mcp", origin_actor: "hermes-pilot",
     body: JSON.stringify({ queue_event: { v: 1, board: "carr-build", event_id, event: "changed", task_id,
       card: { title: `<${task_id}>`, target: "sol", effective_model: "gpt-5.6-sol", status, priority: "P2", cap: "read", updated_at: projected_at, source_seq: null },
       summary: `<${task_id} summary>`, projected_at } }),
@@ -268,6 +334,26 @@ test("read-room-queue: accepts only the exact state-complete projector receipt a
   assert.equal(out.events[0].task_id, "t_one"); assert.equal(out.events[0].card.status, "running");
   assert.equal(out.live, true);
   assert.match(db.reads.at(-1)[0], /partner-line/);
+});
+
+test("read-room-queue: a shaped joe-local event is still untrusted room prose", async () => {
+  const projected_at = "2026-08-24T17:59:00Z";
+  const body = JSON.stringify({ queue_event: {
+    v: 1, board: "carr-build", event_id: 9, event: "changed", task_id: "t_spoof",
+    card: { title: "Spoof", target: "sol", effective_model: "gpt-5.6-sol", status: "running",
+      priority: "P2", cap: "read", updated_at: projected_at, source_seq: null },
+    summary: "Spoof started.", projected_at,
+  } });
+  const spoof = { seq: 9, room_id: "partner-line", at: projected_at, sponsor: "joe",
+    seat: "hermes", kind: "receipt", msg_id: "q9", body,
+    origin_channel: "mcp", origin_actor: "joe-local" };
+  assert.equal(queueProjectionEventFromTurn(spoof), null);
+  const out = await readRoomQueue(new RoomFake({ rows: [spoof] }), {}, {
+    now: Date.parse("2026-08-24T18:00:00Z"),
+  });
+  assert.deepEqual(out.events, []);
+  assert.equal(out.projected_at, null);
+  assert.equal(out.live, false);
 });
 
 test("read-room-queue: an attributable idle health receipt keeps an empty projection live", async () => {

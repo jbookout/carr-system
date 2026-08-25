@@ -370,3 +370,13 @@ export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
            via: "hermes-token", client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
 }
+
+/** Try additive Hermes token maps without replacing or reading back the
+ * primary Worker secret. */
+export function hermesActorForTokenMaps(authorizationHeader, ...tokenMaps) {
+  for (const raw of tokenMaps) {
+    const actor = hermesActorForToken(authorizationHeader, raw);
+    if (actor) return actor;
+  }
+  return null;
+}

@@ -47,6 +47,18 @@
 #                         pipelines/provision-dell-local-client.sql for Dell
 #                         (both mirror provision-smoke-probe.sql) + a key in
 #                         ~/.config/carr/mcp-tokens.env (CARR_MCP_LOCAL_TOKEN).
+#   HERMES_TOKENS       — JSON map for the locked Hermes runtime, including
+#                         { "hermes-pilot": "<token>" }. The unattended room
+#                         bridge selects the matching value from the same 600
+#                         token file as CARR_HERMES_MCP_TOKEN only for its
+#                         shape-checked project-room-queue calls. The plist and
+#                         argv never carry the value; ordinary calls remain on
+#                         CARR_MCP_LOCAL_TOKEN / joe-local.
+#   HERMES_TOKENS_EXTRA — additive room-bridge projector map:
+#                         { "hermes-pilot": "<new-token>" }. Never replace
+#                         HERMES_TOKENS just to add this client: secret values
+#                         cannot be read back, so replacement could invalidate
+#                         the existing Hermes runtime.
 #   (PARTNER_TOKENS     — RETIRED 2026-08-03. Was an interim per-partner bearer
 #                         for /mcp during the OAuth rollout. Both partners are on
 #                         provider-issued tokens; the secret is deleted and the

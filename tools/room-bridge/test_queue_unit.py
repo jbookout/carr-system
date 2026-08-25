@@ -429,6 +429,39 @@ def test_projector_health_records_a_successful_empty_check():
     assert saved["queue_projection_error"] is None
 
 
+def test_projector_identity_rejection_cannot_record_local_health():
+    """PR #605 mocked append success and never exercised writer identity."""
+    class FakeQueue:
+        catalog = CATALOG
+
+        def handle(self, _incoming, *, room):
+            return {"handled": False}
+
+    def projector(**kwargs):
+        health = queue_projection.projection_health_receipt(
+            checked_at=kwargs["checked_at"], cursor=0, projection_digest=None)
+        kwargs["add_room_turn"](
+            body=json.dumps(health, separators=(",", ":")), seat="hermes", kind="receipt",
+            msg_id=queue_projection.health_msg_id("carr-build", 0, kwargs["checked_at"]))
+        return []
+
+    def rejected_provenance(**_kwargs):
+        raise RuntimeError("project-room-queue rejected provenance")
+
+    with tempfile.TemporaryDirectory() as root:
+        state_path = Path(root) / "state.json"
+        summary = bridge.run_once(
+            state_path=state_path, read_room=lambda *_a, **_k: {"turns": []},
+            add_room_turn=lambda **_k: {"seq": 1}, project_room_turn=rejected_provenance,
+            registry=type("Registry", (), {"entries": lambda self: {}, "path": Path(root) / "desks.json"})(),
+            queue_service=FakeQueue(), queue_projector=projector,
+            now_fn=lambda: "2026-08-24T12:00:00+00:00", read_profiles=lambda: [], log=lambda _msg: None)
+        saved = json.loads(state_path.read_text())
+    assert saved["queue_projection_last_success_at"] is None
+    assert saved["queue_projection_error"] == "queue_projection_failed"
+    assert any(error["desk"] == "(queue-projector)" for error in summary["errors"])
+
+
 def test_bridge_passes_one_cycle_stamp_to_projector_for_idle_health_receipt():
     class FakeQueue:
         catalog = {"targets": {}}
@@ -453,6 +486,7 @@ def test_bridge_passes_one_cycle_stamp_to_projector_for_idle_health_receipt():
         bridge.run_once(
             state_path=state_path, read_room=lambda *_a, **_k: {"turns": []},
             add_room_turn=lambda **kwargs: posted.append(kwargs) or {"seq": 1},
+            project_room_turn=lambda **kwargs: posted.append(kwargs) or {"seq": 1},
             registry=type("Registry", (), {"entries": lambda self: {}, "path": Path(root) / "desks.json"})(),
             queue_service=FakeQueue(), queue_projector=projector,
             now_fn=lambda: "2026-08-24T12:00:00+00:00", read_profiles=lambda: [], log=lambda _msg: None,
@@ -558,6 +592,7 @@ def main():
     check("invalid reconciliation shape fences queue dispatch", test_bridge_invalid_reconciliation_shape_fails_closed)
     check("projector health persists a redacted failure", test_projector_health_is_persisted_and_redacts_failure_detail)
     check("projector health records a successful empty check", test_projector_health_records_a_successful_empty_check)
+    check("projector identity rejection cannot record local health", test_projector_identity_rejection_cannot_record_local_health)
     check("bridge passes one cycle stamp to idle projector", test_bridge_passes_one_cycle_stamp_to_projector_for_idle_health_receipt)
     check("retry timing migration is safe and bounded", test_corrupt_retry_timing_is_migration_safe_and_bounded)
     check("mutation guard: consumption order", test_mutation_guard_queue_parse_precedes_route_turn)

@@ -71,6 +71,8 @@ WRITE_ACTION_EXACT = {
                                   # same exact-entry treatment
     "open-investigation-branch",  # sibling of open-investigation, same reasoning
     "presence-lease",
+    "project-room-queue",   # shape-checked unattended room projection write;
+                              # "project" is not generalized because projection reads exist
     "report-problem",       # Program 6 additive Work Request capture; "report"
                               # is not generalized because report-style reads exist
     "review-and-triage",    # Program 6 human state transition; exact because
