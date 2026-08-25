@@ -72,12 +72,14 @@ ROLE_GRANT_MIGRATIONS = {
     "carr_calendar_prebrief_canary_jobs": "0229_calendar_prebrief_projection.sql",
     "carr_calendar_prebrief_attestors": "0229_calendar_prebrief_projection.sql",
     "carr_calendar_prebrief_email_resolver": "0229_calendar_prebrief_projection.sql",
+    "carr_program5_forward_fix_verifiers": "0315_program5_forward_fix_rehearsal.sql",
     "carr_renewal_source_attestors": "0249_renewal_signed_source_ingress.sql",
 }
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence",
              "carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
              "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver",
+             "carr_program5_forward_fix_verifiers",
              "carr_renewal_source_attestors"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
