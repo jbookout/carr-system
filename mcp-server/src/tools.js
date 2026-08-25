@@ -19,6 +19,7 @@ import { botBriefTools } from "./bot-brief.js";
 import { memoryTools } from "./memory.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
+import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -163,7 +164,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory")
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice")
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -8260,3 +8261,7 @@ Object.assign(TOOLS, memoryTools({ withEnvelope, writeEvent, ToolError, assertNo
 // boundary into the grants and the verb surface should not be laxer than the
 // grants are. See migrations/0286 for the permission half.
 Object.assign(TOOLS, incidentTools({ withEnvelope, writeEvent, ToolError, authorizationClassForActor }));
+
+// Engineering Passport runtime: typed plan registration, server-derived
+// admission, and read-only closure projection over the canonical job ledger.
+Object.assign(TOOLS, engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }));
