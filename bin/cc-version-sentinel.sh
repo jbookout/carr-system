@@ -43,6 +43,8 @@ TASK_DIR="$HOME/.claude/scheduled-tasks/cc-update-audit"
 SENTINEL="$TASK_DIR/last-audited-version.txt"
 PENDING="$TASK_DIR/pending-version.txt"
 LOG="$REPO/out/cc-version-sentinel.log"
+NOTIFY_COMMAND="${CARR_CC_VERSION_NOTIFY_COMMAND:-/usr/bin/osascript}"
+LOG="${CARR_CC_VERSION_SENTINEL_LOG:-$LOG}"
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
@@ -124,7 +126,7 @@ detected_at: $(date -u +%FT%TZ)" > "$PENDING"
 TITLE="Claude Code updated"
 SUBTITLE="$CUR"
 MESSAGE="Last audited: $LAST — the update audit is owed. It runs Monday, or ask for it now."
-/usr/bin/osascript -e "display notification \"$MESSAGE\" with title \"$TITLE\" subtitle \"$SUBTITLE\"" \
-  >/dev/null 2>&1 || say "WARN notification failed (osascript)"
+"$NOTIFY_COMMAND" -e "display notification \"$MESSAGE\" with title \"$TITLE\" subtitle \"$SUBTITLE\"" \
+  >/dev/null 2>&1 || say "WARN notification failed ($NOTIFY_COMMAND)"
 
 say "OK marker written, Joe notified"
