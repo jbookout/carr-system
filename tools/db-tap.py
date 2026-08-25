@@ -43,7 +43,6 @@ import importlib.util
 import os
 import pathlib
 import re
-import shutil
 import subprocess
 import sys
 import tomllib
@@ -60,15 +59,8 @@ NEONCTL = os.path.join(REPO, "mcp-server", "node_modules", ".bin", "neonctl")
 # two Homebrew prefixes therefore resolved to the bare name on that machine and
 # every psql path died as FileNotFoundError deep inside subprocess — see
 # psql_bin() below, which now refuses in words instead.
-_USER_LOCAL = os.path.join(os.path.expanduser("~"), ".local")
-PSQL_CANDIDATES = [
-    "/opt/homebrew/opt/libpq/bin/psql",
-    "/usr/local/opt/libpq/bin/psql",
-    os.path.join(_USER_LOCAL, "bin", "psql"),
-    os.path.join(_USER_LOCAL, "pgsql", "bin", "psql"),
-    "psql",
-]
 from lib.local_principal import LocalPrincipalError, local_actor_slug as _established_actor_slug
+from lib.machine_prerequisites import PSQL_CANDIDATES, find_executable
 RECEIPT_LOG = os.path.join(REPO, "out", "break-glass-receipts.log")
 
 
@@ -357,14 +349,9 @@ def psql_bin() -> str:
     A bare name is only a real answer if it actually resolves on PATH, so it is
     resolved here rather than assumed.
     """
-    for candidate in PSQL_CANDIDATES:
-        if os.path.sep in candidate:
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-            continue
-        found = shutil.which(candidate)
-        if found:
-            return found
+    found = find_executable(PSQL_CANDIDATES)
+    if found:
+        return found
     sys.exit(
         "db-tap: NO POSTGRES CLIENT ON THIS MACHINE — `psql` is not installed.\n"
         "  This is a missing dependency, NOT a database or credential failure;\n"

@@ -49,6 +49,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
+
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
 REPO_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -95,6 +98,7 @@ def _canonical_repo(here):
 
 
 REPO = _canonical_repo(REPO_HERE)
+PREREQUISITE_CHECK = machine_prerequisites
 
 # `git -C <path>` IS NOT A GUARANTEE OF WHICH REPOSITORY YOU HIT. Every variable
 # below outranks both -C and the working directory, and git exports several of
@@ -804,6 +808,10 @@ def cmd_check():
     ]
     drift = missing + untracked + different + disallowed
     if not drift and not unversioned:
+        prerequisite_report = prerequisite_failure_report(PREREQUISITE_CHECK(REPO))
+        if prerequisite_report:
+            print(prerequisite_report)
+            return 1
         print(f"config-as-code: OK — {len(pairs())} items, repo matches machine")
         return 0
     if not drift and unversioned:

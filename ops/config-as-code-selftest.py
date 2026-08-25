@@ -19,6 +19,9 @@ spec = importlib.util.spec_from_file_location(
 assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+# The fixture below tests config reconciliation. Machine dependencies have their
+# own hermetic suite and must not be inferred from a temporary HOME.
+setattr(mod, "PREREQUISITE_CHECK", lambda _repo: [])
 
 DESIRED = {"hooks": {
     "Stop": [{"hooks": [{
