@@ -154,6 +154,25 @@ test("a controller dispatch failure records the canonical retry receipt without 
   assert.equal(calls.filter(sql => typeof sql === "string" && sql.includes("ops.fail_job")).length, 1);
 });
 
+test("the controller chooses the newest immutable successor envelope for an idempotent job", async () => {
+  const typed = controllerPlan();
+  const claim = { definition_key: "engineering-slice", job_id: "66666666-6666-4666-8666-666666666666", attempt: 1, lease_token: "77777777-7777-4777-8777-777777777777", envelope_id: "88888888-8888-4888-8888-888888888888", envelope_digest: `sha256:${"a".repeat(64)}`, envelope: { server_binding: { adapter: { surface: "codex_desktop" } } }, payload: { work_request: "WR-301", slice_ref: "slice:one", plan_digest: typed.plan_digest } };
+  let envelopeQuery = "";
+  const c = { query: async (sql) => {
+    if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
+    if (sql.includes("engineering_execution_envelope")) {
+      envelopeQuery = sql;
+      return { rows: [{ id: claim.envelope_id, envelope: claim.envelope, envelope_digest: claim.envelope_digest }] };
+    }
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
+    if (sql.includes("ops.fail_job")) return { rows: [{ state: "retry_wait" }] };
+    return { rows: [] };
+  } };
+  await runEngineeringWorker({ c, worker: "engineering-worker", desk: "engineering-codex", ToolError: Error,
+    dispatchEnvelope: async () => { throw new Error("stop after controller binding"); } });
+  assert.match(envelopeQuery, /order by issued_at desc, id desc limit 1/i);
+});
+
 test("admission fails closed when a DAG dependency lacks a passed independent review", async () => {
   const first = {
     slice_ref: "slice:one", ordinal: 1, objective: "First", definition_of_done: "A receipt exists",

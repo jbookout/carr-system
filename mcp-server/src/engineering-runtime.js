@@ -361,7 +361,15 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
   const claimed = await c.query("select * from ops.engineering_claim_slice($1::text,$2::integer,1800)", [worker, limit]);
   const rows = [];
   for (const job of claimed.rows) {
-    const bound = await c.query("select * from ops.engineering_execution_envelope where job_id=$1", [job.job_id]);
+    // Sponsored-authority recovery may create an immutable successor envelope
+    // for the same idempotent job.  Never let the controller's choice depend
+    // on an unspecified row order (which could resend an expired/read-only
+    // predecessor); the most recently issued envelope is the only candidate
+    // that may receive this fresh lease.
+    const bound = await c.query(
+      "select * from ops.engineering_execution_envelope where job_id=$1 order by issued_at desc, id desc limit 1",
+      [job.job_id],
+    );
     if (!bound.rows.length || !bound.rows[0].envelope) {
       rows.push({ ...job, controller_error: "engineering_envelope_not_found" });
       continue;
