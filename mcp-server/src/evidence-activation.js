@@ -220,6 +220,7 @@ export function evidenceActivationTools({ withEnvelope, ToolError }) {
         if (!WR.test(String(args.human_ref || "")) || !/^PLAN-[0-9a-f]{12}-v[1-9][0-9]*$/.test(String(args.plan_ref || "")) || !UUID.test(String(args.idempotency_key || "")))
           throw new ToolError({ error: "activation_reference_invalid" });
         const tenant = organizationTenantForActor(actor);
+        await c.query("select set_config('carr.organization_tenant_id',$1::text,true) /* activate-context-bundle:tenant */", [tenant]);
         const compiled = await c.query("select ops.compile_context_bundle($1::text,$2::text,$3::text) as bundle /* activate-context-bundle:compile */", [args.human_ref, args.plan_ref, tenant]);
         const bundle = compiled.rows[0]?.bundle;
         if (!bundle) throw new ToolError({ error: "activation_plan_not_ready" });
