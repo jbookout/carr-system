@@ -240,10 +240,13 @@ export function evidenceActivationTools({ withEnvelope, ToolError }) {
       handler: async (c, actor, args) => {
         if (!WR.test(String(args.human_ref || "")) || !/^ctx-[0-9a-f]{16}$/.test(String(args.binding_id || "")))
           throw new ToolError({ error: "activation_reference_invalid" });
-        await c.query("select set_config('carr.organization_tenant_id',$1::text,true) /* read-context-activation:tenant */", [organizationTenantForActor(actor)]);
         const row = (await c.query(
-          "select ops.read_context_activation($1::text,$2::text) as activation /* read-context-activation */",
-          [args.human_ref, args.binding_id],
+          `with tenant_scope as materialized (
+             select set_config('carr.organization_tenant_id',$1::text,true) /* read-context-activation:tenant */
+           )
+           select ops.read_context_activation($2::text,$3::text) as activation
+             from tenant_scope /* read-context-activation */`,
+          [organizationTenantForActor(actor), args.human_ref, args.binding_id],
         )).rows[0]?.activation;
         if (!row) throw new ToolError({ error: "activation_not_found" });
         return { ok: true, human_ref: args.human_ref, binding_id: args.binding_id, activation: row };
@@ -254,8 +257,14 @@ export function evidenceActivationTools({ withEnvelope, ToolError }) {
       inputSchema: { type: "object", additionalProperties: false, properties: { human_ref: { type: "string" }, binding_id: { type: "string" } }, required: ["human_ref", "binding_id"] },
       handler: async (c, actor, args) => {
         if (!WR.test(String(args.human_ref || "")) || !/^ctx-[0-9a-f]{16}$/.test(String(args.binding_id || ""))) throw new ToolError({ error: "activation_reference_invalid" });
-        await c.query("select set_config('carr.organization_tenant_id',$1::text,true) /* render-context-activation:tenant */", [organizationTenantForActor(actor)]);
-        const rows = (await c.query("select ops.render_context_activation_for_brief($1::text,$2::text) as items /* render-context-activation */", [args.human_ref, args.binding_id])).rows[0]?.items;
+        const rows = (await c.query(
+          `with tenant_scope as materialized (
+             select set_config('carr.organization_tenant_id',$1::text,true) /* render-context-activation:tenant */
+           )
+           select ops.render_context_activation_for_brief($2::text,$3::text) as items
+             from tenant_scope /* render-context-activation */`,
+          [organizationTenantForActor(actor), args.human_ref, args.binding_id],
+        )).rows[0]?.items;
         if (!Array.isArray(rows)) throw new ToolError({ error: "context_render_refused" });
         return { ok: true, human_ref: args.human_ref, binding_id: args.binding_id, ephemeral: true, items: rows };
       },
@@ -271,6 +280,7 @@ export function evidenceActivationTools({ withEnvelope, ToolError }) {
       handler: async (c, actor, args) => withEnvelope(c, actor, "issue-execution-envelope", args, async () => {
         if (!WR.test(String(args.human_ref || "")) || !/^ctx-[0-9a-f]{16}$/.test(String(args.binding_id || "")) || !UUID.test(String(args.idempotency_key || "")))
           throw new ToolError({ error: "execution_envelope_reference_invalid" });
+        await c.query("select set_config('carr.organization_tenant_id',$1::text,true) /* issue-execution-envelope:tenant */", [organizationTenantForActor(actor)]);
         const row = (await c.query(
           "select * from ops.issue_execution_envelope_v1($1::text,$2::text,$3::uuid) /* issue-execution-envelope */",
           [args.human_ref, args.binding_id, args.idempotency_key],
