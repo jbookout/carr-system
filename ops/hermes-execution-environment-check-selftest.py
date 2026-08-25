@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import pathlib
+import subprocess
 import tempfile
 
 
@@ -17,10 +18,10 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def fake_tree(root: pathlib.Path, backend: str = "local") -> tuple[pathlib.Path, pathlib.Path]:
+def fake_tree(root: pathlib.Path, backend: str = "local", version: str = "0.20.5") -> tuple[pathlib.Path, pathlib.Path, str]:
     binary = root / "hermes"
     binary.write_text(
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Hermes Agent v0.20.5 (fixture)'; exit 0; fi\n"
+        f"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Hermes Agent v{version} (fixture)'; exit 0; fi\n"
         f"if [ \"$1\" = \"config\" ]; then echo '{backend}'; exit 0; fi\nexit 1\n",
         encoding="utf-8",
     )
@@ -32,15 +33,33 @@ def fake_tree(root: pathlib.Path, backend: str = "local") -> tuple[pathlib.Path,
         encoding="utf-8",
     )
     (source / "base.py").write_text("class BaseEnvironment:\n    pass\n", encoding="utf-8")
-    return binary, root / "source"
+    source_root = root / "source"
+    subprocess.run(["git", "-C", str(source_root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(source_root), "add", "."], check=True)
+    subprocess.run([
+        "git", "-C", str(source_root), "-c", "user.name=Fixture", "-c",
+        "user.email=fixture@example.invalid", "commit", "-qm", "fixture",
+    ], check=True)
+    commit = subprocess.run(
+        ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    binary.write_text(
+        "#!/bin/sh\n"
+        f"if [ \"$1\" = \"--version\" ]; then echo 'Hermes Agent v{version} (fixture) upstream {commit[:8]} local {commit[:8]}'; exit 0; fi\n"
+        f"if [ \"$1\" = \"config\" ]; then echo '{backend}'; exit 0; fi\nexit 1\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    return binary, source_root, commit
 
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as temporary:
-        binary, source = fake_tree(pathlib.Path(temporary))
+        binary, source, commit = fake_tree(pathlib.Path(temporary))
         local_source = source / "tools" / "environments" / "local.py"
         expected = "sha256:" + hashlib.sha256(local_source.read_bytes()).hexdigest()
-        passed = MODULE.check(binary, source, expected_implementation_digest=expected)
+        passed = MODULE.check(binary, source, expected_implementation_digest=expected, expected_upstream_commit=commit, expected_local_head=commit)
         assert passed["status"] == "passed"
         assert passed["contains_secrets"] is False
         assert passed["implementation_digest"] == expected
@@ -50,28 +69,35 @@ def main() -> int:
             "class LocalEnvironment:\n    def cleanup(self): pass\n    def _kill_process(self, proc): return 0\n",
             encoding="utf-8",
         )
-        mutated = MODULE.check(binary, source, expected_implementation_digest=expected)
+        mutated = MODULE.check(binary, source, expected_implementation_digest=expected, expected_upstream_commit=commit, expected_local_head=commit)
         assert mutated["status"] == "failed"
         assert mutated["check_results"]["check:implementation-digest-exact"] is False
         assert mutated["run_digest"] != original_run_digest
     with tempfile.TemporaryDirectory() as temporary:
-        binary, source = fake_tree(pathlib.Path(temporary), "remote")
+        binary, source, commit = fake_tree(pathlib.Path(temporary), "remote")
         local_source = source / "tools" / "environments" / "local.py"
         expected = "sha256:" + hashlib.sha256(local_source.read_bytes()).hexdigest()
-        failed = MODULE.check(binary, source, expected_implementation_digest=expected)
+        failed = MODULE.check(binary, source, expected_implementation_digest=expected, expected_upstream_commit=commit, expected_local_head=commit)
         assert failed["status"] == "failed"
         assert failed["check_results"]["check:terminal-backend-local"] is False
     with tempfile.TemporaryDirectory() as temporary:
-        binary, source = fake_tree(pathlib.Path(temporary))
+        binary, source, commit = fake_tree(pathlib.Path(temporary))
         local_source = source / "tools" / "environments" / "local.py"
         expected = "sha256:" + hashlib.sha256(local_source.read_bytes()).hexdigest()
         with local_source.open("a", encoding="utf-8") as handle:
             handle.write("\napi_key = 'fixture-secret-material'\n")
-        leaked = MODULE.check(binary, source, expected_implementation_digest=expected)
+        leaked = MODULE.check(binary, source, expected_implementation_digest=expected, expected_upstream_commit=commit, expected_local_head=commit)
         assert leaked["status"] == "failed"
         assert leaked["contains_secrets"] is True
         assert leaked["check_results"]["check:source-secret-scan"] is False
-    print("hermes-execution-environment-check selftest: 4 passed")
+    with tempfile.TemporaryDirectory() as temporary:
+        binary, source, commit = fake_tree(pathlib.Path(temporary), version="99.99.99")
+        local_source = source / "tools" / "environments" / "local.py"
+        expected = "sha256:" + hashlib.sha256(local_source.read_bytes()).hexdigest()
+        unrelated = MODULE.check(binary, source, expected_implementation_digest=expected, expected_upstream_commit=commit, expected_local_head=commit)
+        assert unrelated["status"] == "failed"
+        assert unrelated["check_results"]["check:hermes-version-exact"] is False
+    print("hermes-execution-environment-check selftest: 5 passed")
     return 0
 
 

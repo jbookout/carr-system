@@ -15,6 +15,9 @@ import sys
 
 
 EXPECTED_LOCAL_IMPLEMENTATION_DIGEST = "sha256:7d680c252bedc88ff7b80d50a5bfbdb9b926823d8bbc521f606e7b58237cbc1e"
+EXPECTED_UPSTREAM_COMMIT = "1bbb6e5bce56e721ab685af4cd87df21bbff4d35"
+EXPECTED_LOCAL_HEAD = "706f33d42415d706b8f93dd299f4b317428e4a6b"
+EXPECTED_HERMES_VERSION = "0.20.5"
 SECRET_ASSIGNMENT = re.compile(
     r"(?im)^\s*(?:api[_-]?key|access[_-]?token|secret|password|private[_-]?key)\s*=\s*['\"][^'\"]{8,}['\"]"
 )
@@ -73,6 +76,14 @@ def command(binary: pathlib.Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _git(source_root: pathlib.Path, *args: str) -> tuple[int, str]:
+    result = subprocess.run(
+        ["git", "-C", str(source_root), *args], text=True, capture_output=True,
+        timeout=20, check=False,
+    )
+    return result.returncode, result.stdout.strip()
+
+
 def _source_digest(path: pathlib.Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -87,6 +98,9 @@ def check(
     source_root: pathlib.Path,
     *,
     expected_implementation_digest: str = EXPECTED_LOCAL_IMPLEMENTATION_DIGEST,
+    expected_upstream_commit: str = EXPECTED_UPSTREAM_COMMIT,
+    expected_local_head: str = EXPECTED_LOCAL_HEAD,
+    expected_version: str = EXPECTED_HERMES_VERSION,
 ) -> dict:
     version = command(hermes_bin, "--version")
     backend = command(hermes_bin, "config", "get", "terminal.backend")
@@ -98,8 +112,26 @@ def check(
     contains_secrets = _contains_secret_material(local_text, base_text)
     expected_manifest = _local_manifest(expected_implementation_digest)
     version_match = re.search(r"Hermes Agent v[^\n]+", version)
+    head_rc, head_commit = _git(source_root, "rev-parse", "HEAD")
+    expected_rc, resolved_expected = _git(source_root, "rev-parse", f"{expected_upstream_commit}^{{commit}}")
+    ancestor_rc, _ = _git(source_root, "merge-base", "--is-ancestor", expected_upstream_commit, "HEAD")
+    shallow_rc, shallow_value = _git(source_root, "rev-parse", "--is-shallow-repository")
+    version_value = version_match.group(0) if version_match is not None else ""
+    package_provenance_exact = (
+        head_rc == 0 and head_commit == expected_local_head
+        and expected_rc == 0 and resolved_expected == expected_upstream_commit
+        and (ancestor_rc == 0 or (shallow_rc == 0 and shallow_value == "true"))
+        and f"upstream {expected_upstream_commit[:8]}" in version_value
+        and f"local {expected_local_head[:8]}" in version_value
+    )
+    observed_package_digest = (
+        expected_manifest["package_provenance"]["package_digest"]
+        if package_provenance_exact
+        else _sha_text("hermes-head:" + (head_commit if head_rc == 0 else "unavailable"))
+    )
     checks = {
-        "check:hermes-version-bounded": bool(version_match and re.match(r"Hermes Agent v[0-9]+\.[0-9]+\.[0-9]+", version_match.group(0))),
+        "check:hermes-version-exact": bool(version_match and version_match.group(0).startswith(f"Hermes Agent v{expected_version}")),
+        "check:package-provenance-exact": package_provenance_exact,
         "check:terminal-backend-local": backend == "local",
         "check:local-environment-present": "class LocalEnvironment" in local_text,
         "check:base-environment-contract-present": "class BaseEnvironment" in base_text,
@@ -113,14 +145,15 @@ def check(
         "provider_ref": "environment-provider:hermes-local:v1",
         "manifest_digest": expected_manifest["manifest_digest"],
         "implementation_digest": implementation_digest,
-        "package_digest": expected_manifest["package_provenance"]["package_digest"],
+        "package_digest": observed_package_digest,
+        "package_revision_ref": "git:" + (head_commit if head_rc == 0 else "unavailable"),
         "configuration_schema_digest": expected_manifest["configuration_schema_digest"],
         "contract_ref": "conformance:execution-environment-v1",
         "contract_digest": expected_manifest["conformance_contract_digest"],
         "run_ref": "conformance-run:hermes-local-release-20260825",
         "status": status,
         "check_results": checks,
-        "version_ref": version_match.group(0) if version_match is not None and checks["check:hermes-version-bounded"] else "unavailable",
+        "version_ref": version_match.group(0) if version_match is not None else "unavailable",
         "backend_kind": backend if backend in {"local", "docker", "ssh", "singularity", "modal", "daytona"} else "unknown",
         "evidence_refs": ["evidence:hermes-version-readback", "evidence:terminal-backend-readback", "evidence:installed-environment-contract"],
         "contains_secrets": contains_secrets,

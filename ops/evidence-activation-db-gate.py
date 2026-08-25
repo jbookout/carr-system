@@ -125,6 +125,7 @@ def _conformance_observation(
         "manifest_digest": manifest["manifest_digest"],
         "implementation_digest": manifest["implementation_digest"],
         "package_digest": manifest["package_provenance"]["package_digest"],
+        "package_revision_ref": "git:fixture-provider-v1",
         "configuration_schema_digest": manifest["configuration_schema_digest"],
         "contract_ref": manifest["conformance_contract_ref"],
         "contract_digest": manifest["conformance_contract_digest"],
@@ -498,6 +499,16 @@ def main() -> int:
                 run_ref="conformance-run:fixture-regression", status="failed",
                 evidence_refs=["evidence:fixture-regression"],
             )
+            failed_observation["implementation_digest"] = "sha256:" + "d" * 64
+            failed_observation["package_digest"] = "sha256:" + "e" * 64
+            failed_observation["contains_secrets"] = True
+            failed_observation["check_results"].update({
+                "check:implementation-digest-exact": False,
+                "check:package-provenance-exact": False,
+                "check:source-secret-scan": False,
+            })
+            failed_body = {key: value for key, value in failed_observation.items() if key not in {"run_digest", "observed_at"}}
+            failed_observation["run_digest"] = "sha256:" + hashlib.sha256(_canonical_json(failed_body).encode()).hexdigest()
             cur.execute(
                 "select * from ops.attest_execution_environment_conformance(%s,%s,%s)",
                 (quarantined[0], Jsonb(failed_observation), uuid.uuid4()),
@@ -524,7 +535,7 @@ def main() -> int:
             local_conformance = local_provider["conformance"]
             if (
                 local_provider.get("manifest_digest") != "sha256:9f1ac4e93a50163aef414f4084046e3e0740332e15c59baca0ef8ed289fcd6c8"
-                or local_conformance.get("run_digest") != "sha256:d85300c2904f9317d559f871dfcbf0c471e736b9e31a54d920f72de1d95efc64"
+                or local_conformance.get("run_digest") != "sha256:c3b30e6504179d82e0bce658d0165549a9732ac4c5b888b3ec620b706ad9236b"
                 or local_conformance.get("implementation_digest") != "sha256:7d680c252bedc88ff7b80d50a5bfbdb9b926823d8bbc521f606e7b58237cbc1e"
                 or local_conformance.get("manifest_digest") != local_provider.get("manifest_digest")
             ):

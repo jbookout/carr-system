@@ -89,7 +89,7 @@ test("execution environment registry is a bounded read and lifecycle writes rema
   const digest = `sha256:${"a".repeat(64)}`;
   const observation = {
     schema_version: "execution-environment-conformance.v1", provider_ref: "environment-provider:fixture:v1",
-    manifest_digest: digest, implementation_digest: digest, package_digest: digest,
+    manifest_digest: digest, implementation_digest: digest, package_digest: digest, package_revision_ref: "git:fixture",
     configuration_schema_digest: digest, contract_ref: "conformance:execution-environment-v1",
     contract_digest: digest, run_ref: "conformance-run:fixture", status: "passed",
     check_results: { "check:implementation-digest-exact": true }, version_ref: "fixture-v1",

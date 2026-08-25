@@ -1,4 +1,4 @@
--- 0307: governed execution-environment providers for Hermes and CARR.
+-- 0309: governed execution-environment providers for Hermes and CARR.
 --
 -- Hermes owns terminal backend mechanics. CARR owns admission, immutable
 -- provider selection, exact ExecutionEnvelope binding, receipt evidence,
@@ -169,7 +169,7 @@ create or replace function ops.attest_execution_environment_conformance(
 ) returns table(conformance_id uuid,replayed boolean)
 language plpgsql security definer set search_path=ops,public,pg_temp as $$
 declare actor_row actor%rowtype; provider ops.execution_environment_provider%rowtype; existing ops.execution_environment_conformance%rowtype;
-  allowed text[] := array['schema_version','provider_ref','manifest_digest','implementation_digest','package_digest','configuration_schema_digest','contract_ref','contract_digest','run_ref','status','check_results','version_ref','backend_kind','evidence_refs','contains_secrets','run_digest','observed_at'];
+  allowed text[] := array['schema_version','provider_ref','manifest_digest','implementation_digest','package_digest','package_revision_ref','configuration_schema_digest','contract_ref','contract_digest','run_ref','status','check_results','version_ref','backend_kind','evidence_refs','contains_secrets','run_digest','observed_at'];
   derived_run_digest text; observed_at_value timestamptz;
 begin
   if session_user !~ '^carr_authority_' then raise exception 'environment conformance attestation requires human authority'; end if;
@@ -182,17 +182,22 @@ begin
      or p_observation->>'schema_version'<>'execution-environment-conformance.v1'
      or p_observation->>'provider_ref'<>p_provider_ref
      or p_observation->>'manifest_digest'<>provider.manifest_digest
-     or p_observation->>'implementation_digest'<>provider.manifest->>'implementation_digest'
-     or p_observation->>'package_digest'<>provider.manifest->'package_provenance'->>'package_digest'
+     or p_observation->>'implementation_digest' !~ '^sha256:[0-9a-f]{64}$'
+     or (p_observation->>'implementation_digest'<>provider.manifest->>'implementation_digest' and not (p_observation->>'status'='failed' and p_observation->'check_results'->'check:implementation-digest-exact'='false'::jsonb))
+     or p_observation->>'package_digest' !~ '^sha256:[0-9a-f]{64}$'
+     or (p_observation->>'package_digest'<>provider.manifest->'package_provenance'->>'package_digest' and not (p_observation->>'status'='failed' and p_observation->'check_results'->'check:package-provenance-exact'='false'::jsonb))
+     or p_observation->>'package_revision_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
      or p_observation->>'configuration_schema_digest'<>provider.manifest->>'configuration_schema_digest'
      or p_observation->>'contract_ref'<>provider.manifest->>'conformance_contract_ref'
      or p_observation->>'contract_digest'<>provider.manifest->>'conformance_contract_digest'
      or p_observation->>'run_ref' !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
      or p_observation->>'run_digest' is distinct from derived_run_digest
      or p_observation->>'status' not in ('passed','failed')
-     or p_observation->>'backend_kind'<>provider.backend_kind
+     or p_observation->>'backend_kind' not in ('none','local','container','remote','cloud','unknown')
+     or (p_observation->>'backend_kind'<>provider.backend_kind and not (p_observation->>'status'='failed' and p_observation->'check_results'->'check:terminal-backend-local'='false'::jsonb))
      or p_observation->>'version_ref' !~ '^[^[:cntrl:]]{1,160}$'
-     or p_observation->>'contains_secrets'<>'false'
+     or p_observation->>'contains_secrets' not in ('true','false')
+     or (p_observation->>'contains_secrets'='true' and not (p_observation->>'status'='failed' and p_observation->'check_results'->'check:source-secret-scan'='false'::jsonb))
      or jsonb_typeof(p_observation->'check_results')<>'object' or p_observation->'check_results'='{}'::jsonb
      or exists(select 1 from jsonb_each(p_observation->'check_results') c where c.key !~ '^check:[a-z0-9-]+$' or jsonb_typeof(c.value)<>'boolean')
      or (p_observation->>'status'='passed' and exists(select 1 from jsonb_each(p_observation->'check_results') c where c.value<>'true'::jsonb))
@@ -208,7 +213,7 @@ begin
     return query select existing.id,true; return;
   end if;
   insert into ops.execution_environment_conformance(provider_id,contract_ref,contract_digest,run_ref,run_digest,manifest_digest,implementation_digest,package_digest,configuration_schema_digest,status,check_refs,evidence_refs,observation,observed_at,recorded_by_actor_id,idempotency_key)
-  values(provider.id,provider.manifest->>'conformance_contract_ref',provider.manifest->>'conformance_contract_digest',p_observation->>'run_ref',derived_run_digest,provider.manifest_digest,provider.manifest->>'implementation_digest',provider.manifest->'package_provenance'->>'package_digest',provider.manifest->>'configuration_schema_digest',p_observation->>'status',to_jsonb(array(select key from jsonb_each(p_observation->'check_results') order by key)),p_observation->'evidence_refs',p_observation,observed_at_value,actor_row.id,p_idempotency_key)
+  values(provider.id,provider.manifest->>'conformance_contract_ref',provider.manifest->>'conformance_contract_digest',p_observation->>'run_ref',derived_run_digest,provider.manifest_digest,p_observation->>'implementation_digest',p_observation->>'package_digest',p_observation->>'configuration_schema_digest',p_observation->>'status',to_jsonb(array(select key from jsonb_each(p_observation->'check_results') order by key)),p_observation->'evidence_refs',p_observation,observed_at_value,actor_row.id,p_idempotency_key)
   returning id into conformance_id;
   return query select conformance_id,false;
 end $$;
@@ -259,7 +264,7 @@ do $$
 declare joe_id uuid; provider_id uuid; conformance_id uuid; base jsonb; manifest jsonb; manifest_digest text; run_digest text; observation jsonb; observed_at_value timestamptz;
 begin
   select id into joe_id from actor where slug='joe' and kind='human' and active;
-  if joe_id is null then raise exception '0307 requires active Joe actor for approved reference-provider admission'; end if;
+  if joe_id is null then raise exception '0309 requires active Joe actor for approved reference-provider admission'; end if;
   base := jsonb_build_object(
     'schema_version','execution-environment-provider.v1','provider_key','hermes-local','provider_version',1,
     'display_name','Hermes Local Terminal','source_class','built_in','backend_kind','local',
@@ -277,7 +282,7 @@ begin
   manifest_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(base),'sha256'),'hex');
   manifest := base||jsonb_build_object('manifest_digest',manifest_digest);
   insert into ops.execution_environment_provider(provider_key,provider_version,source_class,backend_kind,manifest_digest,manifest,protected_builtin,created_by_actor_id,idempotency_key)
-  values('hermes-local',1,'built_in','local',manifest_digest,manifest,true,joe_id,'03070000-0000-4000-8000-000000000001') returning id into provider_id;
+  values('hermes-local',1,'built_in','local',manifest_digest,manifest,true,joe_id,'03090000-0000-4000-8000-000000000001') returning id into provider_id;
   observed_at_value := clock_timestamp();
   observation := jsonb_build_object(
     'schema_version','execution-environment-conformance.v1',
@@ -285,6 +290,7 @@ begin
     'manifest_digest',manifest_digest,
     'implementation_digest',manifest->>'implementation_digest',
     'package_digest',manifest->'package_provenance'->>'package_digest',
+    'package_revision_ref','git:706f33d42415d706b8f93dd299f4b317428e4a6b',
     'configuration_schema_digest',manifest->>'configuration_schema_digest',
     'contract_ref',manifest->>'conformance_contract_ref',
     'contract_digest',manifest->>'conformance_contract_digest',
@@ -293,9 +299,10 @@ begin
     'check_results',jsonb_build_object(
       'check:base-environment-contract-present',true,
       'check:cleanup-contract-declared',true,
-      'check:hermes-version-bounded',true,
+      'check:hermes-version-exact',true,
       'check:implementation-digest-exact',true,
       'check:local-environment-present',true,
+      'check:package-provenance-exact',true,
       'check:source-secret-scan',true,
       'check:terminal-backend-local',true),
     'version_ref','Hermes Agent v0.20.5 (2026.8.19) · upstream 1bbb6e5b · local 706f33d4 (+1 carried commit)',
@@ -306,14 +313,14 @@ begin
   run_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(observation-'observed_at'),'sha256'),'hex');
   observation := observation||jsonb_build_object('run_digest',run_digest);
   insert into ops.execution_environment_conformance(provider_id,contract_ref,contract_digest,run_ref,run_digest,manifest_digest,implementation_digest,package_digest,configuration_schema_digest,status,check_refs,evidence_refs,observation,observed_at,recorded_by_actor_id,idempotency_key)
-  values(provider_id,manifest->>'conformance_contract_ref',manifest->>'conformance_contract_digest',observation->>'run_ref',run_digest,manifest_digest,manifest->>'implementation_digest',manifest->'package_provenance'->>'package_digest',manifest->>'configuration_schema_digest','passed',to_jsonb(array(select key from jsonb_each(observation->'check_results') order by key)),observation->'evidence_refs',observation,observed_at_value,joe_id,'03070000-0000-4000-8000-000000000002') returning id into conformance_id;
+  values(provider_id,manifest->>'conformance_contract_ref',manifest->>'conformance_contract_digest',observation->>'run_ref',run_digest,manifest_digest,manifest->>'implementation_digest',manifest->'package_provenance'->>'package_digest',manifest->>'configuration_schema_digest','passed',to_jsonb(array(select key from jsonb_each(observation->'check_results') order by key)),observation->'evidence_refs',observation,observed_at_value,joe_id,'03090000-0000-4000-8000-000000000002') returning id into conformance_id;
   insert into ops.execution_environment_provider_event(provider_id,from_state,to_state,evidence_refs,ruled_by_actor_id,idempotency_key) values
-    (provider_id,null,'discovered',jsonb_build_array('evidence:tony-simons-terminal-provider-source'),joe_id,'03070000-0000-4000-8000-000000000003'),
-    (provider_id,'discovered','quarantined',jsonb_build_array('evidence:provider-contract-review'),joe_id,'03070000-0000-4000-8000-000000000004'),
-    (provider_id,'quarantined','conformance_passed',jsonb_build_array('evidence:test-execution-environment-unit'),joe_id,'03070000-0000-4000-8000-000000000005'),
-    (provider_id,'conformance_passed','shadow',jsonb_build_array('evidence:hermes-local-existing-baseline'),joe_id,'03070000-0000-4000-8000-000000000006'),
-    (provider_id,'shadow','canary',jsonb_build_array('evidence:hermes-local-config-readback'),joe_id,'03070000-0000-4000-8000-000000000007'),
-    (provider_id,'canary','active',jsonb_build_array('evidence:joe-approved-provider-foundation'),joe_id,'03070000-0000-4000-8000-000000000008');
+    (provider_id,null,'discovered',jsonb_build_array('evidence:tony-simons-terminal-provider-source'),joe_id,'03090000-0000-4000-8000-000000000003'),
+    (provider_id,'discovered','quarantined',jsonb_build_array('evidence:provider-contract-review'),joe_id,'03090000-0000-4000-8000-000000000004'),
+    (provider_id,'quarantined','conformance_passed',jsonb_build_array('evidence:test-execution-environment-unit'),joe_id,'03090000-0000-4000-8000-000000000005'),
+    (provider_id,'conformance_passed','shadow',jsonb_build_array('evidence:hermes-local-existing-baseline'),joe_id,'03090000-0000-4000-8000-000000000006'),
+    (provider_id,'shadow','canary',jsonb_build_array('evidence:hermes-local-config-readback'),joe_id,'03090000-0000-4000-8000-000000000007'),
+    (provider_id,'canary','active',jsonb_build_array('evidence:joe-approved-provider-foundation'),joe_id,'03090000-0000-4000-8000-000000000008');
 end $$;
 
 create or replace function ops.bind_execution_environment_to_assignment()
@@ -734,7 +741,8 @@ returns jsonb language sql stable security definer set search_path=ops,public,pg
     'conformance',case when c.id is null then jsonb_build_object('state','unavailable') else jsonb_build_object(
       'state',c.status,'run_ref',c.run_ref,'run_digest',c.run_digest,'observed_at',c.observed_at,
       'manifest_digest',c.manifest_digest,'implementation_digest',c.implementation_digest,
-      'package_digest',c.package_digest,'configuration_schema_digest',c.configuration_schema_digest) end,
+      'package_digest',c.package_digest,'package_revision_ref',c.observation->>'package_revision_ref',
+      'configuration_schema_digest',c.configuration_schema_digest) end,
     'evidence_register',jsonb_build_object(
       'source_ref',p.manifest->>'implementation_ref','source_digest',p.manifest->>'implementation_digest',
       'consumer_ref','consumer:hermes-bot-brief+execution-envelope','trigger_ref','trigger:work-request-execution-assignment',
