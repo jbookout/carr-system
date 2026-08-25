@@ -306,6 +306,36 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
   }
 
+  function validateChangeDoctrineItems(items) {
+    if (!Array.isArray(items))
+      throw new ToolError({ error: "change_set_items_invalid",
+        hint: "items must be an array of section changes" });
+
+    const malformed = [];
+    for (const [index, item] of items.entries()) {
+      const fields = [];
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        malformed.push({ item_index: index, fields: ["item"] });
+        continue;
+      }
+      if (typeof item.section_key !== "string" || !item.section_key.trim())
+        fields.push("section_key");
+      if (typeof item.body_text !== "string" || !item.body_text.trim())
+        fields.push("body_text");
+      if (!Number.isInteger(item.base_version) || item.base_version < 0)
+        fields.push("base_version");
+      if (item.title !== undefined && item.title !== null && typeof item.title !== "string")
+        fields.push("title");
+      if (item.ordinal !== undefined && item.ordinal !== null && !Number.isInteger(item.ordinal))
+        fields.push("ordinal");
+      if (fields.length) malformed.push({ item_index: index, fields });
+    }
+    if (malformed.length)
+      throw new ToolError({ error: "change_set_item_invalid", malformed,
+        hint: "each item requires a non-empty section_key, body_text, and non-negative integer base_version" });
+    return items;
+  }
+
   // ------------------------------------------------------------------ verbs
 
   return {
@@ -720,7 +750,11 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           ordinal: { type: "integer" } },
           required: ["section_key", "body_text", "base_version"] } } },
         required: ["idempotency_key", "document", "items"] },
-      handler: async (c, actor, args) => withEnvelope(c, actor, "change-doctrine-sections", args, async () => {
+      handler: async (c, actor, args) => {
+        // Reject malformed nested input before the envelope opens its transaction
+        // or performs the idempotency read; raw items must never reach the sort.
+        validateChangeDoctrineItems(args.items);
+        return withEnvelope(c, actor, "change-doctrine-sections", args, async () => {
         if (!args.items.length) throw new ToolError({ error: "empty_change_set" });
         const doc = await resolveDoc(c, args.document);
         if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
@@ -802,7 +836,8 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           { new: { sections: results.length, keys: results.map(r => r.section_key) },
             idempotency_key: args.idempotency_key });
         return { ok: true, change_set_id: cs.rows[0].id, sections: results, generation };
-      }),
+        });
+      },
     },
 
     "resolve-doctrine-rules": {
