@@ -42,7 +42,7 @@ WRITE_ACTION_PREFIXES = {
     "accept", "activate", "add", "admit", "amend", "approve", "assign", "attach", "attest", "begin", "change", "claim", "close",
     "complete", "confirm", "create", "deactivate", "decide", "decline", "detach", "end", "link",
     "disable", "log", "measure", "merge", "new", "patch", "prepare", "promote", "propose",
-    "reassign", "record", "register", "release", "resolve", "retire",
+    "reassign", "record", "register", "release", "resolve", "retire", "correct", "forget", "observe",
     "revert", "score", "set", "stamp", "start", "teach", "triage",
     "update", "write",
 }
