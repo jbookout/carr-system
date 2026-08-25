@@ -74,7 +74,7 @@ curl -s https://api.doctorcre.com/release
 match what that build carried. **A deploy returning success and a registry that
 answers are two different claims.**
 
-### 4. The typed prior is the only recovery verb-shrink authority
+### 4. Typed recovery is the only verb-shrink authority
 
 A rollback usually removes verbs the newer build added, so the preflight
 refuses:
@@ -86,12 +86,13 @@ REFUSED: this deploy would REMOVE 1 verb(s) from staging.
 ```
 
 That guard exists because production silently went from 75 verbs to 66 in the
-middle of a working session. There is no `--allow-shrink` override. For the
-typed `prior` recovery leg only, the wrapper first prepares the exact
-candidate/prior attempt in the database; that writer proves the same service,
-the exact prior SHA, and the prior's completed Production readback before it
-permits the temporary reduction. Every standalone, current, restore-only, or
-mismatched-prior deploy remains refused.
+middle of a working session. There is no `--allow-shrink` override. For any
+exact typed recovery step (`current_before`, `prior`, `current_after`, or the
+isolated `restore_only` repair), the wrapper first calls that step's matching
+database writer. The writer must durably prepare the exact candidate/prior,
+SHA, service, recovery attempt, and correlation, then return the deterministic
+provider tag that the later prepare must replay idempotently. Standalone/source,
+manual-flag, and mismatched-prior deploys remain refused.
 
 ## The rehearsal, and why it is required before approval
 
@@ -120,7 +121,8 @@ RECOVERY_ATTEMPT_ID=<one-new-uuid>
   --staging-receipt-idempotency-key <current-before-uuid>
 
 # From a clean worktree at <prior-sha>. The wrapper can permit a lower count
-# only after it has prepared this exact typed prior against the completed prior:
+# only after it has prepared this exact typed step against the completed prior;
+# the same rule applies to current_before, current_after, and restore_only:
 ./bin/deploy-worker.sh --env staging --release-sha <prior-sha> \
   --release-key <production-candidate-key> \
   --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
@@ -163,9 +165,10 @@ Run against staging while promoting the `export-email-domains` verb:
 | Rolled back to `8e761a0c` | `8e761a0c`, **139 verbs** |
 | Restored forward | `7c7e1bd1`, **140 verbs** |
 
-The typed prior path allowed the expected temporary verb reduction only after
-the database bound it to the completed prior. Both directions were confirmed
-from the Worker's own `/release` endpoint rather than from deploy output.
+The typed recovery path allowed the expected temporary verb reduction only
+after the matching database writer bound each exact step to the candidate and
+completed prior. Both directions were confirmed from the Worker's own
+`/release` endpoint rather than from deploy output.
 
 ## Two things that will bite you
 

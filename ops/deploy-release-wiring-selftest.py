@@ -224,12 +224,14 @@ def main() -> int:
           and "finish all\nthree within one hour" in rollback_runbook
           and "within 24\nhours of the completed bundle" in rollback_runbook,
           "the typed bundle and approval both fail closed when their timing windows expire")
-    check("8d. only a DB-prepared typed prior can temporarily shrink",
+    check("8d. only a DB-prepared typed recovery step can temporarily shrink",
           "--allow-shrink" not in source
-          and 'if [ "$RECOVERY_STEP" != "prior" ] || [ "$TARGET_ENV" != "staging" ]; then' in source
+          and '[ "$RECOVERY_STEP" != "standalone" ] || fail "standalone deploys cannot authorize verb shrink."' in source
           and 'staging-attempt prepare' in source
-          and '--recovery-step prior' in source
-          and "exact prepared recovery prior" in source
+          and 'staging-restore-only prepare' in source
+          and 'current_before|prior|current_after)' in source
+          and 'restore_only)' in source
+          and "exact prepared typed recovery step" in source
           and "There is no `--allow-shrink` override" in rollback_runbook,
           "a standalone/source deploy or manual flag can still waive verb loss")
 
