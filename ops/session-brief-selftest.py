@@ -29,13 +29,41 @@ someone's stranded work, which is precisely the "line nobody reads" failure.
 Run: .venv/bin/python ops/session-brief-selftest.py
 """
 import importlib.util
+import atexit
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BRIEF = os.path.join(os.path.dirname(HERE), "hooks", "session-brief.py")
+
+# Keep every fixture below one owned root so a normal or failing interpreter
+# exit cannot leave repo-local TMPDIR litter behind.
+_ORIGINAL_MKDTEMP = tempfile.mkdtemp
+_ORIGINAL_MKSTEMP = tempfile.mkstemp
+_FIXTURE_ROOT = _ORIGINAL_MKDTEMP(prefix="session-brief-selftest-")
+atexit.register(shutil.rmtree, _FIXTURE_ROOT, ignore_errors=True)
+# Some platform git helpers create their own directory directly under TMPDIR;
+# point that boundary at the owned root too, so those helpers are collected.
+os.environ["TMPDIR"] = _FIXTURE_ROOT
+os.environ["TMP"] = _FIXTURE_ROOT
+os.environ["TEMP"] = _FIXTURE_ROOT
+
+
+def _fixture_mkdtemp(suffix=None, prefix=None, dir=None):
+    return _ORIGINAL_MKDTEMP(suffix=suffix, prefix=prefix,
+                             dir=_FIXTURE_ROOT)
+
+
+def _fixture_mkstemp(suffix=None, prefix=None, dir=None, text=False):
+    return _ORIGINAL_MKSTEMP(suffix=suffix, prefix=prefix,
+                             dir=_FIXTURE_ROOT, text=text)
+
+
+tempfile.mkdtemp = _fixture_mkdtemp
+tempfile.mkstemp = _fixture_mkstemp
 
 # The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
 # at the repository that invoked it, and on 2026-08-14 that leaked a fixture

@@ -22,14 +22,30 @@ Run: python3 ops/built-unclosed-selftest.py
 from __future__ import annotations
 
 import importlib.util
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 MOD = os.path.join(REPO, "ops", "built_unclosed.py")
+
+# Keep every fixture below one owned root so a normal or failing interpreter
+# exit cannot leave repo-local TMPDIR litter behind.
+_ORIGINAL_MKDTEMP = tempfile.mkdtemp
+_FIXTURE_ROOT = _ORIGINAL_MKDTEMP(prefix="built-unclosed-selftest-")
+atexit.register(shutil.rmtree, _FIXTURE_ROOT, ignore_errors=True)
+
+
+def _fixture_mkdtemp(suffix=None, prefix=None, dir=None):
+    return _ORIGINAL_MKDTEMP(suffix=suffix, prefix=prefix,
+                             dir=_FIXTURE_ROOT)
+
+
+tempfile.mkdtemp = _fixture_mkdtemp
 
 _spec = importlib.util.spec_from_file_location("built_unclosed", MOD)
 assert _spec and _spec.loader, f"cannot load {MOD}"
