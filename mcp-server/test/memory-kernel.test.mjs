@@ -43,7 +43,7 @@ test("observe derives personal scope from the verified sponsor and stores proven
   const statements = [];
   const client = { query: async (sql, params) => {
     statements.push({ sql, params });
-    if (/resolve_memory_plan_anchor/.test(sql)) return { rows: [{ id: "02970000-0000-4000-8000-000000000001", plan_id: "02970000-0000-4000-8000-000000000001", work_request_id: "wr-1", work_request_version: 3 }] };
+    if (/resolve_memory_plan_anchor/.test(sql)) return { rows: [{ plan_id: "02970000-0000-4000-8000-000000000001", work_request_id: "wr-1", work_request_version: 3 }] };
     if (/insert into memory_item/.test(sql)) return { rows: [{ id: "memory-1", version: 1, status: "candidate", scope: "personal" }] };
     if (/insert into memory_evidence/.test(sql)) return { rows: [{ id: "evidence-1" }] };
     return { rows: [] };
@@ -187,7 +187,7 @@ test("plan anchor is validated tenant-scoped and derives work request/version", 
   const statements = [];
   const client = { query: async (sql, params) => {
     statements.push({ sql, params });
-    if (/resolve_memory_plan_anchor/.test(sql)) return { rows: [{ id: "02970000-0000-4000-8000-000000000001", work_request_id: "wr-1", work_request_version: 7 }] };
+    if (/resolve_memory_plan_anchor/.test(sql)) return { rows: [{ plan_id: "02970000-0000-4000-8000-000000000001", work_request_id: "wr-1", work_request_version: 7 }] };
     if (/insert into memory_item/.test(sql)) return { rows: [{ id: MEMORY_ID, status: "candidate", version: 1 }] };
     if (/insert into memory_evidence/.test(sql)) return { rows: [{ id: "e1" }] };
     return { rows: [] };
@@ -200,6 +200,8 @@ test("plan anchor is validated tenant-scoped and derives work request/version", 
   const insert = statements.find(s => /insert into memory_item/.test(s.sql));
   assert.match(insert.sql, /work_request_id/);
   assert.equal(insert.params.includes(7), true, "stored provenance uses plan's version, not caller input");
+  assert.equal(insert.params[3], "02970000-0000-4000-8000-000000000001", "stored provenance uses resolver plan_id");
+  assert.match(anchor.sql, /public\.resolve_memory_plan_anchor/);
 });
 
 test("unknown/cross-tenant plans and caller-assembled passport fields refuse before memory insert", async () => {
@@ -237,6 +239,11 @@ test("memory lifecycle SQL names exact transition metadata and immutable core fi
   // handler transitions.
   const migration = readFileSync("../migrations/0297_memory_kernel.sql", "utf8");
   assert.match(migration, /memory_item_immutable_core/);
+  assert.match(migration, /memory_item_insert_valid/);
+  assert.match(migration, /new\.created_at := now\(\)/);
+  assert.match(migration, /new\.status <> 'candidate'/);
+  assert.match(migration, /prior\.status <> 'corrected'/);
+  assert.match(migration, /new\.lineage_root_id is distinct from expected_root/);
   for (const field of ["kind", "context", "confidence", "observed_by_actor_id", "status", "version", "promoted_by_actor_id", "correction_reason", "forget_reason"])
     assert.match(migration, field === "version"
       ? /new\.version <> old\.version/
@@ -245,4 +252,8 @@ test("memory lifecycle SQL names exact transition metadata and immutable core fi
         : new RegExp(`new\\.${field}.*distinct from old\\.${field}`));
   assert.match(migration, /candidate.*promoted/);
   assert.match(migration, /promoted_by_actor_id/);
+  assert.ok(migration.indexOf("has_function_privilege") < migration.lastIndexOf("commit;"), "privilege proof runs before transaction commit");
+  assert.match(migration, /public\.resolve_memory_plan_anchor/);
+  assert.match(migration, /grant execute on function public\.resolve_memory_plan_anchor/);
+  assert.match(migration, /revoke all on function public\.resolve_memory_plan_anchor/);
 });

@@ -5,18 +5,18 @@
 
 begin;
 
-create or replace function resolve_memory_plan_anchor(p_plan_id uuid, p_tenant text)
+create or replace function public.resolve_memory_plan_anchor(p_plan_id uuid, p_tenant text)
 returns table(plan_id uuid, work_request_id uuid, work_request_version integer)
 language sql stable security definer
-set search_path = pg_catalog, ops, public
+set search_path = pg_catalog, ops
 as $$
   select p.id, p.work_request_id, p.work_request_version
     from ops.sourced_work_request_plan p
     join ops.work_request w on w.id=p.work_request_id
    where p.id=$1 and w.organization_tenant_id=$2;
 $$;
-revoke all on function resolve_memory_plan_anchor(uuid,text) from public, carr_reader, carr_jobs, carr_authority;
-grant execute on function resolve_memory_plan_anchor(uuid,text) to carr_writer;
+revoke all on function public.resolve_memory_plan_anchor(uuid,text) from public, carr_reader, carr_jobs, carr_authority;
+grant execute on function public.resolve_memory_plan_anchor(uuid,text) to carr_writer;
 
 create table memory_item (
   id uuid primary key default gen_random_uuid(),
@@ -60,6 +60,48 @@ create index memory_item_search_idx on memory_item using gin(search_vector);
 create index memory_item_scope_idx on memory_item(scope, owner_actor_id, status, confidence desc);
 create index memory_item_tenant_scope_idx on memory_item(organization_tenant_id, scope, owner_actor_id, status);
 
+create or replace function public.memory_item_insert_valid()
+returns trigger language plpgsql security definer
+set search_path = pg_catalog, public
+as $$
+declare prior memory_item%rowtype; expected_root uuid;
+begin
+  -- Timestamps are server-owned; caller-supplied values are ignored.
+  new.created_at := now();
+  new.updated_at := new.created_at;
+  if new.status <> 'candidate' or new.version <> 1
+     or new.promoted_by_actor_id is not null or new.promoted_at is not null
+     or new.corrected_by_actor_id is not null or new.correction_reason is not null or new.corrected_at is not null
+     or new.forgotten_by_actor_id is not null or new.forget_reason is not null or new.forgotten_at is not null then
+    raise exception 'new memory rows must start as clean candidate version 1';
+  end if;
+  if new.predecessor_id is null or new.lineage_root_id is null then
+    if new.predecessor_id is not null or new.lineage_root_id is not null then
+      raise exception 'new memory roots cannot carry partial lineage';
+    end if;
+    return new;
+  end if;
+  select * into prior from public.memory_item where id=new.predecessor_id;
+  expected_root := coalesce(prior.lineage_root_id, prior.id);
+  if not found or prior.status <> 'corrected'
+     or prior.organization_tenant_id is distinct from new.organization_tenant_id
+     or prior.scope is distinct from new.scope
+     or prior.owner_actor_id is distinct from new.owner_actor_id
+     or prior.kind is distinct from new.kind
+     or prior.context is distinct from new.context
+     or prior.confidence is distinct from new.confidence
+     or prior.work_request_id is distinct from new.work_request_id
+     or prior.work_request_version is distinct from new.work_request_version
+     or prior.plan_id is distinct from new.plan_id
+     or new.lineage_root_id is distinct from expected_root then
+    raise exception 'memory successor lineage does not match corrected predecessor';
+  end if;
+  return new;
+end $$;
+drop trigger if exists memory_item_insert_valid on memory_item;
+create trigger memory_item_insert_valid
+before insert on memory_item for each row execute function public.memory_item_insert_valid();
+
 create or replace function memory_item_plan_anchor_valid()
 returns trigger language plpgsql security definer
 set search_path = pg_catalog, public, ops
@@ -100,6 +142,9 @@ create index memory_evidence_memory_idx on memory_evidence(memory_id, observed_a
 create or replace function memory_item_immutable_core()
 returns trigger language plpgsql as $$
 begin
+  if new.created_at is distinct from old.created_at then
+    raise exception 'memory_item created_at is immutable';
+  end if;
   if new.kind is distinct from old.kind
      or new.context is distinct from old.context
      or new.confidence is distinct from old.confidence
@@ -122,7 +167,8 @@ begin
     raise exception 'memory_item status must make one allowed lifecycle transition';
   end if;
   if old.status='candidate' and new.status='promoted' then
-    if new.promoted_by_actor_id is null or new.promoted_at is null
+    if old.promoted_by_actor_id is not null or old.promoted_at is not null
+       or new.promoted_by_actor_id is null or new.promoted_at is null
        or new.corrected_by_actor_id is distinct from old.corrected_by_actor_id
        or new.correction_reason is distinct from old.correction_reason
        or new.corrected_at is distinct from old.corrected_at
@@ -132,7 +178,8 @@ begin
       raise exception 'candidate promotion requires actor and timestamp';
     end if;
   elsif old.status in ('candidate','promoted') and new.status='corrected' then
-    if new.corrected_by_actor_id is null or new.correction_reason is null or new.corrected_at is null
+    if old.corrected_by_actor_id is not null or old.correction_reason is not null or old.corrected_at is not null
+       or new.corrected_by_actor_id is null or new.correction_reason is null or new.corrected_at is null
        or new.promoted_by_actor_id is distinct from old.promoted_by_actor_id
        or new.promoted_at is distinct from old.promoted_at
        or new.forgotten_by_actor_id is distinct from old.forgotten_by_actor_id
@@ -141,7 +188,8 @@ begin
       raise exception 'memory correction requires actor, reason, and timestamp';
     end if;
   elsif old.status in ('candidate','promoted','corrected') and new.status='forgotten' then
-    if new.forgotten_by_actor_id is null or new.forget_reason is null or new.forgotten_at is null
+    if old.forgotten_by_actor_id is not null or old.forget_reason is not null or old.forgotten_at is not null
+       or new.forgotten_by_actor_id is null or new.forget_reason is null or new.forgotten_at is null
        or new.promoted_by_actor_id is distinct from old.promoted_by_actor_id
        or new.promoted_at is distinct from old.promoted_at
        or new.corrected_by_actor_id is distinct from old.corrected_by_actor_id
@@ -167,14 +215,14 @@ grant select, insert, update on memory_item to carr_writer;
 grant select, insert on memory_evidence to carr_writer;
 revoke delete on memory_item, memory_evidence from carr_reader, carr_writer, carr_jobs;
 
-commit;
-
 do $$
 begin
-  if not has_function_privilege('carr_writer', 'resolve_memory_plan_anchor(uuid,text)', 'execute') then
+  if not has_function_privilege('carr_writer', 'public.resolve_memory_plan_anchor(uuid,text)', 'execute') then
     raise exception '0297 FAILED: carr_writer cannot execute the narrow plan resolver';
   end if;
   if has_table_privilege('carr_writer', 'ops.sourced_work_request_plan', 'select') then
     raise exception '0297 FAILED: carr_writer gained broad plan-table SELECT';
   end if;
 end $$;
+
+commit;

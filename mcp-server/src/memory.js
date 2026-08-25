@@ -19,7 +19,7 @@ function sponsorFor(actor, ToolError) {
 async function planAnchor(c, actor, planId, ToolError) {
   if (planId === undefined || planId === null || planId === "") return null;
   const r = await c.query(
-    `select * from resolve_memory_plan_anchor($1::uuid,$2::text)`,
+    `select * from public.resolve_memory_plan_anchor($1::uuid,$2::text)`,
     [planId, organizationTenantForActor(actor)]);
   if (!r.rows.length) throw new ToolError({ error: "memory_plan_not_found_or_forbidden", plan_id: planId });
   return r.rows[0];
@@ -87,7 +87,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
           `insert into memory_item (organization_tenant_id, work_request_id, work_request_version, plan_id, kind, statement, context, scope, owner_actor_id, observed_by_actor_id, confidence)
            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,(select id from actor where slug=$10),$11)
            returning id, kind, statement, context, scope, owner_actor_id, status, confidence, version, created_at`,
-          [tenant, anchor?.work_request_id || null, anchor?.work_request_version || null, anchor?.id || null,
+          [tenant, anchor?.work_request_id || null, anchor?.work_request_version || null, anchor?.plan_id || null,
            args.kind, text, args.context ? String(args.context).trim() : null, args.scope, owner, actor.slug, confidence]);
         const row = item.rows[0];
         const ev = await c.query(
