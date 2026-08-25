@@ -54,6 +54,83 @@ def main():
 
     gate = load_gate()
 
+    # ── tool credential binding: a rehearsal must never inherit a live DSN ──
+    owner_dsn = "postgresql://neondb_owner:owner@branch.example:5432/integration_check?sslmode=require"
+    jobs_dsn = gate._jobs_login_dsn(owner_dsn, "a/password?never-printed")  # ci-secret-scan: allow — hermetic fixture
+    check("jobs DSN preserves the exact ephemeral host/database/query target",
+          gate.host_of(jobs_dsn) == gate.host_of(owner_dsn)
+          and "/integration_check" in jobs_dsn
+          and "sslmode=require" in jobs_dsn
+          and jobs_dsn.startswith("postgresql://carr_jobs:a%2Fpassword%3Fnever-printed@"))  # ci-secret-scan: allow — hermetic fixture
+    check("jobs binding requires the exact carr_jobs identity and target",
+          gate._same_database_target(owner_dsn, jobs_dsn))
+
+    ambient_names = ("DATABASE_URL", "CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL",
+                     "CARR_DB_OWNER_URL", "CARR_CI_DATABASE_URL",
+                     "CARR_IMPORT_DB_URL", "CARR_RECONCILE_DB_URL",
+                     "DATABASE_URL_READER", "DATABASE_URL_WRITER")
+    saved_ambient = {name: os.environ.get(name) for name in ambient_names}
+    try:
+        os.environ.update({
+            "DATABASE_URL": "postgresql://ambient-owner.invalid/live",
+            "CARR_DB_JOBS_URL": "postgresql://ambient-jobs.invalid/live",
+            "CARR_DB_EXPORTER_URL": "postgresql://ambient-exporter.invalid/live",
+            "CARR_DB_OWNER_URL": "postgresql://ambient-owner.invalid/live",
+            "CARR_CI_DATABASE_URL": "postgresql://ambient-ci.invalid/live",
+            "CARR_IMPORT_DB_URL": "postgresql://ambient-import.invalid/live",
+            "CARR_RECONCILE_DB_URL": "postgresql://ambient-reconcile.invalid/live",
+            "DATABASE_URL_READER": "postgresql://ambient-reader.invalid/live",
+            "DATABASE_URL_WRITER": "postgresql://ambient-writer.invalid/live",
+        })
+        tool_calls = []
+
+        def tool_runner(_argv, **kwargs):
+            tool_calls.append(kwargs)
+            return subprocess.CompletedProcess([], 0, "ok\n", "")
+
+        got = gate.run_tool("tools/ops-record.py", "run", dsn=owner_dsn,
+                            jobs_dsn=jobs_dsn, runner=tool_runner)
+        child_env = tool_calls[0]["env"] if tool_calls else {}
+        check("run_tool binds owner and routine credentials to the same branch database",
+              got.returncode == 0
+              and child_env.get("DATABASE_URL") == owner_dsn
+              and child_env.get("CARR_DB_JOBS_URL") == jobs_dsn)
+        check("run_tool strips ambient database credentials before launch",
+              all(name not in child_env for name in ambient_names[1:]
+                  if name != "CARR_DB_JOBS_URL")
+              and child_env.get("DATABASE_URL") == owner_dsn)
+
+        # A syntactically valid but foreign routine credential is still a
+        # production-routing defect. Refuse before the subprocess runner is
+        # reached, regardless of whether the mismatch is host, database, or
+        # authenticated role.
+        for label, foreign in (
+            ("foreign jobs host", jobs_dsn.replace("branch.example", "other.example")),
+            ("foreign jobs database", jobs_dsn.replace("/integration_check", "/other_db")),
+            ("non-carr_jobs routine identity", jobs_dsn.replace("carr_jobs", "neondb_owner")),
+        ):
+            refused_foreign = False
+            try:
+                gate.run_tool("tools/ops-record.py", "run", dsn=owner_dsn,
+                              jobs_dsn=foreign, runner=tool_runner)
+            except ValueError:
+                refused_foreign = True
+            check(f"run_tool refuses {label}", refused_foreign)
+    finally:
+        for name, value in saved_ambient.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    refused = False
+    try:
+        gate.run_tool("tools/ops-record.py", "run", dsn=owner_dsn,
+                      jobs_dsn=None)
+    except ValueError as exc:
+        refused = "explicit carr_jobs DSN" in str(exc)
+    check("run_tool refuses to launch without an explicit carr_jobs DSN", refused)
+
     # ── host parsing: guard 2 is only as good as this ───────────────────────
     check("host_of pulls the endpoint out of a Neon DSN",
           gate.host_of("postgresql://u:p@ep-damp-star-123.us-east-2.aws.neon.tech/db?sslmode=require")
