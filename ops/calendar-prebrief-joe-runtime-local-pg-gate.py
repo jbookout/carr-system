@@ -71,6 +71,12 @@ def main() -> int:
             (queued, str(queued)),
         )
         cur.execute("set session authorization carr_jobs")
+        summer_due = one(cur, "select to_char(ops.calendar_prebrief_joe_live_due_at(%s::timestamptz) at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')", ("2026-07-13T11:30:00Z",))[0]
+        winter_due = one(cur, "select to_char(ops.calendar_prebrief_joe_live_due_at(%s::timestamptz) at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')", ("2026-01-12T12:30:00Z",))[0]
+        before_window = one(cur, "select ops.calendar_prebrief_joe_live_due_at(%s::timestamptz)", ("2026-07-13T11:29:59Z",))[0]
+        after_window = one(cur, "select ops.calendar_prebrief_joe_live_due_at(%s::timestamptz)", ("2026-07-13T11:45:00Z",))[0]
+        if summer_due != "2026-07-13T11:30:00Z" or winter_due != "2026-01-12T12:30:00Z" or before_window is not None or after_window is not None:
+            raise RuntimeError("calendar Joe schedule is not DST-safe or exactly bounded to the 06:30 local window")
         generic = cur.execute(
             "select job_id from ops.claim_job('generic-runtime-gate',100,300)"
         ).fetchall()
@@ -84,6 +90,17 @@ def main() -> int:
         claimed = one(cur, "select job_id,lease from ops.claim_calendar_prebrief_joe_live_job('runtime-gate',300)")
         if claimed[0] != queued or not isinstance(claimed[1], uuid.UUID):
             raise RuntimeError("calendar Joe narrow claim did not return its exact job")
+        if one(cur, "select ops.heartbeat_job(%s,%s,300)", claimed) != (True,):
+            raise RuntimeError("calendar Joe claimed lease could not be renewed before child execution")
+        if one(cur, "select leased_until > now() + interval '299 seconds' from ops.job where id=%s", (queued,)) != (True,):
+            raise RuntimeError("calendar Joe heartbeat did not protect the full claimed lease")
+        if one(cur, "select ops.fail_job(%s,%s,'calendar_prebrief_child_refusal','fixture deterministic child refusal')", claimed) != ("retry_wait",):
+            raise RuntimeError("calendar Joe typed child failure did not enter retry_wait")
+        failure = one(cur, "select state,last_failure_class,last_failure_detail,lease_token from ops.job where id=%s", (queued,))
+        attempt = one(cur, "select state,failure_class,detail from ops.job_attempt where job_id=%s and attempt=1", (queued,))
+        failure_receipt = one(cur, "select kind,evidence->>'failure_class',evidence->>'next_state' from ops.job_receipt where job_id=%s and attempt=1", (queued,))
+        if failure != ("retry_wait", "calendar_prebrief_child_refusal", "fixture deterministic child refusal", None) or attempt != ("failed", "calendar_prebrief_child_refusal", "fixture deterministic child refusal") or failure_receipt != ("failure", "calendar_prebrief_child_refusal", "retry_wait"):
+            raise RuntimeError("calendar Joe typed child failure did not persist exact attempt and receipt evidence")
         refused(cur, "select ops.activate_calendar_prebrief_joe_live(%s)", (evidence,), "permission denied")
         cur.execute("reset session authorization")
 
