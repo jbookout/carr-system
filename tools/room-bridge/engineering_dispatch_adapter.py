@@ -61,6 +61,12 @@ def _prompt(packet: dict, task: dict) -> str:
     """One exact execution request.  The executor cannot select authority."""
     return (
         "You are the fresh, dedicated Codex executor for one bounded CARR Engineering Passport slice.\n\n"
+        "RULE-DELIVERY WORKFLOW: engineering-slice\n"
+        "RULE-DELIVERY PACKS: engineering-git,delegation-council,scheduled-automation,source-study\n"
+        "FIRST: call `standing-context` with exactly the four packs above and read the returned rules. "
+        "REFUSE before inspecting the envelope, source, or job if that call fails, reports any "
+        "packs_not_found, or does not read back all four canonical names. Never substitute an alias or "
+        "a full-set fallback.\n\n"
         "The controller—not you—owns the database lease, identity, authority, and lifecycle. "
         "Do not connect directly to any database, do not claim/retry/complete a job, do not reuse a session, "
         "and do not widen the accepted slice. Work only inside a fresh isolated Git worktree.\n\n"

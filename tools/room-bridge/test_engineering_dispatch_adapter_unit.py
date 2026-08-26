@@ -122,6 +122,10 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert seen["desk"] == "engineering-codex" and seen["fresh"] is True
     assert "CARR_DB_JOBS_URL" not in seen["env"]
     assert "SERVER-ISSUED SLICE PACKET" in seen["prompt"]
+    assert "RULE-DELIVERY WORKFLOW: engineering-slice" in seen["prompt"]
+    assert ("RULE-DELIVERY PACKS: engineering-git,delegation-council,"
+            "scheduled-automation,source-study") in seen["prompt"]
+    assert "REFUSE before inspecting the envelope, source, or job" in seen["prompt"]
 
 
 def test_invalid_model_receipt_refuses_before_the_controller_can_persist_it():

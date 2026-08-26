@@ -46,6 +46,7 @@ boot would not have delivered. Enforcement flips on at zero unexplained misses.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -60,6 +61,8 @@ from lib.rule_delivery_shadow import (  # noqa:E402
 )
 MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 LOG = os.path.join(REPO, "out", "rule-delivery-shadow.jsonl")
+RECEIPT_SCHEMA = os.path.join(
+    REPO, "control-room", "contracts", "engineering-slice-receipt.v1.schema.json")
 CARR_PATH_MARKERS = ("/carr-system/", "/carr-system", "my drive/carr ai")
 SYNTHETIC_PREFIXES = ("The following is the Codex agent history", "<environment_context>",
                       "<app-context>", "<skills_instructions>", "<permissions instructions>",
@@ -73,6 +76,12 @@ SCHEDULED_TASK_PREAMBLE = (
     "specific action. When in doubt, producing a report of what you found is "
     "the correct output."
 )
+ENGINEERING_WORKFLOW_PACKS = (
+    "engineering-git", "delegation-council", "scheduled-automation", "source-study")
+ENGINEERING_WORKFLOW_HEADER = (
+    "You are the fresh, dedicated Codex executor for one bounded CARR Engineering Passport slice.\n\n"
+    "RULE-DELIVERY WORKFLOW: engineering-slice\n"
+    "RULE-DELIVERY PACKS: engineering-git,delegation-council,scheduled-automation,source-study\n")
 
 
 def load_packs():
@@ -107,12 +116,91 @@ def _content_text(content, kinds=("text", "input_text", "output_text")):
                      if isinstance(b, dict) and b.get("type") in kinds)
 
 
+def _payload_message(record):
+    payload = record.get("payload")
+    if isinstance(payload, dict) and payload.get("type") == "message":
+        return payload
+    return None
+
+
 def role_and_text(record):
     payload = record.get("payload")
     if isinstance(payload, dict) and payload.get("type") == "message":
         return payload.get("role"), _content_text(payload.get("content"))
     message = record.get("message") if isinstance(record.get("message"), dict) else record
     return message.get("role") or record.get("type"), _content_text(message.get("content"))
+
+
+def _schema_valid(value, schema, root):
+    """The dependency-free subset of JSON Schema used by the receipt contract."""
+    if "$ref" in schema:
+        prefix = "#/$defs/"
+        ref = schema["$ref"]
+        return (isinstance(ref, str) and ref.startswith(prefix)
+                and _schema_valid(value, root["$defs"].get(ref[len(prefix):], {}), root))
+    if "oneOf" in schema:
+        return sum(_schema_valid(value, item, root) for item in schema["oneOf"]) == 1
+    if "const" in schema and value != schema["const"]:
+        return False
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    kind = schema.get("type")
+    if kind == "object":
+        if not isinstance(value, dict):
+            return False
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if any(key not in value for key in required):
+            return False
+        if schema.get("additionalProperties") is False and set(value) - set(properties):
+            return False
+        return all(key not in properties or _schema_valid(item, properties[key], root)
+                   for key, item in value.items())
+    if kind == "array":
+        if not isinstance(value, list) or len(value) < schema.get("minItems", 0):
+            return False
+        if schema.get("uniqueItems"):
+            rows = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value]
+            if len(rows) != len(set(rows)):
+                return False
+        return all(_schema_valid(item, schema.get("items", {}), root) for item in value)
+    if kind == "string":
+        return (isinstance(value, str) and len(value) >= schema.get("minLength", 0)
+                and ("pattern" not in schema or re.fullmatch(schema["pattern"], value) is not None))
+    if kind == "boolean":
+        return isinstance(value, bool)
+    if kind == "null":
+        return value is None
+    return True
+
+
+def exact_engineering_receipt(value):
+    try:
+        schema = json.loads(Path(RECEIPT_SCHEMA).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return False
+    return _schema_valid(value, schema, schema)
+
+
+def assistant_machine_receipt(record):
+    """Return only a whole, strict, assistant-authored typed receipt."""
+    message = _payload_message(record)
+    if message is None:
+        message = record.get("message") if isinstance(record.get("message"), dict) else record
+    if message.get("role") != "assistant":
+        return None
+    content = message.get("content")
+    if not isinstance(content, list) or len(content) != 1:
+        return None
+    block = content[0]
+    if not isinstance(block, dict) or block.get("type") not in {
+            "text", "output_text"} or not isinstance(block.get("text"), str):
+        return None
+    try:
+        value = json.loads(block["text"].strip())
+    except (TypeError, ValueError):
+        return None
+    return value if exact_engineering_receipt(value) else None
 
 
 def serialized(record):
@@ -222,6 +310,19 @@ def scheduled_workflow_packs(record):
     return declared
 
 
+def engineering_workflow_packs(record):
+    """Packs from the exact controller-owned Engineering Passport wrapper."""
+    role, value = role_and_text(record)
+    if role not in {"user", "human"} or not value.startswith(ENGINEERING_WORKFLOW_HEADER):
+        return []
+    if (value.count("SERVER-ISSUED SLICE PACKET (immutable):") != 1
+            or value.count("CONTROLLER TASK BINDING (immutable):") != 1
+            or "FIRST: call `standing-context` with exactly the four packs above" not in value
+            or "REFUSE before inspecting the envelope, source, or job" not in value):
+        return []
+    return list(ENGINEERING_WORKFLOW_PACKS)
+
+
 def delivery_state(records):
     """What this session has loaded, across every standing-context call it made.
 
@@ -277,6 +378,167 @@ def _find_delivery(value):
     return None
 
 
+def _brace_spans(text):
+    """Yield balanced object spans without being confused by quoted braces."""
+    stack = []
+    quote = None
+    escaped = False
+    for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote:
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == "{":
+            stack.append(index)
+        elif char == "}" and stack:
+            start = stack.pop()
+            yield start, index + 1
+
+
+def _safe_literal(node, values):
+    """Evaluate data-only Python literals and local literal-constructor lambdas."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id not in values:
+            raise ValueError("unknown literal name")
+        return values[node.id]
+    if isinstance(node, ast.List):
+        return [_safe_literal(item, values) for item in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(_safe_literal(item, values) for item in node.elts)
+    if isinstance(node, ast.Dict):
+        return {_safe_literal(key, values): _safe_literal(item, values)
+                for key, item in zip(node.keys, node.values)}
+    if isinstance(node, ast.Lambda):
+        return node
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        function = values.get(node.func.id)
+        if not isinstance(function, ast.Lambda) or node.keywords:
+            raise ValueError("not a data-only literal constructor")
+        names = [arg.arg for arg in function.args.args]
+        if len(names) != len(node.args):
+            raise ValueError("literal constructor arity mismatch")
+        local = dict(values)
+        local.update({name: _safe_literal(arg, values)
+                      for name, arg in zip(names, node.args)})
+        return _safe_literal(function.body, local)
+    raise ValueError("not a data-only literal")
+
+
+def _line_offsets(text):
+    offsets = [0]
+    for matched in re.finditer("\n", text):
+        offsets.append(matched.end())
+    return offsets
+
+
+def _python_receipt_spans(text):
+    """Locate strict receipt assignments without executing assistant code."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    offsets = _line_offsets(text)
+    values = {}
+    spans = []
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1 \
+                or not isinstance(statement.targets[0], ast.Name):
+            continue
+        name = statement.targets[0].id
+        try:
+            value = _safe_literal(statement.value, values)
+        except (TypeError, ValueError):
+            continue
+        values[name] = value
+        if not exact_engineering_receipt(value):
+            continue
+        start = offsets[statement.value.lineno - 1] + statement.value.col_offset
+        end = offsets[statement.value.end_lineno - 1] + statement.value.end_col_offset
+        spans.append((start, end))
+    return spans
+
+
+def _normalize_receipt_objects(text):
+    """Replace only independently strict JSON/Python receipt object literals."""
+    spans = []
+    for start, end in _brace_spans(text):
+        candidate = text[start:end]
+        value = None
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                value = parser(candidate)
+                break
+            except (SyntaxError, TypeError, ValueError):
+                pass
+        if exact_engineering_receipt(value):
+            spans.append((start, end))
+    spans.extend(_python_receipt_spans(text))
+    # Replace outermost matched spans from right to left. Nested valid receipts
+    # are impossible under the contract, but de-duplication keeps this total.
+    selected = []
+    for start, end in sorted(set(spans), key=lambda item: (item[0], -item[1])):
+        if not any(existing[0] <= start and end <= existing[1] for existing in selected):
+            selected.append((start, end))
+    for start, end in sorted(selected, reverse=True):
+        text = text[:start] + "[engineering-slice-receipt.v1]" + text[end:]
+    return text
+
+
+def _decoded_command(input_text):
+    """Decode a Codex tools.exec_command cmd string, preserving outer metadata."""
+    matched = re.search(r"\bcmd\s*:\s*", input_text)
+    if not matched:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        value, used = decoder.raw_decode(input_text[matched.end():])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, str):
+        return None
+    start = matched.end()
+    return value, input_text[:start] + '"[decoded-command]"' + input_text[start + used:]
+
+
+def custom_tool_text(payload):
+    """Observe every tool and command, minus strict typed receipt data only."""
+    name = str(payload.get("name", ""))
+    raw = payload.get("input")
+    if not isinstance(raw, str):
+        return "\n".join((name, serialized(raw)))
+    if "mcp__carr__standing_context" in raw or "mcp__carr__standing-context" in raw:
+        # This call establishes delivery state; its surface/tier/detail routing
+        # metadata is not observed domain work. Keep the call and declared pack
+        # names visible while excluding those fixed transport arguments.
+        packs = re.search(r"\bpacks\s*:\s*\[([^]]*)\]", raw)
+        return "\n".join((name, "standing_context", packs.group(1) if packs else ""))
+    decoded = _decoded_command(raw)
+    if decoded:
+        command, outer = decoded
+        # Python receipts normally sit inside a heredoc. Parsing the body as
+        # Python lets aliases such as evidence=E(...) resolve as data-only
+        # literals while the shell command around it remains observable.
+        matched = re.search(r"<<['\"]?([A-Za-z0-9_]+)['\"]?\n(.*?)\n\1(?:\n|$)",
+                            command, re.S)
+        if matched:
+            body = matched.group(2)
+            normalized = _normalize_receipt_objects(body)
+            command = command[:matched.start(2)] + normalized + command[matched.end(2):]
+        command = _normalize_receipt_objects(command)
+        return "\n".join((name, outer, command))
+    return "\n".join((name, _normalize_receipt_objects(raw)))
+
+
 def work_text(record):
     """What the SESSION did and said this turn — never what a tool said back.
 
@@ -292,16 +554,29 @@ def work_text(record):
     parts = []
     payload = record.get("payload")
     if isinstance(payload, dict) and payload.get("type") == "custom_tool_call":
-        parts.append(serialized(payload))
+        parts.append(custom_tool_text(payload))
     message = record.get("message") if isinstance(record.get("message"), dict) else record
     role = message.get("role") or record.get("type")
     if role in {"user", "human"} and suppress_static_text(record):
         return ""
     content = message.get("content")
+    payload_message = _payload_message(record)
+    if payload_message is not None and payload_message.get("role") in {
+            "user", "human", "assistant"}:
+        payload_text = _content_text(payload_message.get("content"))
+        # Codex response_item messages were not historically part of this
+        # adapter's prose path. Admit receipt-shaped rows narrowly: exact
+        # machine receipts disappear; malformed/extra/trailing near-shapes fail
+        # closed to ordinary lexical scanning.
+        if (payload_text.lstrip().startswith("{")
+                and "engineering-slice-receipt.v1" in payload_text
+                and assistant_machine_receipt(record) is None):
+            parts.append(payload_text)
     if isinstance(content, str):
         if role in {"user", "human", "assistant"}:
             parts.append(content)
     elif isinstance(content, list):
+        receipt = assistant_machine_receipt(record)
         for block in content:
             if not isinstance(block, dict):
                 continue
@@ -310,7 +585,8 @@ def work_text(record):
                 parts.append(str(block.get("name", "")))
                 parts.append(serialized(block.get("input")))
             elif kind in {"text", "input_text", "output_text"}:
-                parts.append(str(block.get("text", "")))
+                if receipt is None:
+                    parts.append(str(block.get("text", "")))
     return "\n".join(p for p in parts if p)
 
 
@@ -324,6 +600,9 @@ def observed_packs(turn, triggers):
             hits[name] = found[:6]
     for record in turn:
         for name in scheduled_workflow_packs(record):
+            if name in triggers:
+                hits.setdefault(name, ["workflow-contract"])
+        for name in engineering_workflow_packs(record):
             if name in triggers:
                 hits.setdefault(name, ["workflow-contract"])
     return hits

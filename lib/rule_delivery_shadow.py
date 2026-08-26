@@ -31,11 +31,13 @@ WINDOW_SOURCE_PATHS = (
     "ops/config/rule-delivery-activation-overlay.v1.json",
     "ops/config-as-code.py",
     "ops/config/rule-enforcement-map.json",
+    "ops/scheduled-tasks/engineering-slice.SKILL.md",
     "ops/scheduled-tasks/nightly-record-layer.SKILL.md",
     "ops/rule-delivery-cutover.py",
     "ops/rule-delivery-shadow-eligibility.py",
     "ops/rule-delivery-shadow-ledger.py",
     "ops/rule-delivery-shadow-watch.py",
+    "tools/room-bridge/engineering_dispatch_adapter.py",
 )
 EPOCH_KEYS = frozenset({"schema", "record_type", "record_id", "ts",
                         "policy_digest", "map_digest", "source_digest", "owner",
