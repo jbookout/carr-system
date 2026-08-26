@@ -78,6 +78,8 @@ WRITE_ACTION_EXACT = {
     "review-and-triage",    # Program 6 human state transition; exact because
                               # other review-* actions include non-mutating reads
     "propose-ready-plan",   # Program 6 immutable plan proposal; explicit evidence coverage
+    "review-heavy-build-plan", # Program 6 independent heavy-plan review receipt;
+                               # exact because other review-* actions include reads
     "accept-ready-plan",    # Program 6 human readiness transition; never execution
     "propose-outcome-feedback", # Program 6 immutable evidence proposal; no self-attestation
     "accept-outcome-feedback",  # Program 6 human-only observational acceptance; never completion
