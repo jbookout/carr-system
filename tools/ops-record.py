@@ -2093,6 +2093,24 @@ def release_candidate_manifest_refusal(args, manifest: dict) -> str | None:
                 "release manifest so the approval plan hash covers the version "
                 "that can be promoted")
 
+    # A release row is an immutable source binding, not a movable Git ref.  The
+    # manifest verifier can rebuild HEAD, tags, and abbreviated SHAs, so reject
+    # those forms here before either verification or a database credential is
+    # reached.  Also prove that the recorded object is a commit present in this
+    # exact checkout rather than trusting its shape alone.
+    recorded_sha = manifest.get("git_sha")
+    if (not isinstance(recorded_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}", recorded_sha) is None):
+        return "release candidate manifest git_sha must be an exact lowercase 40-hex commit SHA"
+    resolved = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "--verify",
+         f"{recorded_sha}^{{commit}}"],
+        capture_output=True, text=True, check=False,
+    )
+    if resolved.returncode != 0 or resolved.stdout.strip() != recorded_sha:
+        return ("release candidate manifest git_sha must resolve to that exact "
+                "commit in the canonical source checkout")
+
     assurance_fields = (
         manifest.get("performance_budget_ref"),
         manifest.get("performance_budget_ms"),

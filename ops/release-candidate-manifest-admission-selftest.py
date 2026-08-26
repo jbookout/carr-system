@@ -66,6 +66,13 @@ def main() -> int:
     module: Any = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
+    manifest_spec = importlib.util.spec_from_file_location(
+        "release_manifest_candidate_test", MANIFEST
+    )
+    assert manifest_spec and manifest_spec.loader
+    manifest_module: Any = importlib.util.module_from_spec(manifest_spec)
+    manifest_spec.loader.exec_module(manifest_module)
+
     validator = getattr(module, "release_candidate_manifest_refusal", None)
     check("1. candidate intake exposes one shared fail-closed validator",
           callable(validator))
@@ -161,6 +168,31 @@ def main() -> int:
         check("6. production-default manifest for staging refuses before DB write",
               malformed_rc == 2 and not connections,
               f"rc={malformed_rc} connections={connections}")
+
+        # The canonical manifest builder resolves refs, but candidate admission
+        # must persist only one exact immutable commit identity.  Recompute each
+        # plan hash so these refusals prove the source identity check, and invoke
+        # the real command path to prove no database credential is opened.
+        immutable_sha = staging["git_sha"]
+        for label, mutable_ref in (
+            ("HEAD", "HEAD"),
+            ("tag", "refs/tags/candidate-test"),
+            ("abbreviated SHA", immutable_sha[:12]),
+        ):
+            malformed_ref = dict(staging)
+            malformed_ref["git_sha"] = mutable_ref
+            malformed_ref["plan_hash"] = manifest_module.plan_hash(malformed_ref)
+            malformed_ref_path = tmp / f"mutable-{label.replace(' ', '-')}.json"
+            malformed_ref_path.write_text(
+                json.dumps(malformed_ref), encoding="utf-8"
+            )
+            connections.clear()
+            malformed_ref_rc = module.cmd_release(
+                args_for("staging", malformed_ref_path)
+            )
+            check(f"6a. {label} git ref refuses before DB write",
+                  malformed_ref_rc == 2 and not connections,
+                  f"rc={malformed_ref_rc} connections={connections}")
 
     source = (REPO / "bin" / "deploy-worker.sh").read_text(encoding="utf-8")
     check("7. deploys use one manifest builder for exact target/assurance recomputation",
