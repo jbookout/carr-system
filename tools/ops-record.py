@@ -370,7 +370,21 @@ def forward_fix_rehearsal_declaration(cur, idempotency_key: str) -> dict:
     row = cur.fetchone()
     if not row:
         raise RuntimeError("forward-fix rehearsal has no immutable prepared declaration")
-    return row[0]
+    # The function RETURNS TABLE with six columns (0315); building the dict
+    # here mirrors that exact shape. Until 2026-08-26 this returned row[0]
+    # as if the projection were one composite column, so every real read
+    # died with "string indices must be integers" — unseen because the
+    # selftest's fake cursor returned a dict in column zero.
+    if len(row) != 6:
+        raise RuntimeError("forward-fix declaration projection has an unexpected shape")
+    return {
+        "expected_provider_tag": row[0],
+        "declared_migration_set_sha256": row[1],
+        "declared_migration_count": row[2],
+        "declared_schema_highest_migration": row[3],
+        "declared_schema_applied_count": row[4],
+        "declared_schema_ledger_sha256": row[5],
+    }
 
 
 def prepare_staging_restore_only_attempt(cur, args) -> dict:

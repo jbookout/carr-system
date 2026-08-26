@@ -489,15 +489,18 @@ class Cursor:
         elif "ops.read_staging_forward_fix_rehearsal_declaration" in compact:
             # Number-base form: what tools/release-manifest.py actually emits.
             exact_set = ["0315"]
-            self._row = ({
-                "expected_provider_tag": getattr(self, "forward_tag", tag),
-                "declared_migration_set_sha256": "sha256:" + hashlib.sha256(
+            # SIX BARE COLUMNS, exactly as the RETURNS TABLE function emits
+            # them (0315) — never a dict in column zero, which is the fake
+            # shape that hid the row[0] reader bug until 2026-08-26.
+            self._row = (
+                getattr(self, "forward_tag", tag),
+                "sha256:" + hashlib.sha256(
                     json.dumps(exact_set, separators=(",", ":")).encode()).hexdigest(),
-                "declared_migration_count": 1,
-                "declared_schema_highest_migration": "0315_program5_forward_fix_rehearsal.sql",
-                "declared_schema_applied_count": 315,
-                "declared_schema_ledger_sha256": "sha256:" + "7" * 64,
-            },)
+                1,
+                "0315_program5_forward_fix_rehearsal.sql",
+                315,
+                "sha256:" + "7" * 64,
+            )
 
     def fetchone(self):
         return self._row
