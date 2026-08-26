@@ -31,7 +31,6 @@ REMEDIATED = {
     "04bcc76d7f557e4cf7680db48f1f0f7b6ef2b1f5cb359e4e39b043ca87617207",
     "f0c4df3eb2e3d4e8c9843ef62afc587bccd36043a1bbb1aa7a5af00851fef559",
 }
-PINNED_PREFIX_ROWS = 30
 EXPLAINED_CONTEXT = {
     "a76928580de0fddc3231420e6663b3219831b80526d8cabb60b69e4cc85c2028":
         ("Git/PR merge",),
@@ -158,6 +157,9 @@ for event in events:
 # committed digest envelope above and reports which external proof was absent.
 expected_events = {event["event_id"]: (event["session_id"], event["observed_at"])
                    for event in events}
+ledger_snapshot = document["ledger"]["snapshot"]
+prefix_rows = ledger_snapshot["line_count"]
+prefix_sha256 = ledger_snapshot["sha256"]
 local_ledger = (REPO / document["ledger"]["path"]).resolve()
 canonical_root = Path("/Users/booko/carr-system")
 canonical_ledger = (canonical_root / document["ledger"]["path"]).resolve()
@@ -165,17 +167,17 @@ checked_ledger = False
 if local_ledger.is_file() and local_ledger != canonical_ledger:
     checked_ledger = True
     if verify_legacy_ledger(
-            local_ledger.read_bytes(), prefix_rows=PINNED_PREFIX_ROWS,
-            prefix_sha256=document["ledger"]["sha256"], expected=expected_events):
-        print(f"verified immutable {PINNED_PREFIX_ROWS}-row ledger prefix and "
+            local_ledger.read_bytes(), prefix_rows=prefix_rows,
+            prefix_sha256=prefix_sha256, expected=expected_events):
+        print(f"verified immutable {prefix_rows}-row ledger prefix and "
               f"{len(expected_events)} derived finding identities")
     else:
         print("external raw ledger unavailable; clone-local log has no pinned legacy events")
 if verify_owned_ledger(
-        canonical_root, document["ledger"]["path"], prefix_rows=PINNED_PREFIX_ROWS,
-        prefix_sha256=document["ledger"]["sha256"], expected=expected_events):
+        canonical_root, document["ledger"]["path"], prefix_rows=prefix_rows,
+        prefix_sha256=prefix_sha256, expected=expected_events):
     checked_ledger = True
-    print(f"verified canonical immutable {PINNED_PREFIX_ROWS}-row ledger prefix and "
+    print(f"verified canonical immutable {prefix_rows}-row ledger prefix and "
           f"{len(expected_events)} derived finding identities")
 if not checked_ledger:
     print("external raw ledger unavailable; validated committed 14-event digest envelope")
