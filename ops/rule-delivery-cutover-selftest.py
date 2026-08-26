@@ -14,19 +14,30 @@ cutover=importlib.util.module_from_spec(spec); spec.loader.exec_module(cutover)
 py=(REPO/"ops/rule-delivery-cutover.py").read_text()
 sh=(REPO/"bin/rule-delivery-cutover-prod.sh").read_text()
 sql=(REPO/"migrations/0317_atomic_rule_delivery_cutover.sql").read_text()
+successor=(REPO/"migrations/0336_siep02_rule_delivery_authority.sql").read_text()
 checks={
  "exact 38 reviewed proposal ids":len(cutover.curation_ids())==38,
- "human reviewer is checked":"p.status='approved' and a.kind='human'" in py,
+ "human reviewer is checked":"rp.status='approved' and a.kind='human'" in successor,
  "seven-day eligibility is checked":"shadow_eligible(eligibility_module, ledger_rows, identity)" in py and "eligibility[\"eligible\"]" in py,
  "live policy identity binds eligibility":"current_identity(REPO, row)" in py,
  "ledger lock spans atomic flip":"with locked_read(" in py and "ops.set_rule_delivery_mode" in py,
  "policy identity is rebound before write":"where singleton for update" in py and "final_identity" in py,
  "live hook parity runs before write":"if not live_hook_config_parity()" in py,
- "production is pinned":"steep-field-48688294" in sh and "connection-string production" in sh,
+ "production requires the Joe authority login":"CARR_DB_AUTHORITY_JOE_URL" in sh
+    and "neondb_owner" not in sh and "--changed-by" not in sh,
+ "runtime verifies the exact Joe login":"select session_user,current_user" in py
+    and "carr_authority_joe" in py and "--changed-by" not in py,
  "dry run is default":"--apply" in sh and "APPLY=0" in sh,
  "direct policy update is guarded":"rule_delivery_policy_cutover_only" in sql,
  "cutover and controls share one function":"set_rule_delivery_mode" in sql and "delete from ops.rule_enforcement_point" in sql,
  "receipt is append-only":"rule_delivery_activation_receipt_append_only" in sql,
+ "successor derives attribution and revokes legacy authority":
+    "'joe',btrim(p_reason)" in successor
+    and "revoke all on function ops.set_rule_delivery_mode(text,text,text,text)" in successor
+    and "session_user <> 'carr_authority_joe'" in successor,
+ "Joe preflight is typed and aggregate-only":"rule_delivery_cutover_preflight" in py
+    and "from retrieval_proposal" not in py
+    and "cardinality(p_curation_proposal_ids) <> 38" in successor,
 }
 with tempfile.TemporaryDirectory() as directory:
  home=Path(directory); (home/".claude").mkdir(); (home/".codex").mkdir()
