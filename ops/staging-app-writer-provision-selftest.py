@@ -548,6 +548,7 @@ grant insert, select on table ops.work_request to carr_writer;
           rollback_events == [
               ("preserve", 1), ("bulk", future_values), ("verify", None),
               ("preserve", 2), ("bulk", old_values), ("verify", None),
+              ("preserve", 3),
           ])
     first_bulk_events: list[tuple[str, Any]] = []
     first_bulk_calls = 0
@@ -570,7 +571,7 @@ grant insert, select on table ops.work_request to carr_writer;
     check("initial candidate bulk uncertainty also restores the complete old pair",
           first_bulk_events == [
               ("preserve", None), ("bulk", future_values),
-              ("bulk", old_values), ("verify", None),
+              ("bulk", old_values), ("verify", None), ("preserve", None),
           ])
     try:
         with contextlib.redirect_stderr(io.StringIO()):
@@ -584,9 +585,87 @@ grant insert, select on table ops.work_request to carr_writer;
     else:
         raise AssertionError("rollback mode was accepted without --apply")
 
+    candidate_scope = provision.ProviderScope(
+        candidate.project_id, candidate.branch_id, candidate.endpoint_id,
+        candidate.endpoint_host, 5432, "neondb")
+    candidate_owner = provision.ScopedDsn(
+        candidate_scope, "neondb_owner", candidate.endpoint_host, 5432, "neondb",
+        f"postgresql://neondb_owner:candidate-owner-secret@{candidate.endpoint_host}/neondb?sslmode=require",  # ci-secret-scan: allow — hermetic non-routable fixture
+    )
     binding_fixture = provision.ReplacementBinding(
-        target, production, old, candidate, source_manifest, exact_receipt, owner)
-    rollback_main_events: list[tuple[str, Any]] = []
+        target, production, old, candidate, source_manifest, exact_receipt, candidate_owner)
+    valid_state = provision.ExpectedSeedState(provision.EXPECTED_PROPOSAL_STATUS, 0, 0)
+    worker_lock = provision.worker_cutover_lock_path()
+    active_locks: set[pathlib.Path] = set()
+    lock_events: list[tuple[str, pathlib.Path]] = []
+
+    @contextlib.contextmanager
+    def exclusive_lock(path: pathlib.Path):
+        if path in active_locks:
+            raise provision.credential.CredentialRefusal("fixture lock is already held")
+        active_locks.add(path)
+        lock_events.append(("enter", path))
+        try:
+            yield
+        finally:
+            lock_events.append(("exit", path))
+            active_locks.remove(path)
+
+    try:
+        with exclusive_lock(worker_lock):
+            with exclusive_lock(worker_lock):
+                raise AssertionError("overlapping Worker cutover lock was admitted")
+    except provision.credential.CredentialRefusal:
+        check("one global Worker lock refuses an overlapping candidate cutover", True)
+    check("global Worker lock is outside every candidate credential root",
+          worker_lock.parent == pathlib.Path.home() / ".config/carr"
+          and worker_lock != candidate_root / ".staging-role-operation.lock")
+
+    class FakeOwnerCursor:
+        def __init__(self):
+            self.statements: list[str] = []
+
+        def execute(self, statement, _params=None) -> None:
+            self.statements.append(str(statement))
+
+        def fetchone(self):
+            return (True,)
+
+    class FakeOwner:
+        def __init__(self):
+            self.autocommit = False
+            self.cur = FakeOwnerCursor()
+            self.closed = False
+
+        def cursor(self):
+            return self.cur
+
+        def commit(self) -> None:
+            pass
+
+        def rollback(self) -> None:
+            pass
+
+        def execute(self, statement, _params=None) -> None:
+            self.cur.execute(statement, _params)
+
+        def close(self) -> None:
+            self.closed = True
+
+    orchestration_events: list[tuple[str, Any]] = []
+    profile_roots: list[pathlib.Path | None] = []
+    preserve_calls = 0
+    unlocked_preserve_budget = 0
+    reader_candidate = (
+        f"postgresql://app_reader:candidate-reader-secret@{candidate.endpoint_host}/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic non-routable fixture
+    )
+    writer_candidate = (
+        f"postgresql://app_writer:candidate-writer-secret@{candidate.endpoint_host}/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic non-routable fixture
+    )
+    expected_candidate_values = {
+        "DATABASE_URL_READER": reader_candidate,
+        "DATABASE_URL_WRITER": writer_candidate,
+    }
     saved_main_dependencies = {
         "reject_unsafe_environment": provision.reject_unsafe_environment,
         "replacement_target": provision.replacement_target,
@@ -598,6 +677,11 @@ grant insert, select on table ops.work_request to carr_writer;
         "connect": provision.psycopg.connect,
         "prove_provider_preservation": provision.replacement.prove_provider_preservation,
         "load_grants": provision.snapshot_grants.load_current_grants_to_role,
+        "exclusive_lock": provision.credential.exclusive_lock,
+        "credential_profile": provision.credential.profile,
+        "load_existing": provision.credential.load_existing,
+        "validate_profile_login": provision.validate_profile_login,
+        "require_direct_owner_identity": provision.require_direct_owner_identity,
     }
     try:
         provision.reject_unsafe_environment = lambda _environment: None
@@ -605,12 +689,145 @@ grant insert, select on table ops.work_request to carr_writer;
         provision.resolve_replacement_binding = lambda *_args, **_kwargs: binding_fixture
         provision.load_rollback_worker_values = lambda _old: dict(old_values)
         provision.snapshot_grants.load_current_grants_to_role = lambda *_args, **_kwargs: []
+        provision.credential.exclusive_lock = exclusive_lock
+
+        # The default plan proves the full candidate binding but must stop before
+        # credential, role, provider, or Worker mutations.
+        provision.read_seed_state = lambda *_args, **_kwargs: valid_state
         provision.replacement.prove_provider_preservation = lambda *_args, **_kwargs: \
-            rollback_main_events.append(("preserve", None))
-        provision.bulk_worker_database_secrets = lambda values: \
-            rollback_main_events.append(("bulk", dict(values)))
-        provision.verify_worker_database_secret_bindings = lambda: \
-            rollback_main_events.append(("verify", None))
+            (_ for _ in ()).throw(AssertionError("dry-run mutated/read provider scopes"))
+        provision.load_rollback_worker_values = lambda *_args, **_kwargs: \
+            (_ for _ in ()).throw(AssertionError("dry-run loaded secret credentials"))
+        provision.credential.profile = lambda *_args, **_kwargs: \
+            (_ for _ in ()).throw(AssertionError("dry-run opened candidate credential state"))
+        provision.bulk_worker_database_secrets = lambda *_args, **_kwargs: \
+            (_ for _ in ()).throw(AssertionError("dry-run mutated Worker secrets"))
+        provision.psycopg.connect = lambda *_args, **_kwargs: \
+            (_ for _ in ()).throw(AssertionError("dry-run opened candidate owner DB"))
+        dry_stdout = io.StringIO()
+        with contextlib.redirect_stdout(dry_stdout):
+            dry_rc = provision.main([
+                "--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+                "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA,
+            ])
+        dry_output = json.loads(dry_stdout.getvalue())
+        check("main dry-run proves the exact candidate without any mutation path",
+              dry_rc == 0 and dry_output["state"] == "dry_run"
+              and dry_output["mutated"] is False
+              and dry_output["candidate_project_id"] == candidate.project_id
+              and dry_output["prior_staging_project_id"] == old.project_id
+              and dry_output["production_project_id"] == production.project_id)
+
+        real_profile = saved_main_dependencies["credential_profile"]
+        def candidate_profile(label: str, *, config_root=None):
+            profile_roots.append(config_root)
+            return real_profile(label, config_root=config_root)
+        def load_candidate_credential(_paths, *, role_name, **_kwargs):
+            value = reader_candidate if role_name == provision.READER_ROLE else writer_candidate
+            return provision.credential.StoredCredential(
+                "final", pathlib.Path("/fixture/final"), value, "fixture-password",
+                candidate.endpoint_host, 5432, "neondb")
+        provision.credential.profile = candidate_profile
+        provision.credential.load_existing = load_candidate_credential
+        provision.load_rollback_worker_values = lambda _old: dict(old_values)
+        provision.validate_profile_login = lambda *_args, **_kwargs: None
+        provision.require_direct_owner_identity = lambda _cur: "neondb_owner"
+        provision.psycopg.connect = lambda *_args, **_kwargs: FakeOwner()
+        def record_preservation(*_args, **_kwargs) -> None:
+            nonlocal preserve_calls
+            preserve_calls += 1
+            if preserve_calls > unlocked_preserve_budget and worker_lock not in active_locks:
+                raise AssertionError("provider preservation ran outside the global Worker lock")
+            orchestration_events.append(("preserve", None))
+        provision.replacement.prove_provider_preservation = record_preservation
+        def record_bulk(values) -> None:
+            if worker_lock not in active_locks:
+                raise AssertionError("Worker bulk ran outside the global cutover lock")
+            orchestration_events.append(("bulk", dict(values)))
+        provision.bulk_worker_database_secrets = record_bulk
+        def record_verify() -> None:
+            if worker_lock not in active_locks:
+                raise AssertionError("Worker readback ran outside the global cutover lock")
+            orchestration_events.append(("verify", None))
+        provision.verify_worker_database_secret_bindings = record_verify
+
+        # A successful main apply uses candidate-root credentials, one atomic
+        # Worker pair, provider pre/post proof, and the complete final readback.
+        seed_reads = 0
+        preserve_calls = 0
+        unlocked_preserve_budget = 1
+        def successful_seed_read(*_args, **_kwargs):
+            nonlocal seed_reads
+            seed_reads += 1
+            if seed_reads == 2 and worker_lock not in active_locks:
+                raise AssertionError("final seed readback ran outside the global Worker lock")
+            orchestration_events.append(("seed", seed_reads))
+            return valid_state
+        provision.read_seed_state = successful_seed_read
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            rc = provision.main([
+                "--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+                "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
+            ])
+        apply_output = json.loads(stdout.getvalue())
+        check("main apply routes both credentials only through the candidate root",
+              profile_roots == [candidate_root, candidate_root]
+              and all(root != pathlib.Path.home() / ".config/carr" for root in profile_roots))
+        check("main apply performs one atomic candidate pair with provider pre/post proof",
+              rc == 0 and orchestration_events == [
+                  ("seed", 1), ("preserve", None), ("preserve", None),
+                  ("bulk", expected_candidate_values), ("verify", None),
+                  ("preserve", None), ("seed", 2),
+              ])
+        check("main apply completes exact final readback without fallback or disclosure",
+              apply_output["state"] == "provisioned" and seed_reads == 2
+              and apply_output["candidate_operation_id"] == str(CANDIDATE_OPERATION_ID)
+              and all(secret not in stdout.getvalue()
+                      for secret in expected_candidate_values.values()))
+
+        # If the complete final seed readback refuses, main must atomically
+        # restore and verify the old pair before re-proving provider preservation.
+        orchestration_events.clear()
+        profile_roots.clear()
+        failure_reads = 0
+        preserve_calls = 0
+        unlocked_preserve_budget = 1
+        def failing_final_seed_read(*_args, **_kwargs):
+            nonlocal failure_reads
+            failure_reads += 1
+            if failure_reads == 2 and worker_lock not in active_locks:
+                raise AssertionError("failed final readback ran outside the global Worker lock")
+            orchestration_events.append(("seed", failure_reads))
+            if failure_reads == 2:
+                raise provision.ProvisioningRefusal("synthetic final readback failure")
+            return valid_state
+        provision.read_seed_state = failing_final_seed_read
+        failure_stdout = io.StringIO()
+        failure_stderr = io.StringIO()
+        with contextlib.redirect_stdout(failure_stdout), contextlib.redirect_stderr(failure_stderr):
+            failure_rc = provision.main([
+                "--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+                "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
+            ])
+        check("main final-readback refusal restores and provider-verifies the old pair",
+              failure_rc == 2 and orchestration_events == [
+                  ("seed", 1), ("preserve", None), ("preserve", None),
+                  ("bulk", expected_candidate_values), ("verify", None),
+                  ("preserve", None), ("seed", 2),
+                  ("bulk", old_values), ("verify", None), ("preserve", None),
+              ])
+        check("final-readback rollback suppresses both candidate and prior secrets",
+              all(secret not in failure_stdout.getvalue() + failure_stderr.getvalue()
+                  for secret in (*expected_candidate_values.values(), *old_values.values())))
+
+        # Explicit rollback shares the same global Worker lock and does no
+        # candidate credential or database role work.
+        orchestration_events.clear()
+        preserve_calls = 0
+        unlocked_preserve_budget = 0
+        provision.credential.profile = lambda *_args, **_kwargs: \
+            (_ for _ in ()).throw(AssertionError("rollback opened candidate credentials"))
         provision.read_seed_state = lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("rollback must not read/converge candidate roles"))
         provision.psycopg.connect = lambda *_args, **_kwargs: (_ for _ in ()).throw(
@@ -624,7 +841,7 @@ grant insert, select on table ops.work_request to carr_writer;
             ])
         rollback_output = json.loads(stdout.getvalue())
         check("explicit rollback uses one atomic old-pair bulk with pre/post preservation",
-              rc == 0 and rollback_main_events == [
+              rc == 0 and orchestration_events == [
                   ("preserve", None), ("bulk", old_values), ("verify", None),
                   ("preserve", None),
               ])
@@ -644,6 +861,12 @@ grant insert, select on table ops.work_request to carr_writer;
         provision.replacement.prove_provider_preservation = saved_main_dependencies[
             "prove_provider_preservation"]
         provision.snapshot_grants.load_current_grants_to_role = saved_main_dependencies["load_grants"]
+        provision.credential.exclusive_lock = saved_main_dependencies["exclusive_lock"]
+        provision.credential.profile = saved_main_dependencies["credential_profile"]
+        provision.credential.load_existing = saved_main_dependencies["load_existing"]
+        provision.validate_profile_login = saved_main_dependencies["validate_profile_login"]
+        provision.require_direct_owner_identity = saved_main_dependencies[
+            "require_direct_owner_identity"]
     try:
         provision.worker_environment({"CLOUDFLARE_ACCOUNT_ID": "0" * 32})
     except provision.ProvisioningRefusal:

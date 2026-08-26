@@ -396,6 +396,10 @@ def replacement_credential_root(operation_id: uuid.UUID) -> pathlib.Path:
     return pathlib.Path.home() / ".config/carr/staging-replacements" / str(operation_id)
 
 
+def worker_cutover_lock_path() -> pathlib.Path:
+    return pathlib.Path.home() / ".config/carr/.staging-worker-cutover.lock"
+
+
 def load_replacement_source_manifest(
     target: ReplacementTarget, *, run: Run = subprocess.run,
 ) -> dict[str, Any]:
@@ -1138,7 +1142,7 @@ def verify_worker_database_secret_bindings(
 def publish_worker_cutover(
     candidate_values: Mapping[str, str], rollback_values: Mapping[str, str], *,
     preserve: Callable[[], None], bulk: Callable[[Mapping[str, str]], None],
-    verify: Callable[[], None],
+    verify: Callable[[], None], postflight: Callable[[], None] = lambda: None,
 ) -> None:
     """Publish one atomic pair; restore the old pair if postflight refuses."""
     if set(candidate_values) != set(WORKER_DATABASE_SECRET_NAMES) \
@@ -1149,10 +1153,12 @@ def publish_worker_cutover(
         bulk(candidate_values)
         verify()
         preserve()
+        postflight()
     except Exception as exc:
         try:
             bulk(rollback_values)
             verify()
+            preserve()
         except Exception as rollback_exc:
             raise ProvisioningRefusal(
                 "Worker credential cutover refused and rollback outcome is uncertain; output suppressed"
@@ -1266,11 +1272,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.rollback_to_prior_staging:
             rollback_values = load_rollback_worker_values(binding.old)
-            rollback_worker_to_prior(
-                rollback_values, preserve=preserve_provider_scopes,
-                bulk=lambda values: bulk_worker_database_secrets(values),
-                verify=lambda: verify_worker_database_secret_bindings(),
-            )
+            with credential.exclusive_lock(worker_cutover_lock_path()):
+                rollback_worker_to_prior(
+                    rollback_values, preserve=preserve_provider_scopes,
+                    bulk=lambda values: bulk_worker_database_secrets(values),
+                    verify=lambda: verify_worker_database_secret_bindings(),
+                )
             print(json.dumps({
                 "environment": "staging", "state": "rolled_back_to_prior_staging",
                 "candidate_operation_id": str(target.candidate_operation_id),
@@ -1385,15 +1392,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except (psycopg.Error, ValueError):
                     pass
                 owner.close()
-        publish_worker_cutover(
-            candidate_values, rollback_values, preserve=preserve_provider_scopes,
-            bulk=lambda values: bulk_worker_database_secrets(values),
-            verify=lambda: verify_worker_database_secret_bindings(),
-        )
-        after = read_seed_state(owner_dsn.value)
-        validate_seed_state(after)
-        if after != before:
-            raise ProvisioningRefusal("provisioning changed proposals, doctrine targets, or batches")
+        final_state: dict[str, ExpectedSeedState] = {}
+        def verify_final_candidate_state() -> None:
+            observed = read_seed_state(owner_dsn.value)
+            validate_seed_state(observed)
+            if observed != before:
+                raise ProvisioningRefusal(
+                    "provisioning changed proposals, doctrine targets, or batches")
+            final_state["after"] = observed
+
+        with credential.exclusive_lock(worker_cutover_lock_path()):
+            publish_worker_cutover(
+                candidate_values, rollback_values, preserve=preserve_provider_scopes,
+                bulk=lambda values: bulk_worker_database_secrets(values),
+                verify=lambda: verify_worker_database_secret_bindings(),
+                postflight=verify_final_candidate_state,
+            )
+        after = final_state.get("after")
+        if after is None:
+            raise ProvisioningRefusal("final candidate state readback is absent")
         print(json.dumps({
             "environment": "staging", "project": binding.candidate.project_name,
             "branch": STAGING_BRANCH_NAME, "state": "provisioned",
