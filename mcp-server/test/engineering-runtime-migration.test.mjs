@@ -8,6 +8,11 @@ const controllerMigration = fs.readFileSync(new URL("../../migrations/0312_engin
 const successorPermissionRepair = fs.readFileSync(new URL("../../migrations/0319_engineering_envelope_writer_successor.sql", import.meta.url), "utf8");
 const claimOutputRepair = fs.readFileSync(new URL("../../migrations/0323_engineering_claim_output_qualification.sql", import.meta.url), "utf8");
 const claimEligibilityRepair = fs.readFileSync(new URL("../../migrations/0325_engineering_claim_envelope_eligibility.sql", import.meta.url), "utf8");
+const currentnessRepair = fs.readFileSync(new URL("../../migrations/0326_engineering_controller_currentness.sql", import.meta.url), "utf8");
+const engineeringMigrationCorpus = fs.readdirSync(new URL("../../migrations/", import.meta.url))
+  .filter(name => /^\d+_.*engineering.*\.sql$/i.test(name))
+  .map(name => fs.readFileSync(new URL(`../../migrations/${name}`, import.meta.url), "utf8"))
+  .join("\n");
 const runtime = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 const mcp = fs.readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
 const registry = JSON.parse(fs.readFileSync(new URL("../../ops/config/control-plane-workflows.v1.json", import.meta.url), "utf8"));
@@ -42,9 +47,10 @@ test("0310's receipt insertion requires the claimed lease and concrete attempt",
   assert.match(migration, /create or replace function ops\.engineering_record_slice_receipt/);
   assert.match(migration, /attempt_row\.lease_token=p_lease_token and attempt_row\.state='running'/);
   assert.match(migration, /job_attempt_id uuid not null unique references ops\.job_attempt\(id\)/);
-  assert.match(runtime, /engineering_finalize_slice_receipt/);
+  assert.match(runtime, /engineering_record_slice_receipt/);
   assert.match(runtime, /engineering_claim_slice/);
-  assert.doesNotMatch(runtime, /ops\.complete_job\(/, "receipt append and completion stay in one database statement");
+  const submit = runtime.slice(runtime.indexOf("export async function submitEngineeringReceipt"), runtime.indexOf("function controllerActor"));
+  assert.doesNotMatch(submit, /ops\.(?:complete_job|fail_job)\(/, "the runtime must not finalize a job after receipt persistence");
 });
 
 test("0310 admits dependent slices from the reviewer fact's bound attempt", () => {
@@ -123,6 +129,56 @@ test("0325 refuses stale Engineering envelopes before a lease is created", () =>
   assert.match(claimEligibilityRepair, /engineering_finalize_slice_receipt/);
   assert.match(claimEligibilityRepair, /grant execute on function ops\.engineering_claim_slice\(text,integer,integer\),[\s\S]*engineering_finalize_slice_receipt\(uuid,uuid,jsonb,text,uuid\) to carr_jobs/);
   assert.doesNotMatch(claimEligibilityRepair, /grant\s+(?:all|select|insert|update|delete)\s+on\s+/i);
+});
+
+test("0326 makes controller eligibility current, safe to parse, and receipt-race safe", () => {
+  assert.match(currentnessRepair, /add column if not exists lease_expires_at/);
+  assert.match(currentnessRepair, /engineering_safe_timestamptz/);
+  assert.match(currentnessRepair, /exception when others/);
+  assert.match(currentnessRepair, /capability_agent_session_lease_immutable/);
+  assert.match(currentnessRepair, /envelope->>'envelope_id'='env:'/);
+  assert.match(currentnessRepair, /envelope->'request'->>'job_ref'='job:'/);
+  assert.match(currentnessRepair, /envelope->'plan_revision'->>'digest'/);
+  assert.match(currentnessRepair, /envelope->'phase_binding'->>'phase_id'/);
+  assert.match(currentnessRepair, /p_generation\s+is\s+null/);
+  assert.match(currentnessRepair, /jsonb_typeof\(p_receipt->'deviations'\)\s+is\s+distinct\s+from\s+'array'/);
+  assert.match(currentnessRepair, /group\s+by\s+deviation->>'deviation_ref'\s+having\s+count\(\*\)>1/i);
+  assert.match(currentnessRepair, /envelope->>'envelope_id'='env:'/);
+  assert.match(currentnessRepair, /envelope->'request'->>'job_ref'='job:'/);
+  assert.match(currentnessRepair, /expires_at<=issued_at\+interval '30 minutes'/);
+  assert.match(currentnessRepair, /agent_session_lease_expired_or_mismatched/);
+  assert.match(currentnessRepair, /malformed_envelope_schema/);
+  assert.match(currentnessRepair, /superseded_envelope/);
+  assert.match(currentnessRepair, /already_receipted/);
+  assert.match(currentnessRepair, /for update/);
+  assert.match(currentnessRepair, /engineering_retire_permanently_ineligible_jobs/);
+  assert.match(currentnessRepair, /'dead_letter'/);
+  assert.match(currentnessRepair, /p_limit is distinct from 1/);
+  assert.match(currentnessRepair, /drop function(?: if exists)? ops\.engineering_controller_binding\(uuid,uuid,uuid\)/i);
+  assert.match(currentnessRepair, /drop function(?: if exists)? ops\.engineering_finalize_slice_receipt\(uuid,uuid,jsonb,text,uuid\)/i);
+  assert.match(currentnessRepair, /drop function(?: if exists)? ops\.engineering_envelope_is_executable\(uuid,uuid,integer\)/i);
+  assert.match(currentnessRepair, /revoke all on function ops\.engineering_claim_slice\(text,integer,integer\)/i);
+  assert.doesNotMatch(currentnessRepair, /grant execute on function ops\.engineering_controller_binding\(uuid,uuid,uuid\)/i);
+  assert.doesNotMatch(currentnessRepair, /grant execute on function ops\.engineering_finalize_slice_receipt\(uuid,uuid,jsonb,text,uuid\)/i);
+  assert.doesNotMatch(currentnessRepair, /grant execute on function ops\.engineering_envelope_is_executable\(uuid,uuid,integer\)/i);
+  assert.match(currentnessRepair, /ops\.engineering_envelope_is_executable\(e\.id,j\.id\)/);
+  assert.match(currentnessRepair, /insert into ops\.engineering_slice_receipt[\s\S]*perform ops\.complete_job/);
+  assert.match(currentnessRepair, /insert into ops\.engineering_slice_receipt[\s\S]*perform ops\.fail_job/);
+  assert.match(currentnessRepair, /perform ops\.complete_job[\s\S]*perform ops\.fail_job[\s\S]*update ops\.capability_agent_session\s+set state='cancelled'[\s\S]*where id=s\.id and work_request_id=e\.work_request_id/);
+  assert.doesNotMatch(currentnessRepair, /grant\s+(?:all|update|insert)\s+on\s+ops\.(?:job|job_attempt)/i);
+});
+
+test("reviewer lineage is pinned to the immutable receipt and latest-generation projection", () => {
+  assert.match(engineeringMigrationCorpus, /(?:v\.receipt_id\s*=\s*r\.id|review\.receipt_id\s*=\s*receipt\.id)/i,
+    "dependent admission must bind the reviewer row to the exact receipt row");
+  assert.match(engineeringMigrationCorpus, /(?:order\s+by\s+r\.created_at\s+desc\s*,\s*r\.id\s+desc[\s\S]{0,160}limit\s+1|newer_receipt\.created_at\s*,\s*newer_receipt\.id\)\s*>\s*\(receipt\.created_at\s*,\s*receipt\.id\))/i,
+    "database projection must select the latest receipt generation deterministically");
+  assert.match(engineeringMigrationCorpus, /create\s+(?:or\s+replace\s+)?function\s+ops\.[A-Za-z0-9_]*(?:review|reviewer|fact)[A-Za-z0-9_]*|create\s+trigger\s+[A-Za-z0-9_]*(?:review|reviewer|fact)[A-Za-z0-9_]*/i,
+    "reviewer facts need a database guard/trigger, not only caller validation");
+  assert.match(runtime, /latestReceiptForSlice[\s\S]*\.sort\(compareCanonicalGeneration\)\.at\(-1\)/,
+    "runtime projection/admission must use latest immutable receipt semantics");
+  assert.match(runtime, /row\.receipt_id\s*===\s*receiptRow\.id/,
+    "runtime reviewer admission must use the exact receipt identifier");
 });
 
 test("the reviewed control-plane inventory carries the exact engineering job contract", () => {

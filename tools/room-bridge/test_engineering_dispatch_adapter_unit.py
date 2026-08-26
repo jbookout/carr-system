@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -48,19 +49,32 @@ ENVELOPE = json.loads((FIXTURES / "codex_desktop.execution-envelope.v1.json").re
 PLAN = json.loads((FIXTURES / "engineering-passport.synthetic.plan.v1.json").read_text())
 
 
+def canonical_second(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# The tracked fixture is an immutable historical contract.  This adapter test
+# needs a live bounded lease, so derive one once and keep receipt hashes bound
+# to the exact packet used by every local test.
+_NOW = datetime.now(timezone.utc).replace(microsecond=0)
+ENVELOPE["issued_at"] = canonical_second(_NOW - timedelta(seconds=30))
+ENVELOPE["expires_at"] = canonical_second(_NOW + timedelta(minutes=20))
+ENVELOPE["agent_session"]["lease_expires_at"] = ENVELOPE["expires_at"]
+
+
 def evidence(ref: str) -> dict:
     return {"ref": ref, "redaction_class": "redacted_evidence",
             "content_digest": "sha256:" + "a" * 64}
 
 
-def valid_receipt() -> dict:
+def valid_receipt(envelope: dict = ENVELOPE) -> dict:
     return {
         "schema_version": "engineering-slice-receipt.v1",
-        "envelope_digest": contract.execution_envelope_digest(ENVELOPE),
+        "envelope_digest": contract.execution_envelope_digest(envelope),
         "attempt_id": "attempt:1", "slice_ref": "slice:a", "plan_digest": PLAN["plan_digest"],
-        "attribution": {"actor_ref": ENVELOPE["server_binding"]["identity"]["agent_principal_id"],
-                        "session_ref": ENVELOPE["agent_session"]["id"],
-                        "adapter_ref": ENVELOPE["server_binding"]["adapter"]["adapter_id"]},
+        "attribution": {"actor_ref": envelope["server_binding"]["identity"]["agent_principal_id"],
+                        "session_ref": envelope["agent_session"]["id"],
+                        "adapter_ref": envelope["server_binding"]["adapter"]["adapter_id"]},
         "planned_resource_refs": ["resource:worktree-a"], "actual_resource_refs": ["resource:worktree-a"],
         "planned_component_refs": ["component:execution-fabric"], "actual_component_refs": ["component:execution-fabric"],
         "checks": [{"check_ref": "check:contracts", "state": "passed", "evidence_refs": [evidence("evidence:check")]}],
@@ -154,6 +168,50 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
         prompt_prefix + task_marker
         + json.dumps(unbound_task, sort_keys=True, separators=(",", ":")))
     assert rule_pack_gate.engineering_workflow_packs(unbound_prompt) == []
+
+
+def test_authority_runway_refuses_expired_near_expiry_or_mismatched_session_before_dispatch():
+    def no_dispatch(*_args, **_kwargs):
+        raise AssertionError("Codex received an insufficient-authority packet")
+
+    cases = []
+    expired = request()
+    expired["envelope"]["expires_at"] = canonical_second(datetime.now(timezone.utc) - timedelta(seconds=1))
+    expired["envelope"]["agent_session"]["lease_expires_at"] = expired["envelope"]["expires_at"]
+    cases.append(expired)
+    near = request()
+    near["envelope"]["expires_at"] = canonical_second(datetime.now(timezone.utc) + timedelta(seconds=929))
+    near["envelope"]["agent_session"]["lease_expires_at"] = near["envelope"]["expires_at"]
+    cases.append(near)
+    mismatched = request()
+    mismatched["envelope"]["agent_session"]["lease_expires_at"] = canonical_second(datetime.now(timezone.utc) + timedelta(minutes=21))
+    cases.append(mismatched)
+    malformed = request()
+    malformed["envelope"]["expires_at"] = "not-a-timestamp"
+    malformed["envelope"]["agent_session"]["lease_expires_at"] = "not-a-timestamp"
+    cases.append(malformed)
+
+    for bad in cases:
+        try:
+            adapter.run(bad, dispatch_fn=no_dispatch, registry=ValidEngineeringDesk())
+        except adapter.DispatchRefusal:
+            continue
+        raise AssertionError("insufficient or malformed authority was dispatched")
+
+
+def test_authority_runway_accepts_a_canonical_packet_with_at_least_930_seconds():
+    good = request()
+    expiry = canonical_second(datetime.now(timezone.utc) + timedelta(seconds=931))
+    good["envelope"]["expires_at"] = expiry
+    good["envelope"]["agent_session"]["lease_expires_at"] = expiry
+    seen = {"called": False}
+
+    def fake_dispatch(*_args, **_kwargs):
+        seen["called"] = True
+        return {"status": "completed", "result": json.dumps(valid_receipt(good["envelope"]))}
+
+    assert adapter.run(good, dispatch_fn=fake_dispatch, registry=ValidEngineeringDesk())["ok"] is True
+    assert seen["called"]
 
 
 def test_invalid_model_receipt_refuses_before_the_controller_can_persist_it():
