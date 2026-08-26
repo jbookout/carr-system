@@ -57,9 +57,23 @@ EXPORT_HOME = Path(os.environ.get("CARR_EXPORT_HOME")
                    or "/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI")
 LIVE = os.environ.get("CARR_EXPORT_LIVE") == "1"
 KEEP_GENERATIONS = 7
-GENERATION_COPY_ATTEMPTS = 3
+# The retry budget below is sized against a OneDrive hydration stall, not a
+# scheduler hiccup.  It shipped on 2026-08-25 as 3 attempts over 0.05s + 0.10s,
+# and on 2026-08-26 the curriculum export died the same EDEADLK death anyway:
+# a sixth of a second is indistinguishable from no retry when the FileProvider
+# is materialising a dehydrated cloud file.  That night the step began at
+# 07:05:13Z and failed at 07:05:15Z, while the same file read by hand two
+# minutes later succeeded on the first try.  Seconds, not milliseconds.
+#
+# Keep ATTEMPTS == len(BACKOFF_SECONDS) + 1: the retry loops index
+# BACKOFF_SECONDS[attempt] on every attempt but the last, so a mismatch turns
+# the retry into an IndexError raised from inside the error handler.
+# ops/export-generation-retry-selftest.py pins both the total wall-clock budget
+# and that relationship, because a budget is the part of a retry that silently
+# regresses to a value which still looks like a retry.
+GENERATION_COPY_ATTEMPTS = 6
 GENERATION_COPY_RETRY_ERRNOS = frozenset({errno.EAGAIN, errno.EDEADLK})
-GENERATION_COPY_BACKOFF_SECONDS = (0.05, 0.10)
+GENERATION_COPY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 5.0, 15.0)
 
 
 def connect():
