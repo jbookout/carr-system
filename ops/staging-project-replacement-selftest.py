@@ -54,8 +54,8 @@ def sql_expected_keys(function_name: str) -> frozenset[str]:
 # Python <-> SQL parity is exact, not substring presence elsewhere in SQL.
 assert ctl.PREPARE_KEYS == sql_expected_keys("prepare_staging_replacement_project")
 assert ctl.OBSERVATION_KEYS == sql_expected_keys("record_staging_replacement_project")
-assert ctl.FINAL_MIGRATION == "0322_clean_staging_replacement_contract.sql"
-assert (ROOT / "migrations" / ctl.FINAL_MIGRATION).is_file()
+assert ctl.CONTRACT_MIGRATION == "0322_clean_staging_replacement_contract.sql"
+assert (ROOT / "migrations" / ctl.CONTRACT_MIGRATION).is_file()
 assert "clean-staging-replacement-contract.v1" in sql_source
 assert "clean-staging-replacement-observation.v1" in sql_source
 
@@ -246,7 +246,61 @@ material = b"100644\0blob\0" + (b"f"*40) + b"\0line\nbreak\0"
 assert manifest.digest_full_tree(entries) == "sha256:" + hashlib.sha256(material).hexdigest()
 contract = manifest.source_contract("HEAD")
 assert contract["source_tree_sha256"] != contract["artifact_sha256"]
-assert contract["migration_highest"] == ctl.FINAL_MIGRATION
+assert contract["migration_highest"] == next(reversed(contract["migration_ledger"]))
+assert ctl.CONTRACT_MIGRATION in contract["migration_ledger"]
+
+# The replacement reconstructs the complete requested source tree, including
+# migrations merged after the receipt contract itself.
+future_manifest = dict(contract)
+future_manifest["migration_ledger"] = dict(contract["migration_ledger"])
+future_manifest["migration_ledger"]["0323_future_source.sql"] = "f" * 64
+future_manifest["migration_count"] = len(future_manifest["migration_ledger"])
+future_manifest["migration_highest"] = "0323_future_source.sql"
+future_material = "".join(f"{name}\0{digest}\n"
+                          for name, digest in future_manifest["migration_ledger"].items())
+future_manifest["migration_ledger_sha256"] = (
+    "sha256:" + hashlib.sha256(future_material.encode()).hexdigest())
+future_source = ctl.SourceContract("a" * 40, future_manifest)
+migration_calls: list[list[str]] = []
+def capture_migration(args, **_kwargs):
+    migration_calls.append(args)
+    return subprocess.CompletedProcess(args, 0, "", "")
+ctl.apply_candidate_migrations(
+    owner, future_source,
+    run=capture_migration,
+    environ={"PATH": "/bin"})
+assert migration_calls and migration_calls[0][-2:] == ["--through", "0323_future_source.sql"]
+prior_scope = ctl.ProviderScope("old", "carr-staging", "br-old", "ep-old", "ep-old.neon.tech")
+future_payload = ctl.prepare_payload(future_source, prior_scope, owner_scope, 1)
+assert future_payload["migration_highest"] == "0323_future_source.sql"
+assert future_payload["migration_count"] == len(future_manifest["migration_ledger"])
+
+def copied_future_manifest():
+    copied = dict(future_manifest)
+    copied["migration_ledger"] = dict(future_manifest["migration_ledger"])
+    return copied
+
+stale_digest = copied_future_manifest()
+stale_digest["migration_ledger_sha256"] = contract["migration_ledger_sha256"]
+refuses(lambda: ctl.validate_migration_ledger(stale_digest), "boundary")
+bad_filename = copied_future_manifest()
+bad_filename["migration_ledger"]["0324 NOT-CANONICAL.sql"] = "a" * 64
+refuses(lambda: ctl.validate_migration_ledger(bad_filename), "canonical")
+bad_value = copied_future_manifest()
+bad_value["migration_ledger"][ctl.CONTRACT_MIGRATION] = "not-a-sha"
+refuses(lambda: ctl.validate_migration_ledger(bad_value), "canonical")
+reordered = copied_future_manifest()
+reordered["migration_ledger"] = dict(reversed(list(reordered["migration_ledger"].items())))
+refuses(lambda: ctl.validate_migration_ledger(reordered), "canonical")
+wrong_count = copied_future_manifest()
+wrong_count["migration_count"] += 1
+refuses(lambda: ctl.validate_migration_ledger(wrong_count), "boundary")
+wrong_highest = copied_future_manifest()
+wrong_highest["migration_highest"] = ctl.CONTRACT_MIGRATION
+refuses(lambda: ctl.validate_migration_ledger(wrong_highest), "boundary")
+missing_contract = copied_future_manifest()
+del missing_contract["migration_ledger"][ctl.CONTRACT_MIGRATION]
+refuses(lambda: ctl.validate_migration_ledger(missing_contract), "lacks")
 
 
 # Same-operation credential retries serialize before touching pending files or roles.
