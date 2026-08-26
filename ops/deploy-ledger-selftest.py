@@ -116,7 +116,9 @@ def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subp
             failure = os.environ.get("FAKE_PROGRAM5_FAILURE", "")
             if args and args[0] == "-c":
                 expression = args[1] if len(args) > 1 else ""
-                if "schema_highest_migration" in expression:
+                if "schema_ledger_sha256" in expression:
+                    print("sha256:" + "7" * 64)
+                elif "schema_highest_migration" in expression:
                     print("0300_operational_hermes_bot_profiles.sql")
                 elif "schema_applied_count" in expression:
                     print("236")

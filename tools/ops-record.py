@@ -67,6 +67,7 @@ meant to be run through tools/db-tap.py.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -96,6 +97,7 @@ DSN_FOR = {
     "owner": ("DATABASE_URL", "CARR_DB_EXPORTER_URL"),
     "read":  ("DATABASE_URL", "CARR_DB_EXPORTER_URL", "CARR_DB_JOBS_URL"),
     "authority": ("CARR_DB_AUTHORITY_JOE_URL",),
+    "forward_fix_verifier": ("CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL",),
 }
 
 TERMINAL_RUN_STATES = {"succeeded", "failed", "timed_out", "cancelled", "skipped"}
@@ -208,6 +210,10 @@ def staging_readback_projection(path: str, expected_sha: str,
             or not migration.endswith(".sql")
             or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789_-." for ch in migration)):
         raise ValueError("staging readback schema identity is invalid")
+    schema_ledger = schema.get("ledger_sha256")
+    if (not isinstance(schema_ledger, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", schema_ledger) is None):
+        raise ValueError("staging readback schema ledger is invalid")
     doctrine_value = _object_field(raw.get("doctrine_generation")).get("value")
     return {
         "git_sha": expected_sha,
@@ -217,6 +223,7 @@ def staging_readback_projection(path: str, expected_sha: str,
         "verb_count": _exact_int(raw.get("verb_count"), "verb_count", minimum=1),
         "schema_highest_migration": migration,
         "schema_applied_count": _exact_int(schema.get("applied_count"), "schema applied count", minimum=1),
+        "schema_ledger_sha256": schema_ledger,
         "doctrine_generation": _exact_int(doctrine_value, "doctrine generation"),
         # The boolean is the only database type: posture text is derived from
         # it and malformed values have already been refused above.
@@ -325,6 +332,46 @@ def claim_staging_deployment_attempt(cur, idempotency_key: str) -> dict:
     return row[0]
 
 
+def prepare_staging_forward_fix_rehearsal(cur, args) -> dict:
+    cur.execute("select ops.prepare_staging_forward_fix_rehearsal(%s::uuid,%s::uuid,%s,%s)",
+                (args.idempotency_key, args.correlation, args.release_key, args.git_sha))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal writer returned no durable state")
+    return row[0]
+
+
+def claim_staging_forward_fix_rehearsal(cur, idempotency_key: str) -> dict:
+    cur.execute("select ops.claim_staging_forward_fix_rehearsal(%s::uuid)", (idempotency_key,))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal claim returned no durable state")
+    return row[0]
+
+
+def record_staging_forward_fix_rehearsal(cur, args, projection: dict) -> dict:
+    cur.execute("""select ops.record_staging_forward_fix_rehearsal(
+      %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s,%s)""",
+                (args.idempotency_key, projection["provider_version_id"], projection["provider_tag"],
+                 projection["verb_count"], projection["schema_highest_migration"],
+                 projection["schema_applied_count"], projection["schema_ledger_sha256"],
+                 projection["doctrine_generation"], projection["program6_actions_enabled"]))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal result writer returned no durable state")
+    return row[0]
+
+
+def forward_fix_rehearsal_declaration(cur, idempotency_key: str) -> dict:
+    """Read only the verifier-scoped immutable declaration projection."""
+    cur.execute("""select * from ops.read_staging_forward_fix_rehearsal_declaration(%s::uuid)""",
+                (idempotency_key,))
+    row = cur.fetchone()
+    if not row:
+        raise RuntimeError("forward-fix rehearsal has no immutable prepared declaration")
+    return row[0]
+
+
 def prepare_staging_restore_only_attempt(cur, args) -> dict:
     """Persist a recovery repair that is structurally outside bundle evidence."""
     cur.execute(
@@ -410,6 +457,8 @@ def dsn(kind: str) -> str:
                 raise SystemExit("ops-record: CARR_DB_JOBS_URL must authenticate as carr_jobs")
             if kind == "authority" and not _is_authority_dsn(value):
                 raise SystemExit("ops-record: CARR_DB_AUTHORITY_JOE_URL must authenticate as carr_authority_joe")
+            if kind == "forward_fix_verifier" and not _is_forward_fix_verifier_dsn(value):
+                raise SystemExit("ops-record: CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL must authenticate as carr_program5_forward_fix_verifier")
             return value
     raise SystemExit(
         f"ops-record: no credential — set one of {', '.join(DSN_FOR[kind])} "
@@ -431,20 +480,32 @@ def _is_authority_dsn(value: str) -> bool:
     return any(part == "user=carr_authority_joe" for part in value.split())
 
 
+def _is_forward_fix_verifier_dsn(value: str) -> bool:
+    parsed = urlsplit(value)
+    if parsed.scheme:
+        return unquote(parsed.username or "") == "carr_program5_forward_fix_verifier"
+    return any(part == "user=carr_program5_forward_fix_verifier" for part in value.split())
+
+
 def connect(kind: str):
     try:
         import psycopg
     except ImportError:
         raise SystemExit("ops-record: psycopg not installed (pip install 'psycopg[binary]')")
     conn = psycopg.connect(dsn(kind), autocommit=True)
-    if kind in ("routine", "authority"):
+    if kind in ("routine", "authority", "forward_fix_verifier"):
         with conn.cursor() as cur:
-            cur.execute("select session_user,current_user")
+            if kind == "forward_fix_verifier":
+                cur.execute("select session_user,current_user,pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')")
+            else:
+                cur.execute("select session_user,current_user")
             row = cur.fetchone()
-        expected = "carr_jobs" if kind == "routine" else "carr_authority_joe"
-        if row != (expected, expected):
+        expected = ("carr_jobs" if kind == "routine" else "carr_authority_joe"
+                    if kind == "authority" else "carr_program5_forward_fix_verifier")
+        exact_row = (expected, expected) if kind != "forward_fix_verifier" else (expected, expected, True)
+        if row != exact_row:
             conn.close()
-            raise SystemExit(f"ops-record: {kind} connection is not {expected}")
+            raise SystemExit(f"ops-record: {kind} connection is not the exact scoped identity")
     return conn
 
 
@@ -1751,6 +1812,69 @@ def cmd_staging_restore_only(args) -> int:
     return 0
 
 
+def cmd_staging_forward_fix(args) -> int:
+    """The sole staging controller for an approval-eligible forward-fix proof."""
+    try:
+        args.idempotency_key = str(uuid.UUID(args.idempotency_key))
+        if args.action == "prepare":
+            if not args.release_key or not args.git_sha:
+                raise ValueError("forward-fix prepare is missing exact release inputs")
+            args.correlation = correlation_of(args.correlation)
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = prepare_staging_forward_fix_rehearsal(cur, args)
+        elif args.action == "claim":
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = claim_staging_forward_fix_rehearsal(cur, args.idempotency_key)
+        else:
+            if (not args.git_sha or not args.expected_provider_tag or not args.expected_program6_actions
+                    or not args.staging_readback_file or not args.provider_versions_file or not args.manifest):
+                raise ValueError("forward-fix result requires manifest, readback, provider versions, and exact identity")
+            projection = staging_readback_projection(args.staging_readback_file, args.git_sha,
+                                                     args.expected_provider_tag,
+                                                     args.expected_program6_actions)
+            staging_provider_version(args.provider_versions_file, args.expected_provider_tag,
+                                     projection["provider_version_id"])
+            manifest = json.loads(_read_bounded_regular_file(args.manifest))
+            if not isinstance(manifest, dict):
+                raise ValueError("forward-fix manifest is not an object")
+            for key, observed in (("git_sha", projection["git_sha"]),
+                                  ("schema_highest_migration", projection["schema_highest_migration"]),
+                                  ("schema_applied_count", projection["schema_applied_count"]),
+                                  ("schema_ledger_sha256", projection["schema_ledger_sha256"])):
+                if manifest.get(key) != observed:
+                    raise ValueError("forward-fix readback does not match the exact candidate manifest")
+            migration_set = manifest.get("migration_set")
+            if (not isinstance(migration_set, list) or not migration_set
+                    or any(not isinstance(item, str) or not re.fullmatch(r"[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql", item)
+                           for item in migration_set)):
+                raise ValueError("forward-fix manifest lacks its exact migration set")
+            if manifest.get("program6_actions") != {"enabled": args.expected_program6_actions == "enabled",
+                                                    "posture": args.expected_program6_actions}:
+                raise ValueError("forward-fix manifest Program 6 posture is not exact")
+            with connect("forward_fix_verifier") as conn, conn.transaction(), conn.cursor() as cur:
+                declared = forward_fix_rehearsal_declaration(cur, args.idempotency_key)
+                manifest_set_hash = "sha256:" + hashlib.sha256(
+                    json.dumps(migration_set, separators=(",", ":")).encode()).hexdigest()
+                if (declared["expected_provider_tag"] != args.expected_provider_tag
+                        or declared["declared_migration_set_sha256"] != manifest_set_hash
+                        or declared["declared_migration_count"] != len(migration_set)):
+                    raise ValueError("forward-fix manifest does not match the immutable candidate migration boundary")
+                result = record_staging_forward_fix_rehearsal(cur, args, projection)
+    except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print("ops-record: could not persist forward-fix rehearsal: "
+              f"{str(exc).splitlines()[0][:240]}", file=sys.stderr)
+        return 1
+    if args.field:
+        value = result.get(args.field)
+        print("" if value is None else ("true" if value is True else "false" if value is False else value))
+    else:
+        print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def cmd_staging_readback_verify(args) -> int:
     try:
         projection = staging_readback_projection(args.file, args.git_sha,
@@ -2597,6 +2721,22 @@ def main() -> int:
                                             "mutation_allowed", "expected_provider_tag", "result_ref",
                                             "status"])
 
+    sff = sub.add_parser("staging-forward-fix",
+                         help="prepare, claim, and record one verified forward-fix staging rehearsal")
+    sff.add_argument("action", choices=["prepare", "claim", "result"])
+    sff.add_argument("--idempotency-key", required=True)
+    sff.add_argument("--release-key")
+    sff.add_argument("--git-sha")
+    sff.add_argument("--correlation")
+    sff.add_argument("--staging-readback-file")
+    sff.add_argument("--provider-versions-file")
+    sff.add_argument("--manifest")
+    sff.add_argument("--expected-provider-tag")
+    sff.add_argument("--expected-program6-actions", choices=["enabled", "disabled"])
+    sff.add_argument("--field", choices=["forward_fix_rehearsal_attempt_id", "state", "mutation_claimed",
+                                            "mutation_allowed", "expected_provider_tag", "result_ref",
+                                            "bundle_id", "recovery_run_id"])
+
     srv = sub.add_parser("staging-readback-verify",
                          help="verify one bounded staging /release file without writing")
     srv.add_argument("--file", required=True)
@@ -2648,6 +2788,7 @@ def main() -> int:
         "staging-target": cmd_staging_target,
         "staging-attempt": cmd_staging_attempt,
         "staging-restore-only": cmd_staging_restore_only,
+        "staging-forward-fix": cmd_staging_forward_fix,
         "staging-readback-verify": cmd_staging_readback_verify,
         "staging-provider-version": cmd_staging_provider_version,
         "assess": cmd_assess,

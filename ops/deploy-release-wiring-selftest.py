@@ -182,7 +182,10 @@ def main() -> int:
     # 5. one digest decision, not two
     check("5. the manifest comes from tools/release-manifest.py",
           "tools/release-manifest.py" in source
-          and "sha256" not in source,
+          # The wrapper may validate the manifest's declared schema_ledger_sha256
+          # field, but it must not compute a competing digest itself.
+          and "sha256(" not in source
+          and "digest(" not in source,
           "the wrapper appears to compute a digest of its own")
 
     # 6. a source rehearsal still refuses without a SHA, with no DB in sight
