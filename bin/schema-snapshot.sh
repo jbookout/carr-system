@@ -522,6 +522,14 @@ fi
 #     controlled block the 0228 lifecycle cannot validate pinned rules. Do not
 #     add rule_control_binding or any receipt/rule table: those are per-rule
 #     history, not bounded internal control configuration.
+#   * ops.rule_delivery_policy (exactly 1 row) and
+#     ops.rule_delivery_activation_target (exactly 9 rows) are the bounded
+#     configuration for the already-existing scoped rule-delivery cutover.
+#     0291 and 0317 seed them, but once those migrations enter this snapshot's
+#     ledger they no longer replay. Omitting the rows produced mode:null and no
+#     cutover target set on a fresh rebuild. Carry these two tables only; never
+#     add ops.rule_delivery_observation, ops.rule_delivery_activation_receipt,
+#     or any other runtime/evidence table to this list.
 #   * The disabled renewal-radar-source-daily v1 job definition is a fixed
 #     internal contract required by 0230's lease-bound delivery gate. Carry
 #     only that exact row; never widen this to arbitrary job/runtime rows.
@@ -548,7 +556,8 @@ deal_phase deal_type_ref lead_lane lead_stage loop_domain negotiation_claim_type
 participant_role party_link_kind vendor_category vendor_disposition \
 vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
 doctrine_review_policy actor retrieval_proposal retrieval_ranking_policy \
-ops.guidance_registry"
+ops.guidance_registry ops.rule_delivery_policy \
+ops.rule_delivery_activation_target"
 
 VOCAB_ARGS=""
 for t in $VOCAB_TABLES; do
