@@ -40,7 +40,13 @@
       "database": {
         "kind": "neon-project",
         "project": "carr-staging",
-        "resolution": "by name, so a deleted and recreated project is picked up rather than silently missed"
+        "resolution": "by name, so a deleted and recreated project is picked up rather than silently missed",
+        "replacement_candidate_spec": {
+          "postgres_version": 18,
+          "region_id": "aws-us-east-1",
+          "compute_min_cu": 0.25,
+          "compute_max_cu": 8
+        }
       },
       "worker": {"deployed": true, "name": "carr-mcp-staging", "config": "mcp-server/wrangler.toml [env.staging]"},
       "domains": [],

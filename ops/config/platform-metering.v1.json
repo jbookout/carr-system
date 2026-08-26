@@ -67,6 +67,16 @@
         "active_nondefault_branches": 2
       }
     },
+    "neon-standing-project-create": {
+      "platform": "neon",
+      "installed": true,
+      "installed_enforcement_ref": "tools/staging-project-replacement.py authorizes exactly one operation-bound standing project create before provider dispatch",
+      "required_true": ["local_checks_green"],
+      "required_nonempty": ["candidate_sha", "operation_id"],
+      "maximums": {
+        "standing_project_create_count": 1
+      }
+    },
     "cloudflare-worker-release": {
       "platform": "cloudflare-workers",
       "installed": true,
