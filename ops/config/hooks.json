@@ -1,6 +1,16 @@
 {
   "PreToolUse": [
     {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-preuse-reselection.py",
+          "timeout": 20
+        }
+      ]
+    },
+    {
       "matcher": "Bash|WebFetch",
       "hooks": [
         {

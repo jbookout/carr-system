@@ -57,6 +57,9 @@ from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+from lib.rule_delivery_preuse import (  # noqa:E402
+    contains_receipt_marker, preuse_delivery,
+)
 from lib.rule_delivery_shadow import (  # noqa:E402
     append_locked, file_sha256, make_error_observation, make_observation,
     source_sha256, stamp,
@@ -513,10 +516,12 @@ def delivery_state(records):
     policy and the payload as they stand now.
     """
     mode, declared, omit = None, set(), []
-    for record in records:
-        if "rule_delivery" not in serialized(record):
-            continue
-        found = _find_delivery(record)
+    for index, record in enumerate(records):
+        found = preuse_delivery(record, records[:index], repo=Path(REPO))
+        if found is None:
+            if "rule_delivery" not in serialized(record):
+                continue
+            found = _find_delivery(record)
         if found:
             mode, packs, omit = found
             declared.update(packs)
@@ -525,6 +530,8 @@ def delivery_state(records):
 
 def _find_delivery(value):
     """Depth-first hunt for a rule_delivery object, whatever wrapper it arrived in."""
+    if contains_receipt_marker(value):
+        return None
     if isinstance(value, dict):
         block = value.get("rule_delivery")
         if isinstance(block, dict) and "mode" in block:

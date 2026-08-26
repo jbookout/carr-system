@@ -6,6 +6,16 @@
         "hooks": [
           {
             "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-preuse-reselection.py",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|functions\\.exec)$",
+        "hooks": [
+          {
+            "type": "command",
             "command": "/usr/bin/env python3 {{REPO}}/hooks/guard-unattended.py",
             "timeout": 15
           }
