@@ -197,6 +197,22 @@ def main() -> int:
           out.returncode == 2 and "needs --sha" in (out.stderr + out.stdout),
           f"rc={out.returncode} err={out.stderr.strip()[:120]}")
 
+    check("6a. one builder binds target and assurance for every deploy rebuild",
+          "build_release_manifest()" in source
+          and source.count("build_release_manifest ") >= 3
+          and 'build --sha "$BUILD_MANIFEST_SHA"' in source
+          and '--environment "$BUILD_MANIFEST_ENVIRONMENT"' in source,
+          "candidate and deploy can recompute different approval preimages")
+    check("6b. standalone staging requires the full assurance preimage",
+          "standalone staging release requires performance/recovery assurance" in source,
+          "staging can still approve a recovery plan the deploy does not rebuild")
+    record_source = RECORD.read_text(encoding="utf-8")
+    check("6c. staging refusal prints an explicit target and assurance build",
+          "--environment staging --performance-budget-ref <immutable-ref>" in record_source
+          and "--performance-budget-ms <milliseconds>" in record_source
+          and "--rollback-plan-ref <immutable-ref>" in record_source,
+          "the recovery instruction can recreate the production-default manifest defect")
+
     check("7. rollback instruction uses immutable provider promotion",
           "bin/deploy-worker.sh --promote-version "
           "<approved-prior-version-id>." in source

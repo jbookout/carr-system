@@ -36,8 +36,11 @@ whether a release may ship. It computes evidence and compares evidence.
             broader than the Worker deployment artifact.
 
 USAGE
-  tools/release-manifest.py build --sha HEAD
-  tools/release-manifest.py build --sha HEAD > out/release.json
+  tools/release-manifest.py build --sha HEAD --environment production
+  tools/release-manifest.py build --sha HEAD --environment staging \
+    --performance-budget-ref <immutable-ref> --performance-budget-ms <ms> \
+    --recovery-strategy rollback --rollback-plan-ref <immutable-ref> \
+    > out/release.json
   tools/release-manifest.py bind-provider --manifest out/release.json \
       --provider cloudflare-workers --provider-version-id <version-id> > out/bound.json
   tools/release-manifest.py verify --manifest out/release.json
