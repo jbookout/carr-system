@@ -80,10 +80,48 @@ def main():
         kept = generation_files(deadlock_target)
         check("EDEADLK used all required attempts", len(deadlock_reads) == 2,
               f"failed reads {len(deadlock_reads)}")
-        check("EDEADLK backoff is bounded and ordered",
-              sleeps == list(common.GENERATION_COPY_BACKOFF_SECONDS), repr(sleeps))
+        # A fixture that stalls TWICE sleeps twice, which is the leading slice of
+        # the declared backoff and not the whole of it. Those were the same list
+        # only while ATTEMPTS was 3, and asserting equality silently welded this
+        # partial-retry case to the size of the budget: widening the budget on
+        # 2026-08-26 failed here for no reason but the coincidence.
+        check("EDEADLK backoff is the ordered leading slice of the declared budget",
+              sleeps == list(common.GENERATION_COPY_BACKOFF_SECONDS[:len(sleeps)]),
+              f"{sleeps!r} vs budget {list(common.GENERATION_COPY_BACKOFF_SECONDS)!r}")
+        check("EDEADLK slept once between each attempt", len(sleeps) == len(deadlock_reads),
+              f"{len(sleeps)} sleep(s) for {len(deadlock_reads)} failed read(s)")
         check("retry leaves one complete generation",
               len(kept) == 1 and kept[0].read_bytes() == b"cloud path payload\n")
+
+        print("2b. the budget is sized against a real hydration stall")
+        # The retry shipped on 2026-08-25 as 3 attempts over 0.05s + 0.10s, and
+        # the curriculum export died the same EDEADLK death on 08-26 anyway: a
+        # sixth of a second is indistinguishable from no retry while OneDrive's
+        # FileProvider materialises a dehydrated file. The step began 07:05:13Z
+        # and failed 07:05:15Z; the same file read by hand two minutes later
+        # succeeded first try. So the reviewable number is total wall-clock, and
+        # nothing was asserting it.
+        budget = sum(common.GENERATION_COPY_BACKOFF_SECONDS)
+        check("total backoff outlasts a hydration stall", budget >= 20.0,
+              f"{budget:.2f}s of backoff")
+        # Both retry loops index BACKOFF_SECONDS[attempt] on every attempt but
+        # the last, so a mismatch turns the retry into an IndexError raised from
+        # inside the error handler.
+        check("attempts and backoff steps agree",
+              len(common.GENERATION_COPY_BACKOFF_SECONDS) == common.GENERATION_COPY_ATTEMPTS - 1,
+              f"{common.GENERATION_COPY_ATTEMPTS} attempts, "
+              f"{len(common.GENERATION_COPY_BACKOFF_SECONDS)} backoff step(s)")
+        check("backoff never shrinks",
+              all(a <= b for a, b in zip(common.GENERATION_COPY_BACKOFF_SECONDS,
+                                         common.GENERATION_COPY_BACKOFF_SECONDS[1:])),
+              repr(common.GENERATION_COPY_BACKOFF_SECONDS))
+        # Named constants, not integers: EDEADLK is 11 on macOS where EAGAIN is
+        # 35, and on Linux those numbers swap. Exact in both directions, so a
+        # permission or storage failure still escapes instead of burning the
+        # budget and surfacing late.
+        check("only the two FileProvider transients are retryable",
+              common.GENERATION_COPY_RETRY_ERRNOS == frozenset({errno.EAGAIN, errno.EDEADLK}),
+              repr(sorted(common.GENERATION_COPY_RETRY_ERRNOS)))
 
         print("3. EAGAIN is transient, but exhaustion remains an error")
         again_target = tmp / "vendors.md"
