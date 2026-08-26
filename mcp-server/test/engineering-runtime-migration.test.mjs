@@ -6,7 +6,7 @@ const migration = fs.readFileSync(new URL("../../migrations/0310_engineering_exe
 const authorityRepair = fs.readFileSync(new URL("../../migrations/0311_sponsored_engineering_executor_authority.sql", import.meta.url), "utf8");
 const controllerMigration = fs.readFileSync(new URL("../../migrations/0312_engineering_dispatch_controller.sql", import.meta.url), "utf8");
 const successorPermissionRepair = fs.readFileSync(new URL("../../migrations/0319_engineering_envelope_writer_successor.sql", import.meta.url), "utf8");
-const claimOutputRepair = fs.readFileSync(new URL("../../migrations/0321_engineering_claim_output_qualification.sql", import.meta.url), "utf8");
+const claimOutputRepair = fs.readFileSync(new URL("../../migrations/0322_engineering_claim_output_qualification.sql", import.meta.url), "utf8");
 const runtime = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 const mcp = fs.readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
 const registry = JSON.parse(fs.readFileSync(new URL("../../ops/config/control-plane-workflows.v1.json", import.meta.url), "utf8"));
@@ -80,7 +80,7 @@ test("0319 keeps the successor guard on the writer's append-only authority", () 
   assert.doesNotMatch(successorPermissionRepair, /grant\s+update\s+on\s+ops\.engineering_execution_envelope/i);
 });
 
-test("0321 qualifies the claim attempt output without widening its authority", () => {
+test("0322 qualifies the claim attempt output without widening its authority", () => {
   assert.match(claimOutputRepair, /create or replace function ops\.engineering_claim_slice/);
   assert.match(claimOutputRepair, /insert into ops\.job_attempt as claimed_attempt\(job_id,attempt,lease_owner,lease_token,state\)/);
   assert.match(claimOutputRepair, /returning claimed_attempt\.job_id/);

@@ -1,4 +1,4 @@
--- 0321_engineering_claim_output_qualification.sql
+-- 0322_engineering_claim_output_qualification.sql
 --
 -- Repair the first live Engineering Passport claim path without rewriting the
 -- frozen 0310 migration.  The RETURNS TABLE output `job_id` is a PL/pgSQL
@@ -62,7 +62,7 @@ do $$
 begin
   if not has_function_privilege('carr_jobs',
        'ops.engineering_claim_slice(text,integer,integer)'::regprocedure, 'EXECUTE') then
-    raise exception '0321 FAILED: carr_jobs cannot execute the repaired Engineering claim function';
+    raise exception '0322 FAILED: carr_jobs cannot execute the repaired Engineering claim function';
   end if;
   if exists (
     select 1
@@ -71,7 +71,7 @@ begin
      where p.oid='ops.engineering_claim_slice(text,integer,integer)'::regprocedure
        and acl.grantee=0 and acl.privilege_type='EXECUTE'
   ) then
-    raise exception '0321 FAILED: repaired Engineering claim function is PUBLIC executable';
+    raise exception '0322 FAILED: repaired Engineering claim function is PUBLIC executable';
   end if;
 end $$;
 
