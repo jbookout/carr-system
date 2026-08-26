@@ -11,6 +11,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "bin/cc-version-sentinel.sh"
+HELPER = REPO / "bin/cc-version-string.sh"
+# The exact fragment rule a8c55a47 says must exist in ONE file only — the
+# sentinel used to build this string inline before it moved to HELPER.
+CLI_AWK_FRAGMENT = "--version 2>/dev/null | awk '{print $1}'"
 FAILED: list[str] = []
 
 
@@ -42,6 +46,30 @@ def run(home: Path, notifier: Path, notifier_calls: Path, log: Path) -> None:
                    capture_output=True, text=True)
 
 
+def run_with_broken_helper(scratch: Path, home: Path, notifier: Path,
+                            notifier_calls: Path, log: Path) -> "subprocess.CompletedProcess[str]":
+    """Copies the real sentinel next to a helper stub that always fails, so
+    REPO resolves — via the sentinel's own `dirname "$0"` logic, not cwd — to
+    a tree where bin/cc-version-string.sh cannot succeed. Proves a helper
+    failure surfaces as the sentinel's own FAIL line and a nonzero exit,
+    never a silent `set -eu` abort with nothing in the log to say why."""
+    bin_dir = scratch / "bin"
+    bin_dir.mkdir(parents=True)
+    broken_sentinel = bin_dir / "cc-version-sentinel.sh"
+    broken_sentinel.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+    broken_sentinel.chmod(0o755)
+    broken_helper = bin_dir / "cc-version-string.sh"
+    broken_helper.write_text("#!/bin/zsh\nexit 9\n", encoding="utf-8")
+    broken_helper.chmod(0o755)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["CARR_CC_VERSION_NOTIFY_COMMAND"] = str(notifier)
+    env["CARR_CC_VERSION_NOTIFY_CALLS"] = str(notifier_calls)
+    env["CARR_CC_VERSION_SENTINEL_LOG"] = str(log)
+    return subprocess.run(["zsh", str(broken_sentinel)], cwd=scratch, env=env,
+                          check=False, capture_output=True, text=True)
+
+
 def marker_field(marker: str, field: str) -> str:
     prefix = field + ": "
     return next((line[len(prefix):] for line in marker.splitlines()
@@ -55,6 +83,11 @@ def notification_count(path: Path) -> int:
 
 
 def main() -> int:
+    bin_files = list((REPO / "bin").glob("*.sh"))
+    owners = [p for p in bin_files if CLI_AWK_FRAGMENT in p.read_text(encoding="utf-8")]
+    check("CLI-discovery construction lives in exactly one file (the helper)",
+          owners == [HELPER])
+
     with tempfile.TemporaryDirectory(prefix="cc-sentinel-") as tmp:
         home = Path(tmp)
         notifier_calls = home / "notifier-calls.log"
@@ -113,6 +146,55 @@ def main() -> int:
               sum("cc-version-sentinel CHANGE" in line for line in log_lines) == 3
               and sum("marker written, Joe notified" in line for line in log_lines) == 2
               and sum("already notified for this change" in line for line in log_lines) == 1)
+
+    with tempfile.TemporaryDirectory(prefix="cc-sentinel-helper-fail-") as tmp2:
+        scratch = Path(tmp2) / "repo"
+        home2 = Path(tmp2) / "home"
+        task2 = home2 / ".claude/scheduled-tasks/cc-update-audit"
+        task2.mkdir(parents=True)
+        (task2 / "last-audited-version.txt").write_text("cli=1.0.0 app=1.0.0\n", encoding="utf-8")
+        log2 = Path(tmp2) / "cc-version-sentinel.log"
+        notifier2 = Path(tmp2) / "fake-osascript"
+        notifier2.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        notifier2.chmod(0o755)
+        result = run_with_broken_helper(scratch, home2, notifier2, Path(tmp2) / "notifier-calls.log", log2)
+        check("a failing version helper exits nonzero, not a silent set -eu abort",
+              result.returncode != 0)
+        log2_text = log2.read_text(encoding="utf-8") if log2.exists() else ""
+        check("a failing version helper's exit reaches the sentinel's own FAIL line",
+              "FAIL version helper failed" in log2_text)
+
+    with tempfile.TemporaryDirectory(prefix="cc-sentinel-converge-") as tmp3:
+        home3 = Path(tmp3)
+        task3 = home3 / ".claude/scheduled-tasks/cc-update-audit"
+        task3.mkdir(parents=True)
+        cli3 = observed_cli()
+        audited = f"cli={cli3} app=1.0.0"
+        (task3 / "last-audited-version.txt").write_text(audited + "\n", encoding="utf-8")
+        app3 = home3 / "Library/Application Support/Claude/claude-code/1.0.0"
+        app3.mkdir(parents=True)
+        stale_pending = task3 / "pending-version.txt"
+        stale_pending.write_text(
+            "current: cli=" + cli3 + " app=9.9.9\n"
+            "last_audited: " + audited + "\n"
+            "detected_at: 2020-01-01T00:00:00Z\n",
+            encoding="utf-8",
+        )
+        notifier3 = home3 / "fake-osascript"
+        notifier3.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        notifier3.chmod(0o755)
+        notifier_calls3 = home3 / "notifier-calls.log"
+        log3 = home3 / "cc-version-sentinel.log"
+        run(home3, notifier3, notifier_calls3, log3)
+        check("current converging back to last_audited clears a stale pending marker",
+              not stale_pending.exists())
+        log3_text = log3.read_text(encoding="utf-8")
+        check("clearing the stale marker is logged with its own OK line",
+              "cleared stale pending marker" in log3_text)
+        check("convergence still records the ordinary no-change OK line",
+              "OK no change" in log3_text)
+        check("clearing a stale marker on convergence sends no notification",
+              notification_count(notifier_calls3) == 0)
 
     print(f"Claude version sentinel selftest — {len(FAILED)} failure(s)")
     return 1 if FAILED else 0
