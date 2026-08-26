@@ -5,6 +5,7 @@ import fs from "node:fs";
 const migration = fs.readFileSync(new URL("../../migrations/0310_engineering_execution_fabric.sql", import.meta.url), "utf8");
 const authorityRepair = fs.readFileSync(new URL("../../migrations/0311_sponsored_engineering_executor_authority.sql", import.meta.url), "utf8");
 const controllerMigration = fs.readFileSync(new URL("../../migrations/0312_engineering_dispatch_controller.sql", import.meta.url), "utf8");
+const successorPermissionRepair = fs.readFileSync(new URL("../../migrations/0319_engineering_envelope_writer_successor.sql", import.meta.url), "utf8");
 const runtime = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 const mcp = fs.readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
 const registry = JSON.parse(fs.readFileSync(new URL("../../ops/config/control-plane-workflows.v1.json", import.meta.url), "utf8"));
@@ -64,6 +65,18 @@ test("0311 replaces stale envelopes immutably and admits a new job generation", 
     assert.match(runtime, new RegExp(action));
   for (const forbidden of ["repository:merge", "repository:deploy", "repository:migrate-production", "repository:independent-review"])
     assert.doesNotMatch(runtime, new RegExp(forbidden));
+});
+
+test("0319 keeps the successor guard on the writer's append-only authority", () => {
+  assert.match(successorPermissionRepair, /create or replace function ops\.guard_engineering_envelope_supersession/);
+  assert.match(successorPermissionRepair, /engineering-envelope:' \|\| new\.slice_plan_id/);
+  const guardStart = successorPermissionRepair.indexOf("create or replace function ops.guard_engineering_envelope_supersession()");
+  const guardEnd = successorPermissionRepair.indexOf("-- The safe repair", guardStart);
+  assert.ok(guardStart >= 0 && guardEnd > guardStart, "0319 must contain the replacement guard body");
+  assert.doesNotMatch(successorPermissionRepair.slice(guardStart, guardEnd), /for key share/i);
+  assert.match(successorPermissionRepair, /has_table_privilege\('carr_writer', 'ops\.engineering_execution_envelope', 'update'\)/);
+  assert.match(successorPermissionRepair, /carr_writer cannot create or read engineering envelopes/);
+  assert.doesNotMatch(successorPermissionRepair, /grant\s+update\s+on\s+ops\.engineering_execution_envelope/i);
 });
 
 test("the reviewed control-plane inventory carries the exact engineering job contract", () => {
