@@ -63,7 +63,16 @@ def pinned_file_prefix(raw: bytes, expected_sha256: str) -> tuple[bytes, int]:
     for line_count, line in enumerate(lines, 1):
         running.update(line)
         if running.hexdigest() == expected_sha256:
-            return b"".join(lines[:line_count]), len(lines) - line_count
+            suffix = lines[line_count:]
+            assert all(line.endswith(b"\n") for line in suffix), \
+                "transcript suffix contains an unterminated JSONL fragment"
+            for appended_line in suffix:
+                try:
+                    json.loads(appended_line)
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise AssertionError(
+                        "transcript suffix contains a malformed JSONL row") from exc
+            return b"".join(lines[:line_count]), len(suffix)
     raise AssertionError("transcript is shorter than or changed within its pinned prefix")
 
 
@@ -258,7 +267,9 @@ prefix, appended = pinned_file_prefix(
 assert prefix == transcript_fixture and appended == 1
 for bad_transcript in (
         transcript_fixture.splitlines(keepends=True)[0],
-        transcript_fixture.replace(b'"row":1', b'"row":9', 1)):
+        transcript_fixture.replace(b'"row":1', b'"row":9', 1),
+        transcript_fixture + b'{"row":',
+        transcript_fixture + b'not-json\n'):
     try:
         pinned_file_prefix(bad_transcript, transcript_digest)
     except AssertionError:
