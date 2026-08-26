@@ -1874,8 +1874,13 @@ def cmd_staging_forward_fix(args) -> int:
                 raise ValueError("forward-fix manifest Program 6 posture is not exact")
             with connect("forward_fix_verifier") as conn, conn.transaction(), conn.cursor() as cur:
                 declared = forward_fix_rehearsal_declaration(cur, args.idempotency_key)
+                # ops.program5_migration_set_sha256 is the canon: it hashes
+                # to_jsonb(text[])::text, which PostgreSQL renders with ", "
+                # between elements — not compact JSON. Until 2026-08-26 this
+                # hashed compact JSON, so the boundary comparison could never
+                # match a real declaration.
                 manifest_set_hash = "sha256:" + hashlib.sha256(
-                    json.dumps(migration_set, separators=(",", ":")).encode()).hexdigest()
+                    json.dumps(migration_set, separators=(", ", ": ")).encode()).hexdigest()
                 if (declared["expected_provider_tag"] != args.expected_provider_tag
                         or declared["declared_migration_set_sha256"] != manifest_set_hash
                         or declared["declared_migration_count"] != len(migration_set)):

@@ -495,7 +495,9 @@ class Cursor:
             self._row = (
                 getattr(self, "forward_tag", tag),
                 "sha256:" + hashlib.sha256(
-                    json.dumps(exact_set, separators=(",", ":")).encode()).hexdigest(),
+                    # PostgreSQL to_jsonb::text rendering — the canonical form
+                    # ops.program5_migration_set_sha256 hashes.
+                    json.dumps(exact_set, separators=(", ", ": ")).encode()).hexdigest(),
                 1,
                 "0315_program5_forward_fix_rehearsal.sql",
                 315,
