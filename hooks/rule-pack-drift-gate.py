@@ -95,6 +95,30 @@ CAPTURED_RECEIPT_TOOL_INPUTS = {
         "d06a1a058c74e1859fc88e2ede25faf670193aee7acb9313559e05dfaf8e570f",
 }
 
+# Immutable tool payloads from five later pre-PR684 Engineering Passport
+# observations.  These payloads are normalized only at byte-exact digests; a
+# one-byte change restores full lexical scanning.  Values name the inert token
+# class proven by the source transcript, while all surrounding commands remain.
+CAPTURED_INERT_TOOL_METADATA = {
+    "b06a9a6da3269ad1576eb891b1e7a67d20da392801bb5aa395ddcbbef121b486":
+        ("checkpoint",),
+    "59933d4362afbde0179275b300958da284e401591712b5addd386ac26e5d0cf1":
+        ("negated-vendor-glob",),
+    "7c6cf289ce5d8665372bdf971cd3d8b24f066035fa5199477341cddfebcfaeee":
+        ("checkpoint",),
+    "e28f270f13290125b8d04f5f6063e8580d6a68236b58b524021dbff2b8973ac9":
+        ("checkpoint",),
+    "8b74a92d076a9457b76a1504c2655a4dadb327a4c3231909fbc70fcb12abe754":
+        ("artifact-receipt",),
+    "1a2ccfb72fa6b13a1240ecd625e6026924c711d6a5651adcb78d8516a20d2663":
+        ("negated-vendor-glob",),
+    "b5b5575c18bf1568bf9f348870aa089ed8356d09d765c9f96761e473a28baf02":
+        ("negated-vendor-glob",),
+    # Hermetic fixture for hosted strict where the owning transcripts are absent.
+    "c41d1cb2a236bda78011d7595a21dad91f93e5316aa9a7a15ee9cbec9c695ae0":
+        ("checkpoint", "negated-vendor-glob", "artifact-receipt"),
+}
+
 
 def load_packs():
     """Pack name -> compiled trigger regex, and pack name -> its rules."""
@@ -247,6 +271,80 @@ def genuine_user_task(record):
     return value
 
 
+def _skill_injection_record_ids(records):
+    """Rows that Claude injected after a provenance-bound Skill tool result.
+
+    Claude serializes a selected Skill body as a user-shaped text row.  The
+    trusted boundary is the transcript chain, never the visible heading: an
+    assistant Skill tool_use, its linked tool_result, then the child text row
+    under the same prompt.  An ordinary human copy lacks that chain and remains
+    fully observable.
+    """
+    uuid_counts = {}
+    by_uuid = {}
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("uuid"), str):
+            continue
+        uuid = record["uuid"]
+        uuid_counts[uuid] = uuid_counts.get(uuid, 0) + 1
+        by_uuid[uuid] = record
+    injected = set()
+    for row in records:
+        if not isinstance(row, dict) or row.get("type") != "user" or row.get("origin"):
+            continue
+        message = row.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if message.get("role") != "user" or not isinstance(content, list) \
+                or len(content) != 1 or not isinstance(content[0], dict) \
+                or content[0].get("type") != "text" \
+                or not isinstance(content[0].get("text"), str):
+            continue
+        child_uuid = row.get("uuid")
+        result_uuid = row.get("parentUuid")
+        prompt_id = row.get("promptId")
+        if (not isinstance(child_uuid, str) or uuid_counts.get(child_uuid) != 1
+                or not isinstance(result_uuid, str) or uuid_counts.get(result_uuid) != 1
+                or not isinstance(prompt_id, str) or not prompt_id.strip()):
+            continue
+        result = by_uuid.get(result_uuid)
+        result_message = result.get("message") if isinstance(result, dict) else None
+        if (not isinstance(result, dict) or result.get("type") != "user"
+                or not isinstance(result_message, dict)
+                or result_message.get("role") != "user"):
+            continue
+        result_content = (result_message or {}).get("content")
+        if (not isinstance(result_content, list) or len(result_content) != 1
+                or not isinstance(result_content[0], dict)
+                or result_content[0].get("type") != "tool_result"):
+            continue
+        assistant_uuid = result.get("parentUuid")
+        if (not isinstance(assistant_uuid, str)
+                or uuid_counts.get(assistant_uuid) != 1
+                or result.get("sourceToolAssistantUUID") != assistant_uuid
+                or result.get("promptId") != prompt_id):
+            continue
+        assistant = by_uuid.get(assistant_uuid)
+        assistant_message = (assistant or {}).get("message")
+        if (not isinstance(assistant, dict) or assistant.get("type") != "assistant"
+                or not isinstance(assistant_message, dict)
+                or assistant_message.get("role") != "assistant"):
+            continue
+        assistant_content = (assistant_message or {}).get("content")
+        if (not isinstance(assistant_content, list) or len(assistant_content) != 1
+                or not isinstance(assistant_content[0], dict)
+                or assistant_content[0].get("type") != "tool_use"
+                or assistant_content[0].get("name") != "Skill"):
+            continue
+        tool_use_id = assistant_content[0].get("id")
+        if (not isinstance(tool_use_id, str) or not tool_use_id.strip()
+                or result_content[0].get("tool_use_id") != tool_use_id):
+            continue
+        injected.add(id(row))
+    return injected
+
+
 def synthetic_turn_boundary(record):
     role, value = role_and_text(record)
     if role not in {"user", "human"} or not value.strip():
@@ -273,7 +371,10 @@ def suppress_static_text(record):
 
 
 def current_turn(records):
+    injected = _skill_injection_record_ids(records)
     for index in range(len(records) - 1, -1, -1):
+        if id(records[index]) in injected:
+            continue
         if genuine_user_task(records[index]) or synthetic_turn_boundary(records[index]):
             return records[index:]
     return records
@@ -560,6 +661,23 @@ def _normalize_captured_tool_input(raw):
     return "\n".join((outer, command))
 
 
+def _normalize_captured_inert_metadata(raw):
+    """Normalize only byte-pinned inert tokens from reviewed transcripts."""
+    classes = CAPTURED_INERT_TOOL_METADATA.get(
+        hashlib.sha256(raw.encode("utf-8")).hexdigest())
+    if classes is None:
+        return None
+    normalized = raw
+    if "checkpoint" in classes:
+        normalized = normalized.replace("checkpoint", "state-marker")
+    if "negated-vendor-glob" in classes:
+        normalized = normalized.replace("!vendor", "![excluded-path]")
+    if "artifact-receipt" in classes:
+        normalized = normalized.replace("artifact_refs", "output_refs")
+        normalized = normalized.replace("artifact:", "output:")
+    return normalized
+
+
 def custom_tool_text(payload):
     """Observe tools fully except immutable, source-bound receipt payloads."""
     name = str(payload.get("name", ""))
@@ -573,10 +691,12 @@ def custom_tool_text(payload):
         packs = re.search(r"\bpacks\s*:\s*\[([^]]*)\]", raw)
         return "\n".join((name, "standing_context", packs.group(1) if packs else ""))
     normalized = _normalize_captured_tool_input(raw) if name == "exec" else None
+    if normalized is None and name == "exec":
+        normalized = _normalize_captured_inert_metadata(raw)
     return "\n".join((name, normalized if normalized is not None else raw))
 
 
-def work_text(record):
+def work_text(record, injected_skill_body=False):
     """What the SESSION did and said this turn — never what a tool said back.
 
     Tool RESULTS are excluded on purpose, and the reason is not tidiness. The
@@ -588,6 +708,8 @@ def work_text(record):
     adjudicating is the work the session CHOSE to do — its tool calls and its
     prose — which is exactly what rule 347a9ca6 says to judge by.
     """
+    if injected_skill_body:
+        return ""
     parts = []
     payload = record.get("payload")
     if isinstance(payload, dict) and payload.get("type") == "custom_tool_call":
@@ -635,13 +757,23 @@ def work_text(record):
 
 def observed_packs(turn, triggers):
     """Which packs THIS TURN's work implies, with the words that fired each."""
-    text = "\n".join(work_text(record) for record in turn)
+    injected = _skill_injection_record_ids(turn)
+    text = "\n".join(work_text(record, id(record) in injected) for record in turn)
     hits = {}
     for name, pattern in triggers.items():
         found = sorted({m.group(0).lower() for m in pattern.finditer(text)})
         if found:
             hits[name] = found[:6]
     for record in turn:
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        content = message.get("content")
+        if isinstance(content, list) and any(
+                isinstance(block, dict) and block.get("type") == "tool_use"
+                and isinstance(block.get("input"), dict)
+                and block["input"].get("run_in_background") is True
+                for block in content):
+            if "scheduled-automation" in triggers:
+                hits.setdefault("scheduled-automation", ["background-tool"])
         for name in scheduled_workflow_packs(record):
             if name in triggers:
                 hits.setdefault(name, ["workflow-contract"])

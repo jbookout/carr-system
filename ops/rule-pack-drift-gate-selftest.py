@@ -120,6 +120,28 @@ def codex_user(text: str) -> dict:
             "role": "user", "content": [{"type": "input_text", "text": text}]}}
 
 
+def claude_skill_injection(skill_text: str) -> list[dict]:
+    """Minimal provenance chain emitted by Claude when a Skill body is injected."""
+    prompt = "prompt:human"
+    assistant_uuid = "assistant:skill-launch"
+    result_uuid = "user:skill-result"
+    return [
+        {"type": "assistant", "uuid": assistant_uuid,
+         "message": {"role": "assistant", "content": [{
+             "type": "tool_use", "id": "skill-1", "name": "Skill",
+             "input": {"skill": "update-config", "args": "configure the project"}}]}},
+        {"type": "user", "uuid": result_uuid, "promptId": prompt,
+         "parentUuid": assistant_uuid, "sourceToolAssistantUUID": assistant_uuid,
+         "message": {"role": "user", "content": [{
+             "type": "tool_result", "tool_use_id": "skill-1",
+             "content": "Launching skill: update-config"}]}},
+        {"type": "user", "uuid": "user:skill-body", "promptId": prompt,
+         "parentUuid": result_uuid,
+         "message": {"role": "user", "content": [{
+             "type": "text", "text": skill_text}]}},
+    ]
+
+
 def engineering_receipt() -> dict:
     digest = "sha256:" + "a" * 64
     evidence = {"ref": "evidence:blocked", "redaction_class": "metadata_only",
@@ -241,6 +263,142 @@ older = run([
 ])
 check("a previous turn's deal work does not follow the session forever",
       "client-deal" not in older["needed"], str(older["needed"]))
+
+# Claude injects a selected Skill body as a user-shaped transcript row after a
+# source-linked Skill tool call and its tool result.  That body is instruction
+# data, not a second human task or observed work.  Its provenance chain must not
+# replace the real human boundary, while later tools remain fully observable.
+skill_body = ("# Update Config Skill\nclient contact email override artifact "
+              "subagent workflow checkpoint git commit")
+skill_turn = [
+    assistant_tool("mcp__carr__standing-context", {
+        "packs": ["engineering-git", "governance-rules", "source-study"]}),
+    standing_context_result(
+        "shadow", ["engineering-git", "governance-rules", "source-study"],
+        ["1e62c007"]),
+    {"type": "user", "uuid": "user:human", "promptId": "prompt:human",
+     "origin": {"kind": "human"},
+     "message": {"role": "user", "content":
+                 "add an allow rule for the staging database door"}},
+    *claude_skill_injection(skill_body),
+    assistant_tool("Bash", {
+        "command": "until test -f /tmp/allow-rule; do sleep 5; done",
+        "run_in_background": True, "timeout": 3600000}),
+]
+skill_result = run(skill_turn)
+check("provenance-bound Skill body is not a genuine user boundary",
+      gate.current_turn(skill_turn)[0] is skill_turn[2])
+check("injected Skill prose does not create domain work",
+      set(skill_result["needed"]) == {
+          "engineering-git", "governance-rules", "scheduled-automation"},
+      str(skill_result))
+check("real background work after a Skill injection remains observable",
+      skill_result["missing"] == ["scheduled-automation"], str(skill_result))
+copied_skill = run([
+    user(skill_body),
+    assistant_tool("mcp__carr__standing-context", {"packs": []}),
+    standing_context_result("shadow", [], ["006a7eaa"]),
+])
+check("ordinary user Skill-shaped prose is never trusted as injected metadata",
+      {"client-deal", "delegation-council", "governance-rules", "joe-comms",
+       "joe-development", "records-intake", "surface-doctrine"}
+      <= set(copied_skill["needed"]), str(copied_skill))
+
+skill_chain_negatives = []
+for label in (
+    "mismatched-tool-result", "wrong-result-parent", "wrong-result-source",
+    "missing-child-prompt", "missing-result-prompt", "mismatched-prompt",
+    "mixed-tool-call", "multiple-skill-calls", "duplicate-tool-results",
+    "duplicate-tool-use-id", "missing-tool-use-id", "missing-tool-result-id",
+    "assistant-type-swap", "assistant-role-swap", "result-type-swap",
+    "result-role-swap",
+    "duplicate-record-uuid",
+):
+    chain = json.loads(json.dumps(claude_skill_injection(skill_body)))
+    if label == "mismatched-tool-result":
+        chain[1]["message"]["content"][0]["tool_use_id"] = "skill-other"
+    elif label == "wrong-result-parent":
+        chain[1]["parentUuid"] = "assistant:other"
+    elif label == "wrong-result-source":
+        chain[1]["sourceToolAssistantUUID"] = "assistant:other"
+    elif label == "missing-child-prompt":
+        del chain[2]["promptId"]
+    elif label == "missing-result-prompt":
+        del chain[1]["promptId"]
+    elif label == "mismatched-prompt":
+        chain[2]["promptId"] = "prompt:other"
+    elif label == "mixed-tool-call":
+        chain[0]["message"]["content"].append({
+            "type": "tool_use", "id": "bash-1", "name": "Bash",
+            "input": {"command": "true"}})
+    elif label == "multiple-skill-calls":
+        chain[0]["message"]["content"].append({
+            "type": "tool_use", "id": "skill-2", "name": "Skill",
+            "input": {"skill": "other"}})
+    elif label == "duplicate-tool-results":
+        chain[1]["message"]["content"].append({
+            "type": "tool_result", "tool_use_id": "skill-1",
+            "content": "duplicate"})
+    elif label == "duplicate-tool-use-id":
+        chain[0]["message"]["content"].append({
+            "type": "tool_use", "id": "skill-1", "name": "Skill",
+            "input": {"skill": "other"}})
+    elif label == "missing-tool-use-id":
+        del chain[0]["message"]["content"][0]["id"]
+    elif label == "missing-tool-result-id":
+        del chain[1]["message"]["content"][0]["tool_use_id"]
+    elif label == "assistant-type-swap":
+        chain[0]["type"] = "user"
+    elif label == "assistant-role-swap":
+        chain[0]["message"]["role"] = "user"
+    elif label == "result-type-swap":
+        chain[1]["type"] = "assistant"
+    elif label == "result-role-swap":
+        chain[1]["message"]["role"] = "assistant"
+    elif label == "duplicate-record-uuid":
+        chain.append(json.loads(json.dumps(chain[1])))
+    negative = run([
+        user("configure the project"),
+        *chain,
+        assistant_tool("Bash", {"command": "date -u"}),
+    ])
+    skill_chain_negatives.append((label, negative))
+for label, negative in skill_chain_negatives:
+    check(f"invalid Skill provenance {label} stays observable",
+          {"client-deal", "delegation-council", "engineering-git",
+           "governance-rules", "joe-comms", "joe-development",
+           "records-intake", "surface-doctrine"}
+          <= set(negative["needed"]), str(negative))
+
+# Only inert machine syntax is normalized.  A negated search glob is not vendor
+# work; typed receipt evidence keys are not governance or surface work.  The
+# surrounding commands remain visible and still trigger engineering work.
+metadata_only = run([
+    user("inspect the repository"),
+    assistant_tool("mcp__carr__standing-context", {
+        "packs": list(gate.ENGINEERING_WORKFLOW_PACKS)}),
+    standing_context_result("shadow", list(gate.ENGINEERING_WORKFLOW_PACKS), []),
+    codex_tool("exec", "const receipt={schema_version:"
+               "'engineering-slice-receipt.v1',artifact_refs:"
+               "['artifact:red-test'],replacement_checkpoint_ref:"
+               "'checkpoint:reissue'}; tools.exec_command({cmd:\"rg --files "
+               "--glob '!vendor' && git status\"});"),
+])
+check("negated glob and receipt metadata do not create unrelated packs",
+      set(metadata_only["needed"]) <= {
+          "engineering-git", "delegation-council", "scheduled-automation",
+          "source-study"}, str(metadata_only))
+check("normalization preserves the surrounding git command",
+      "engineering-git" in metadata_only["needed"], str(metadata_only))
+tampered_metadata = run([codex_tool(
+    "exec",
+    "const receipt={schema_version:'engineering-slice-receipt.v1',"
+    "artifact_refs:['artifact:red-test'],replacement_checkpoint_ref:"
+    "'checkpoint:reissue'}; tools.exec_command({cmd:\"rg --files "
+    "--glob '!vendor' && git status\"}); ")])
+check("one-byte metadata payload change restores full lexical scanning",
+      {"governance-rules", "records-intake", "surface-doctrine"}
+      <= set(tampered_metadata["needed"]), str(tampered_metadata))
 
 # Harness notifications are turn boundaries, not partner work. Walking backward
 # past one would pull stale work into a later agent action; scanning its static
@@ -615,6 +773,67 @@ if exact_replay_path.is_file():
           str(exact_result))
     check("immutable event 10529812 action replay closes drift",
           exact_result["missing"] == [], str(exact_result))
+
+# Replay the five later pre-repair Engineering Passport observations.  The
+# source-owned workflow rail supplies exactly its four reviewed packs.  The
+# replay proves that normalization removes only negated-search and typed
+# evidence metadata; domain-bearing tour/ledger/surface terms and an actual
+# source URL ending in .html stay observable.
+engineering_replays = [
+    ("22523b89", "rollout-2026-08-26T04-45-27-01a03d75-d35e-7222-8ece-e17ddd5bb614.jsonl",
+     70, "ad095eead12f3a5befceb9c3722cffd6df24f8955f9ae5981dd0d4f0f9f44d21",
+     ["client-deal", "joe-development", "surface-doctrine"]),
+    ("f223b855", "rollout-2026-08-26T04-50-13-01a03d7a-2ff8-7402-a197-9330017515cf.jsonl",
+     56, "ed2e31f5e33d76bab8e3ab9ff91d33bcc9f7576e0846b9b86d67da14b0031406", []),
+    ("f8f72943", "rollout-2026-08-26T04-54-39-01a03d7e-4159-7972-b125-f7ba75dcff0b.jsonl",
+     63, "3c79eb43ddfb53c6b307cd6c8036ac241a56d15b42135b040176a3e308edd272", []),
+    ("9f560848", "rollout-2026-08-26T05-14-40-01a03d90-93ad-7661-945f-7f5d817b6b4b.jsonl",
+     195, "e7fcfd8a89eccf708141f62c725295797f19f0dda9f0df9f3b63022bc9621f2c",
+     ["surface-doctrine"]),
+    ("5cfde2b7", "rollout-2026-08-26T05-24-43-01a03d99-c647-7802-93b3-1dc40ec2a8e7.jsonl",
+     49, "49858916bfddf419f251d62f2d1cf6c732be7875b0b772d4b1dc5d85b5fb2b73", []),
+]
+codex_session_dir = Path("/Users/booko/.codex/sessions/2026/08/26")
+for event, filename, line_count, digest, expected_missing in engineering_replays:
+    replay_path = codex_session_dir / filename
+    if not replay_path.is_file():
+        continue
+    check(f"event {event} transcript digest is immutable",
+          gate.file_sha256(replay_path) == digest)
+    replay_records = [json.loads(line) for line in
+                      replay_path.read_bytes().splitlines()[:line_count]]
+    replay_records.append(codex_standing_context_result(
+        "shadow", list(gate.ENGINEERING_WORKFLOW_PACKS), []))
+    replay_result = run(replay_records)
+    check(f"event {event} preserves only evidence-backed remaining domains",
+          replay_result["missing"] == expected_missing, str(replay_result))
+    if event == "9f560848":
+        check("source-study .html URL remains observable surface vocabulary",
+              replay_result["triggers"].get("surface-doctrine") == ["html"],
+              str(replay_result["triggers"].get("surface-doctrine")))
+
+# The sixth observation is a Claude config turn, not an Engineering Passport
+# slice.  Its append-only prefix proves the injected Skill body had displaced
+# the genuine human boundary.  After provenance repair, only the real
+# background watcher remains missing; no source-owned update-config workflow
+# rail exists in this repository to declare that pack in advance.
+claude_replay_path = Path(
+    "/Users/booko/.claude/projects/-Users-booko-carr-system/"
+    "48574aa2-9289-4e90-906c-b4f958806026.jsonl")
+if claude_replay_path.is_file():
+    claude_prefix = b"\n".join(
+        claude_replay_path.read_bytes().splitlines()[:1081]) + b"\n"
+    check("event 2b17ed65 immutable prefix is preserved",
+          hashlib.sha256(claude_prefix).hexdigest()
+          == "e464b1ee8d65f5e810881094b96f4f2bd192cb9641ea70de72a28f910933d412")
+    claude_records = [json.loads(line) for line in claude_prefix.splitlines()]
+    claude_result = run(claude_records)
+    check("event 2b17ed65 retains the real scheduled automation miss",
+          claude_result["missing"] == ["scheduled-automation"], str(claude_result))
+    check("event 2b17ed65 excludes injected Skill prose only",
+          set(claude_result["needed"]) == {
+              "engineering-git", "governance-rules", "scheduled-automation"},
+          str(claude_result))
 
 # ── every new observation can be bound to the exact epoch source/map ───────
 source_digest = gate.source_sha256(REPO)
