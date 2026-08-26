@@ -752,7 +752,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         except Exception as exc:  # projection failure must be visible, never a live-looking board
             state["queue_projection_error"] = "queue_projection_failed"
             errors.append({"desk": "(queue-projector)", "error": "queue_projection_failed",
-                           "detail": "queue projector failed"})
+                           "detail": str(exc)[:500] or "queue projector failed"})
 
     # Read the registry back AFTER the heartbeat stamps above, so the roster the
     # observatory sees carries this cycle's own liveness rather than the values
