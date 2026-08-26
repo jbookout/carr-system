@@ -67,12 +67,10 @@
   "control_catalog": {
     "pack_delivery": {
       "implementation": [
-        "hooks/rule-pack-drift-gate.py",
-        "hooks/rule-pack-preuse-reselection.py"
+        "hooks/rule-pack-drift-gate.py"
       ],
       "test": [
         "ops/rule-pack-drift-gate-selftest.py",
-        "ops/rule-pack-preuse-reselection-selftest.py",
         "ops/rule-load-layer-check-selftest.py"
       ],
       "failure_mode": "Stop block naming the pack the turn's own work needed, once ops.rule_delivery_policy says enforced; a recorded observation until then",
