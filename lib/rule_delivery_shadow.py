@@ -16,7 +16,20 @@ WINDOW_SOURCE_PATHS = (
     "bin/rule-delivery-cutover-prod.sh",
     "bin/rule-delivery-shadow-ledger-prod.sh",
     "hooks/rule-pack-drift-gate.py",
+    "hooks/session-brief.py",
+    "hooks/machine-converge.py",
     "lib/rule_delivery_shadow.py",
+    "lib/rule_delivery_activation.py",
+    "mcp-server/src/mcp.js",
+    "migrations/0291_rule_delivery_layers.sql",
+    "migrations/0317_atomic_rule_delivery_cutover.sql",
+    "migrations/0321_rule_delivery_policy_seed_repair.sql",
+    "ops/config/codex-hooks.json",
+    "ops/config/control-enforcement-classes.v1.json",
+    "ops/config/gate-baseline.json",
+    "ops/config/hooks.json",
+    "ops/config/rule-delivery-activation-overlay.v1.json",
+    "ops/config-as-code.py",
     "ops/config/rule-enforcement-map.json",
     "ops/rule-delivery-cutover.py",
     "ops/rule-delivery-shadow-eligibility.py",
@@ -221,6 +234,9 @@ def append_locked(path: Path, build) -> dict:
         rows, bad = read_jsonl_handle(handle)
         if bad:
             raise RuntimeError(f"refusing append: {bad} unreadable telemetry line(s)")
+        existing = inspect(rows)
+        if existing["errors"]:
+            raise ValueError("existing ledger validation failed")
         row = build(rows)
         if not isinstance(row, dict):
             raise ValueError("append builder did not return a record")
@@ -234,6 +250,9 @@ def append_locked(path: Path, build) -> dict:
                 raise ValueError(problem)
         if row.get("record_type") == "epoch":
             validate_epoch_append(rows, row)
+        appended = inspect([*rows, row])
+        if appended["errors"]:
+            raise ValueError("appended record violates ledger order or schema")
         handle.seek(0, os.SEEK_END)
         handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
         handle.flush()
@@ -360,6 +379,7 @@ def inspect(rows: list[dict]) -> dict:
             seen_records.add(row["record_id"])
             if kind == "epoch":
                 epoch_seen = stamp(row)
+                assert epoch_seen is not None
                 if newest_prior is not None and epoch_seen < newest_prior:
                     errors.append(f"backdated/out-of-order epoch at row {index + 1}")
                 epochs.append((index, row))
@@ -380,7 +400,8 @@ def inspect(rows: list[dict]) -> dict:
         elif first_epoch_index is not None and index > first_epoch_index:
             errors.append(f"legacy observation after explicit epoch at row {index + 1}")
             continue
-        if stamp(row) is None:
+        seen = stamp(row)
+        if seen is None:
             errors.append(f"malformed observation timestamp at row {index + 1}")
             continue
         event_id = observation_id(row)
@@ -390,15 +411,36 @@ def inspect(rows: list[dict]) -> dict:
         if event_id in observations:
             errors.append(f"duplicate observation event {event_id}")
         observations[event_id] = (index, row)
-        seen = stamp(row)
         if newest_prior is None or seen > newest_prior:
             newest_prior = seen
     for target, (disp_index, disp) in dispositions.items():
         observed = observations.get(target)
         if observed is None:
             errors.append(f"orphan disposition for {target}")
-        elif disp_index <= observed[0] or stamp(disp) < stamp(observed[1]):
-            errors.append(f"disposition precedes observation {target}")
+        else:
+            disposition_seen = stamp(disp)
+            observation_seen = stamp(observed[1])
+            assert disposition_seen is not None and observation_seen is not None
+            if disp_index <= observed[0] or disposition_seen < observation_seen:
+                errors.append(f"disposition precedes observation {target}")
+    strict_started = False
+    last_strict: datetime | None = None
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        kind = row.get("record_type")
+        valid = ((kind in {"epoch", "disposition"} and validate_record(row) is None)
+                 or (kind == "observation" and validate_observation(row) is None))
+        if kind == "epoch" and valid:
+            strict_started = True
+        if not strict_started or not valid:
+            continue
+        seen = stamp(row)
+        assert seen is not None
+        if last_strict is not None and seen < last_strict:
+            errors.append(f"reverse-order strict timestamp at row {index + 1}")
+        if last_strict is None or seen > last_strict:
+            last_strict = seen
     return {"observations": observations, "dispositions": dispositions,
             "epochs": epochs, "errors": errors}
 
@@ -438,6 +480,8 @@ def validate_epoch_append(rows: list[dict], epoch: dict) -> None:
     if problem:
         raise ValueError(problem)
     epoch_seen = stamp(epoch)
-    prior = [stamp(row) for row in rows if isinstance(row, dict) and stamp(row) is not None]
+    assert epoch_seen is not None
+    prior = [seen for row in rows if isinstance(row, dict)
+             and (seen := stamp(row)) is not None]
     if prior and epoch_seen < max(prior):
         raise ValueError("epoch timestamp is earlier than prior ledger evidence")

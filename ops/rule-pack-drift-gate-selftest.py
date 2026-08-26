@@ -222,14 +222,15 @@ with tempfile.TemporaryDirectory() as directory:
     transcript = Path(directory) / "transcript.jsonl"
     secret = "postgresql://user:SUPER-SECRET@example.invalid/db"  # ci-secret-scan: allow
     transcript.write_text("{not-json " + secret + "\n", encoding="utf-8")
-    old_log, old_stdin = gate.LOG, sys.stdin
-    gate.LOG = str(Path(directory) / "shadow.jsonl")
+    old_log, old_stdin = getattr(gate, "LOG"), sys.stdin
+    setattr(gate, "LOG", str(Path(directory) / "shadow.jsonl"))
     sys.stdin = io.StringIO(json.dumps({"transcript_path": str(transcript),
                                         "session_id": "secret-test"}))
     try:
         gate.main()
     finally:
-        gate.LOG, sys.stdin = old_log, old_stdin
+        setattr(gate, "LOG", old_log)
+        sys.stdin = old_stdin
     persisted = Path(directory, "shadow.jsonl").read_text()
     error_row = json.loads(persisted)
     check("hook exception detail is redacted", secret not in persisted, persisted)

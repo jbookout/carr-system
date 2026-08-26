@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -141,6 +142,7 @@ def main() -> int:
     epoch.add_argument("--reason", required=True)
     fields(epoch)
     args = parser.parse_args()
+    result: Any
     try:
         if args.command == "list-findings":
             result = list_findings(args.log)

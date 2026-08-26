@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +18,39 @@ from lib.rule_delivery_shadow import current_identity, locked_read  # noqa:E402
 
 CURATION_BATCH = REPO / "audits" / "guidance-situation-curation-approval-batch.v1.json"
 ELIGIBILITY = REPO / "ops" / "rule-delivery-shadow-eligibility.py"
+HOOK_TEMPLATE = "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py"
+
+
+def _stop_commands(document: dict) -> list[str]:
+    hooks = document.get("hooks", document)
+    return [str(hook.get("command", ""))
+            for group in hooks.get("Stop", [])
+            for hook in group.get("hooks", []) if isinstance(hook, dict)]
+
+
+def live_hook_config_parity(repo: Path = REPO, home: Path | None = None,
+                            runner=subprocess.run) -> bool:
+    """Config-as-code plus exact Claude/Codex trigger command readback."""
+    home = home or Path.home()
+    try:
+        source_claude = json.loads((repo / "ops/config/hooks.json").read_text())
+        source_codex = json.loads((repo / "ops/config/codex-hooks.json").read_text())
+        expected_live = HOOK_TEMPLATE.replace("{{REPO}}", str(repo))
+        if _stop_commands(source_claude).count(HOOK_TEMPLATE) != 1:
+            return False
+        if _stop_commands(source_codex).count(HOOK_TEMPLATE) != 1:
+            return False
+        live_claude = json.loads((home / ".claude/settings.json").read_text())
+        live_codex = json.loads((home / ".codex/hooks.json").read_text())
+        if _stop_commands(live_claude).count(expected_live) != 1:
+            return False
+        if _stop_commands(live_codex).count(expected_live) != 1:
+            return False
+        result = runner([sys.executable, str(repo / "ops/config-as-code.py"), "check"],
+                        cwd=repo, capture_output=True, text=True, timeout=60)
+        return result.returncode == 0
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return False
 
 
 def curation_ids() -> set[str]:
@@ -118,6 +152,10 @@ def main() -> int:
             if args.mode == "enforced" else {"eligible": True}
         if final_identity != identity or not final_eligibility["eligible"]:
             print("rule-delivery-cutover: policy/evidence identity changed before write",
+                  file=sys.stderr)
+            return 1
+        if not live_hook_config_parity():
+            print("rule-delivery-cutover: Claude/Codex hook config parity failed",
                   file=sys.stderr)
             return 1
         cur.execute("select * from ops.set_rule_delivery_mode(%s,%s,%s,%s)",

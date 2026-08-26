@@ -77,6 +77,7 @@ def evaluate(rows: list[dict], now: datetime | None = None,
     after = [(event_id, index, row) for event_id, (index, row)
              in state["observations"].items() if index > epoch_index]
     epoch_seen = stamp(epoch)
+    assert epoch_seen is not None
     for event_id, _index, row in after:
         seen = stamp(row)
         if seen is None or seen < epoch_seen:
@@ -84,9 +85,12 @@ def evaluate(rows: list[dict], now: datetime | None = None,
         for key in ("map_digest", "source_digest"):
             if row.get(key) != epoch_identity[key]:
                 reasons.append(f"observation {event_id} {key} differs from current epoch")
-    observations = sorted(
-        ((stamp(row), event_id, row) for event_id, _index, row in after if scoped(row)),
-        key=lambda item: item[0])
+    observations: list[tuple[datetime, str, dict]] = []
+    for event_id, _index, row in after:
+        seen = stamp(row)
+        if scoped(row) and seen is not None:
+            observations.append((seen, event_id, row))
+    observations.sort(key=lambda item: item[0])
     if not observations:
         reasons.append("no actual scoped shadow observations after current epoch")
     else:

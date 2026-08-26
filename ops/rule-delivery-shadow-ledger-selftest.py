@@ -106,7 +106,7 @@ with tempfile.TemporaryDirectory() as directory:
 
     # A newly created ledger fsyncs both its append FD and containing directory.
     import lib.rule_delivery_shadow as shadow
-    calls = []
+    calls: list[object] = []
     real_fsync = shadow.os.fsync
     shadow.os.fsync = lambda fd: calls.append(fd)
     try:
@@ -115,6 +115,34 @@ with tempfile.TemporaryDirectory() as directory:
     finally:
         shadow.os.fsync = real_fsync
     assert len(calls) == 2 and durable_path.read_text().count("\n") == 1
+
+    ordered_path = Path(directory) / "ordered.jsonl"
+    base_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+    ordered_epoch = ledger.make_epoch(
+        identity, owner="o", reason="ordered", remedy_ref="m", rollback_ref="b",
+        at=base_time)
+    ledger.append(ordered_path, lambda _rows: ordered_epoch)
+    later = gate.make_observation(
+        session="later", map_digest=identity["map_digest"],
+        source_digest=identity["source_digest"], at=base_time + timedelta(minutes=2),
+        result={"mode": "shadow", "needed": [], "loaded": ["engineering-git"],
+                "missing": [], "triggers": {}, "would_omit_count": 1,
+                "missed_rules": []})
+    reverse = gate.make_observation(
+        session="reverse", map_digest=identity["map_digest"],
+        source_digest=identity["source_digest"], at=base_time + timedelta(minutes=1),
+        result={"mode": "shadow", "needed": [], "loaded": ["engineering-git"],
+                "missing": [], "triggers": {}, "would_omit_count": 1,
+                "missed_rules": []})
+    ledger.append(ordered_path, lambda _rows: later)
+    try:
+        ledger.append(ordered_path, lambda _rows: reverse)
+    except ValueError as exc:
+        assert "ledger order" in str(exc)
+    else:
+        raise AssertionError("append door accepted a reverse-order observation")
+    state = ledger.inspect([ordered_epoch, later, reverse])
+    assert any("reverse-order strict timestamp" in error for error in state["errors"])
 
     # Simultaneous hook miss vs epoch is serialized: an epoch can only win
     # before the miss, never reset past an undispositioned miss.
@@ -196,8 +224,8 @@ with tempfile.TemporaryDirectory() as directory:
 # Arbitrary provider/auth failures never reach stdout, stderr, or a traceback.
 secret = "postgresql://user:SUPER-SECRET@example.invalid/db"  # ci-secret-scan: allow
 old_argv = sys.argv
-old_identity = ledger.live_identity
-ledger.live_identity = lambda: (_ for _ in ()).throw(RuntimeError(secret))
+old_identity = getattr(ledger, "live_identity")
+setattr(ledger, "live_identity", lambda: (_ for _ in ()).throw(RuntimeError(secret)))
 sys.argv = ["ledger", "--log", "/tmp/not-written-shadow-test.jsonl", "start-epoch",
             "--owner", "o", "--reason", "r", "--remedy-ref", "m",
             "--rollback-ref", "b"]
@@ -206,7 +234,7 @@ try:
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         rc = ledger.main()
 finally:
-    ledger.live_identity = old_identity
+    setattr(ledger, "live_identity", old_identity)
     sys.argv = old_argv
 rendered = stdout.getvalue() + stderr.getvalue()
 assert rc == 1 and secret not in rendered and "Traceback" not in rendered
@@ -215,4 +243,4 @@ wrapper = (REPO / "bin/rule-delivery-shadow-ledger-prod.sh").read_text()
 assert "carr_load_routine_db_env CARR_DB_JOBS_URL" in wrapper
 assert "CARR_DB_JOBS_URL=\"$CARR_DB_JOBS_URL\"" in wrapper
 
-print("rule-delivery-shadow-ledger-selftest: 34 cases passed")
+print("rule-delivery-shadow-ledger-selftest: 36 cases passed")
