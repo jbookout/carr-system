@@ -94,6 +94,43 @@ def run_loop_case(human, tool_name, tool_input):
         "session_id": "selftest", "tool_input": tool_input})
 
 
+def run_multi_case(human, items):
+    """A MULTI-ITEM interview — the shape the 2026-08-23 council called the
+    escalation gate's blind spot. items = [(question, options), ...]."""
+    def build(path):
+        questions = []
+        for q, opts in items:
+            questions.append({"question": q, "header": "Q", "multiSelect": False,
+                              "options": [{"label": o, "description": ""}
+                                          for o in opts]})
+        return {"tool_name": "AskUserQuestion", "transcript_path": path,
+                "session_id": "selftest", "tool_input": {"questions": questions}}
+    return with_transcript(human, build)
+
+
+# ── MULTI-ITEM interviews (the blind spot the 2026-08-23 gates-audit council
+# named): classification must be per QUESTION, so one fact-capture item cannot
+# exempt an internal item riding in the same call. ────────────────────────────
+# (name, human_last, [(question, options), ...], expect_deny)
+MULTI_CASES = [
+    ("mixed-fact-then-internal", "work the queue",
+     [("How did the meeting with Dr. Patel go?", ["Strong", "Lukewarm"]),
+      ("Should the deleted_at column be nullable?", ["Nullable", "Sentinel"])],
+     True),
+    ("mixed-internal-first", "work the queue",
+     [("Which folder structure for the exports?", ["Flat", "Nested"]),
+      ("Did they call you back this week?", ["Yes", "No"])],
+     True),
+    ("all-fact-capture", "log my day",
+     [("How did the meeting go?", ["Strong", "Lukewarm"]),
+      ("Pursue or table this vendor?", ["Pursue", "Table"])],
+     False),
+    ("single-item-still-denied", "work the queue",
+     [("Should the nightly job run at 2am or 4am?", ["2am", "4am"])],
+     True),
+]
+
+
 def main():
     if not os.path.exists(HOOK):
         print(f"FAIL: hook not found at {HOOK}"); return 1
@@ -107,6 +144,13 @@ def main():
               f"want={'DENY ' if expect else 'allow'} got={'DENY' if got else 'allow'}")
     for name, human, tool_name, tool_input, expect in LOOP_CASES:
         got = run_loop_case(human, tool_name, tool_input)
+        ok = (got == expect)
+        passed, failed = (passed+1, failed) if ok else (passed, failed+1)
+        if not ok: bad.append(name)
+        print(f"  {'ok  ' if ok else 'FAIL'} {name:24} "
+              f"want={'DENY ' if expect else 'allow'} got={'DENY' if got else 'allow'}")
+    for name, human, items, expect in MULTI_CASES:
+        got = run_multi_case(human, items)
         ok = (got == expect)
         passed, failed = (passed+1, failed) if ok else (passed, failed+1)
         if not ok: bad.append(name)
