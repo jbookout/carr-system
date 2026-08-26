@@ -3789,9 +3789,9 @@ begin
     from candidate c where j.id=c.id
     returning j.*
   ), attempts as (
-    insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
+    insert into ops.job_attempt as claimed_attempt(job_id,attempt,lease_owner,lease_token,state)
     select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
-    returning job_id
+    returning claimed_attempt.job_id
   )
   select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
          d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
@@ -5760,6 +5760,135 @@ end $_$;
 
 
 --
+-- Name: prepare_staging_replacement_project(uuid, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.prepare_staging_replacement_project(p_idempotency_key uuid, p_contract jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare
+  expected_keys constant text[] := array[
+    'artifact_sha256','config_sha256','dependency_sha256',
+    'expected_production_overlap_count','expected_synthetic_data_count','git_sha',
+    'migration_count','migration_highest','migration_ledger','migration_ledger_sha256',
+    'prior_staging_project_id','replacement_branch_id','replacement_endpoint_id',
+    'replacement_project_id','schema_version','source_tree_entry_count',
+    'source_tree_oid','source_tree_sha256','tree_mode'
+  ];
+  production_project_id constant text := 'steep-field-48688294';
+  supplied_keys text[]; ledger jsonb; declared_ledger_digest text;
+  declared_count integer; declared_highest text; invalid_entries integer;
+  existing ops.staging_replacement_project_contract%rowtype;
+  receipt ops.staging_replacement_project_receipt%rowtype; contract_uuid uuid;
+begin
+  if session_user<>'carr_jobs' then
+    raise exception 'staging replacement preparation requires the carr_jobs session';
+  end if;
+  if p_idempotency_key is null or jsonb_typeof(p_contract)<>'object' then
+    raise exception 'invalid staging replacement preparation input';
+  end if;
+  select array_agg(k order by k collate "C") into supplied_keys
+    from jsonb_object_keys(p_contract) as keys(k);
+  if supplied_keys is distinct from expected_keys then
+    raise exception 'staging replacement contract has missing or unknown keys';
+  end if;
+  if jsonb_typeof(p_contract->'migration_ledger')<>'object'
+     or jsonb_typeof(p_contract->'migration_count')<>'number'
+     or jsonb_typeof(p_contract->'source_tree_entry_count')<>'number'
+     or jsonb_typeof(p_contract->'expected_synthetic_data_count')<>'number'
+     or jsonb_typeof(p_contract->'expected_production_overlap_count')<>'number' then
+    raise exception 'staging replacement contract has invalid typed values';
+  end if;
+  ledger:=p_contract->'migration_ledger';
+  select count(*)::integer, max(e.key collate "C"),
+         count(*) filter (where e.key !~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'
+                           or e.value !~ '^[0-9a-f]{64}$')::integer,
+         'sha256:'||encode(public.digest(
+           coalesce(string_agg(
+             convert_to(e.key,'UTF8')||decode('00','hex')||
+             convert_to(e.value,'UTF8')||decode('0a','hex'),
+             ''::bytea order by e.key collate "C"),''::bytea),'sha256'),'hex')
+    into declared_count,declared_highest,invalid_entries,declared_ledger_digest
+    from jsonb_each_text(ledger) e;
+  if declared_count=0 or invalid_entries<>0
+     or (p_contract->>'migration_count')::integer<>declared_count
+     or p_contract->>'migration_highest' is distinct from declared_highest
+     or p_contract->>'migration_ledger_sha256' is distinct from declared_ledger_digest then
+    raise exception 'staging replacement contract is not the exact full migration tree';
+  end if;
+  if p_contract->>'schema_version'<>'clean-staging-replacement-contract.v1'
+     or p_contract->>'tree_mode'<>'full'
+     or coalesce(p_contract->>'git_sha','') !~ '^[0-9a-f]{40}$'
+     or coalesce(p_contract->>'source_tree_oid','') !~ '^[0-9a-f]{40}$'
+     or coalesce(p_contract->>'source_tree_sha256','') !~ '^sha256:[0-9a-f]{64}$'
+     or (p_contract->>'source_tree_entry_count')::integer<=0
+     or coalesce(p_contract->>'artifact_sha256','') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(p_contract->>'config_sha256','') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(p_contract->>'dependency_sha256','') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(btrim(p_contract->>'prior_staging_project_id'),'')=''
+     or coalesce(btrim(p_contract->>'replacement_project_id'),'')=''
+     or coalesce(btrim(p_contract->>'replacement_branch_id'),'')=''
+     or coalesce(btrim(p_contract->>'replacement_endpoint_id'),'')=''
+     or p_contract->>'prior_staging_project_id'=p_contract->>'replacement_project_id'
+     or p_contract->>'prior_staging_project_id'=production_project_id
+     or p_contract->>'replacement_project_id'=production_project_id
+     or (p_contract->>'expected_synthetic_data_count')::bigint<=0
+     or (p_contract->>'expected_production_overlap_count')::bigint<>0 then
+    raise exception 'staging replacement contract identity or isolation assertion is invalid';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,322));
+  select * into existing from ops.staging_replacement_project_contract
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if (existing.schema_version,existing.tree_mode,existing.git_sha,
+        existing.source_tree_oid,existing.source_tree_sha256,existing.source_tree_entry_count,
+        existing.artifact_sha256,existing.config_sha256,existing.dependency_sha256,
+        existing.migration_ledger,existing.migration_count,existing.migration_highest,
+        existing.migration_ledger_sha256,existing.prior_staging_project_id,
+        existing.replacement_project_id,existing.replacement_branch_id,
+        existing.replacement_endpoint_id,existing.expected_synthetic_data_count,
+        existing.expected_production_overlap_count) is distinct from
+       (p_contract->>'schema_version',p_contract->>'tree_mode',p_contract->>'git_sha',
+        p_contract->>'source_tree_oid',p_contract->>'source_tree_sha256',
+        (p_contract->>'source_tree_entry_count')::integer,p_contract->>'artifact_sha256',
+        p_contract->>'config_sha256',p_contract->>'dependency_sha256',ledger,
+        declared_count,declared_highest,declared_ledger_digest,
+        p_contract->>'prior_staging_project_id',p_contract->>'replacement_project_id',
+        p_contract->>'replacement_branch_id',p_contract->>'replacement_endpoint_id',
+        (p_contract->>'expected_synthetic_data_count')::bigint,0::bigint) then
+      raise exception 'staging replacement idempotency key was reused with changed input';
+    end if;
+    select * into receipt from ops.staging_replacement_project_receipt
+     where contract_id=existing.id;
+    return jsonb_build_object('contract_id',existing.id,
+      'state',case when receipt.id is null then 'prepared' else 'observed' end,
+      'receipt_id',receipt.id,'evidence_ref',receipt.evidence_ref,'replayed',true);
+  end if;
+
+  insert into ops.staging_replacement_project_contract(
+    idempotency_key,schema_version,tree_mode,git_sha,source_tree_oid,
+    source_tree_sha256,source_tree_entry_count,artifact_sha256,config_sha256,
+    dependency_sha256,migration_ledger,migration_count,migration_highest,
+    migration_ledger_sha256,prior_staging_project_id,replacement_project_id,
+    replacement_branch_id,replacement_endpoint_id,expected_synthetic_data_count,
+    expected_production_overlap_count,writer_session_user)
+  values(p_idempotency_key,p_contract->>'schema_version',p_contract->>'tree_mode',
+    p_contract->>'git_sha',p_contract->>'source_tree_oid',p_contract->>'source_tree_sha256',
+    (p_contract->>'source_tree_entry_count')::integer,p_contract->>'artifact_sha256',
+    p_contract->>'config_sha256',p_contract->>'dependency_sha256',ledger,
+    declared_count,declared_highest,declared_ledger_digest,
+    p_contract->>'prior_staging_project_id',p_contract->>'replacement_project_id',
+    p_contract->>'replacement_branch_id',p_contract->>'replacement_endpoint_id',
+    (p_contract->>'expected_synthetic_data_count')::bigint,0,session_user)
+  returning id into contract_uuid;
+  return jsonb_build_object('contract_id',contract_uuid,'state','prepared',
+    'receipt_id',null,'evidence_ref',null,'replayed',false);
+end $_$;
+
+
+--
 -- Name: prepare_staging_restore_only_attempt(uuid, uuid, text, text, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -6574,6 +6703,48 @@ begin
     a.declared_migration_count,a.declared_schema_highest_migration,
     a.declared_schema_applied_count,a.declared_schema_ledger_sha256
   from ops.staging_forward_fix_rehearsal_attempt a where a.idempotency_key=p_idempotency_key;
+end $$;
+
+
+--
+-- Name: read_staging_replacement_project_receipt(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.read_staging_replacement_project_receipt(p_receipt_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare result jsonb;
+begin
+  if session_user<>'carr_jobs' and not (
+       session_user='carr_program5_forward_fix_verifier'
+       and pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')) then
+    raise exception 'staging replacement receipt read requires a scoped session';
+  end if;
+  select jsonb_build_object(
+      'contract_id',c.id,'receipt_id',r.id,'evidence_ref',r.evidence_ref,
+      'receipt_sha256',r.receipt_sha256,'git_sha',r.git_sha,
+      'source_tree_oid',r.source_tree_oid,'source_tree_sha256',r.source_tree_sha256,
+      'source_tree_entry_count',r.source_tree_entry_count,
+      'artifact_sha256',r.artifact_sha256,'config_sha256',r.config_sha256,
+      'dependency_sha256',r.dependency_sha256,
+      'prior_staging_project_id',r.prior_staging_project_id,
+      'replacement_project_id',r.replacement_project_id,
+      'replacement_branch_id',r.replacement_branch_id,
+      'replacement_endpoint_id',r.replacement_endpoint_id,
+      'live_migration_ledger',r.live_migration_ledger,
+      'live_migration_count',r.live_migration_count,
+      'live_migration_highest',r.live_migration_highest,
+      'live_migration_ledger_sha256',r.live_migration_ledger_sha256,
+      'synthetic_data_count',r.synthetic_data_count,
+      'production_overlap_count',r.production_overlap_count,
+      'observed_at',r.observed_at)
+    into result
+    from ops.staging_replacement_project_receipt r
+    join ops.staging_replacement_project_contract c on c.id=r.contract_id
+   where r.id=p_receipt_id;
+  if result is null then raise exception 'staging replacement receipt not found'; end if;
+  return result;
 end $$;
 
 
@@ -7854,6 +8025,159 @@ begin
   end if;
   return jsonb_build_object('receipt_id',receipt_uuid,'receipt_ref',receipt_ref,'replayed',false,'bundle_id',bundle_uuid,'recovery_run_id',run_uuid);
 end $_$;
+
+
+--
+-- Name: record_staging_replacement_project(uuid, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare
+  expected_keys constant text[] := array[
+    'artifact_sha256','config_sha256','dependency_sha256','git_sha',
+    'prior_staging_project_id','production_overlap_count','replacement_branch_id',
+    'replacement_endpoint_id','replacement_project_id','schema_version',
+    'source_tree_entry_count','source_tree_oid','source_tree_sha256','synthetic_data_count'
+  ];
+  supplied_keys text[]; contract ops.staging_replacement_project_contract%rowtype;
+  existing ops.staging_replacement_project_receipt%rowtype; receipt_uuid uuid;
+  live_ledger jsonb; live_count integer; live_highest text; live_digest text;
+  derived_synthetic_count bigint; observed_at_value timestamptz;
+  projection jsonb; receipt_digest text; receipt_ref text;
+begin
+  if session_user<>'carr_program5_forward_fix_verifier'
+     or not pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member') then
+    raise exception 'staging replacement recording requires the scoped verifier session';
+  end if;
+  if p_idempotency_key is null or jsonb_typeof(p_observation)<>'object' then
+    raise exception 'invalid staging replacement observation input';
+  end if;
+  select array_agg(k order by k collate "C") into supplied_keys
+    from jsonb_object_keys(p_observation) as keys(k);
+  if supplied_keys is distinct from expected_keys
+     or jsonb_typeof(p_observation->'source_tree_entry_count')<>'number'
+     or jsonb_typeof(p_observation->'synthetic_data_count')<>'number'
+     or jsonb_typeof(p_observation->'production_overlap_count')<>'number' then
+    raise exception 'staging replacement observation has missing, unknown, or invalid typed keys';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,322));
+  select * into contract from ops.staging_replacement_project_contract
+   where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'staging replacement contract was not prepared'; end if;
+
+  if (p_observation->>'schema_version',p_observation->>'git_sha',
+      p_observation->>'source_tree_oid',p_observation->>'source_tree_sha256',
+      (p_observation->>'source_tree_entry_count')::integer,
+      p_observation->>'artifact_sha256',p_observation->>'config_sha256',
+      p_observation->>'dependency_sha256',p_observation->>'prior_staging_project_id',
+      p_observation->>'replacement_project_id',p_observation->>'replacement_branch_id',
+      p_observation->>'replacement_endpoint_id') is distinct from
+     ('clean-staging-replacement-observation.v1',contract.git_sha,
+      contract.source_tree_oid,contract.source_tree_sha256,contract.source_tree_entry_count,
+      contract.artifact_sha256,contract.config_sha256,contract.dependency_sha256,
+      contract.prior_staging_project_id,contract.replacement_project_id,
+      contract.replacement_branch_id,contract.replacement_endpoint_id) then
+    raise exception 'staging replacement observation does not match the prepared immutable identity';
+  end if;
+
+  -- The local count is derived here from the replacement database. Production
+  -- overlap is cross-project evidence: this function can only require the
+  -- controller's governed G1 table-ID comparison assertion to be exactly zero.
+  if to_regclass('public.party') is null or to_regclass('public.client') is null
+     or to_regclass('public.deal') is null or to_regclass('public.lead') is null
+     or to_regclass('public.vendor') is null then
+    raise exception 'replacement database lacks a required synthetic-data table';
+  end if;
+  select (select count(*) from public.party)
+       + (select count(*) from public.client)
+       + (select count(*) from public.deal)
+       + (select count(*) from public.lead)
+       + (select count(*) from public.vendor)
+    into derived_synthetic_count;
+  if derived_synthetic_count<=0
+     or (p_observation->>'synthetic_data_count')::bigint<>derived_synthetic_count
+     or derived_synthetic_count<>contract.expected_synthetic_data_count
+     or (p_observation->>'production_overlap_count')::bigint<>0
+     or contract.expected_production_overlap_count<>0 then
+    raise exception 'staging replacement synthetic-data or no-Production-overlap assertion failed';
+  end if;
+
+  select coalesce(jsonb_object_agg(filename,sha256 order by filename collate "C"),'{}'::jsonb),
+         count(*)::integer,max(filename collate "C"),
+         'sha256:'||encode(public.digest(
+           coalesce(string_agg(convert_to(filename,'UTF8')||decode('00','hex')||
+             convert_to(sha256,'UTF8')||decode('0a','hex'),''::bytea
+             order by filename collate "C"),''::bytea),'sha256'),'hex')
+    into live_ledger,live_count,live_highest,live_digest
+    from public.schema_migrations;
+  if live_ledger is distinct from contract.migration_ledger
+     or live_count is distinct from contract.migration_count
+     or live_highest is distinct from contract.migration_highest
+     or live_digest is distinct from contract.migration_ledger_sha256 then
+    raise exception 'replacement database live full migration ledger does not match the exact declared tree';
+  end if;
+
+  select * into existing from ops.staging_replacement_project_receipt
+   where contract_id=contract.id;
+  if found then
+    if (existing.schema_version,existing.git_sha,existing.source_tree_oid,
+        existing.source_tree_sha256,existing.source_tree_entry_count,
+        existing.artifact_sha256,existing.config_sha256,existing.dependency_sha256,
+        existing.prior_staging_project_id,existing.replacement_project_id,
+        existing.replacement_branch_id,existing.replacement_endpoint_id,
+        existing.live_migration_ledger,existing.live_migration_count,
+        existing.live_migration_highest,existing.live_migration_ledger_sha256,
+        existing.synthetic_data_count,existing.production_overlap_count) is distinct from
+       (p_observation->>'schema_version',contract.git_sha,contract.source_tree_oid,
+        contract.source_tree_sha256,contract.source_tree_entry_count,contract.artifact_sha256,
+        contract.config_sha256,contract.dependency_sha256,contract.prior_staging_project_id,
+        contract.replacement_project_id,contract.replacement_branch_id,
+        contract.replacement_endpoint_id,live_ledger,live_count,live_highest,live_digest,
+        derived_synthetic_count,0::bigint) then
+      raise exception 'staging replacement observation replay changed recorded evidence';
+    end if;
+    return jsonb_build_object('contract_id',contract.id,'receipt_id',existing.id,
+      'evidence_ref',existing.evidence_ref,'state','observed','replayed',true);
+  end if;
+
+  observed_at_value:=clock_timestamp();
+  projection:=jsonb_build_object('contract_id',contract.id,'git_sha',contract.git_sha,
+    'source_tree_oid',contract.source_tree_oid,'source_tree_sha256',contract.source_tree_sha256,
+    'source_tree_entry_count',contract.source_tree_entry_count,
+    'artifact_sha256',contract.artifact_sha256,'config_sha256',contract.config_sha256,
+    'dependency_sha256',contract.dependency_sha256,
+    'prior_staging_project_id',contract.prior_staging_project_id,
+    'replacement_project_id',contract.replacement_project_id,
+    'replacement_branch_id',contract.replacement_branch_id,
+    'replacement_endpoint_id',contract.replacement_endpoint_id,
+    'live_migration_ledger',live_ledger,'live_migration_count',live_count,
+    'live_migration_highest',live_highest,'live_migration_ledger_sha256',live_digest,
+    'synthetic_data_count',derived_synthetic_count,'production_overlap_count',0,
+    'observed_at',observed_at_value);
+  receipt_digest:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
+  receipt_ref:='ops.staging-replacement-project:'||receipt_digest;
+  insert into ops.staging_replacement_project_receipt(
+    idempotency_key,contract_id,schema_version,git_sha,source_tree_oid,
+    source_tree_sha256,source_tree_entry_count,artifact_sha256,config_sha256,
+    dependency_sha256,prior_staging_project_id,replacement_project_id,
+    replacement_branch_id,replacement_endpoint_id,live_migration_ledger,
+    live_migration_count,live_migration_highest,live_migration_ledger_sha256,
+    synthetic_data_count,production_overlap_count,receipt_sha256,evidence_ref,
+    writer_session_user,observed_at)
+  values(p_idempotency_key,contract.id,p_observation->>'schema_version',contract.git_sha,
+    contract.source_tree_oid,contract.source_tree_sha256,contract.source_tree_entry_count,
+    contract.artifact_sha256,contract.config_sha256,contract.dependency_sha256,
+    contract.prior_staging_project_id,contract.replacement_project_id,
+    contract.replacement_branch_id,contract.replacement_endpoint_id,live_ledger,
+    live_count,live_highest,live_digest,derived_synthetic_count,0,receipt_digest,
+    receipt_ref,session_user,observed_at_value)
+  returning id into receipt_uuid;
+  return jsonb_build_object('contract_id',contract.id,'receipt_id',receipt_uuid,
+    'evidence_ref',receipt_ref,'state','observed','replayed',false);
+end $$;
 
 
 --
@@ -15238,6 +15562,106 @@ CREATE TABLE ops.staging_release_readback_receipt (
 --
 
 COMMENT ON COLUMN ops.staging_release_readback_receipt.program6_actions_enabled IS 'Effective Program 6 action boolean read from /release for post-0218 receipts; NULL is legacy immutable evidence.';
+
+
+--
+-- Name: staging_replacement_project_contract; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_replacement_project_contract (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    schema_version text NOT NULL,
+    tree_mode text NOT NULL,
+    git_sha text NOT NULL,
+    source_tree_oid text NOT NULL,
+    source_tree_sha256 text CONSTRAINT staging_replacement_project_contrac_source_tree_sha256_not_null NOT NULL,
+    source_tree_entry_count integer CONSTRAINT staging_replacement_project_co_source_tree_entry_count_not_null NOT NULL,
+    artifact_sha256 text NOT NULL,
+    config_sha256 text NOT NULL,
+    dependency_sha256 text NOT NULL,
+    migration_ledger jsonb NOT NULL,
+    migration_count integer NOT NULL,
+    migration_highest text NOT NULL,
+    migration_ledger_sha256 text CONSTRAINT staging_replacement_project_co_migration_ledger_sha256_not_null NOT NULL,
+    prior_staging_project_id text CONSTRAINT staging_replacement_project_c_prior_staging_project_id_not_null NOT NULL,
+    replacement_project_id text CONSTRAINT staging_replacement_project_con_replacement_project_id_not_null NOT NULL,
+    replacement_branch_id text CONSTRAINT staging_replacement_project_cont_replacement_branch_id_not_null NOT NULL,
+    replacement_endpoint_id text CONSTRAINT staging_replacement_project_co_replacement_endpoint_id_not_null NOT NULL,
+    expected_synthetic_data_count bigint CONSTRAINT staging_replacement_project_expected_synthetic_data_co_not_null NOT NULL,
+    expected_production_overlap_count bigint CONSTRAINT staging_replacement_project_expected_production_overla_not_null NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_replacement_project_contra_writer_session_user_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_replacement_project__expected_production_overlap__check CHECK ((expected_production_overlap_count = 0)),
+    CONSTRAINT staging_replacement_project__expected_synthetic_data_coun_check CHECK ((expected_synthetic_data_count > 0)),
+    CONSTRAINT staging_replacement_project_cont_prior_staging_project_id_check CHECK ((btrim(prior_staging_project_id) <> ''::text)),
+    CONSTRAINT staging_replacement_project_contr_migration_ledger_sha256_check CHECK ((migration_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contr_replacement_endpoint_id_check CHECK ((btrim(replacement_endpoint_id) <> ''::text)),
+    CONSTRAINT staging_replacement_project_contr_source_tree_entry_count_check CHECK ((source_tree_entry_count > 0)),
+    CONSTRAINT staging_replacement_project_contra_replacement_project_id_check CHECK ((btrim(replacement_project_id) <> ''::text)),
+    CONSTRAINT staging_replacement_project_contrac_replacement_branch_id_check CHECK ((btrim(replacement_branch_id) <> ''::text)),
+    CONSTRAINT staging_replacement_project_contract_artifact_sha256_check CHECK ((artifact_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_config_sha256_check CHECK ((config_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_dependency_sha256_check CHECK ((dependency_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_migration_count_check CHECK ((migration_count > 0)),
+    CONSTRAINT staging_replacement_project_contract_migration_highest_check CHECK ((migration_highest ~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'::text)),
+    CONSTRAINT staging_replacement_project_contract_migration_ledger_check CHECK ((jsonb_typeof(migration_ledger) = 'object'::text)),
+    CONSTRAINT staging_replacement_project_contract_schema_version_check CHECK ((schema_version = 'clean-staging-replacement-contract.v1'::text)),
+    CONSTRAINT staging_replacement_project_contract_source_tree_oid_check CHECK ((source_tree_oid ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_source_tree_sha256_check CHECK ((source_tree_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_tree_mode_check CHECK ((tree_mode = 'full'::text)),
+    CONSTRAINT staging_replacement_project_contract_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_replacement_project_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_replacement_project_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    contract_id uuid NOT NULL,
+    schema_version text NOT NULL,
+    git_sha text NOT NULL,
+    source_tree_oid text NOT NULL,
+    source_tree_sha256 text NOT NULL,
+    source_tree_entry_count integer CONSTRAINT staging_replacement_project_re_source_tree_entry_count_not_null NOT NULL,
+    artifact_sha256 text NOT NULL,
+    config_sha256 text NOT NULL,
+    dependency_sha256 text NOT NULL,
+    prior_staging_project_id text CONSTRAINT staging_replacement_project_r_prior_staging_project_id_not_null NOT NULL,
+    replacement_project_id text CONSTRAINT staging_replacement_project_rec_replacement_project_id_not_null NOT NULL,
+    replacement_branch_id text CONSTRAINT staging_replacement_project_rece_replacement_branch_id_not_null NOT NULL,
+    replacement_endpoint_id text CONSTRAINT staging_replacement_project_re_replacement_endpoint_id_not_null NOT NULL,
+    live_migration_ledger jsonb CONSTRAINT staging_replacement_project_rece_live_migration_ledger_not_null NOT NULL,
+    live_migration_count integer CONSTRAINT staging_replacement_project_recei_live_migration_count_not_null NOT NULL,
+    live_migration_highest text CONSTRAINT staging_replacement_project_rec_live_migration_highest_not_null NOT NULL,
+    live_migration_ledger_sha256 text CONSTRAINT staging_replacement_project_live_migration_ledger_sha2_not_null NOT NULL,
+    synthetic_data_count bigint CONSTRAINT staging_replacement_project_recei_synthetic_data_count_not_null NOT NULL,
+    production_overlap_count bigint CONSTRAINT staging_replacement_project_r_production_overlap_count_not_null NOT NULL,
+    receipt_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_replacement_project_receip_writer_session_user_not_null NOT NULL,
+    observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_replacement_project__live_migration_ledger_sha256_check CHECK ((live_migration_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_rece_production_overlap_count_check CHECK ((production_overlap_count = 0)),
+    CONSTRAINT staging_replacement_project_recei_source_tree_entry_count_check CHECK ((source_tree_entry_count > 0)),
+    CONSTRAINT staging_replacement_project_receipt_artifact_sha256_check CHECK ((artifact_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_config_sha256_check CHECK ((config_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_dependency_sha256_check CHECK ((dependency_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-replacement-project:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_live_migration_count_check CHECK ((live_migration_count > 0)),
+    CONSTRAINT staging_replacement_project_receipt_live_migration_ledger_check CHECK ((jsonb_typeof(live_migration_ledger) = 'object'::text)),
+    CONSTRAINT staging_replacement_project_receipt_receipt_sha256_check CHECK ((receipt_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_schema_version_check CHECK ((schema_version = 'clean-staging-replacement-observation.v1'::text)),
+    CONSTRAINT staging_replacement_project_receipt_source_tree_oid_check CHECK ((source_tree_oid ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_source_tree_sha256_check CHECK ((source_tree_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_synthetic_data_count_check CHECK ((synthetic_data_count > 0)),
+    CONSTRAINT staging_replacement_project_receipt_writer_session_user_check CHECK ((writer_session_user = 'carr_program5_forward_fix_verifier'::text))
+);
 
 
 --
@@ -27212,6 +27636,62 @@ ALTER TABLE ONLY ops.staging_release_readback_receipt
 
 
 --
+-- Name: staging_replacement_project_contract staging_replacement_project_contract_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_contract
+    ADD CONSTRAINT staging_replacement_project_contract_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_replacement_project_contract staging_replacement_project_contract_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_contract
+    ADD CONSTRAINT staging_replacement_project_contract_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_contract_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_contract_id_key UNIQUE (contract_id);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_receipt_sha256_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_receipt_sha256_key UNIQUE (receipt_sha256);
+
+
+--
 -- Name: staging_restore_only_attempt staging_restore_only_attempt_expected_provider_tag_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -31118,6 +31598,20 @@ CREATE TRIGGER staging_release_readback_append_only BEFORE DELETE OR UPDATE ON o
 
 
 --
+-- Name: staging_replacement_project_contract staging_replacement_project_contract_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_replacement_project_contract_append_only BEFORE DELETE OR UPDATE ON ops.staging_replacement_project_contract FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_replacement_project_receipt_append_only BEFORE DELETE OR UPDATE ON ops.staging_replacement_project_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
 -- Name: staging_restore_only_attempt staging_restore_only_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -33375,6 +33869,14 @@ ALTER TABLE ONLY ops.staging_release_readback_receipt
 
 ALTER TABLE ONLY ops.staging_release_readback_receipt
     ADD CONSTRAINT staging_release_readback_receipt_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_contract_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES ops.staging_replacement_project_contract(id) ON DELETE RESTRICT;
 
 
 --
@@ -35883,6 +36385,7 @@ revoke all on function ops.current_sourced_work_requests(p_organization_tenant_i
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
+revoke all on function ops.engineering_claim_slice(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid) from public;
 revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text) from public;
 revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) from public;
@@ -35912,6 +36415,7 @@ revoke all on function ops.nightly_availability_canary_live_job(p_job_id uuid, p
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) from public;
 revoke all on function ops.prepare_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_git_sha text) from public;
+revoke all on function ops.prepare_staging_replacement_project(p_idempotency_key uuid, p_contract jsonb) from public;
 revoke all on function ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) from public;
 revoke all on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) from public;
 revoke all on function ops.program5_migration_set_sha256(p_migration_set text[]) from public;
@@ -35927,6 +36431,7 @@ revoke all on function ops.read_calendar_prebrief_joe_activation(p_id uuid) from
 revoke all on function ops.read_context_activation(p_work_request text, p_binding_id text) from public;
 revoke all on function ops.read_execution_environment_providers() from public;
 revoke all on function ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) from public;
+revoke all on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) from public;
 revoke all on function ops.reap_expired_jobs() from public;
 revoke all on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
@@ -35944,6 +36449,7 @@ revoke all on function ops.record_staging_forward_fix_rehearsal(p_idempotency_ke
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
 revoke all on function ops.record_staging_release_readback_program6(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
+revoke all on function ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) from public;
 revoke all on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text, p_actor text) from public;
@@ -36768,6 +37274,7 @@ grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_wo
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_writer;
 grant execute on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) to carr_jobs;
 grant execute on function ops.prepare_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_git_sha text) to carr_jobs;
+grant execute on function ops.prepare_staging_replacement_project(p_idempotency_key uuid, p_contract jsonb) to carr_jobs;
 grant execute on function ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) to carr_jobs;
 grant execute on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) to carr_authority;
 grant execute on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) to carr_jobs;
@@ -36788,6 +37295,8 @@ grant execute on function ops.read_execution_environment_providers() to carr_aut
 grant execute on function ops.read_execution_environment_providers() to carr_reader;
 grant execute on function ops.read_execution_environment_providers() to carr_writer;
 grant execute on function ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) to carr_program5_forward_fix_verifiers;
+grant execute on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) to carr_jobs;
+grant execute on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
 grant execute on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
@@ -36804,6 +37313,7 @@ grant execute on function ops.record_sourced_heavy_build_admission(p_plan_id uui
 grant execute on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
+grant execute on function ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -37152,6 +37662,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0319_engineering_envelope_writer_successor.sql	f45b50d9471153d25b07064055ef638b24e463866ef1e311cbe06d3fe930e097	2026-08-26 00:52:53.168213+00
 0320_heavy_build_admission.sql	f3db5160c88db372fd58fc8e73eaa2671c7c8997dd3bee2753d5b636cd074465	2026-08-26 02:22:40.923301+00
 0321_rule_delivery_policy_seed_repair.sql	98494c4715a09ed735524a97f8bd3a1d0323df4adda690f5f06abcc6e971b482	2026-08-26 02:22:41.137134+00
+0322_clean_staging_replacement_contract.sql	8be25e17aed9fbc665a2ac226f95b26cb66b9abbe32865c021a83fed7ef65659	2026-08-26 03:43:35.495345+00
+0323_engineering_claim_output_qualification.sql	85c828bc82197ec14fa82871cc9bf7c17282c1807e3b17b6c9fc61080e3d5ff6	2026-08-26 03:43:35.712334+00
 \.
 
 
@@ -37703,6 +38215,35 @@ values
    '{"key":"facts.all_true","spec":{"all_of":["renewal.source_run_sealed"]},"receipt_kind":"renewal_source_run"}'::jsonb,
    '{"provider":"none","status":"disabled","activation":"explicit source-run adapter required"}'::jsonb)
 on conflict (key,version) do nothing;
+
+-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh) — safe rebuild default.
+-- The bounded vocabulary dump preserves an existing singleton. If the source
+-- store lacks it, 0291 will not replay once its ledger row is in the snapshot,
+-- so this fallback creates only the fail-safe shadow default.
+insert into ops.rule_delivery_policy (singleton,mode,changed_by,reason)
+values (true,'shadow','schema-snapshot',
+        'Fresh rebuild default: scoped delivery remains shadow until governed cutover evidence exists.')
+on conflict (singleton) do nothing;
+
+-- CARR RULE DELIVERY ACTIVATION TARGETS (bin/schema-snapshot.sh) — exact reviewed cutover config.
+-- The nine rows are reviewed cutover configuration from 0317, not live
+-- activation state.  Without them the guarded function correctly refuses to
+-- move out of shadow after a schema-only rebuild.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('581cb3fe','shared','delegation-council','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a')
+on conflict (short_id) do nothing;
 
 -- CARR GOVERNED EXECUTION SEEDS (bin/schema-snapshot.sh) — exact bounded repository declarations.
 -- 0309's protected hermes-local provider, its passed conformance, and its
