@@ -91,10 +91,11 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
   try {
     const rows = await sql`
       select count(*)::int as applied_count, max(filename) as highest_applied_migration,
-             'sha256:' || encode(digest(coalesce(string_agg(
+             'sha256:' || encode(public.digest(coalesce(string_agg(
                convert_to(filename, 'UTF8') || decode('00', 'hex') ||
                convert_to(sha256, 'UTF8') || decode('0a', 'hex'),
-               ''::bytea order by filename collate "C"), 'sha256'), 'hex') as ledger_sha256
+               ''::bytea order by filename collate "C"), ''::bytea),
+               'sha256'), 'hex') as ledger_sha256
         from v_schema_ledger`;
     const row = (rows && rows[0]) || {};
     schema = {

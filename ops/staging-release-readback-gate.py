@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -114,6 +115,47 @@ def bind_live_schema_identity(cur) -> None:
     SCHEMA_HIGHEST_MIGRATION = highest
     SCHEMA_APPLIED_COUNT = count
     SCHEMA_LEDGER_SHA256 = digest
+
+
+def worker_release_identity_query() -> str:
+    """The exact schema-identity SQL the deployed Worker runs for /release.
+
+    Extracted from mcp-server/src/release.js rather than copied, so this gate
+    executes the same query text production will run (rule a8c55a47). The
+    Worker's unit suite mocks the `sql` tag, so no PostgreSQL parser sees that
+    text before deploy — this execution is the parse-and-digest check. The
+    2026-08-26 staging rehearsal caught exactly this: a misnested
+    encode/digest/coalesce shipped to origin/main and every staging readback
+    came back "schema identity is invalid".
+    """
+    source = (_REPO / "mcp-server" / "src" / "release.js").read_text()
+    found = re.search(
+        r"await sql`\s*(select count\(\*\)::int as applied_count.*?from v_schema_ledger)`",
+        source, re.S)
+    if not found:
+        raise AssertionError(
+            "mcp-server/src/release.js no longer contains the v_schema_ledger identity query")
+    return found.group(1)
+
+
+def check_worker_release_identity(cur) -> None:
+    """Run the Worker's /release identity SQL and demand digest equality."""
+    cur.execute("savepoint worker_release_identity")
+    try:
+        cur.execute(worker_release_identity_query())
+        row = one(cur)
+        ok = (row[0] == SCHEMA_APPLIED_COUNT
+              and row[1] == SCHEMA_HIGHEST_MIGRATION
+              and row[2] == SCHEMA_LEDGER_SHA256)
+        detail = "" if ok else (
+            f"worker query returned {row!r}, reference is "
+            f"({SCHEMA_APPLIED_COUNT!r}, {SCHEMA_HIGHEST_MIGRATION!r}, {SCHEMA_LEDGER_SHA256!r})")
+    except Exception as exc:
+        cur.execute("rollback to savepoint worker_release_identity")
+        ok, detail = False, f"worker /release identity query failed to execute: {exc}"
+    cur.execute("release savepoint worker_release_identity")
+    check("worker /release schema-identity SQL executes and matches the reference digest",
+          ok, detail)
 
 
 def seed_fixture(cur, prefix: str) -> dict:
@@ -380,6 +422,7 @@ def main() -> int:
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
         ensure_authority_roles(cur)
         fixture = seed_fixture(cur, "main")
+        check_worker_release_identity(cur)
         attempt = uuid.uuid4()
         ids = [uuid.uuid4(),uuid.uuid4(),uuid.uuid4()]
         versions = [uuid.uuid4(),uuid.uuid4(),uuid.uuid4()]
