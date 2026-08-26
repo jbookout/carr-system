@@ -228,9 +228,17 @@ def main() -> int:
         check("the admission sync builds the nine-control preimage",
               admission.returncode == 0, admission.stderr.strip()[-500:])
         digest = "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a"
-        cur.execute("""select * from ops.set_rule_delivery_mode(
-                       'enforced','local-pg-acceptance','seven-day evidence fixture',%s)""",
-                    (digest,))
+        try:
+            cur.execute("""select * from ops.set_rule_delivery_mode(
+                           'enforced','local-pg-acceptance','seven-day evidence fixture',%s)""",
+                        (digest,))
+        except psycopg.Error as exc:
+            # psycopg appends a PL/pgSQL CONTEXT line after the useful refusal.
+            # The local runner reports only the final line, so preserve the
+            # database's first message without echoing a query or DSN.
+            raise RuntimeError(
+                "rule-delivery cutover refused: " + str(exc).splitlines()[0]
+            ) from None
         cutover = one(cur)
         check("cutover reports the exact nine", cutover[0] == "enforced" and cutover[1] == 9)
         cur.execute("select mode from ops.rule_delivery_policy")

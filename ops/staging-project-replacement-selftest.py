@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Hermetic lifecycle/parity contract for clean staging replacement."""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import io
+import json
+import re
+import subprocess
+import sys
+import types
+import uuid
+from contextlib import contextmanager, redirect_stderr
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+ctl = load("staging_project_replacement", ROOT / "tools/staging-project-replacement.py")
+fixture = load("staging_fixtures", ROOT / "tools/staging-fixtures.py")
+manifest = load("replacement_release_manifest", ROOT / "tools/release-manifest.py")
+sql_source = (ROOT / "migrations/0322_clean_staging_replacement_contract.sql").read_text()
+controller_source = (ROOT / "tools/staging-project-replacement.py").read_text()
+
+
+def refuses(call, contains: str) -> None:
+    try:
+        call()
+    except (ctl.ReplacementRefusal, fixture.FixtureRefusal,
+            ctl.credential_helper.CredentialRefusal, SystemExit) as exc:
+        assert contains in str(exc), (contains, str(exc))
+    else:
+        raise AssertionError(f"expected refusal containing {contains!r}")
+
+
+def sql_expected_keys(function_name: str) -> frozenset[str]:
+    start = sql_source.index(f"function ops.{function_name}(")
+    block = sql_source[start:sql_source.index("begin", start)]
+    raw = block[block.index("expected_keys constant text[] := array["):]
+    raw = raw[:raw.index("];")]
+    return frozenset(re.findall(r"'([a-z0-9_]+)'", raw))
+
+
+# Python <-> SQL parity is exact, not substring presence elsewhere in SQL.
+assert ctl.PREPARE_KEYS == sql_expected_keys("prepare_staging_replacement_project")
+assert ctl.OBSERVATION_KEYS == sql_expected_keys("record_staging_replacement_project")
+assert ctl.FINAL_MIGRATION == "0322_clean_staging_replacement_contract.sql"
+assert (ROOT / "migrations" / ctl.FINAL_MIGRATION).is_file()
+assert "clean-staging-replacement-contract.v1" in sql_source
+assert "clean-staging-replacement-observation.v1" in sql_source
+
+
+# Full operation UUID and source-controlled provider profile.
+operation_id = uuid.UUID("11111111-2222-4333-8444-555555555555")
+assert ctl.candidate_name(operation_id).endswith(operation_id.hex)
+assert len(ctl.candidate_name(operation_id)) == len("carr-staging-replacement-") + 32
+assert ctl.load_candidate_spec() == ctl.CandidateSpec(18, "aws-us-east-1",
+                                                      ctl.Decimal("0.25"), ctl.Decimal("8"))
+
+
+class ScopeRun:
+    def __init__(self, project_bound: bool = True, endpoint_bound: bool = True):
+        self.project_bound = project_bound
+        self.endpoint_bound = endpoint_bound
+
+    def __call__(self, args, **unused):
+        if "branches" in args:
+            payload = {"branches": [{"id": "br-candidate", "name": "main", "default": True,
+                         "project_id": "candidate" if self.project_bound else "wrong"}]}
+        else:
+            payload = {"endpoints": [{"id": "ep-candidate", "host": "ep-candidate.neon.tech",
+                         "branch_id": "br-candidate" if self.endpoint_bound else "wrong",
+                         "type": "read_write", "autoscaling_limit_min_cu": 0.25,
+                         "autoscaling_limit_max_cu": 8}]}
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+
+project = {"id": "candidate", "name": ctl.candidate_name(operation_id),
+           "pg_version": 18, "region_id": "aws-us-east-1"}
+env = {"NEON_API_KEY": "fixture-key", "PATH": "/bin"}
+scope = ctl.resolve_scope(project, run=ScopeRun(), environ=env)
+assert scope.project_id == "candidate" and scope.branch_id == "br-candidate"
+refuses(lambda: ctl.resolve_scope(project, run=ScopeRun(project_bound=False), environ=env),
+        "default branch")
+refuses(lambda: ctl.resolve_scope(project, run=ScopeRun(endpoint_bound=False), environ=env),
+        "endpoint")
+
+
+class StateCursor:
+    def __init__(self, rows, table_count=10, has_ledger=True):
+        self.rows, self.table_count, self.has_ledger = rows, table_count, has_ledger
+        self.statement = ""
+
+    def __enter__(self): return self
+    def __exit__(self, *unused): return False
+    def execute(self, statement, params=()): self.statement = statement
+    def fetchone(self):
+        if "server_version_num" in self.statement: return (ctl.OWNER_ROLE, "neondb", 180001)
+        if "count(*) from pg_class" in self.statement: return (self.table_count,)
+        if "to_regclass" in self.statement: return ("schema_migrations",) if self.has_ledger else (None,)
+        raise AssertionError(self.statement)
+    def fetchall(self):
+        assert "schema_migrations" in self.statement
+        return self.rows
+
+
+class StateConnection:
+    def __init__(self, cursor): self.value = cursor
+    def __enter__(self): return self
+    def __exit__(self, *unused): return False
+    def cursor(self): return self.value
+
+
+source_manifest = {"migration_ledger": {"0320_a.sql": "a"*64, "0322_b.sql": "b"*64}}
+source = ctl.SourceContract("c"*40, source_manifest)
+owner_scope = ctl.ProviderScope("candidate", ctl.candidate_name(operation_id), "br-candidate",
+                                "ep-candidate", "ep-candidate.neon.tech")
+owner = ctl.SecretDsn(owner_scope,
+    "postgresql://neondb_owner:secret@ep-candidate.neon.tech/neondb")  # ci-secret-scan: allow
+connect_for = lambda cursor: (lambda _dsn: StateConnection(cursor))
+assert ctl.candidate_reconstruction_state(
+    owner, source, connect=connect_for(StateCursor([], table_count=0))) == "empty"
+assert ctl.candidate_reconstruction_state(
+    owner, source, connect=connect_for(StateCursor([("0320_a.sql", "a"*64)]))) == "prefix"
+assert ctl.candidate_reconstruction_state(
+    owner, source, connect=connect_for(StateCursor(list(source_manifest["migration_ledger"].items())))) \
+    == "reconstructed"
+refuses(lambda: ctl.candidate_reconstruction_state(
+    owner, source, connect=connect_for(StateCursor([("0321_wrong.sql", "f"*64)]))),
+    "exact source prefix")
+refuses(lambda: ctl.candidate_reconstruction_state(
+    owner, source, connect=connect_for(StateCursor([], has_ledger=False))), "no migration ledger")
+
+
+class ReadOnlyCursor:
+    def __init__(self, read_only="on"):
+        self.statement = ""; self.read_only = read_only
+    def __enter__(self): return self
+    def __exit__(self, *unused): return False
+    def execute(self, statement, params=()): self.statement = statement
+    def fetchone(self):
+        return (self.read_only,) if "transaction_read_only" in self.statement else (0,)
+
+
+class ReadOnlyConnection:
+    def __init__(self, value="on"): self.read_only = False; self.value = ReadOnlyCursor(value)
+    def cursor(self): return self.value
+
+
+production = ReadOnlyConnection()
+assert ctl.production_overlap_count({table: () for table in ctl.CLIENT_TABLES}, production) == 0
+assert production.read_only is True
+refuses(lambda: ctl.production_overlap_count({table: () for table in ctl.CLIENT_TABLES},
+                                              ReadOnlyConnection("off")), "not read-only")
+
+
+# Provider-bound fixture door: declarations must match all three live objects.
+class FixtureProviderRun:
+    def __init__(self, wrong_host=False): self.calls = []; self.wrong_host = wrong_host
+    def __call__(self, args, **unused):
+        self.calls.append(args)
+        if "projects" in args:
+            payload = {"projects": [{"id": "candidate", "name": "carr-staging-replacement-abc"}]}
+        elif "branches" in args:
+            payload = {"branches": [{"id": "br-candidate", "name": "main", "default": True,
+                                      "project_id": "candidate"}]}
+        else:
+            payload = {"endpoints": [{"id": "ep-candidate", "branch_id": "br-candidate",
+                "type": "read_write", "host": "wrong.neon.tech" if self.wrong_host
+                else "ep-candidate.neon.tech"}]}
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+
+fixture_dsn = "postgresql://neondb_owner:secret@ep-candidate.neon.tech/neondb"  # ci-secret-scan: allow
+fixture.validate_target(fixture_dsn, "candidate", "ep-candidate")
+provider_run = FixtureProviderRun()
+fixture.validate_provider_binding(fixture_dsn, "candidate", "ep-candidate",
+                                  run=provider_run, environ=env)
+assert len(provider_run.calls) == 3
+refuses(lambda: fixture.validate_provider_binding(fixture_dsn, "candidate", "ep-candidate",
+        run=FixtureProviderRun(wrong_host=True), environ=env), "does not own")
+refuses(lambda: fixture.validate_target(fixture_dsn, ctl.PRODUCTION_PROJECT_ID, "ep-candidate"),
+        "forbidden")
+
+
+# Strict receipt projection: any omitted durable field fails.
+expected_receipt = {"contract_id": str(uuid.uuid4()), "receipt_id": str(uuid.uuid4()),
+                    "evidence_ref": "ops.staging-replacement-project:sha256:" + "d"*64,
+                    "prior_staging_project_id": "old", "replacement_project_id": "new"}
+good_receipt = {**expected_receipt, "receipt_sha256": "sha256:" + "e"*64,
+                "observed_at": "2026-08-25T12:00:00Z"}
+ctl.validate_receipt_readback(good_receipt, expected_receipt)
+for missing in expected_receipt:
+    changed = dict(good_receipt); changed.pop(missing)
+    refuses(lambda changed=changed: ctl.validate_receipt_readback(changed, expected_receipt),
+            "readback disagrees")
+
+
+# Final provider preservation is behavioral, not an output-string assertion.
+saved_resolver = ctl.resolve_existing_scopes
+try:
+    prod = ctl.ProviderScope("prod", "production", "br-p", "ep-p", "ep-p.neon.tech")
+    old = ctl.ProviderScope("old", "carr-staging", "br-o", "ep-o", "ep-o.neon.tech")
+    candidate = owner_scope
+    ctl.resolve_existing_scopes = lambda *args, **kwargs: (prod, old, candidate)
+    ctl.prove_provider_preservation(operation_id, prod, old, candidate, run=lambda *a, **k: None,
+                                    environ={})
+    ctl.resolve_existing_scopes = lambda *args, **kwargs: (prod, old,
+        ctl.ProviderScope("other", candidate.project_name, candidate.branch_id,
+                          candidate.endpoint_id, candidate.endpoint_host))
+    refuses(lambda: ctl.prove_provider_preservation(operation_id, prod, old, candidate,
+             run=lambda *a, **k: None, environ={}), "changed")
+finally:
+    ctl.resolve_existing_scopes = saved_resolver
+
+
+# Secrets are captured/suppressed and unrelated ambient credentials never reach children.
+secret = "do-not-leak"
+refuses(lambda: ctl._success(subprocess.CompletedProcess([], 9, secret, secret), "provider"),
+        "output suppressed")
+assert secret not in repr(ctl.SecretDsn(owner_scope, secret))
+sanitized = ctl.safe_environment({"PATH": "/bin", "HOME": "/tmp/home", "GH_TOKEN": secret,
+                                  "DATABASE_URL": secret, "OPENAI_API_KEY": secret})
+assert sanitized == {"PATH": "/bin", "HOME": "/tmp/home"}
+assert "os.write(" not in controller_source and "O_EXCL" not in controller_source
+assert "credential_helper.prepare_pending" in controller_source
+assert "credential_helper.exclusive_lock" in controller_source
+assert 'psql_bin, "--single-transaction"' in controller_source
+assert '"projects", "update"' not in controller_source
+assert '"projects", "delete"' not in controller_source
+
+
+# Full-tree tuple encoding terminates every field with NUL, including newline-bearing paths.
+entries = [("100644", "blob", "f"*40, "line\nbreak")]
+material = b"100644\0blob\0" + (b"f"*40) + b"\0line\nbreak\0"
+assert manifest.digest_full_tree(entries) == "sha256:" + hashlib.sha256(material).hexdigest()
+contract = manifest.source_contract("HEAD")
+assert contract["source_tree_sha256"] != contract["artifact_sha256"]
+assert contract["migration_highest"] == ctl.FINAL_MIGRATION
+
+
+# Same-operation credential retries serialize before touching pending files or roles.
+saved_psycopg = ctl.psycopg
+saved_psycopg_module = sys.modules.get("psycopg")
+saved_lock = ctl.credential_helper.exclusive_lock
+lock_secret = "lock-secret-must-not-escape"
+lock_entered: list[bool] = []
+@contextmanager
+def busy_lock(_path):
+    lock_entered.append(True)
+    raise ctl.credential_helper.CredentialRefusal(lock_secret)
+    yield
+try:
+    fake_psycopg = types.ModuleType("psycopg")
+    setattr(fake_psycopg, "sql", types.SimpleNamespace())
+    ctl.psycopg = fake_psycopg
+    sys.modules["psycopg"] = fake_psycopg
+    ctl.credential_helper.exclusive_lock = busy_lock
+    refuses(lambda: ctl.provision_scoped_credentials(owner, operation_id, connect=lambda *_a, **_k: None),
+            lock_secret)
+    assert lock_entered == [True]
+finally:
+    ctl.psycopg = saved_psycopg
+    if saved_psycopg_module is None:
+        sys.modules.pop("psycopg", None)
+    else:
+        sys.modules["psycopg"] = saved_psycopg_module
+    ctl.credential_helper.exclusive_lock = saved_lock
+
+
+# A helper refusal at the real main boundary is concise rc2 and never reflects secret text.
+saved = {name: getattr(ctl, name) for name in (
+    "validate_source", "load_candidate_spec", "resolve_existing_scopes",
+    "validate_candidate_spec", "derive_dsn", "candidate_reconstruction_state",
+    "install_fixtures", "provision_scoped_credentials")}
+top_secret = "credential-uri-secret-must-not-escape"
+try:
+    ctl.validate_source = lambda _sha: ctl.SourceContract("a"*40, {})
+    ctl.load_candidate_spec = lambda: ctl.CandidateSpec(18, "aws-us-east-1",
+        ctl.Decimal("0.25"), ctl.Decimal("8"))
+    prod = ctl.ProviderScope(ctl.PRODUCTION_PROJECT_ID, "production", "br-p", "ep-p",
+                             "ep-p.neon.tech")
+    old = ctl.ProviderScope("old", "carr-staging", "br-o", "ep-o", "ep-o.neon.tech")
+    ctl.resolve_existing_scopes = lambda *_a, **_k: (prod, old, owner_scope)
+    ctl.validate_candidate_spec = lambda *_a, **_k: None
+    ctl.derive_dsn = lambda *_a, **_k: owner
+    ctl.candidate_reconstruction_state = lambda *_a, **_k: "reconstructed"
+    ctl.install_fixtures = lambda *_a, **_k: None
+    ctl.provision_scoped_credentials = lambda *_a, **_k: (
+        (_ for _ in ()).throw(ctl.credential_helper.CredentialRefusal(top_secret)))
+    ctl.psycopg = types.SimpleNamespace(connect=lambda *_a, **_k: None)
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        rc = ctl.main(["prepare", "--sha", "a"*40, "--operation-id", str(operation_id),
+                       "--apply", "--local-checks-green"])
+    assert rc == 2 and "REFUSED" in stderr.getvalue()
+    assert top_secret not in stderr.getvalue() and "Traceback" not in stderr.getvalue()
+finally:
+    for name, value in saved.items(): setattr(ctl, name, value)
+    ctl.psycopg = saved_psycopg
+
+
+try:
+    ctl.parse_args(["prepare", "--sha", "a"*40, "--operation-id", str(operation_id)])
+except SystemExit:
+    pass
+else:
+    raise AssertionError("prepare without explicit apply was accepted")
+
+print("staging-project-replacement-selftest: PASS")

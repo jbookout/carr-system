@@ -143,6 +143,22 @@ case "$RENEWAL_SOURCE_APPLIED" in
   *) echo "schema-snapshot: could not read the renewal-delivery ledger state" >&2; exit 1 ;;
 esac
 
+RULE_DELIVERY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0291_rule_delivery_layers.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery ledger state" >&2; exit 1 ;;
+esac
+
+RULE_DELIVERY_CUTOVER_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0317_atomic_rule_delivery_cutover.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_CUTOVER_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery cutover ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -762,6 +778,45 @@ values
 on conflict (key,version) do nothing;
 
 RENEWAL_SOURCE_JOB
+fi
+
+if [ "$RULE_DELIVERY_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_POLICY'
+-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh) — safe rebuild default.
+-- The bounded vocabulary dump preserves an existing singleton. If the source
+-- store lacks it, 0291 will not replay once its ledger row is in the snapshot,
+-- so this fallback creates only the fail-safe shadow default.
+insert into ops.rule_delivery_policy (singleton,mode,changed_by,reason)
+values (true,'shadow','schema-snapshot',
+        'Fresh rebuild default: scoped delivery remains shadow until governed cutover evidence exists.')
+on conflict (singleton) do nothing;
+
+RULE_DELIVERY_POLICY
+fi
+
+if [ "$RULE_DELIVERY_CUTOVER_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS'
+-- CARR RULE DELIVERY ACTIVATION TARGETS (bin/schema-snapshot.sh) — exact reviewed cutover config.
+-- The nine rows are reviewed cutover configuration from 0317, not live
+-- activation state.  Without them the guarded function correctly refuses to
+-- move out of shadow after a schema-only rebuild.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('581cb3fe','shared','delegation-council','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a')
+on conflict (short_id) do nothing;
+
+RULE_DELIVERY_ACTIVATION_TARGETS
 fi
 
 # TWO GOVERNED EXECUTION SEEDS JOINED ON 2026-08-25, after 0309 and 0310
