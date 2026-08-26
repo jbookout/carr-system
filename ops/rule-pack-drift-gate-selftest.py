@@ -269,7 +269,7 @@ check("a previous turn's deal work does not follow the session forever",
 # data, not a second human task or observed work.  Its provenance chain must not
 # replace the real human boundary, while later tools remain fully observable.
 skill_body = ("# Update Config Skill\nclient contact email override artifact "
-              "subagent workflow checkpoint")
+              "subagent workflow checkpoint git commit")
 skill_turn = [
     assistant_tool("mcp__carr__standing-context", {
         "packs": ["engineering-git", "governance-rules", "source-study"]}),
@@ -303,6 +303,62 @@ check("ordinary user Skill-shaped prose is never trusted as injected metadata",
       {"client-deal", "delegation-council", "governance-rules", "joe-comms",
        "joe-development", "records-intake", "surface-doctrine"}
       <= set(copied_skill["needed"]), str(copied_skill))
+
+skill_chain_negatives = []
+for label in (
+    "mismatched-tool-result", "wrong-result-parent", "wrong-result-source",
+    "missing-child-prompt", "missing-result-prompt", "mismatched-prompt",
+    "mixed-tool-call", "multiple-skill-calls", "duplicate-tool-results",
+    "duplicate-tool-use-id", "missing-tool-use-id", "missing-tool-result-id",
+    "duplicate-record-uuid",
+):
+    chain = json.loads(json.dumps(claude_skill_injection(skill_body)))
+    if label == "mismatched-tool-result":
+        chain[1]["message"]["content"][0]["tool_use_id"] = "skill-other"
+    elif label == "wrong-result-parent":
+        chain[1]["parentUuid"] = "assistant:other"
+    elif label == "wrong-result-source":
+        chain[1]["sourceToolAssistantUUID"] = "assistant:other"
+    elif label == "missing-child-prompt":
+        del chain[2]["promptId"]
+    elif label == "missing-result-prompt":
+        del chain[1]["promptId"]
+    elif label == "mismatched-prompt":
+        chain[2]["promptId"] = "prompt:other"
+    elif label == "mixed-tool-call":
+        chain[0]["message"]["content"].append({
+            "type": "tool_use", "id": "bash-1", "name": "Bash",
+            "input": {"command": "true"}})
+    elif label == "multiple-skill-calls":
+        chain[0]["message"]["content"].append({
+            "type": "tool_use", "id": "skill-2", "name": "Skill",
+            "input": {"skill": "other"}})
+    elif label == "duplicate-tool-results":
+        chain[1]["message"]["content"].append({
+            "type": "tool_result", "tool_use_id": "skill-1",
+            "content": "duplicate"})
+    elif label == "duplicate-tool-use-id":
+        chain[0]["message"]["content"].append({
+            "type": "tool_use", "id": "skill-1", "name": "Skill",
+            "input": {"skill": "other"}})
+    elif label == "missing-tool-use-id":
+        del chain[0]["message"]["content"][0]["id"]
+    elif label == "missing-tool-result-id":
+        del chain[1]["message"]["content"][0]["tool_use_id"]
+    elif label == "duplicate-record-uuid":
+        chain.append(json.loads(json.dumps(chain[1])))
+    negative = run([
+        user("configure the project"),
+        *chain,
+        assistant_tool("Bash", {"command": "date -u"}),
+    ])
+    skill_chain_negatives.append((label, negative))
+for label, negative in skill_chain_negatives:
+    check(f"invalid Skill provenance {label} stays observable",
+          {"client-deal", "delegation-council", "engineering-git",
+           "governance-rules", "joe-comms", "joe-development",
+           "records-intake", "surface-doctrine"}
+          <= set(negative["needed"]), str(negative))
 
 # Only inert machine syntax is normalized.  A negated search glob is not vendor
 # work; typed receipt evidence keys are not governance or surface work.  The

@@ -280,8 +280,14 @@ def _skill_injection_record_ids(records):
     under the same prompt.  An ordinary human copy lacks that chain and remains
     fully observable.
     """
-    by_uuid = {row.get("uuid"): row for row in records
-               if isinstance(row, dict) and isinstance(row.get("uuid"), str)}
+    uuid_counts = {}
+    by_uuid = {}
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("uuid"), str):
+            continue
+        uuid = record["uuid"]
+        uuid_counts[uuid] = uuid_counts.get(uuid, 0) + 1
+        by_uuid[uuid] = record
     injected = set()
     for row in records:
         if not isinstance(row, dict) or row.get("type") != "user" or row.get("origin"):
@@ -295,24 +301,37 @@ def _skill_injection_record_ids(records):
                 or content[0].get("type") != "text" \
                 or not isinstance(content[0].get("text"), str):
             continue
-        result = by_uuid.get(row.get("parentUuid"))
+        child_uuid = row.get("uuid")
+        result_uuid = row.get("parentUuid")
+        prompt_id = row.get("promptId")
+        if (not isinstance(child_uuid, str) or uuid_counts.get(child_uuid) != 1
+                or not isinstance(result_uuid, str) or uuid_counts.get(result_uuid) != 1
+                or not isinstance(prompt_id, str) or not prompt_id.strip()):
+            continue
+        result = by_uuid.get(result_uuid)
         result_message = result.get("message") if isinstance(result, dict) else None
         result_content = (result_message or {}).get("content")
-        if not isinstance(result_content, list) or not result_content or not all(
-                isinstance(block, dict) and block.get("type") == "tool_result"
-                for block in result_content):
+        if (not isinstance(result_content, list) or len(result_content) != 1
+                or not isinstance(result_content[0], dict)
+                or result_content[0].get("type") != "tool_result"):
             continue
-        assistant_ref = (result.get("sourceToolAssistantUUID")
-                         or result.get("parentUuid"))
-        assistant = by_uuid.get(assistant_ref)
+        assistant_uuid = result.get("parentUuid")
+        if (not isinstance(assistant_uuid, str)
+                or uuid_counts.get(assistant_uuid) != 1
+                or result.get("sourceToolAssistantUUID") != assistant_uuid
+                or result.get("promptId") != prompt_id):
+            continue
+        assistant = by_uuid.get(assistant_uuid)
         assistant_message = (assistant or {}).get("message")
         assistant_content = (assistant_message or {}).get("content")
-        if not isinstance(assistant_content, list) or not any(
-                isinstance(block, dict) and block.get("type") == "tool_use"
-                and block.get("name") == "Skill" for block in assistant_content):
+        if (not isinstance(assistant_content, list) or len(assistant_content) != 1
+                or not isinstance(assistant_content[0], dict)
+                or assistant_content[0].get("type") != "tool_use"
+                or assistant_content[0].get("name") != "Skill"):
             continue
-        if (row.get("promptId") is not None
-                and result.get("promptId") != row.get("promptId")):
+        tool_use_id = assistant_content[0].get("id")
+        if (not isinstance(tool_use_id, str) or not tool_use_id.strip()
+                or result_content[0].get("tool_use_id") != tool_use_id):
             continue
         injected.add(id(row))
     return injected
