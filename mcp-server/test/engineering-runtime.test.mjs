@@ -270,7 +270,7 @@ test("successful admission persists its event through the injected writer", asyn
   assert.equal(insertParams[10], admitted.expires_at);
 });
 
-test("admission replaces a terminal prior-session envelope with a new immutable generation", async () => {
+for (const priorState of ["completed", "cancelled"]) test(`admission replaces a ${priorState} prior-session envelope with a new immutable generation`, async () => {
   const item = {
     slice_ref: "slice:one", ordinal: 1, objective: "Do the bounded work", definition_of_done: "A typed receipt exists",
     dependency_refs: [], declared_resource_refs: [], declared_component_refs: [], declared_plan_step_refs: [],
@@ -295,14 +295,20 @@ test("admission replaces a terminal prior-session envelope with a new immutable 
   const newSession = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const newJob = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   const newEnvelopeId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const predecessorSnapshot = JSON.stringify(facts.envelopes[0]);
+  const calls = [];
   let insertParams;
   let enqueueParams;
+  let sessionRow;
   const c = { query: async (sql, params = []) => {
+    calls.push(sql);
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
-    if (sql.includes("select state from ops.capability_agent_session")) return { rows: [{ state: "completed" }] };
+    if (sql.includes("select state from ops.capability_agent_session")) return { rows: [{ state: priorState }] };
     if (sql.includes("update ops.capability_agent_session")) return { rows: [] };
-    if (sql.includes("insert into ops.capability_agent_session"))
-      return { rows: [{ id: newSession, executor_actor_id: actor.id, state: "active" }] };
+    if (sql.includes("insert into ops.capability_agent_session")) {
+      sessionRow = { id: newSession, executor_actor_id: actor.id, state: "active" };
+      return { rows: [sessionRow] };
+    }
     if (sql.includes("select id, executor_actor_id")) return { rows: [] };
     if (sql.includes("from actor")) return { rows: [{ id: actor.id, slug: actor.slug }] };
     if (sql.includes("engineering_enqueue_slice_job")) { enqueueParams = params; return { rows: [{ id: newJob }] }; }
@@ -318,7 +324,11 @@ test("admission replaces a terminal prior-session envelope with a new immutable 
     slice_ref: item.slice_ref,
   }, Error, async () => {});
   assert.equal(result.replayed, false);
+  assert.equal(result.job_id, newJob);
+  assert.equal(result.envelope_id, newEnvelopeId);
+  assert.equal(result.agent_session_id, newSession);
   assert.equal(result.supersedes_envelope_id, priorId);
+  assert.deepEqual(sessionRow, { id: newSession, executor_actor_id: actor.id, state: "active" });
   assert.equal(enqueueParams[4], 2);
   assert.equal(insertParams[11], priorId);
   const replacement = JSON.parse(insertParams[8]);
@@ -326,6 +336,8 @@ test("admission replaces a terminal prior-session envelope with a new immutable 
   assert.equal(replacement.handoff.replaces_agent_session_id, `session:${priorSession}`);
   assert.equal(replacement.handoff.capability_inherited, false);
   assert.equal(replacement.server_binding.authority.read_only, false);
+  assert.equal(JSON.stringify(facts.envelopes[0]), predecessorSnapshot);
+  assert.equal(calls.filter(sql => /(?:update|delete)\s+ops\.engineering_execution_envelope/i.test(sql)).length, 0);
 });
 
 test("successful independent review persists its event through the injected writer", async () => {
