@@ -7,6 +7,15 @@ const migration = fs.readFileSync(
   "utf8",
 );
 const dbGate = fs.readFileSync(new URL("../../ops/siep-program-local-pg-gate.py", import.meta.url), "utf8");
+const migrationNames = fs.readdirSync(new URL("../../migrations/", import.meta.url))
+  .filter((name) => name.endsWith(".sql"))
+  .sort();
+
+test("0324 is immediately before the already-merged 0325 source", () => {
+  const siepIndex = migrationNames.indexOf("0324_siep_program_authority.sql");
+  assert.notEqual(siepIndex, -1);
+  assert.equal(migrationNames[siepIndex + 1], "0325_engineering_claim_envelope_eligibility.sql");
+});
 
 test("0324 keeps Work Request as SIEP package lifecycle authority", () => {
   assert.match(migration, /carr-system-integrity-elimination-v1/);
