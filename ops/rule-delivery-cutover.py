@@ -13,6 +13,7 @@ import psycopg
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.rule_delivery_activation import load_validated  # noqa:E402
+from lib.rule_delivery_shadow import current_identity  # noqa:E402
 
 CURATION_BATCH = REPO / "audits" / "guidance-situation-curation-approval-batch.v1.json"
 ELIGIBILITY = REPO / "ops" / "rule-delivery-shadow-eligibility.py"
@@ -30,14 +31,14 @@ def curation_ids() -> set[str]:
     return ids
 
 
-def shadow_eligible() -> dict:
+def shadow_eligible(identity: dict) -> dict:
     import importlib.util
     spec = importlib.util.spec_from_file_location("shadow_eligibility", ELIGIBILITY)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     rows, unreadable = module.load(module.DEFAULT_LOG)
-    result = module.evaluate(rows)
+    result = module.evaluate(rows, identity=identity)
     if unreadable:
         result["eligible"] = False
         result["reasons"].append(f"{unreadable} unreadable telemetry line(s)")
@@ -60,9 +61,11 @@ def main() -> int:
 
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("begin transaction read only")
-        cur.execute("select mode from ops.rule_delivery_policy where singleton")
+        cur.execute("""select mode,changed_by,reason,changed_at
+                         from ops.rule_delivery_policy where singleton""")
         row = cur.fetchone()
         current = row[0] if row else None
+        identity = current_identity(REPO, row)
         cur.execute("""select count(*),count(*) filter(where p.status='approved'),
                               count(*) filter(where p.status='approved' and a.kind='human')
                          from retrieval_proposal p left join actor a on a.id=p.reviewer_id
@@ -83,7 +86,7 @@ def main() -> int:
         receipt_count = receipt_row[0]
         conn.rollback()
 
-    eligibility = shadow_eligible() if args.mode == "enforced" else {"eligible": True}
+    eligibility = shadow_eligible(identity) if args.mode == "enforced" else {"eligible": True}
     preflight = {"current_mode": current,"requested_mode": args.mode,
                  "targets": target_count,"prior_receipts": receipt_count,
                  "curation":{"found":curation[0],"approved":curation[1],

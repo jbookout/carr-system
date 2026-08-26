@@ -54,7 +54,7 @@
     "worktree_scope.py": "b87c5657bfe748d97064a4ef1db4a76b6853c3c38420e3949a11519529825ebb",
     "hook_meter.py": "1b0acf7964b5e96a7073dd0a137263e57dd1b9c0b1bf09706bd44a9b5c43f1f8",
     "hook-meter-run.py": "c3a052e2f245123745e5568b9f256cad3813fca1c6c2a9980c833401d46cd537",
-    "rule-pack-drift-gate.py": "25cfb3d7e7225b653e391facac8dd2ee81e31b6429644bad5e838d3003d31890"
+    "rule-pack-drift-gate.py": "3257ad046ecd35849c45770c4117bbda0cde4e741ee8507fb93b02754d1ef6ce"
   },
   "contracts": {
     "delegation-gate-hook.json": "e40833c685de0a915d4a15b96506ef2c4bff60cd70e70e240dbe274233b7dbd4",

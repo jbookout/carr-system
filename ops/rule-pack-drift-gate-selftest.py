@@ -209,6 +209,12 @@ check("Codex mcp_tool_call_end yields the scoped omission count",
 check("Codex transcript fixture has no false drift",
       codex["missing"] == [], str(codex))
 
+# ── every new observation can be bound to the exact epoch source/map ───────
+source_digest = gate.source_sha256(REPO)
+map_digest = gate.file_sha256(REPO / "ops/config/rule-enforcement-map.json")
+check("shadow source identity is a sha256", len(source_digest) == 64, source_digest)
+check("reviewed map identity is a sha256", len(map_digest) == 64, map_digest)
+
 # ── a trigger that ends in punctuation still matches ────────────────────────
 xcom = run([user("pull the metrics from x.com for last week"),
             assistant_tool("Bash", {"command": "grok x search"})])
@@ -220,4 +226,4 @@ if FAILURES:
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-pack-drift-gate-selftest: 24 cases passed")
+print("rule-pack-drift-gate-selftest: 26 cases passed")

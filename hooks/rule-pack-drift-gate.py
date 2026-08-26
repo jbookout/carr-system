@@ -51,8 +51,13 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+from lib.rule_delivery_shadow import (  # noqa:E402
+    file_sha256, observation_id, source_sha256,
+)
 MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 LOG = os.path.join(REPO, "out", "rule-delivery-shadow.jsonl")
 CARR_PATH_MARKERS = ("/carr-system/", "/carr-system", "my drive/carr ai")
@@ -301,9 +306,14 @@ def main():
         triggers, members = load_packs()
         result = evaluate(records, triggers, members)
         row = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "schema": "rule-delivery-shadow-observation/v2",
+               "record_type": "observation",
                "hook": "rule-pack-drift-gate",
                "session": payload.get("session_id") or payload.get("sessionId"),
+               "map_digest": file_sha256(Path(MAP)),
+               "source_digest": source_sha256(Path(REPO)),
                **result}
+        row["event_id"] = observation_id(row)
         # A turn that implied no pack and loaded none is the ordinary case and
         # writing a row per turn for it would bury the rows that matter.
         if result["needed"] or result["loaded"]:
@@ -318,10 +328,18 @@ def main():
         # This one guards DELIVERY: a bug here that blocked every turn would
         # stop all work over a check that has not cut a single rule yet, and the
         # first fix anyone reached for would be to uninstall it.
-        audit({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-               "hook": "rule-pack-drift-gate",
+        row = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "schema": "rule-delivery-shadow-observation/v2",
+               "record_type": "observation", "hook": "rule-pack-drift-gate",
                "session": payload.get("session_id") or payload.get("sessionId"),
-               "error": type(exc).__name__, "detail": str(exc)[:200]})
+               "error": type(exc).__name__, "detail": str(exc)[:200]}
+        try:
+            row.update({"map_digest": file_sha256(Path(MAP)),
+                        "source_digest": source_sha256(Path(REPO))})
+        except Exception:
+            pass
+        row["event_id"] = observation_id(row)
+        audit(row)
         return 0
 
 
