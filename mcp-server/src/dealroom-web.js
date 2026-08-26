@@ -1,4 +1,5 @@
-// Browser entrypoint for the configured production or staging Deal Room host.
+// Browser entrypoint for the configured production app host (with a narrow
+// legacy Deal Room compatibility door).
 //
 // Google proves identity; identity.js reduces it to one of the two partner
 // actors; an opaque, server-side session lets the installed PWA reuse that
@@ -15,6 +16,8 @@ import { actorFromProps, personalScopeForActor, propsForSlug, slugForEmail } fro
 import { normalizeRoomPaging, ROOM_BODY_MAX } from "./partner-room.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
+import { workspaceCommandCenterEnabled } from "./workspace-feature-flag.js";
+import { COMMAND_CENTER_PATH } from "./workspace-command-center.js";
 
 export const DEALROOM_ASSET_DIRECTORY = "../dealroom"; // mirrors wrangler.toml [assets]
 
@@ -31,6 +34,7 @@ const REAUTH_TTL = 10 * 60;
 const ACTION_CHALLENGE_TTL = 5 * 60;
 const SYSTEM_WORK_MAX_BODY = 16 * 1024;
 const SYSTEM_WORK_PREFIX = "/api/system-work";
+const COMMAND_CENTER_API_PREFIX = "/api/v1/";
 // The Model Room observatory (Joe's ruling 0892c539). One read door onto the
 // partner-room wire and one write door back into it, both behind the same
 // cookie session the rest of this host uses.  The room's own body cap is
@@ -59,10 +63,19 @@ const PUBLIC_SHELL = new Map([
 ]);
 const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEALROOM_EXACT_PATHS = new Set([
-  "/", "/index.html", "/system-work.html", "/room.html",
+  "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html", "/system-work.html", "/room.html", "/queue.html",
   "/manifest.webmanifest", "/sw.js", "/offline.html",
 ]);
-const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", "/css/", "/js/", "/data/", "/icons/"];
+const DEALROOM_ROUTE_ASSETS = new Map([
+  ["/deals", "/index.html"],
+  ["/leads", "/leads.html"],
+  ["/workspace", "/workspace.html"],
+]);
+const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", COMMAND_CENTER_API_PREFIX, "/css/", "/js/", "/data/", "/icons/"];
+const LEGACY_BROWSER_REDIRECT_PATHS = new Set([
+  "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html",
+  "/system-work.html", "/room.html", "/queue.html", "/auth/login", "/auth/reauth",
+]);
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -107,7 +120,13 @@ async function sha256(value) {
 // the exact deployment that owns the session.  A missing or malformed setting
 // deliberately closes the Deal Room route rather than falling back to prod.
 function dealroomOrigin(env) {
-  const host = env?.DEALROOM_HOST;
+  const host = env?.APP_HOST || env?.DEALROOM_HOST;
+  if (typeof host !== "string" || !DEALROOM_HOST_PATTERN.test(host)) return null;
+  return `https://${host}`;
+}
+
+function legacyDealroomOrigin(env) {
+  const host = env?.LEGACY_DEALROOM_HOST;
   if (typeof host !== "string" || !DEALROOM_HOST_PATTERN.test(host)) return null;
   return `https://${host}`;
 }
@@ -417,6 +436,18 @@ async function roomTurns(request, env, session, dependencies) {
     csrf_token: session.csrfToken });
 }
 
+/** GET /api/room/queue — the read-room-queue verb's exact projection. */
+async function roomQueue(_request, env, _session, dependencies) {
+  if (typeof dependencies.queueReadFn !== "function") return json({ error: "not_found" }, 404);
+  let read;
+  try { read = await dependencies.queueReadFn(env, {}); }
+  catch (error) { return json({ error: "queue_unavailable", detail: String(error?.message || error).slice(0, 200), live: false }, 503); }
+  if (!read || read.ok !== true) return json({ error: read?.error || "queue_unavailable", live: false }, 503);
+  // Deliberately no actor or CSRF token here: this is a small, exact read
+  // contract. The enqueue form obtains its synchronizer token from /turns.
+  return json(read);
+}
+
 /**
  * POST /api/room/turn — Joe speaking into the room from the panel.
  *
@@ -485,6 +516,7 @@ async function roomTurnPost(request, env, session, dependencies) {
     posted = await dependencies.roomWriteFn(env, {
       sponsor: scope.sponsor, seat: "human", kind, body,
       msgId: await roomMessageId(session.key, body, dependencies.now()),
+      originChannel: "browser-human", originActor: session.actor.slug,
     });
   } catch (error) {
     return json({ error: "wire_unavailable", detail: String(error?.message || error).slice(0, 200) }, 503);
@@ -502,6 +534,10 @@ async function roomRequest(request, env, session, dependencies) {
   if (pathname === `${ROOM_PREFIX}/turn`) {
     if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
     return roomTurnPost(request, env, session, dependencies);
+  }
+  if (pathname === `${ROOM_PREFIX}/queue`) {
+    if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    return roomQueue(request, env, session, dependencies);
   }
   return json({ error: "not_found" }, 404);
 }
@@ -608,9 +644,36 @@ async function startReauth(request, env, dependencies) {
   return attachRefresh(response, session.refreshCookie);
 }
 
+async function commandCenterResponse(request, env, session, dependencies) {
+  if (!workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
+  const url = new URL(request.url);
+  const queryKeys = [...url.searchParams.keys()];
+  if (queryKeys.length > 0 && (queryKeys.length !== 1 || queryKeys[0] !== "viewer" || url.searchParams.get("viewer") !== session.actor.slug)) {
+    return json({ error: "AUTHORIZATION_REFUSED" }, 403);
+  }
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { allow: "GET, HEAD, OPTIONS", "cache-control": "no-store" } });
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(JSON.stringify({ error: "METHOD_NOT_ALLOWED" }), {
+      status: 405, headers: { ...JSON_HEADERS, allow: "GET, HEAD, OPTIONS" },
+    });
+  }
+  if (typeof dependencies.commandCenterReader !== "function") return json({ error: "DEPENDENCY_UNAVAILABLE" }, 503);
+  try {
+    const payload = await dependencies.commandCenterReader(env, session.actor, env.CORRELATION_ID);
+    if (request.method === "HEAD") return new Response(null, { status: 200, headers: JSON_HEADERS });
+    return json(payload);
+  } catch (error) {
+    const code = ["AUTHORIZATION_REFUSED", "TENANT_SCOPE_REFUSED", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"].includes(error?.code) ? error.code : "INTERNAL_ERROR";
+    const status = code === "AUTHORIZATION_REFUSED" ? 403 : code === "TENANT_SCOPE_REFUSED" ? 404 : code === "FRESHNESS_UNKNOWN" ? 409 : code === "DEPENDENCY_UNAVAILABLE" ? 503 : 500;
+    return json({ error: code }, status);
+  }
+}
+
 async function bundleAsset(env, request) {
   const url = new URL(request.url);
-  const requested = url.pathname === "/" ? "/index.html" : url.pathname;
+  const requested = url.pathname === "/" ? "/index.html" : (DEALROOM_ROUTE_ASSETS.get(url.pathname) || url.pathname);
   for (const pathname of [requested, `/dist${requested}`]) {
     const response = await asset(env, request, pathname);
     if (response) return withHeaders(response, { "cache-control": "no-cache" });
@@ -646,6 +709,19 @@ export function createDealroomHandler(overrides = {}) {
 
 async function handleRequest(request, env, ctx, dependencies) {
       const origin = dealroomOrigin(env);
+      const legacyOrigin = legacyDealroomOrigin(env);
+      if (legacyOrigin && requestMatchesDealroomOrigin(request, legacyOrigin)) {
+        const legacyUrl = new URL(request.url);
+        // The old hostname is a browser bookmark bridge only.  Do not carry
+        // query input (including stale return_to values) across origins, and
+        // never let API, machine, asset, or mutation requests become HTML
+        // redirects by accident.
+        if ((request.method === "GET" || request.method === "HEAD") &&
+            LEGACY_BROWSER_REDIRECT_PATHS.has(legacyUrl.pathname) && origin) {
+          return redirect(`${origin}/deals`);
+        }
+        return json({ error: "not_found" }, 404);
+      }
       if (!origin || !requestMatchesDealroomOrigin(request, origin)) return json({ error: "not_found" }, 404);
       const url = new URL(request.url);
       const publicResponse = await publicShellAsset(env, request, url.pathname);
@@ -653,6 +729,11 @@ async function handleRequest(request, env, ctx, dependencies) {
       if (url.pathname === "/auth/login" && request.method === "GET") return startLogin(request, env);
       if (url.pathname === "/auth/callback" && request.method === "GET") return completeLogin(request, env, dependencies);
       if (url.pathname === "/auth/reauth" && request.method === "GET") return startReauth(request, env, dependencies);
+      // The first prototype's workspace API was intentionally retired. Keep
+      // it a quiet 404 so stale browser bundles cannot reach a second read.
+      if (url.pathname.startsWith("/api/v1/") && url.pathname !== COMMAND_CENTER_PATH) return json({ error: "not_found" }, 404);
+      if (url.pathname === COMMAND_CENTER_PATH && !workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
+      if (url.pathname === "/workspace" || url.pathname === "/workspace.html") return redirect(`${origin}/`);
 
       if (url.pathname === "/auth/signout") {
         if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
@@ -667,6 +748,9 @@ async function handleRequest(request, env, ctx, dependencies) {
 
       const session = await sessionFor(request, env, dependencies);
       if (!session) {
+        if (url.pathname === COMMAND_CENTER_PATH) {
+          return json({ error: "AUTHENTICATION_REQUIRED" }, 401);
+        }
         if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
             url.pathname.startsWith(SYSTEM_WORK_PREFIX) || url.pathname.startsWith(ROOM_PREFIX)) {
           return json({ error: "unauthorized", state: "sign_in_required" }, 401);
@@ -698,12 +782,23 @@ async function handleRequest(request, env, ctx, dependencies) {
         response = await dependencies.mcpHandler(request, env, ctx, session.actor);
       }
       else if (url.pathname === "/pipeline/changes") response = await dependencies.pipelineHandler(request, env, ctx, session.actor);
-      else response = await bundleAsset(env, request);
+      else if (url.pathname === COMMAND_CENTER_PATH) {
+        response = await commandCenterResponse(request, env, session, dependencies);
+      } else if (url.pathname.startsWith("/api/v1/")) {
+        response = json({ error: "not_found" }, 404);
+      } else if (url.pathname === "/" && workspaceCommandCenterEnabled(env)) {
+        const originalPath = url.pathname;
+        url.pathname = "/workspace.html";
+        response = await bundleAsset(env, new Request(url, request));
+        url.pathname = originalPath;
+      } else response = await bundleAsset(env, request);
       return attachRefresh(response, session.refreshCookie);
 }
 
 export function isDealroomRequest(request, env) {
   const origin = dealroomOrigin(env);
+  const legacyOrigin = legacyDealroomOrigin(env);
+  if (requestMatchesDealroomOrigin(request, legacyOrigin)) return true;
   if (!requestMatchesDealroomOrigin(request, origin)) return false;
   const pathname = new URL(request.url).pathname;
   if (pathname === SYSTEM_WORK_PREFIX || DEALROOM_EXACT_PATHS.has(pathname) ||
@@ -717,4 +812,8 @@ export function isDealroomRequest(request, env) {
     return !request.headers.get("authorization") && Boolean(cookieValue(request, SESSION_COOKIE));
   }
   return false;
+}
+
+export function isLegacyDealroomRequest(request, env) {
+  return requestMatchesDealroomOrigin(request, legacyDealroomOrigin(env));
 }

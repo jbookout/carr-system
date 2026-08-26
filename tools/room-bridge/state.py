@@ -64,11 +64,19 @@ import json
 from pathlib import Path
 
 DELIVERED_CAP = 4000  # per desk; oldest dropped first — a dedup memory, not an audit log
+QUEUE_RETRY_CAP = 400  # timing hints only; canonical attempt evidence remains in Hermes
+QUEUE_UNAVAILABLE_CAP = 128  # bounded migration-safe task -> first-known-dead time
 
 
 def default_state() -> dict:
     return {"last_seq": 0, "desks": {}, "last_heartbeat_at": None,
-            "control_logins": {}, "awaiting_login": {}}
+            "control_logins": {}, "awaiting_login": {},
+            "queue_event_cursor": 0, "queue_projection_digest": None,
+            "queue_projection_checked_at": None,
+            "queue_projection_last_success_at": None,
+            "queue_projection_health_last_posted_at": None,
+            "queue_projection_error": None,
+            "queue_retry_at": {}, "queue_unavailable_since": {}}
 
 
 def load_state(path: Path) -> dict:
@@ -84,7 +92,72 @@ def load_state(path: Path) -> dict:
     data.setdefault("last_heartbeat_at", None)
     data.setdefault("control_logins", {})
     data.setdefault("awaiting_login", {})
+    data.setdefault("queue_event_cursor", 0)
+    data.setdefault("queue_projection_digest", None)
+    data.setdefault("queue_projection_checked_at", None)
+    data.setdefault("queue_projection_last_success_at", None)
+    data.setdefault("queue_projection_health_last_posted_at", None)
+    data.setdefault("queue_projection_error", None)
+    unavailable = data.get("queue_unavailable_since")
+    if not isinstance(unavailable, dict):
+        unavailable = {}
+    # Keep only the intentionally tiny migration field.  Timestamps are
+    # validated at the dispatch boundary as well; malformed values must never
+    # become an immediate deadline.
+    data["queue_unavailable_since"] = {
+        desk: value for desk, value in unavailable.items()
+        if isinstance(desk, str) and len(desk) <= 80
+        and isinstance(value, str) and len(value) <= 64
+    }
+    while len(data["queue_unavailable_since"]) > QUEUE_UNAVAILABLE_CAP:
+        data["queue_unavailable_since"].pop(next(iter(data["queue_unavailable_since"])))
+    retry_at = data.get("queue_retry_at")
+    if not isinstance(retry_at, dict):
+        retry_at = {}
+    data["queue_retry_at"] = {
+        task_id: due for task_id, due in retry_at.items()
+        if isinstance(task_id, str) and task_id.startswith("t_")
+        and isinstance(due, str) and len(due) <= 64
+    }
+    while len(data["queue_retry_at"]) > QUEUE_RETRY_CAP:
+        data["queue_retry_at"].pop(next(iter(data["queue_retry_at"])))
     return data
+
+
+def set_queue_retry_at(state: dict, task_id: str, retry_at: str) -> None:
+    scheduled = state.setdefault("queue_retry_at", {})
+    if not isinstance(scheduled, dict):
+        state["queue_retry_at"] = scheduled = {}
+    scheduled[task_id] = retry_at
+    while len(scheduled) > QUEUE_RETRY_CAP:
+        scheduled.pop(next(iter(scheduled)))
+
+
+def clear_queue_retry_at(state: dict, task_id: str | None) -> None:
+    if isinstance(task_id, str):
+        state["queue_retry_at"].pop(task_id, None)
+
+
+def set_queue_unavailable_since(state: dict, desk_name: str, when: str) -> None:
+    values = state.setdefault("queue_unavailable_since", {})
+    if not isinstance(values, dict):
+        state["queue_unavailable_since"] = values = {}
+    values[desk_name] = when
+    while len(values) > QUEUE_UNAVAILABLE_CAP:
+        values.pop(next(iter(values)))
+
+
+def clear_queue_unavailable_since(state: dict, task_id: str | None) -> None:
+    if isinstance(task_id, str):
+        state.setdefault("queue_unavailable_since", {}).pop(task_id, None)
+
+
+def prune_queue_unavailable_since(state: dict, ready_task_ids: set[str]) -> None:
+    values = state.setdefault("queue_unavailable_since", {})
+    if isinstance(values, dict):
+        for task_id in list(values):
+            if task_id not in ready_task_ids:
+                values.pop(task_id, None)
 
 
 def get_heartbeat_at(state: dict) -> str | None:
@@ -195,9 +268,15 @@ def pop_next_queued(state: dict, desk_name: str) -> dict | None:
     return slot["queue"].pop(0)
 
 
+def has_queued(state: dict, desk_name: str) -> bool:
+    return bool(_desk_slot(state, desk_name)["queue"])
+
+
 def set_pending(state: dict, desk_name: str, *, dispatch_msg_id: str,
                  log_offset: int, injected_at: str, source_msg_id: str,
-                 source_seq) -> None:
+                 source_seq, origin_kind: str = "room",
+                 kanban_task_id: str | None = None, target: str | None = None,
+                 finish: str | None = None, cap: str | None = None) -> None:
     slot = _desk_slot(state, desk_name)
     slot["pending"] = {
         "dispatch_msg_id": dispatch_msg_id,
@@ -205,7 +284,15 @@ def set_pending(state: dict, desk_name: str, *, dispatch_msg_id: str,
         "injected_at": injected_at,
         "source_msg_id": source_msg_id,
         "source_seq": source_seq,
+        "origin_kind": origin_kind,
     }
+    if origin_kind == "queue":
+        slot["pending"].update({
+            "kanban_task_id": kanban_task_id,
+            "target": target,
+            "finish": finish,
+            "cap": cap,
+        })
 
 
 def clear_pending(state: dict, desk_name: str) -> None:

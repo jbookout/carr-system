@@ -50,6 +50,15 @@ import tempfile
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CHECK = os.path.join(REPO, "ops", "stale-config-check.py")
 
+# Every git hook exports GIT_DIR, which outranks cwd and -C when git chooses
+# a repository. The throwaway origin/clone this file builds under
+# tempfile.TemporaryDirectory() would be vulnerable to exactly that if this
+# selftest is itself invoked from a hook (e.g. ops/ci.sh under pre-push) —
+# the 2026-08-13 incident ops/git_env.py documents. __file__'s directory is
+# ops/, so this reaches the one scrub definition directly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 failures: list[str] = []
 
 
@@ -62,10 +71,11 @@ def check(name, cond, detail=""):
 
 
 def git(repo, *args, must=False):
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
-                        "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE")}
-    p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, env=env)
+    # fixture_env() replaces a hand-rolled scrub dict that duplicated (and
+    # under-covered — it was missing GIT_ALTERNATE_OBJECT_DIRECTORIES) the
+    # list ops/git_env.py keeps in one place for exactly this reason.
+    p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
+                       env=fixture_env())
     if must and p.returncode != 0:
         raise SystemExit(f"fixture setup failed: git {' '.join(args)}\n{p.stderr}")
     return p
@@ -82,7 +92,7 @@ def make_repo(tmp):
     """origin (bare) + a clone, with one watched file already committed."""
     origin = os.path.join(tmp, "origin.git")
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, env=fixture_env())
     repo = os.path.join(tmp, "clone")
     git(tmp, "clone", "-q", origin, repo, must=True)
     git(repo, "config", "user.email", "t@example.invalid", must=True)
@@ -97,8 +107,11 @@ def make_repo(tmp):
 
 
 def run(repo):
+    # CHECK's own git() helper shells out to plain `git` with no env of its
+    # own, so it inherits whatever we pass here — same GIT_DIR leak as the
+    # git() helper above, one hop further down the stack.
     p = subprocess.run([sys.executable, CHECK], cwd=repo, capture_output=True,
-                       text=True, timeout=60)
+                       text=True, timeout=60, env=fixture_env())
     return p.returncode, (p.stdout + p.stderr)
 
 
@@ -182,7 +195,7 @@ with tempfile.TemporaryDirectory() as tmp:
     plain = os.path.join(tmp, "plain")
     os.makedirs(plain)
     p = subprocess.run([sys.executable, CHECK], cwd=plain, capture_output=True,
-                       text=True, timeout=60)
+                       text=True, timeout=60, env=fixture_env())
     check("outside a git repository it never blocks", p.returncode == 0,
           f"rc={p.returncode}")
 

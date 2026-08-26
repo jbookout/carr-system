@@ -47,6 +47,14 @@ import subprocess
 import sys
 import tempfile
 
+# The one scrubber (ops/git_env.py), not a local copy. GIT_DIR is exported by
+# every git hook and overrides cwd for any child git process — the
+# 2026-08-14 incident where fixture commits landed on live main is the
+# reason git() below now delegates to fixture_env() instead of hand-rolling
+# its own (incomplete) list of GIT_* variables to drop.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATE = os.path.join(REPO, "hooks", "loose-work-gate.py")
 
@@ -72,10 +80,13 @@ def git(repo, *args):
     which is the same 0 most of these cases assert. A test suite passing because
     its fixture is absent is the exact failure this file exists to catch in the
     gate, so it is worth the paragraph.
+
+    Removal now comes from fixture_env() (ops/git_env.py) rather than a local
+    list: that list here used to cover seven variables and git consults ten,
+    so this hand-rolled version was itself an instance of the class of bug it
+    was written to describe.
     """
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
-                        "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE")}
+    env = fixture_env()
     p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
                        env=env)
     if p.returncode != 0 and args and args[0] in ("init", "add", "commit", "config"):
@@ -113,15 +124,40 @@ def transcript(tmp, written_paths, name="t.jsonl"):
     return p
 
 
+def spoken(stdout):
+    """The announcement text this gate emitted, or "" if it said nothing.
+
+    DEMOTED 2026-08-23 (gates-audit council, Joe's Stop-gate rationing). This
+    gate used to exit 2, which REOPENS the turn and costs a whole extra
+    assistant message. It now announces: the finding rides into context without
+    forcing another turn. So "caught" means an announcement was emitted, and an
+    exit 2 from here is itself the regression — the same inversion
+    ops/chat-lint-gate-selftest.py made when that gate was demoted on
+    2026-08-16, for the same reason.
+    """
+    try:
+        emitted = json.loads(stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return ""
+    if "decision" in emitted:               # a block wearing an announce's clothes
+        return ""
+    return (emitted.get("hookSpecificOutput") or {}).get("additionalContext") or ""
+
+
 def run(repo, transcript_path, env=None):
     payload = json.dumps({"session_id": "s1", "transcript_path": transcript_path,
                           "cwd": repo})
-    e = {**os.environ, "CARR_LOOSE_WORK_REPO": repo}
+    # hooks/loose-work-gate.py shells out to git itself (status, remote,
+    # rev-list) with cwd=repo and no scrub of its own — fixture_env() here is
+    # what keeps THOSE calls confined to the fixture too.
+    e = dict(fixture_env(), CARR_LOOSE_WORK_REPO=repo)
     if env:
         e.update(env)
     p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
                        text=True, env=e, timeout=60)
-    return p.returncode, (p.stdout + p.stderr)
+    # `out` is what the gate SAID, in whichever register. rc is how much it
+    # cost: 0 is an announcement, 2 would be a reopened turn.
+    return p.returncode, (spoken(p.stdout) + p.stderr)
 
 
 print("\nloose-work-gate — a session does not end leaving its own work loose")
@@ -137,8 +173,9 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(target, "w") as fh:
         fh.write("modified by this session\n")
     rc, out = run(repo, transcript(tmp, [target]))
-    check("a session that left its own tracked file modified is stopped", rc == 2,
-          f"rc={rc}")
+    check("a session that left its own tracked file modified is told", bool(out),
+          f"rc={rc} said nothing")
+    check("...and it is told WITHOUT the turn being reopened", rc == 0, f"rc={rc}")
     check("the refusal names the file", "tracked.txt" in out, out[:200])
     check("the refusal says how to land it", "worktree" in out or "commit" in out,
           out[:200])
@@ -256,7 +293,7 @@ def add_remote(repo, tmp, name="origin"):
     bare = os.path.join(tmp, f"{name}.git")
     git(repo, "init", "--bare", "-q", "-b", "main", bare) if False else None
     subprocess.run(["git", "init", "--bare", "-q", "-b", "main", bare],
-                   capture_output=True, check=True)
+                   capture_output=True, check=True, env=fixture_env())
     git(repo, "remote", "add", name, bare)
     return bare
 
@@ -271,8 +308,9 @@ with tempfile.TemporaryDirectory() as tmp:
     git(repo, "add", "tracked.txt")
     git(repo, "commit", "-q", "-m", "the fix nobody could see")
     rc, out = run(repo, committing_transcript(tmp))
-    check("a session that committed and never pushed is stopped", rc == 2,
-          f"rc={rc}: {out[:200]}")
+    check("a session that committed and never pushed is told", bool(out),
+          f"rc={rc} said nothing")
+    check("...and that one does not reopen the turn either", rc == 0, f"rc={rc}")
     check("...and the refusal says the commit exists on no other machine",
           "unpushed" in out.lower() or "no other machine" in out.lower(), out[:200])
 
@@ -326,6 +364,50 @@ with tempfile.TemporaryDirectory() as tmp:
     git(repo, "commit", "-q", "-m", "local")
     rc, out = run(repo, committing_transcript(tmp))
     check("a repository with no remote is never nagged about pushing", rc == 0,
+          f"rc={rc}: {out[:200]}")
+
+# 13. COUNCIL RECOMMENDATION 1 (2026-08-23): the gate judges the tree the session
+# is STANDING IN, not the canonical checkout every hook is loaded from.
+#
+# hooksPath is absolute, so REPO inside the gate is always ~/carr-system whatever
+# worktree the session lives in. That made this gate hand one session another
+# session's unpushed commit: on 2026-08-23 a worktree that was clean and exactly
+# in sync with origin was told it had "committed 1 change and never pushed",
+# because canonical's HEAD (9c23a9ca, someone else's work) had not been pushed.
+# The session cannot act on that report and cannot make it stop.
+with tempfile.TemporaryDirectory() as tmp:
+    canonical = make_repo(tmp)
+    add_remote(canonical, tmp)
+    git(canonical, "push", "-q", "origin", "main")
+
+    # A registered worktree of that checkout, in the real location run.sh uses.
+    wt = os.path.join(canonical, ".claude", "worktrees", "alpha")
+    os.makedirs(os.path.dirname(wt), exist_ok=True)
+    git(canonical, "worktree", "add", "-q", "-b", "alpha", wt)
+    git(wt, "push", "-q", "origin", "alpha")
+
+    # Canonical is left dirty AND unpushed — another session's in-flight work.
+    with open(os.path.join(canonical, "tracked.txt"), "w") as fh:
+        fh.write("another session's commit\n")
+    git(canonical, "add", "tracked.txt")
+    git(canonical, "commit", "-q", "-m", "not this session's work")
+
+    rc, out = run(wt, committing_transcript(tmp),
+                  env={"CARR_LOOSE_WORK_REPO": canonical})
+    check("a clean, pushed worktree is not blamed for canonical's unpushed commit",
+          rc == 0, f"rc={rc}: {out[:200]}")
+
+    # The same session, genuinely leaving its OWN commit loose, is still caught:
+    # scoping the gate must not turn it off. (Caught now means ANNOUNCED — this
+    # gate was demoted 2026-08-23 and an exit 2 is itself a regression.)
+    with open(os.path.join(wt, "tracked.txt"), "w") as fh:
+        fh.write("this session's real fix\n")
+    git(wt, "add", "tracked.txt")
+    git(wt, "commit", "-q", "-m", "the fix nobody could see")
+    rc, out = run(wt, committing_transcript(tmp),
+                  env={"CARR_LOOSE_WORK_REPO": canonical})
+    check("...but its own unpushed commit is still announced",
+          rc == 0 and ("unpushed" in out.lower() or "no other machine" in out.lower()),
           f"rc={rc}: {out[:200]}")
 
 print()

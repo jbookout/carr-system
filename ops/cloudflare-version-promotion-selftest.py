@@ -64,12 +64,16 @@ def run_manifest(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def run_release_verify(payload: str, *, version: str = VERSION,
-                       posture: str = "enabled") -> subprocess.CompletedProcess[str]:
+                       posture: str = "enabled",
+                       schema_highest: str = "0300_operational_hermes_bot_profiles.sql",
+                       schema_count: int = 236) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(VERIFY_RELEASE), "--environment", "production",
          "--sha", "a" * 40, "--provider", PROVIDER,
          "--provider-version-id", version,
-         "--expected-program6-actions", posture],
+         "--expected-program6-actions", posture,
+         "--expected-schema-highest-migration", schema_highest,
+         "--expected-schema-applied-count", str(schema_count)],
         cwd=REPO,
         input=payload,
         capture_output=True,
@@ -188,7 +192,7 @@ def main() -> int:
           (malformed_version.stdout + malformed_version.stderr),
           f"rc={malformed_version.returncode}")
 
-    with tempfile.TemporaryDirectory(prefix="promotion-selftest-", dir=REPO) as td:
+    with tempfile.TemporaryDirectory(prefix="promotion-selftest-") as td:
         manifest_path = Path(td) / "bound.json"
         manifest_path.write_text(json.dumps({
             "service": "carr-mcp",
@@ -206,7 +210,7 @@ def main() -> int:
           (mismatched_manifest.stdout + mismatched_manifest.stderr),
           f"rc={mismatched_manifest.returncode}")
 
-    with tempfile.TemporaryDirectory(prefix="promotion-verify-", dir=REPO) as td:
+    with tempfile.TemporaryDirectory(prefix="promotion-verify-") as td:
         source_path = Path(td) / "source.json"
         bound_path = Path(td) / "bound.json"
         tampered_path = Path(td) / "tampered.json"
@@ -279,7 +283,7 @@ def main() -> int:
                     record, re.DOTALL) is not None)
 
     resolve_at = deploy.find("RELEASE_BINDING=")
-    rebuild_at = deploy.find('release-manifest.py" build --sha "$HEAD_SHA"', resolve_at)
+    rebuild_at = deploy.find('build_release_manifest "$HEAD_SHA" production', resolve_at)
     bind_at = deploy.find('release-manifest.py" bind-provider', rebuild_at)
     recheck_at = deploy.find("RECONFIRMED_BINDING=", bind_at)
     promote_at = deploy.find('"$WRANGLER" versions deploy', recheck_at)
@@ -312,17 +316,32 @@ def main() -> int:
     check("8c. malformed or mismatched read-back records failed and exits nonzero",
           "production_readback_mismatch" in deploy
           and "record_deployment failed" in deploy)
+    check("8c1. read-back threads exact manifest schema highest/count",
+          "--expected-schema-highest-migration" in deploy
+          and "--expected-schema-applied-count" in deploy
+          and 'schema.get("highest_applied_migration")' in verifier
+          and 'schema.get("applied_count")' in verifier)
     good_release = json.dumps({
         "ok": True,
         "env": {"value": "production"},
         "git_sha": {"value": "a" * 40},
         "provider": PROVIDER,
         "worker_version": {"id": VERSION},
+        "schema": {
+            "highest_applied_migration": "0300_operational_hermes_bot_profiles.sql",
+            "applied_count": 236,
+        },
         "program6_actions": {"enabled": True, "posture": "enabled", "reason": None},
     })
     good = run_release_verify(good_release, version=VERSION.upper())
     check("8d. executable read-back verifier accepts the exact identity",
           good.returncode == 0, f"rc={good.returncode} err={good.stderr[:120]}")
+    schema_wrong = json.loads(good_release)
+    schema_wrong["schema"]["applied_count"] = 235
+    schema_mismatch = run_release_verify(json.dumps(schema_wrong))
+    check("8d1. executable read-back verifier refuses a schema count mismatch",
+          schema_mismatch.returncode == 1 and "schema.applied_count" in schema_mismatch.stderr,
+          f"rc={schema_mismatch.returncode}")
     wrong = json.loads(good_release)
     wrong["worker_version"]["id"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     mismatch = run_release_verify(json.dumps(wrong))

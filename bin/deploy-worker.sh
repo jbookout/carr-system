@@ -22,10 +22,12 @@
 #   ship dirty mcp-server/ or dealroom/ trees (this repo
 #   regularly holds another live session's uncommitted work; see rule 308ef1de).
 #   COUNT CHECK catches the class — compare the verb count about to ship against
-#   the count recorded by the last successful deploy, and refuse on a DROP. A
-#   deliberate retirement is still allowed, it just has to say so out loud with
-#   --allow-shrink, which is the whole point: shrinking becomes a decision
-#   instead of an accident.
+#   the count recorded by the last successful deploy, and refuse on a DROP.
+#   The sole exceptions are the already-prepared typed recovery legs
+#   (`current_before`, `prior`, `current_after`, or the isolated
+#   `restore_only` repair): the matching DB writer must durably prepare that
+#   exact step and return its deterministic provider tag before it authorises a
+#   temporary drop. Standalone/source deploys and caller flags never waive it.
 #
 # The count is EXACT, not parsed: it imports the module and reads
 # Object.keys(TOOLS).length. A regex over the source undercounts (61 vs the real
@@ -35,14 +37,14 @@
 # Usage:
 #   bin/deploy-worker.sh              # preflight, deploy, postflight
 #   bin/deploy-worker.sh --check      # preflight only, ship nothing
-#   bin/deploy-worker.sh --allow-shrink   # deliberate verb retirement
 #   bin/deploy-worker.sh --release-sha <full-40-char-sha>
 #       # an approved immutable release when main moves after approval
 #   bin/deploy-worker.sh --upload-version
 #       # upload a Production candidate without changing traffic
 #   bin/deploy-worker.sh --promote-version <cloudflare-version-id>
 #       # promote that exact approved version to 100% of Production traffic
-#   # Both Production modes also require the approval preimage inputs:
+#   # Production modes and a standalone staging release require the approval
+#   # preimage inputs:
 #       --performance-budget-ref <immutable-ref> --performance-budget-ms <ms>
 #       --recovery-strategy <rollback|forward_fix>
 #       --rollback-plan-ref <immutable-runbook-ref>
@@ -87,17 +89,18 @@
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORKER_DIR="$REPO/mcp-server"
-# Set again after argument parsing when a non-production env is chosen, so a
-# staging deploy can never overwrite the baseline production is measured against.
-WRANGLER="$WORKER_DIR/node_modules/.bin/wrangler"
+# Policy, writers and runtime dependencies always resolve from this current
+# wrapper root. A typed recovery can select only a detached, exact source root
+# for Worker/assets; it never gets to execute that revision's wrapper or tools.
+SOURCE_ROOT="$REPO"
+WORKER_DIR="$SOURCE_ROOT/mcp-server"
+WRANGLER="$REPO/mcp-server/node_modules/.bin/wrangler"
 # Same resolution ops/ci.sh and bin/worktree.sh use: prefer the repo venv, fall
 # back to whatever python3 is on PATH. The release preflight below needs it.
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY="$(command -v python3 || true)"
 
 CHECK_ONLY=0
-ALLOW_SHRINK=0
 TARGET_ENV="production"
 PINNED_RELEASE=""
 VERSION_MODE="ordinary"
@@ -112,8 +115,34 @@ RECOVERY_ATTEMPT_ID=""
 RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
 STAGING_RECEIPT_KEY=""
+EXACT_SOURCE_ROOT=""
+EXACT_RUNTIME_LINK=""
 # Filled only from the exact immutable release manifest after preflight.
 EXPECTED_PROGRAM6_ACTIONS=""
+
+# A detached recovery source is validated as a clean, exact Git tree and must
+# not carry ignored dependencies.  Wrangler still needs the current verified
+# runtime to bundle that exact Worker, so the link below is provisioned only
+# after source and package-lock validation.  One cleanup hook owns all
+# ephemeral files so later receipt-specific traps cannot strand the link.
+cleanup_ephemeral() {
+  if [ -n "${STAGING_RECEIPT:-}" ] && [ -e "$STAGING_RECEIPT" ]; then
+    rm -f "$STAGING_RECEIPT"
+  fi
+  if [ -n "${EXACT_RUNTIME_LINK:-}" ] && [ -L "$EXACT_RUNTIME_LINK" ] \
+      && [ "$(readlink "$EXACT_RUNTIME_LINK")" = "$REPO/mcp-server/node_modules" ]; then
+    rm -f "$EXACT_RUNTIME_LINK"
+  fi
+}
+cleanup_on_signal() {
+  cleanup_ephemeral
+  trap - EXIT HUP INT TERM
+  exit "$1"
+}
+trap cleanup_ephemeral EXIT
+trap 'cleanup_on_signal 129' HUP
+trap 'cleanup_on_signal 130' INT
+trap 'cleanup_on_signal 143' TERM
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check)         CHECK_ONLY=1 ;;
@@ -122,7 +151,6 @@ while [ "$#" -gt 0 ]; do
       TARGET_ENV="$2"
       shift
       ;;
-    --allow-shrink)  ALLOW_SHRINK=1 ;;
     --performance-budget-ref)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --performance-budget-ref needs a reference" >&2; exit 64; }
       PERFORMANCE_BUDGET_REF="$2"; shift ;;
@@ -147,7 +175,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-attempt-id needs a UUID" >&2; exit 64; }
       RECOVERY_ATTEMPT_ID="$2"; shift ;;
     --recovery-step)
-      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-step needs current_before|prior|current_after" >&2; exit 64; }
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-step needs current_before|prior|current_after|forward_fix|restore_only" >&2; exit 64; }
       RECOVERY_STEP="$2"; shift ;;
     --recovery-prior-release-key)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-prior-release-key needs a key" >&2; exit 64; }
@@ -155,6 +183,10 @@ while [ "$#" -gt 0 ]; do
     --staging-receipt-idempotency-key)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --staging-receipt-idempotency-key needs a UUID" >&2; exit 64; }
       STAGING_RECEIPT_KEY="$2"; shift ;;
+    --internal-exact-source-root)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --internal-exact-source-root needs a path" >&2; exit 64; }
+      [ -z "$EXACT_SOURCE_ROOT" ] || { echo "deploy-worker: --internal-exact-source-root may appear once" >&2; exit 64; }
+      EXACT_SOURCE_ROOT="$2"; shift ;;
     --upload-version)
       [ "$VERSION_MODE" = "ordinary" ] \
         || { echo "deploy-worker: --upload-version and --promote-version are mutually exclusive" >&2; exit 64; }
@@ -175,6 +207,71 @@ done
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 
+# One builder owns the exact source/environment/assurance preimage for every
+# release-manifest reconstruction.  A caller may supply either the complete
+# assurance group or none; the admission rules below require the complete group
+# for Production and standalone staging releases.
+build_release_manifest() {
+  BUILD_MANIFEST_SHA="$1"
+  BUILD_MANIFEST_ENVIRONMENT="$2"
+  if [ -n "$PERFORMANCE_BUDGET_REF" ]; then
+    "$PY" "$REPO/tools/release-manifest.py" build --sha "$BUILD_MANIFEST_SHA" \
+      --environment "$BUILD_MANIFEST_ENVIRONMENT" \
+      --performance-budget-ref "$PERFORMANCE_BUDGET_REF" \
+      --performance-budget-ms "$PERFORMANCE_BUDGET_MS" \
+      --recovery-strategy "$RECOVERY_STRATEGY" \
+      --rollback-plan-ref "$ROLLBACK_PLAN_REF"
+  else
+    "$PY" "$REPO/tools/release-manifest.py" build --sha "$BUILD_MANIFEST_SHA" \
+      --environment "$BUILD_MANIFEST_ENVIRONMENT"
+  fi
+}
+
+# A temporary verb-count drop is authorized only after the DB writer for the
+# exact typed recovery step has durably prepared the attempt and returned its
+# deterministic provider tag.  This is deliberately a function shared by the
+# preflight shrink gate and the later deployment prepare: the later call is an
+# idempotent replay of the same writer input, never a second authorization path.
+prepare_typed_recovery_shrink() {
+  [ "$TARGET_ENV" = "staging" ] || fail "typed recovery shrink is staging-only."
+  [ "$RECOVERY_STEP" != "standalone" ] || fail "standalone deploys cannot authorize verb shrink."
+  [ -n "$STAGING_RECEIPT_KEY" ] || fail "typed recovery shrink needs a staging receipt idempotency key."
+  printf '%s\n' "$STAGING_RECEIPT_KEY" | grep -Eq \
+    '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+    || fail "--staging-receipt-idempotency-key must be a lowercase canonical UUID."
+
+  case "$RECOVERY_STEP" in
+    current_before|prior|current_after)
+      TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-attempt prepare \
+        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+        --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+        --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --recovery-step "$RECOVERY_STEP" \
+        --git-sha "$HEAD_SHA" --correlation "$RECOVERY_ATTEMPT_ID" \
+        --field expected_provider_tag)" \
+        || fail "the typed recovery step was not durably prepared; verb shrink is refused."
+      ;;
+    restore_only)
+      TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-restore-only prepare \
+        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+        --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+        --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --git-sha "$HEAD_SHA" \
+        --correlation "$RECOVERY_ATTEMPT_ID" --field expected_provider_tag)" \
+        || fail "the typed restore-only repair was not durably prepared; verb shrink is refused."
+      ;;
+    forward_fix)
+      TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-forward-fix prepare \
+        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+        --git-sha "$HEAD_SHA" --correlation "$STAGING_RECEIPT_KEY" \
+        --field expected_provider_tag)" \
+        || fail "the typed forward-fix rehearsal was not durably prepared; deploy is refused."
+      ;;
+    *) fail "standalone deploys cannot authorize verb shrink." ;;
+  esac
+  printf '%s\n' "$TYPED_RECOVERY_TAG" | grep -Eq '^carr-staging(-forward-fix)?-[0-9a-f]{32}$' \
+    || fail "the prepared typed recovery step returned no exact provider tag; verb shrink is refused."
+  echo "  !!  shrinking by $LOST verb(s), allowed only by the exact prepared typed recovery step"
+}
+
 if [ "$VERSION_MODE" != "ordinary" ] && [ "$TARGET_ENV" != "production" ]; then
   fail "provider-version operations are Production-only; staging is a source rehearsal and receives its own build."
 fi
@@ -183,17 +280,50 @@ case "$RECOVERY_STEP" in
     [ -z "$RECOVERY_ATTEMPT_ID$RECOVERY_PRIOR_RELEASE_KEY" ] \
       || fail "standalone staging deploy cannot carry recovery attempt/prior fields."
     ;;
-  current_before|prior|current_after)
-    [ "$TARGET_ENV" = "staging" ] && [ -n "$RECOVERY_ATTEMPT_ID" ] \
-      && [ -n "$RECOVERY_PRIOR_RELEASE_KEY" ] && [ -n "$REQUESTED_RELEASE_KEY" ] \
-      || fail "recovery deploy requires staging plus --release-key, --recovery-attempt-id, --recovery-prior-release-key and --recovery-step."
-    printf '%s\n' "$RECOVERY_ATTEMPT_ID" | grep -Eq \
-      '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' \
-      || fail "--recovery-attempt-id must be an exact UUID."
-    RECOVERY_ATTEMPT_ID="$(printf '%s' "$RECOVERY_ATTEMPT_ID" | tr 'A-F' 'a-f')"
+  current_before|prior|current_after|forward_fix|restore_only)
+    [ "$TARGET_ENV" = "staging" ] && [ -n "$REQUESTED_RELEASE_KEY" ] \
+      || fail "recovery deploy requires staging plus --release-key and --recovery-step."
+    if [ "$RECOVERY_STEP" != "forward_fix" ]; then
+      [ -n "$RECOVERY_ATTEMPT_ID" ] && [ -n "$RECOVERY_PRIOR_RELEASE_KEY" ] \
+        || fail "rollback recovery deploy requires --recovery-attempt-id and --recovery-prior-release-key."
+    fi
+    if [ "$RECOVERY_STEP" != "forward_fix" ]; then
+      printf '%s\n' "$RECOVERY_ATTEMPT_ID" | grep -Eq \
+        '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' \
+        || fail "--recovery-attempt-id must be an exact UUID."
+      RECOVERY_ATTEMPT_ID="$(printf '%s' "$RECOVERY_ATTEMPT_ID" | tr 'A-F' 'a-f')"
+    fi
     ;;
-  *) fail "--recovery-step must be standalone|current_before|prior|current_after." ;;
+  *) fail "--recovery-step must be standalone|current_before|prior|current_after|forward_fix|restore_only." ;;
 esac
+if [ -n "$EXACT_SOURCE_ROOT" ]; then
+  [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "staging" ] \
+    && [ "$RECOVERY_STEP" != "standalone" ] && [ -n "$PINNED_RELEASE" ] \
+    || fail "an exact source root is internal to a typed staging recovery step."
+  SOURCE_ROOT="$("$PY" "$REPO/tools/validate-exact-recovery-source.py" \
+    --root "$EXACT_SOURCE_ROOT" --sha "$PINNED_RELEASE")" \
+    || fail "the internal exact source root is not the bound clean detached source."
+  CURRENT_PACKAGE_LOCK="$REPO/mcp-server/package-lock.json"
+  EXACT_PACKAGE_LOCK="$SOURCE_ROOT/mcp-server/package-lock.json"
+  [ -f "$CURRENT_PACKAGE_LOCK" ] \
+    || fail "the current wrapper dependency lockfile is missing."
+  [ -f "$EXACT_PACKAGE_LOCK" ] \
+    || fail "the exact recovery source dependency lockfile is missing."
+  cmp -s "$CURRENT_PACKAGE_LOCK" "$EXACT_PACKAGE_LOCK" \
+    || fail "the exact recovery source dependency lockfile differs from the current verified runtime."
+  EXACT_RUNTIME_LINK="$SOURCE_ROOT/mcp-server/node_modules"
+  [ -d "$REPO/mcp-server/node_modules" ] \
+    || fail "the current verified runtime dependencies are missing."
+  if [ -e "$EXACT_RUNTIME_LINK" ] || [ -L "$EXACT_RUNTIME_LINK" ]; then
+    fail "the exact recovery source already contains mcp-server/node_modules."
+  fi
+  ln -s "$REPO/mcp-server/node_modules" "$EXACT_RUNTIME_LINK" \
+    || fail "could not provision the current verified runtime for exact recovery bundling."
+  [ -L "$EXACT_RUNTIME_LINK" ] \
+    && [ "$(readlink "$EXACT_RUNTIME_LINK")" = "$REPO/mcp-server/node_modules" ] \
+    || fail "the exact recovery runtime link was not created with the expected target."
+  WORKER_DIR="$SOURCE_ROOT/mcp-server"
+fi
 if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "production" ]; then
   fail "Production source deploy is disabled. Upload an immutable candidate with
   --upload-version, bind that provider version to an approved release, then use
@@ -209,10 +339,18 @@ fi
 cd "$REPO"
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 [ -x "$PY" ] || fail "python not found; release truth cannot be checked."
-if [ "$TARGET_ENV" = "production" ]; then
+if [ -n "$PERFORMANCE_BUDGET_REF$PERFORMANCE_BUDGET_MS$RECOVERY_STRATEGY$ROLLBACK_PLAN_REF" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] && [ -n "$PERFORMANCE_BUDGET_MS" ] \
     && [ -n "$RECOVERY_STRATEGY" ] && [ -n "$ROLLBACK_PLAN_REF" ] \
+    || fail "performance budget/ref, recovery strategy, and rollback plan ref must be supplied together."
+fi
+if [ "$TARGET_ENV" = "production" ]; then
+  [ -n "$PERFORMANCE_BUDGET_REF" ] \
     || fail "Production performance budget/ref, recovery strategy, and rollback plan ref are required; they are approval inputs, not deploy defaults."
+fi
+if [ "$TARGET_ENV" = "staging" ] && [ "$RECOVERY_STEP" = "standalone" ]; then
+  [ -n "$PERFORMANCE_BUDGET_REF" ] \
+    || fail "standalone staging release requires performance/recovery assurance; the exact inputs are approval-bound, not deploy defaults."
 fi
 
 HEAD_SHA=""
@@ -224,22 +362,22 @@ if [ "$VERSION_MODE" = "promote" ]; then
   echo "  OK  immutable provider promotion — source checkout and build preflights are skipped"
   echo "      release truth below supplies the SHA bound to $PROVIDER_VERSION_ID"
 else
-git fetch origin main --quiet 2>/dev/null || fail "could not reach origin to verify main."
+git -C "$REPO" fetch origin main --quiet 2>/dev/null || fail "could not reach origin to verify main."
 
-HEAD_SHA="$(git rev-parse HEAD)"
-MAIN_SHA="$(git rev-parse origin/main)"
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+HEAD_SHA="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+MAIN_SHA="$(git -C "$SOURCE_ROOT" rev-parse origin/main)"
+BRANCH="$(git -C "$SOURCE_ROOT" rev-parse --abbrev-ref HEAD)"
 
 if [ -n "$PINNED_RELEASE" ]; then
   [ "${#PINNED_RELEASE}" -eq 40 ] \
     || fail "--release-sha must be the full immutable 40-character commit SHA."
-  PINNED_SHA="$(git rev-parse --verify "${PINNED_RELEASE}^{commit}" 2>/dev/null)" \
+  PINNED_SHA="$(git -C "$SOURCE_ROOT" rev-parse --verify "${PINNED_RELEASE}^{commit}" 2>/dev/null)" \
     || fail "approved release SHA does not resolve to a commit."
   [ "$PINNED_RELEASE" = "$PINNED_SHA" ] \
     || fail "--release-sha must be the exact canonical full SHA, not an abbreviation or tag."
   [ "$HEAD_SHA" = "$PINNED_SHA" ] \
     || fail "checkout HEAD does not equal the approved release SHA."
-  git merge-base --is-ancestor "$PINNED_SHA" origin/main \
+  git -C "$SOURCE_ROOT" merge-base --is-ancestor "$PINNED_SHA" origin/main \
     || fail "approved release SHA is not an ancestor of fetched origin/main."
   echo "  OK  pinned approved release: $PINNED_SHA (ancestor of origin/main $MAIN_SHA)"
 elif [ "$TARGET_ENV" != "production" ]; then
@@ -251,8 +389,8 @@ elif [ "$TARGET_ENV" != "production" ]; then
   echo "  OK  env=$TARGET_ENV — branch check skipped on purpose (staging exists to run unmerged code)"
   echo "      shipping $BRANCH @ $HEAD_SHA"
 elif [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
-  BEHIND="$(git rev-list --count "HEAD..origin/main")"
-  AHEAD="$(git rev-list --count "origin/main..HEAD")"
+  BEHIND="$(git -C "$SOURCE_ROOT" rev-list --count "HEAD..origin/main")"
+  AHEAD="$(git -C "$SOURCE_ROOT" rev-list --count "origin/main..HEAD")"
   fail "this checkout is not origin/main.
   branch:  $BRANCH
   HEAD:    $HEAD_SHA
@@ -279,7 +417,7 @@ fi
 # until the file is committed. It is a guard artifact and never ships to the
 # Worker. The postflight still tells you to commit it, because an uncommitted
 # baseline protects only this checkout.
-DIRTY_LIST="$(git status --porcelain -- mcp-server/ dealroom/ \
+DIRTY_LIST="$(git -C "$SOURCE_ROOT" status --porcelain -- mcp-server/ dealroom/ \
   | grep -v 'mcp-server/node_modules' \
   | grep -v 'mcp-server/.last-deployed-verb-count' || true)"
 DIRTY="$(printf '%s' "$DIRTY_LIST" | grep -c . || true)"
@@ -344,15 +482,15 @@ case "$LEDGER_RC" in
   0)
     if [ -n "$PREVIOUS" ] && [ "$SHIPPING" -lt "$PREVIOUS" ]; then
       LOST=$((PREVIOUS - SHIPPING))
-      if [ "$ALLOW_SHRINK" = "0" ]; then
+      if [ "$RECOVERY_STEP" = "standalone" ] || [ "$TARGET_ENV" != "staging" ]; then
         fail "this deploy would REMOVE $LOST verb(s) from $TARGET_ENV.
   last deployed: $PREVIOUS
   about to ship: $SHIPPING
 
-  If verbs were deliberately retired, say so: re-run with --allow-shrink.
-  If not, you are about to reproduce loop #276."
+  Source and standalone deploys cannot waive the verb-loss guard. Only an
+  exact prepared typed staging recovery step may temporarily shrink."
       fi
-      echo "  !!  shrinking by $LOST verb(s), allowed explicitly via --allow-shrink"
+      prepare_typed_recovery_shrink
     else
       echo "  OK  no verb loss (last deployed to $TARGET_ENV: $PREVIOUS)"
     fi
@@ -539,11 +677,7 @@ if [ "$VERSION_MODE" = "promote" ]; then
   # with every immutable dimension and the freshly computed plan hash.
   PROMOTION_SOURCE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-source-manifest.XXXXXX")"
   PROMOTION_BOUND_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-bound-manifest.XXXXXX")"
-  if ! "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-      --environment production --performance-budget-ref "$PERFORMANCE_BUDGET_REF" \
-      --performance-budget-ms "$PERFORMANCE_BUDGET_MS" \
-      --recovery-strategy "$RECOVERY_STRATEGY" \
-      --rollback-plan-ref "$ROLLBACK_PLAN_REF" > "$PROMOTION_SOURCE_MANIFEST"; then
+  if ! build_release_manifest "$HEAD_SHA" production > "$PROMOTION_SOURCE_MANIFEST"; then
     fail "approved release evidence cannot be rebuilt from git SHA $HEAD_SHA."
   fi
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
@@ -575,21 +709,14 @@ elif [ "$RECOVERY_STEP" != "standalone" ]; then
   echo "  prior release: $RECOVERY_PRIOR_RELEASE_KEY"
   echo "  recovery attempt/step: $RECOVERY_ATTEMPT_ID / $RECOVERY_STEP"
   RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-recovery-release-manifest.XXXXXX")"
-  "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-    --environment staging > "$RELEASE_MANIFEST" \
+  build_release_manifest "$HEAD_SHA" staging > "$RELEASE_MANIFEST" \
     || fail "recovery release evidence cannot be rebuilt from git SHA $HEAD_SHA."
 elif [ -f "$REPO/tools/release-manifest.py" ]; then
   echo ""
   echo "== preflight: release truth =="
   RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-release-manifest.XXXXXX")"
-  if [ "$TARGET_ENV" = "production" ]; then
-    manifest_build_args="--performance-budget-ref $PERFORMANCE_BUDGET_REF --performance-budget-ms $PERFORMANCE_BUDGET_MS --recovery-strategy $RECOVERY_STRATEGY --rollback-plan-ref $ROLLBACK_PLAN_REF"
-  else
-    manifest_build_args=""
-  fi
-  # shellcheck disable=SC2086
-  if "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-       --environment "$TARGET_ENV" $manifest_build_args > "$RELEASE_MANIFEST" 2>/dev/null; then
+  if build_release_manifest "$HEAD_SHA" "$TARGET_ENV" \
+       > "$RELEASE_MANIFEST" 2>/dev/null; then
     RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
                           --manifest "$RELEASE_MANIFEST" 2>/dev/null)"
     echo "  manifest built for ${HEAD_SHA} — plan ${RELEASE_PLAN_HASH:-unknown}"
@@ -630,6 +757,26 @@ case "$EXPECTED_PROGRAM6_ACTIONS" in
   enabled|disabled) ;;
   *) fail "release manifest returned an invalid Program 6 posture." ;;
 esac
+EXPECTED_SCHEMA_HIGHEST_MIGRATION="$("$PY" -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["schema_highest_migration"])' \
+  "$RELEASE_MANIFEST")" \
+  || fail "release manifest has no declared schema highest migration."
+EXPECTED_SCHEMA_APPLIED_COUNT="$("$PY" -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["schema_applied_count"])' \
+  "$RELEASE_MANIFEST")" \
+  || fail "release manifest has no declared schema applied count."
+EXPECTED_SCHEMA_LEDGER_SHA256="$("$PY" -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["schema_ledger_sha256"])' \
+  "$RELEASE_MANIFEST")" \
+  || fail "release manifest has no declared schema ledger digest."
+printf '%s' "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
+  | grep -Eq '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$' \
+  || fail "release manifest declared an invalid schema highest migration."
+printf '%s' "$EXPECTED_SCHEMA_APPLIED_COUNT" \
+  | grep -Eq '^[1-9][0-9]*$' \
+  || fail "release manifest declared an invalid schema applied count."
+printf '%s' "$EXPECTED_SCHEMA_LEDGER_SHA256" | grep -Eq '^sha256:[0-9a-f]{64}$' \
+  || fail "release manifest declared an invalid schema ledger digest."
 
 if [ "$CHECK_ONLY" = "1" ]; then
   echo ""
@@ -685,10 +832,10 @@ if [ "$VERSION_MODE" = "upload" ]; then
   echo "  .venv/bin/python tools/ops-record.py release candidate --key <key> \\"
   echo "    --environment production --provider $PROVIDER \\"
   echo "    --provider-version-id $PROVIDER_VERSION_ID --manifest $RELEASE_MANIFEST ..."
-  echo "Then record the actual release-linked recovery rehearsal before Joe approves:"
-  echo "  .venv/bin/python tools/ops-record.py run --kind check --service carr-mcp \\"
-  echo "    --key recovery.rehearsal.worker --state succeeded --environment staging \\"
-  echo "    --release-key <key> --source-ref <rehearsal-run> --evidence-ref <receipt>"
+  echo "Before Joe approves, use the typed staging wrapper to record the exact recovery strategy:"
+  echo "  rollback: bin/deploy-worker.sh --env staging --recovery-step current_before|prior|current_after ..."
+  echo "  forward_fix: bin/deploy-worker.sh --env staging --recovery-step forward_fix --release-key <key> ..."
+  echo "The wrapper, not a generic ops-record run, writes approval-eligible rehearsal evidence."
   exit 0
 fi
 
@@ -711,6 +858,8 @@ else
       || fail "--staging-receipt-idempotency-key must be a lowercase canonical UUID."
     if [ "$RECOVERY_STEP" = "standalone" ]; then
       CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+    elif [ "$RECOVERY_STEP" = "forward_fix" ]; then
+      CARR_CORRELATION_ID="$STAGING_RECEIPT_KEY"
     else
       [ -z "${CARR_CORRELATION_ID:-}" ] || [ "$CARR_CORRELATION_ID" = "$RECOVERY_ATTEMPT_ID" ] \
         || fail "ambient CARR_CORRELATION_ID differs from the recovery attempt."
@@ -720,7 +869,17 @@ else
 
     staging_attempt() {
       attempt_action="$1"; shift
-      if [ "$RECOVERY_STEP" = "standalone" ]; then
+      if [ "$RECOVERY_STEP" = "restore_only" ]; then
+        "$PY" "$REPO/tools/ops-record.py" staging-restore-only "$attempt_action" \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
+          --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
+          --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --git-sha "$HEAD_SHA" \
+          --correlation "$CARR_CORRELATION_ID" "$@"
+      elif [ "$RECOVERY_STEP" = "forward_fix" ]; then
+        "$PY" "$REPO/tools/ops-record.py" staging-forward-fix "$attempt_action" \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
+          --git-sha "$HEAD_SHA" --correlation "$CARR_CORRELATION_ID" "$@"
+      elif [ "$RECOVERY_STEP" = "standalone" ]; then
         "$PY" "$REPO/tools/ops-record.py" staging-attempt "$attempt_action" \
           --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
           --recovery-step standalone --git-sha "$HEAD_SHA" \
@@ -737,8 +896,20 @@ else
     DEPLOY_TAG="$(staging_attempt prepare --field expected_provider_tag)" \
       || fail "the exact staging deployment attempt was not durably prepared."
     [ -n "$DEPLOY_TAG" ] || fail "the prepared staging attempt returned no provider tag."
-    ATTEMPT_DEPLOY_CLAIMED="$(staging_attempt prepare --field deploy_claimed)" \
+    if [ -n "${TYPED_RECOVERY_TAG:-}" ] && [ "$DEPLOY_TAG" != "$TYPED_RECOVERY_TAG" ]; then
+      fail "the idempotent typed recovery prepare returned a different provider tag."
+    fi
+    ATTEMPT_CLAIM_FIELD="deploy_claimed"
+    [ "$RECOVERY_STEP" != "restore_only" ] || ATTEMPT_CLAIM_FIELD="mutation_claimed"
+    [ "$RECOVERY_STEP" != "forward_fix" ] || ATTEMPT_CLAIM_FIELD="mutation_claimed"
+    ATTEMPT_DEPLOY_CLAIMED="$(staging_attempt prepare --field "$ATTEMPT_CLAIM_FIELD")" \
       || fail "the prepared staging attempt claim state could not be read."
+    if [ "$RECOVERY_STEP" = "restore_only" ]; then
+      # The controller may record an `unknown` repair result only after this
+      # append-only attempt exists.  A preflight refusal has no repair row and
+      # must remain only the failed source-step evidence.
+      echo "  restore-only attempt prepared"
+    fi
 
     verify_staging_receipt_file() {
       receipt_file="$1"
@@ -765,7 +936,25 @@ else
     record_staging_receipt_file() {
       receipt_file="$1"
       verify_staging_receipt_file "$receipt_file" || return 1
-      if [ "$RECOVERY_STEP" = "standalone" ]; then
+      if [ "$RECOVERY_STEP" = "restore_only" ]; then
+        "$PY" "$REPO/tools/ops-record.py" staging-restore-only result \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --status succeeded \
+          --git-sha "$HEAD_SHA" --expected-provider-tag "$DEPLOY_TAG" \
+          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+          --staging-readback-file "$receipt_file"
+      elif [ "$RECOVERY_STEP" = "forward_fix" ]; then
+        provider_versions="$(mktemp "${TMPDIR:-/tmp}/carr-staging-forward-fix-versions.XXXXXX")" || return 1
+        chmod 600 "$provider_versions"
+        "$WRANGLER" versions list --env "$TARGET_ENV" --json > "$provider_versions" 2>/dev/null || { rm -f "$provider_versions"; return 1; }
+        "$PY" "$REPO/tools/ops-record.py" staging-forward-fix result \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --git-sha "$HEAD_SHA" \
+          --expected-provider-tag "$DEPLOY_TAG" --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+          --manifest "$RELEASE_MANIFEST" --staging-readback-file "$receipt_file" \
+          --provider-versions-file "$provider_versions"
+        result_rc=$?
+        rm -f "$provider_versions"
+        return "$result_rc"
+      elif [ "$RECOVERY_STEP" = "standalone" ]; then
         "$PY" "$REPO/tools/ops-record.py" deployment --service carr-mcp \
           --environment staging --state complete --git-sha "$HEAD_SHA" \
           --correlation "$CARR_CORRELATION_ID" --source-kind wrapper \
@@ -811,7 +1000,10 @@ else
     if [ "$STAGING_DEPLOY_RECOVERED" = 1 ]; then
       echo "  recovered exact serving staging tag; provider deploy skipped"
     else
-      DEPLOY_ALLOWED="$(staging_attempt claim --field deploy_allowed)" \
+      DEPLOY_CLAIM_FIELD="deploy_allowed"
+      [ "$RECOVERY_STEP" != "restore_only" ] || DEPLOY_CLAIM_FIELD="mutation_allowed"
+      [ "$RECOVERY_STEP" != "forward_fix" ] || DEPLOY_CLAIM_FIELD="mutation_allowed"
+      DEPLOY_ALLOWED="$(staging_attempt claim --field "$DEPLOY_CLAIM_FIELD")" \
         || fail "the prepared staging attempt could not be claimed."
       [ "$DEPLOY_ALLOWED" = "true" ] \
         || fail "deployment already claimed but its exact tag is not serving; refusing redeploy"
@@ -874,7 +1066,9 @@ if [ "$TARGET_ENV" = "production" ]; then
         "$PY" "$REPO/ops/verify-worker-release.py" \
           --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
           --provider-version-id "$PROVIDER_VERSION_ID" \
-          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" >/dev/null 2>&1
+          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+          --expected-schema-highest-migration "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
+          --expected-schema-applied-count "$EXPECTED_SCHEMA_APPLIED_COUNT" >/dev/null 2>&1
       LIVE_VERIFY_RC=$?
       set -e
       if [ "$LIVE_VERIFY_RC" -eq 0 ]; then
@@ -908,7 +1102,9 @@ if [ "$TARGET_ENV" = "production" ]; then
       "$PY" "$REPO/ops/verify-worker-release.py" \
         --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
         --provider-version-id "$PROVIDER_VERSION_ID" \
-        --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" || true
+        --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+        --expected-schema-highest-migration "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
+        --expected-schema-applied-count "$EXPECTED_SCHEMA_APPLIED_COUNT" || true
     echo "  Production /release is malformed or does not match the approved identity," \
          "still, after $LIVE_RELEASE_ATTEMPT attempt(s) over" \
          "$((LIVE_RELEASE_ATTEMPT * LIVE_READBACK_SLEEP))s. This is a settled" \
@@ -1223,21 +1419,66 @@ if [ "$TARGET_ENV" = "staging" ]; then
     || fail "checked-in staging target config is not exact."
   STAGING_RECEIPT="$(mktemp "${TMPDIR:-/tmp}/carr-staging-release.XXXXXX")"
   chmod 600 "$STAGING_RECEIPT"
-  trap 'rm -f "$STAGING_RECEIPT"' EXIT INT TERM
   STAGING_OK=0
+  # Cloudflare's staging route can continue serving the prior immutable Worker
+  # briefly after Wrangler returns. Attempt 9625fafe proved the old three-read
+  # window was too short: the provider version was created with the exact
+  # prepared tag, but all three /release reads still saw the prior tag and the
+  # typed recovery stopped at VERIFYING. Retry the same typed readback inside a
+  # fixed 60-second wall-clock budget. The only ambient controls are bounded
+  # below, and cannot turn a readback into an unbounded wait.
+  STAGING_READBACK_DEADLINE_SECONDS=60
+  STAGING_READBACK_CURL_MAX_SECONDS=15
+  STAGING_READBACK_ATTEMPTS="${CARR_STAGING_READBACK_ATTEMPTS:-12}"
+  STAGING_READBACK_SLEEP_SECONDS="${CARR_STAGING_READBACK_SLEEP_SECONDS:-5}"
+  case "$STAGING_READBACK_ATTEMPTS" in
+    ''|*[!0-9]*|0) fail "staging readback attempts must be a positive integer" ;;
+  esac
+  case "$STAGING_READBACK_SLEEP_SECONDS" in
+    ''|*[!0-9]*|0) fail "staging readback sleep must be a positive integer" ;;
+  esac
+  [ "$STAGING_READBACK_ATTEMPTS" -gt 0 ] \
+    || fail "staging readback attempts must be a positive integer"
+  [ "$STAGING_READBACK_SLEEP_SECONDS" -gt 0 ] \
+    || fail "staging readback sleep must be a positive integer"
+  [ "$STAGING_READBACK_ATTEMPTS" -le 12 ] \
+    || fail "staging readback attempts exceed the 12-attempt safety bound"
+  [ "$STAGING_READBACK_SLEEP_SECONDS" -le 5 ] \
+    || fail "staging readback sleep exceeds the 5-second safety bound"
+  STAGING_READBACK_STARTED_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
+  STAGING_READBACK_DEADLINE_MS=$((STAGING_READBACK_STARTED_MS + STAGING_READBACK_DEADLINE_SECONDS * 1000))
+  STAGING_READBACK_ATTEMPT=0
   record_staging_receipt() {
     record_staging_receipt_file "$STAGING_RECEIPT" >/dev/null
   }
-  for _ in 1 2 3; do
-    if [ -n "$STAGING_HOST" ] && curl --fail --silent --show-error --max-time 30 --max-filesize 65536 \
+  while [ "$STAGING_READBACK_ATTEMPT" -lt "$STAGING_READBACK_ATTEMPTS" ]; do
+    STAGING_READBACK_NOW_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
+    STAGING_READBACK_REMAINING_MS=$((STAGING_READBACK_DEADLINE_MS - STAGING_READBACK_NOW_MS))
+    [ "$STAGING_READBACK_REMAINING_MS" -gt 0 ] || break
+    STAGING_READBACK_ATTEMPT=$((STAGING_READBACK_ATTEMPT + 1))
+    STAGING_READBACK_CURL_MAX_MS=$((STAGING_READBACK_CURL_MAX_SECONDS * 1000))
+    [ "$STAGING_READBACK_CURL_MAX_MS" -le "$STAGING_READBACK_REMAINING_MS" ] || \
+      STAGING_READBACK_CURL_MAX_MS="$STAGING_READBACK_REMAINING_MS"
+    STAGING_READBACK_CURL_MAX="$("$PY" -c 'import sys; print(f"{int(sys.argv[1]) / 1000:.3f}")' "$STAGING_READBACK_CURL_MAX_MS")"
+    if [ -n "$STAGING_HOST" ] && curl --fail --silent --show-error --max-time "$STAGING_READBACK_CURL_MAX" --max-filesize 65536 \
          "https://$STAGING_HOST/release" > "$STAGING_RECEIPT" 2>/dev/null && \
        record_staging_receipt; then
       STAGING_OK=1; break
     fi
-    sleep 5
+    STAGING_READBACK_NOW_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
+    STAGING_READBACK_REMAINING_MS=$((STAGING_READBACK_DEADLINE_MS - STAGING_READBACK_NOW_MS))
+    if [ "$STAGING_READBACK_REMAINING_MS" -gt 0 ] && \
+       [ "$STAGING_READBACK_ATTEMPT" -lt "$STAGING_READBACK_ATTEMPTS" ]; then
+      STAGING_READBACK_SLEEP_MS=$((STAGING_READBACK_SLEEP_SECONDS * 1000))
+      [ "$STAGING_READBACK_SLEEP_MS" -le "$STAGING_READBACK_REMAINING_MS" ] || \
+        STAGING_READBACK_SLEEP_MS="$STAGING_READBACK_REMAINING_MS"
+      STAGING_READBACK_SLEEP="$("$PY" -c 'import sys; print(f"{int(sys.argv[1]) / 1000:.3f}")' "$STAGING_READBACK_SLEEP_MS")"
+      echo "  staging readback attempt $STAGING_READBACK_ATTEMPT of $STAGING_READBACK_ATTEMPTS did not yet observe the exact typed identity; waiting ${STAGING_READBACK_SLEEP}s"
+      sleep "$STAGING_READBACK_SLEEP"
+    fi
   done
   rm -f "$STAGING_RECEIPT"
-  trap - EXIT INT TERM
+  STAGING_RECEIPT=""
   if [ "$STAGING_OK" = 1 ]; then
     echo "  recorded immutable staging /release receipt for $CARR_CORRELATION_ID"
   else

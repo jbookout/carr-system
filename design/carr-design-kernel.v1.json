@@ -1,0 +1,68 @@
+{
+  "schema_version": "carr-design-kernel.v1",
+  "contract_id": "contract:carr-design-kernel",
+  "version": "v1",
+  "status": "active_contract_not_a_runtime_or_authority",
+  "priority_hierarchy": [
+    "user_task",
+    "authority_and_truth",
+    "accessibility",
+    "consistency",
+    "aesthetics",
+    "developer_convenience"
+  ],
+  "token_architecture": {
+    "canonical_stylesheet": "design/tokens.css",
+    "primitive_layer": ["primitive-brand-navy", "primitive-brand-navy-deep", "primitive-brand-orange", "space", "radius", "shadow", "motion", "touch-min"],
+    "semantic_layer": ["surface", "content", "border", "action", "status"],
+    "component_layer": ["card", "control", "focus"],
+    "theme_policy": "primitives_stable_semantic_aliases_swap",
+    "legacy_canon": ["navy", "navy-deep", "orange", "paper", "card", "field", "line", "ink", "muted", "quiet", "risk", "warn", "good"]
+  },
+  "context_slices": [
+    {"slice_id": "slice:core", "purpose": "Hierarchy, token architecture, status truth, and adapter boundary.", "required_for": ["all"]},
+    {"slice_id": "slice:interactive", "purpose": "State contracts, keyboard, focus, touch target, and reduced motion.", "required_for": ["interactive", "workstation"]},
+    {"slice_id": "slice:structured", "purpose": "Card grammar, visual structure, non-color status, narrow layout, and evidence display.", "required_for": ["structured", "workstation", "artifact"]},
+    {"slice_id": "slice:artifact", "purpose": "Self-contained output, freshness, provenance, and print/export adapter boundaries.", "required_for": ["artifact"]},
+    {"slice_id": "slice:review", "purpose": "Evidence-bound aesthetic critique and no-promotion constraint.", "required_for": ["review"]}
+  ],
+  "design_intents": [
+    {"intent_id": "intent:workspace", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
+    {"intent_id": "intent:deal-room", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
+    {"intent_id": "intent:model-room", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
+    {"intent_id": "intent:control-room", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
+    {"intent_id": "intent:job-passport", "surface_class": "workstation", "required_slices": ["slice:core", "slice:interactive", "slice:structured"], "optional_slices": ["slice:review"], "evaluation_profile": "profile:interactive-surface"},
+    {"intent_id": "intent:generated-artifact", "surface_class": "artifact", "required_slices": ["slice:core", "slice:structured", "slice:artifact"], "optional_slices": ["slice:interactive", "slice:review"], "evaluation_profile": "profile:artifact-surface"}
+  ],
+  "component_state_contract": {
+    "required_states": ["default", "hover", "active", "focus-visible", "disabled", "loading", "error", "empty"],
+    "conditional_states": ["success"],
+    "applicability": "state_must_be_authored_or_explicitly_not_applicable",
+    "failure_posture": "partial_stale_offline_and_refusal_are_visible_not_silent"
+  },
+  "visual_gate_portfolio": {
+    "profiles": [
+      {"profile_id": "profile:interactive-surface", "required_gates": ["keyboard", "focus_visible", "reduced_motion", "narrow_280", "narrow_320", "narrow_414", "overflow_clip", "target_size", "light_theme", "dark_theme", "semantic_tokens", "hardcode_lint", "non_color_meaning", "rtl_when_relevant"]},
+      {"profile_id": "profile:artifact-surface", "required_gates": ["focus_visible", "reduced_motion", "narrow_280", "narrow_320", "narrow_414", "overflow_clip", "light_theme", "dark_theme", "semantic_tokens", "hardcode_lint", "non_color_meaning", "rtl_when_relevant"]}
+    ],
+    "critical_gate_ids": ["keyboard", "focus_visible", "reduced_motion", "narrow_280", "narrow_320", "narrow_414", "overflow_clip", "target_size", "semantic_tokens", "non_color_meaning"],
+    "evidence_policy": "render_and_measure_in_a_real_browser_or_record_not_verified",
+    "aggregation_policy": "no_blended_score_critical_failure_blocks_admission"
+  },
+  "aesthetic_critique": {
+    "requires_evidence_refs": true,
+    "may_override_correctness": false,
+    "may_grant_promotion": false,
+    "role": "advisory_human_review_input"
+  },
+  "adapter_projection": {
+    "allowed_surface_families": ["workspace", "deal-room", "model-room", "control-room", "generated-artifact", "future-adapter"],
+    "projection_rule": "adapters_project_semantic_and_component_tokens_without_redefining_canonical_truth",
+    "required_provenance": ["contract_id", "version", "content_digest", "adapter_id"]
+  },
+  "provenance": {
+    "derived_from": ["corpus/DNA/ux-doctrine.md", "design/tokens.css", "claude-tree/skills/surface-review/SKILL.md", "control-room/contracts/carr-evaluation-kernel.v1.schema.json"],
+    "external_inspiration": "general_design_contract_pattern_only_no_third_party_content_or_branding_copied",
+    "data_class": "metadata_only"
+  }
+}

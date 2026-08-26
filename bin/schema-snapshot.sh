@@ -143,6 +143,22 @@ case "$RENEWAL_SOURCE_APPLIED" in
   *) echo "schema-snapshot: could not read the renewal-delivery ledger state" >&2; exit 1 ;;
 esac
 
+RULE_DELIVERY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0291_rule_delivery_layers.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery ledger state" >&2; exit 1 ;;
+esac
+
+RULE_DELIVERY_CUTOVER_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0317_atomic_rule_delivery_cutover.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_CUTOVER_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery cutover ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -204,6 +220,7 @@ begin
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
     'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
     'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver',
+    'carr_program5_forward_fix_verifiers',
     'carr_renewal_source_attestors'
   ] loop
     if not exists (select 1 from pg_roles where rolname = r) then
@@ -333,6 +350,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 select format('grant %s on schema %s to %s;',
@@ -350,6 +368,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 select format('grant %s on %s %s.%s to %s;',
@@ -369,6 +388,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
@@ -389,6 +409,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
@@ -406,6 +427,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 -- pg_auth_members permits different grantors for the same role/member pair.
@@ -516,6 +538,14 @@ fi
 #     controlled block the 0228 lifecycle cannot validate pinned rules. Do not
 #     add rule_control_binding or any receipt/rule table: those are per-rule
 #     history, not bounded internal control configuration.
+#   * ops.rule_delivery_policy (exactly 1 row) and
+#     ops.rule_delivery_activation_target (exactly 9 rows) are the bounded
+#     configuration for the already-existing scoped rule-delivery cutover.
+#     0291 and 0317 seed them, but once those migrations enter this snapshot's
+#     ledger they no longer replay. Omitting the rows produced mode:null and no
+#     cutover target set on a fresh rebuild. Carry these two tables only; never
+#     add ops.rule_delivery_observation, ops.rule_delivery_activation_receipt,
+#     or any other runtime/evidence table to this list.
 #   * The disabled renewal-radar-source-daily v1 job definition is a fixed
 #     internal contract required by 0230's lease-bound delivery gate. Carry
 #     only that exact row; never widen this to arbitrary job/runtime rows.
@@ -542,7 +572,8 @@ deal_phase deal_type_ref lead_lane lead_stage loop_domain negotiation_claim_type
 participant_role party_link_kind vendor_category vendor_disposition \
 vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
 doctrine_review_policy actor retrieval_proposal retrieval_ranking_policy \
-ops.guidance_registry"
+ops.guidance_registry ops.rule_delivery_policy \
+ops.rule_delivery_activation_target"
 
 VOCAB_ARGS=""
 for t in $VOCAB_TABLES; do
@@ -748,6 +779,146 @@ on conflict (key,version) do nothing;
 
 RENEWAL_SOURCE_JOB
 fi
+
+if [ "$RULE_DELIVERY_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_POLICY'
+-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh) — safe rebuild default.
+-- The bounded vocabulary dump preserves an existing singleton. If the source
+-- store lacks it, 0291 will not replay once its ledger row is in the snapshot,
+-- so this fallback creates only the fail-safe shadow default.
+insert into ops.rule_delivery_policy (singleton,mode,changed_by,reason)
+values (true,'shadow','schema-snapshot',
+        'Fresh rebuild default: scoped delivery remains shadow until governed cutover evidence exists.')
+on conflict (singleton) do nothing;
+
+RULE_DELIVERY_POLICY
+fi
+
+if [ "$RULE_DELIVERY_CUTOVER_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS'
+-- CARR RULE DELIVERY ACTIVATION TARGETS (bin/schema-snapshot.sh) — exact reviewed cutover config.
+-- The nine rows are reviewed cutover configuration from 0317, not live
+-- activation state.  Without them the guarded function correctly refuses to
+-- move out of shadow after a schema-only rebuild.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('581cb3fe','shared','delegation-council','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a')
+on conflict (short_id) do nothing;
+
+RULE_DELIVERY_ACTIVATION_TARGETS
+fi
+
+# TWO GOVERNED EXECUTION SEEDS JOINED ON 2026-08-25, after 0309 and 0310
+# entered the production ledger.  Neither is a vocabulary row and neither is
+# safe to recover by dumping the whole table: execution-environment tables
+# contain append-only provider evidence, while ops.job_definition contains
+# live runtime contracts.  A snapshot that carries the ledger but omits these
+# two bounded repository-declared rows cannot bind a fresh Work Request to the
+# active Hermes local environment or admit an Engineering Passport slice.
+#
+# The values below are the exact reviewed built-in seed from 0309 and the
+# final engineering-slice:v1 contract from 0310 through 0312.  They are deliberately
+# rendered from repository text, with no production payload or observed
+# timestamp copied into the tracked snapshot.  The fixed conformance time is
+# a historical source observation, not a freshness claim; the provider's
+# active state and passed conformance remain the authoritative admission facts.
+cat >> "$TMP" <<'GOVERNED_EXECUTION_SEEDS'
+-- CARR GOVERNED EXECUTION SEEDS (bin/schema-snapshot.sh) — exact bounded repository declarations.
+-- 0309's protected hermes-local provider, its passed conformance, and its
+-- complete lifecycle stream are required because 0309 is already in the
+-- snapshot ledger and therefore will not replay its data block.
+do $carr_governed_execution_seeds$
+declare joe_id uuid; provider_id uuid; conformance_id uuid; base jsonb;
+  manifest jsonb; manifest_digest text; run_digest text; observation jsonb;
+  observed_at_value timestamptz;
+begin
+  select id into joe_id from public.actor where slug='joe' and kind='human' and active;
+  if joe_id is null then raise exception 'schema snapshot requires active Joe actor for hermes-local seed'; end if;
+  base := jsonb_build_object(
+    'schema_version','execution-environment-provider.v1','provider_key','hermes-local','provider_version',1,
+    'display_name','Hermes Local Terminal','source_class','built_in','backend_kind','local',
+    'implementation_ref','hermes:tools.environments.local.LocalEnvironment',
+    'implementation_digest','sha256:7d680c252bedc88ff7b80d50a5bfbdb9b926823d8bbc521f606e7b58237cbc1e',
+    'capability_refs',jsonb_build_array('environment:exec','environment:filesystem','environment:process'),
+    'operation_refs',jsonb_build_array('operation:create','operation:exec','operation:cancel','operation:destroy','operation:health'),
+    'isolation_class','host_process','egress_policy_ref','egress:host-governed','secret_policy_ref','secrets:never-in-manifest',
+    'persistence_mode','session_scoped','resource_policy_ref','resources:bounded-local-v1','cleanup_policy_ref','cleanup:process-tree-v1',
+    'threat_model_ref','threat-model:local-trusted-input-v1','conformance_contract_ref','conformance:execution-environment-v1',
+    'conformance_contract_digest','sha256:'||encode(public.digest('conformance:execution-environment-v1','sha256'),'hex'),
+    'configuration_schema_digest','sha256:'||encode(public.digest('hermes:terminal.backend:local:v1','sha256'),'hex'),
+    'package_provenance',jsonb_build_object('package_ref','package:nous-hermes-agent','package_digest','sha256:'||encode(public.digest('hermes-upstream:1bbb6e5bce56e721ab685af4cd87df21bbff4d35','sha256'),'hex'),'signature_ref','signature:upstream-git-commit','sbom_ref','sbom:hermes-installed-tree'),
+    'collision_policy','protected_builtin','contains_secrets',false);
+  manifest_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(base),'sha256'),'hex');
+  manifest := base||jsonb_build_object('manifest_digest',manifest_digest);
+  insert into ops.execution_environment_provider(provider_key,provider_version,source_class,backend_kind,manifest_digest,manifest,protected_builtin,created_by_actor_id,idempotency_key)
+  values('hermes-local',1,'built_in','local',manifest_digest,manifest,true,joe_id,'03090000-0000-4000-8000-000000000001')
+  returning id into provider_id;
+  observed_at_value := '2026-08-25T00:00:00Z'::timestamptz;
+  observation := jsonb_build_object(
+    'schema_version','execution-environment-conformance.v1','provider_ref','environment-provider:hermes-local:v1',
+    'manifest_digest',manifest_digest,'implementation_digest',manifest->>'implementation_digest',
+    'package_digest',manifest->'package_provenance'->>'package_digest','package_revision_ref','git:706f33d42415d706b8f93dd299f4b317428e4a6b',
+    'configuration_schema_digest',manifest->>'configuration_schema_digest','contract_ref',manifest->>'conformance_contract_ref',
+    'contract_digest',manifest->>'conformance_contract_digest','run_ref','conformance-run:hermes-local-release-20260825',
+    'status','passed','check_results',jsonb_build_object(
+      'check:base-environment-contract-present',true,'check:cleanup-contract-declared',true,'check:hermes-version-exact',true,
+      'check:implementation-digest-exact',true,'check:local-environment-present',true,'check:package-provenance-exact',true,
+      'check:package-tree-clean',true,'check:source-secret-scan',true,'check:terminal-backend-local',true),
+    'version_ref','Hermes Agent v0.20.5 (2026.8.19) · upstream 1bbb6e5b · local 706f33d4 (+1 carried commit)',
+    'backend_kind','local','evidence_refs',jsonb_build_array('evidence:hermes-version-readback','evidence:terminal-backend-readback','evidence:installed-environment-contract'),
+    'contains_secrets',false,'observed_at',to_jsonb(observed_at_value));
+  run_digest := 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(observation-'observed_at'),'sha256'),'hex');
+  observation := observation||jsonb_build_object('run_digest',run_digest);
+  insert into ops.execution_environment_conformance(provider_id,contract_ref,contract_digest,run_ref,run_digest,manifest_digest,implementation_digest,package_digest,configuration_schema_digest,status,check_refs,evidence_refs,observation,observed_at,recorded_by_actor_id,idempotency_key)
+  values(provider_id,manifest->>'conformance_contract_ref',manifest->>'conformance_contract_digest',observation->>'run_ref',run_digest,manifest_digest,manifest->>'implementation_digest',manifest->'package_provenance'->>'package_digest',manifest->>'configuration_schema_digest','passed',to_jsonb(array(select key from jsonb_each(observation->'check_results') order by key)),observation->'evidence_refs',observation,observed_at_value,joe_id,'03090000-0000-4000-8000-000000000002')
+  returning id into conformance_id;
+  insert into ops.execution_environment_provider_event(provider_id,from_state,to_state,evidence_refs,ruled_by_actor_id,idempotency_key) values
+    (provider_id,null,'discovered',jsonb_build_array('evidence:tony-simons-terminal-provider-source'),joe_id,'03090000-0000-4000-8000-000000000003'),
+    (provider_id,'discovered','quarantined',jsonb_build_array('evidence:provider-contract-review'),joe_id,'03090000-0000-4000-8000-000000000004'),
+    (provider_id,'quarantined','conformance_passed',jsonb_build_array('evidence:test-execution-environment-unit'),joe_id,'03090000-0000-4000-8000-000000000005'),
+    (provider_id,'conformance_passed','shadow',jsonb_build_array('evidence:hermes-local-existing-baseline'),joe_id,'03090000-0000-4000-8000-000000000006'),
+    (provider_id,'shadow','canary',jsonb_build_array('evidence:hermes-local-config-readback'),joe_id,'03090000-0000-4000-8000-000000000007'),
+    (provider_id,'canary','active',jsonb_build_array('evidence:joe-approved-provider-foundation'),joe_id,'03090000-0000-4000-8000-000000000008');
+end
+$carr_governed_execution_seeds$;
+
+-- The exact enabled on-demand engineering-slice:v1 job contract through 0312.
+-- A post-0312 snapshot marks 0311/0312 applied in its migration ledger, so a
+-- fresh rebuild will not replay their contract updates.  This INSERT uses
+-- ON CONFLICT DO NOTHING deliberately: it must therefore already be the final
+-- sponsored, lease-bound controller declaration rather than the old 0310 row.
+-- It remains the existing ops.job queue projection, not a second workflow or
+-- task store.
+insert into ops.job_definition
+  (key,version,enabled,risk,owner_actor,execution_kind,execution_contract,
+   inventory_contract,state_contract,routing_contract,filtering_contract,
+   recurrence,validation_contract,retry_policy,deduplication,completion_contract,legacy_schedule)
+values
+  ('engineering-slice',1,true,'yellow','hermes','deterministic',
+   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runEngineeringWorker","args":["room-bridge-engineering-controller"],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
+   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["room-bridge lease-bound controller","Codex Desktop fresh-native-session adapter"],"authority":"server-derived sponsored Codex execution with a closed repository action allowlist; no caller-selected identity, authority, model, action, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
+   '{"states":["queued","running","succeeded","failed","timed_out"]}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["capability.candidate_admitted","runner.identity_bound"]},"description":"an accepted capability candidate and bound runner identity admit the slice"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["command.registered_args_selected"]},"description":"only the registered fresh Codex adapter is selected"}'::jsonb,
+   '{"kind":"on_demand","schedule":null,"cron":null,"timezone":"America/Chicago","source":"MCP admit-engineering-slice only"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["command.exit_zero","command.workflow_marker_valid"]},"description":"the bounded adapter succeeds and returns its typed workflow marker"}'::jsonb,
+   '{"max_attempts":2,"backoff":"constant","base_seconds":30,"cap_seconds":300,"timeout_seconds":1800}'::jsonb,
+   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}:generation:{generation}"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["command.receipt_persisted","command.execution_evidence_reconciles"]},"description":"lease-bound typed receipt persists and reconciles to the issued envelope","receipt_kind":"engineering_slice"}'::jsonb,
+   '{"provider":"none","status":"disabled","disable_requires":"no scheduler exists; on-demand MCP admission only"}'::jsonb)
+on conflict (key,version) do nothing;
+GOVERNED_EXECUTION_SEEDS
 
 # doctrine_meta is a singleton bootstrap rather than reference vocabulary: its
 # live generation advances with successful doctrine commits and must never be

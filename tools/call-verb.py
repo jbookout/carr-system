@@ -48,6 +48,13 @@ no DATABASE_URL set. On the break-glass path, identity comes from
 ~/.config/carr/local-actor.json (bin/set-local-actor.sh) — see
 mcp-server/local-verb.mjs for the resolution and its stated limits.
 
+The unattended room bridge's queue projector is the one bounded internal
+exception to the LOCAL_TOKENS credential choice: its subprocess sets
+CARR_MCP_CLIENT_PROFILE=hermes-projector, causing local-verb.mjs to read
+CARR_HERMES_MCP_TOKEN from the same 600-mode file. The Worker still derives the
+actor from HERMES_TOKENS; no slug or token is put in argv. Ordinary bridge calls
+clear the selector in verb_io.py and remain joe-local.
+
 Never prints the DSN or any token value.
 """
 import importlib.util
@@ -94,6 +101,23 @@ def node_bin() -> str:
         if os.path.sep not in p or os.path.exists(p):
             return p
     return "node"
+
+
+def break_glass_dsn(db_tap, branch):
+    """Choose the narrow Joe authority credential for an authority-only verb.
+
+    A named rehearsal branch has no corresponding authority credential, so it
+    retains the existing owner-derived branch path.  On production, though,
+    the documented authority credential must win when it is available: deriving
+    neondb_owner first makes an authority-only verb unreachable through this
+    otherwise receipted wrapper and widens its database privilege needlessly.
+    The value is returned only to subprocess environment construction and is
+    never printed.
+    """
+    authority_url = os.environ.get("CARR_DB_AUTHORITY_JOE_URL")
+    if branch is None and authority_url:
+        return authority_url
+    return db_tap.dsn(branch or "production")
 
 
 def main() -> None:
@@ -143,7 +167,7 @@ def main() -> None:
         sys.exit(rc)
 
     # ---- break-glass path: direct database connection, receipted ----
-    url = _db_tap().dsn(branch or "production")
+    url = break_glass_dsn(_db_tap(), branch)
     env = {
         **os.environ,
         "DATABASE_URL": url,

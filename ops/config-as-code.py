@@ -49,6 +49,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
+
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
 REPO_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -95,6 +98,7 @@ def _canonical_repo(here):
 
 
 REPO = _canonical_repo(REPO_HERE)
+PREREQUISITE_CHECK = machine_prerequisites
 
 # `git -C <path>` IS NOT A GUARANTEE OF WHICH REPOSITORY YOU HIT. Every variable
 # below outranks both -C and the working directory, and git exports several of
@@ -216,7 +220,8 @@ PRIMARY_ONLY = {
     # plist as designed, and bin/preflight-watch.sh is retired with this entry —
     # which had been naming a plist that exists in neither ops/launchd/ nor
     # ~/Library/LaunchAgents. A lifecycle that completes should leave nothing
-    # behind pointing at it (rule 61c64d91).
+    # behind pointing at it (rule def3e84e, artifact tombstones: nothing
+    # silently rots).
     "com.carr.nightly-record-layer.plist",
     "com.carr.rules-refresh.plist",
     "com.carr.local-briefs.plist",
@@ -238,6 +243,15 @@ DEFINITION_ONLY = {
         "awaits accepted shadow/canary evidence and cutover approval"
     ),
 }
+
+# A LaunchAgent that invokes this installer cannot unload its own label and
+# still return to bin/run-scheduled.sh: launchd terminates the wrapper process
+# tree, so the run never reaches its durable receipt.  The caller may identify
+# exactly that one active label.  Every other plist retains the ordinary
+# unload/load convergence below.  If the active plist changed, install fails
+# closed without writing a misleading new body over the still-old loaded job;
+# an external installer is the named remedy.  If unchanged, it remains loaded.
+ACTIVE_LAUNCHD_LABEL_ENV = "CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL"
 
 
 # Claude scheduled-task definitions are not merely configuration files: their
@@ -456,6 +470,35 @@ def read(path):
         return None
 
 
+def launchd_texts_match(live_text, repo_text):
+    """Compare launchd plist bodies with token portability normalized on both sides."""
+    return portable(live_text or "") == portable(repo_text or "")
+
+
+def tracked_text_match(label, live, repo_text):
+    """Config equality that keeps launchd normalization symmetrical."""
+    if label.startswith("launchd "):
+        return launchd_texts_match(live, repo_text)
+    return live == repo_text
+
+
+def hook_block_script_paths(block):
+    """Every absolute .py path a hooks block's commands invoke, real and sorted.
+
+    The extraction half shared by hook_scripts_untracked (which asks git about
+    the LIVE block) and cmd_install's missing-script refusal (which asks the
+    filesystem about the PLANNED block before writing it)."""
+    paths = set()
+    for groups in (block or {}).values():
+        if not isinstance(groups, list):
+            continue
+        for grp in groups:
+            for hook in (grp or {}).get("hooks", []) or []:
+                for tok in re.findall(r"(/[^\s'\"]+\.py)", hook.get("command", "") or ""):
+                    paths.add(os.path.realpath(concrete(tok)))
+    return sorted(paths)
+
+
 def hook_scripts_untracked():
     """Hook scripts that settings.json points at but git does not track.
 
@@ -482,16 +525,8 @@ def hook_scripts_untracked():
     block = live_hooks_block()
     if not block:
         return []
-    paths = set()
-    for groups in block.values():
-        if not isinstance(groups, list):
-            continue
-        for grp in groups:
-            for hook in (grp or {}).get("hooks", []) or []:
-                for tok in re.findall(r"(/[^\s'\"]+\.py)", hook.get("command", "") or ""):
-                    paths.add(os.path.realpath(concrete(tok)))
     out = []
-    for p in sorted(paths):
+    for p in hook_block_script_paths(block):
         if not os.path.exists(p):
             out.append((p, "settings.json invokes it and IT DOES NOT EXIST"))
             continue
@@ -766,7 +801,7 @@ def cmd_check():
             missing.append((label, "on disk: MISSING; in repo: present"))
         elif have is None:
             untracked.append((label, "on disk: present; in repo: NOT TRACKED"))
-        elif have != live:
+        elif not tracked_text_match(label, live, have):
             different.append((label, "TRACKED BUT DIFFERENT from the live copy"))
     # A hook script the settings block invokes but git does not track is a
     # separate failure from a settings mismatch, and it used to be invisible
@@ -782,6 +817,10 @@ def cmd_check():
     ]
     drift = missing + untracked + different + disallowed
     if not drift and not unversioned:
+        prerequisite_report = prerequisite_failure_report(PREREQUISITE_CHECK(REPO))
+        if prerequisite_report:
+            print(prerequisite_report)
+            return 1
         print(f"config-as-code: OK — {len(pairs())} items, repo matches machine")
         return 0
     if not drift and unversioned:
@@ -857,6 +896,47 @@ def cmd_pull(apply):
     return 0
 
 
+def install_launchd_plist(filename, dest, body, body_matches):
+    """Render and load one plist without letting an active job unload itself.
+
+    Returns ``loaded``, ``kept``, or ``failed``.  A changed active plist cannot
+    be rendered honestly without also reloading it, and reloading it here kills
+    the receipt wrapper.  That case therefore leaves the destination untouched
+    and fails with the exact external-install remedy.
+    """
+    try:
+        label = plistlib.loads(body.encode("utf-8")).get("Label", "")
+    except (AttributeError, plistlib.InvalidFileException, ValueError):
+        label = ""
+    active_label = os.environ.get(ACTIVE_LAUNCHD_LABEL_ENV, "").strip()
+    is_active_self = bool(label and active_label == label)
+
+    if is_active_self:
+        if body_matches:
+            print(f"      kept loaded (active installer job {label}; body unchanged)")
+            return "kept"
+        print(f"      SELF-RELOAD REFUSED ({filename}: active installer job {label}; "
+              "destination left unchanged so loaded and installed state cannot diverge)")
+        print("      remedy: run `python3 ops/config-as-code.py install --apply` "
+              "from an external process")
+        return "failed"
+
+    if not body_matches:
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    subprocess.run(["launchctl", "unload", "-w", dest],
+                   capture_output=True, check=False)
+    r = subprocess.run(["launchctl", "load", "-w", dest],
+                       capture_output=True, text=True, check=False)
+    if r.returncode == 0:
+        print("      loaded")
+        return "loaded"
+    print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
+          f"— migration will remain incomplete")
+    return "failed"
+
+
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
     settings_existed = os.path.exists(SETTINGS)
@@ -875,6 +955,25 @@ def cmd_install(apply):
         return 1
 
     planned = json.loads(concrete(src))
+
+    # REFUSE A BLOCK WHOSE SCRIPTS ARE NOT THERE (added after 2026-08-24).
+    # Settings apply on the very next prompt of every session, so a hooks block
+    # invoking a script this machine does not have blocks EVERY session the
+    # moment it lands. That is not hypothetical: on 2026-08-24 install ran from
+    # a worktree that had the freshly merged hook wrapper while {{REPO}} still
+    # expanded to a canonical checkout one commit behind, and every session on
+    # this Mac was dead overnight. cmd_check's hook_scripts_untracked() sees
+    # this class only AFTER the write; install is the moment it is preventable.
+    absent = [p for p in hook_block_script_paths(planned) if not os.path.exists(p)]
+    if absent:
+        print("ERROR: the tracked hooks block invokes script(s) this machine does not have:")
+        for p in absent:
+            print(f"    {p}")
+        print("  Installing anyway would block every session at its next prompt.")
+        print("  Most likely the checkout those paths point into is behind the branch")
+        print("  that shipped them — fast-forward it, then re-run install.")
+        return 1
+
     if cfg.get("hooks") == planned:
         print("  hooks block already matches the repo")
     else:
@@ -970,7 +1069,7 @@ def cmd_install(apply):
         print("  SKIP  scheduled tasks (secondary machines install none; no approved "
               "secondary task scope is configured)")
 
-    launchd_load_failures = []
+    launchd_activation_failures = []
     if apply:
         os.makedirs(LAUNCHD_SRC, exist_ok=True)
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
@@ -984,8 +1083,12 @@ def cmd_install(apply):
             print(f"  SKIP  {f} (the nightly chain already does this here)")
             continue
         dest = os.path.join(LAUNCHD_SRC, f)
-        body = concrete(read(os.path.join(LAUNCHD_REPO, f)))
-        body_matches = read(dest) == body
+        source = read(os.path.join(LAUNCHD_REPO, f))
+        if source is None:
+            print(f"  ERROR  cannot render {f} because its tracked source is missing")
+            return 1
+        body = concrete(source)
+        body_matches = launchd_texts_match(read(dest), source)
         if body_matches and not apply:
             continue
         gone = missing_targets(body)
@@ -997,9 +1100,6 @@ def cmd_install(apply):
         else:
             print(f"  {'WRITE' if apply else 'would write'}  {dest}")
         if apply:
-            if not body_matches:
-                with open(dest, "w", encoding="utf-8") as fh:
-                    fh.write(body)
             # Load it, do not print a command for a human to paste (rule
             # e313a3ca). Writing the plist and stopping leaves the job on disk
             # and dead: on a fresh machine that means the nightly never runs,
@@ -1007,16 +1107,9 @@ def cmd_install(apply):
             # migration and then never refreshed as clients are added. unload
             # is expected to fail when the job was never loaded; that is not
             # an error, which is why only the load result is reported.
-            subprocess.run(["launchctl", "unload", "-w", dest],
-                           capture_output=True, check=False)
-            r = subprocess.run(["launchctl", "load", "-w", dest],
-                               capture_output=True, text=True, check=False)
-            if r.returncode == 0:
-                print("      loaded")
-            else:
-                print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
-                      f"— migration will remain incomplete")
-                launchd_load_failures.append(f)
+            outcome = install_launchd_plist(f, dest, body, body_matches)
+            if outcome == "failed":
+                launchd_activation_failures.append(f)
 
     # Git hooks. Added 2026-08-03, when Dell was granted WRITE and it turned out
     # branch protection is unavailable on a private free-plan repo — so the pull
@@ -1134,8 +1227,9 @@ def cmd_install(apply):
     # running five sessions. The opposite is true: an install takes effect
     # everywhere immediately. Rule 97326357 — a claim about a surface becomes
     # doctrine only after a live test from that surface.
-    if launchd_load_failures:
-        print("ERROR: LaunchAgent load failed for: " + ", ".join(launchd_load_failures))
+    if launchd_activation_failures:
+        print("ERROR: LaunchAgent install/reload failed for: "
+              + ", ".join(launchd_activation_failures))
         return 1
     backup_note = ", ".join(written_backups) if written_backups else "none; new files"
     if codex_state == "absent":

@@ -120,6 +120,18 @@ check(
     events[5][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
 )
 check(
+    "atomic rule-delivery cutover runs after authority acceptance",
+    events[6][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+)
+check(
+    "scoped engineering claim runs after the authority acceptances",
+    events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+)
+check(
+    "Engineering terminalization race runs after the scoped claim",
+    events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+)
+check(
     "authority acceptance receives only the local disposable DSN",
     child_envs[5].get("CARR_LOCAL_PG_DSN")
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci"
@@ -144,6 +156,18 @@ check("strict lane uses canonical strict CI", result == 0 and events[4][-1] == "
 check(
     "strict lane also proves atomic Joe lifecycle",
     events[5][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+)
+check(
+    "strict lane also proves atomic rule-delivery cutover",
+    events[6][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+)
+check(
+    "strict lane also proves the scoped engineering claim",
+    events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+)
+check(
+    "strict lane also proves the Engineering terminalization race",
+    events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
 )
 
 

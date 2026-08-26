@@ -19,6 +19,11 @@ spec = importlib.util.spec_from_file_location(
 assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+NIGHTLY_SOURCE = (Path(REPO) / "ops/scheduled-tasks/nightly-record-layer.SKILL.md").read_text(
+    encoding="utf-8")
+# The fixture below tests config reconciliation. Machine dependencies have their
+# own hermetic suite and must not be inferred from a temporary HOME.
+setattr(mod, "PREREQUISITE_CHECK", lambda _repo: [])
 
 DESIRED = {"hooks": {
     "Stop": [{"hooks": [{
@@ -132,6 +137,7 @@ def main():
             f"task-{number:02d}": f"---\nname: task-{number:02d}\n---\nCARR managed {number}\n"
             for number in range(1, 17)
         }
+        primary_tasks["nightly-record-layer"] = NIGHTLY_SOURCE
         for name, body in primary_tasks.items():
             (tasks / f"{name}.SKILL.md").write_text(body, encoding="utf-8")
         original_primary = mod.IS_PRIMARY
@@ -140,9 +146,13 @@ def main():
             primary_task_install_rc = mod.cmd_install(True)
             primary_task_check_rc = mod.cmd_check()
         primary_task_rendered = all(
-            (Path(mod.TASKS_SRC) / name / "SKILL.md").read_text(encoding="utf-8") == body
+            (Path(mod.TASKS_SRC) / name / "SKILL.md").read_text(encoding="utf-8")
+            == mod.concrete(body)
             for name, body in primary_tasks.items()
         )
+        nightly_task_rendered = (
+            Path(mod.TASKS_SRC) / "nightly-record-layer" / "SKILL.md"
+        ).read_text(encoding="utf-8") == mod.concrete(NIGHTLY_SOURCE)
 
         mod.IS_PRIMARY = False
         secondary_task_source = Path(mod.TASKS_SRC)
@@ -197,6 +207,79 @@ def main():
             secondary_bad_install_rc = mod.cmd_install(True)
         secondary_bad_output = secondary_bad_out.getvalue()
         modified_task_preserved = modified_task.read_text(encoding="utf-8") == "modified CARR task\n"
+        # A launchd body that contains a literal token string and /Users path in a
+        # comment must still compare equal after install-style concrete rendering.
+        # A shared helper, not a duplicated ad hoc compare, now owns that rule.
+        token_comment_name = "com.carr.literal-comment-token.plist"
+        token_comment_body = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!--\n"
+            "  NOTE: this comment keeps the literal text {{REPO}} while documenting the\n"
+            "  same home path as /Users/booko for human readability.\n"
+            "-->\n"
+            "<plist version=\"1.0\">\n"
+            "<dict>\n"
+            "<key>Label</key>\n"
+            "<string>com.carr.literal-comment-token</string>\n"
+            "<key>ProgramArguments</key>\n"
+            "<array>\n"
+            "  <string>/usr/bin/env</string>\n"
+            "  <string>zsh</string>\n"
+            "</array>\n"
+            "<key>RunAtLoad</key>\n"
+            "<false/>\n"
+            "</dict>\n"
+            "</plist>\n"
+        )
+        token_comment_case_home = home / "launchd-token-comment-case"
+        token_comment_case_repo = token_comment_case_home / "carr-system"
+        token_comment_case_config = token_comment_case_repo / "ops" / "config"
+        token_comment_case_launchd = token_comment_case_repo / "ops" / "launchd"
+        for p in [token_comment_case_config, token_comment_case_launchd]:
+            p.mkdir(parents=True, exist_ok=True)
+        original_state = {name: getattr(mod, name) for name in [
+            "REPO", "SETTINGS", "TASKS_SRC", "TASKS_REPO", "TASKS_QUARANTINE",
+            "LAUNCHD_SRC", "LAUNCHD_REPO", "HOOKS_REPO", "CODEX_HOOKS_SRC",
+            "CODEX_HOOKS_REPO", "CODEX_CONFIG", "CODEX_PERMISSIONS_REPO",
+        ]}
+        token_comment_home = token_comment_case_home / "home"
+        token_comment_case_settings = token_comment_home / ".claude" / "settings.json"
+        hooks = {"PreToolUse": []}
+        (token_comment_home / ".claude").mkdir(parents=True, exist_ok=True)
+        token_comment_case_settings.write_text(json.dumps({"hooks": hooks}, indent=2) + "\n", encoding="utf-8")
+        (token_comment_case_config / "hooks.json").write_text(
+            json.dumps(hooks, indent=2) + "\n", encoding="utf-8"
+        )
+        mod.REPO = str(token_comment_case_repo)
+        mod.SETTINGS = str(token_comment_case_settings)
+        mod.TASKS_SRC = str(token_comment_home / ".claude" / "scheduled-tasks")
+        mod.TASKS_REPO = str(token_comment_case_repo / "ops" / "scheduled-tasks")
+        mod.TASKS_QUARANTINE = str(token_comment_home / ".claude" / "scheduled-tasks-quarantine" / "carr-primary-only")
+        mod.LAUNCHD_SRC = str(token_comment_home / "Library" / "LaunchAgents")
+        mod.LAUNCHD_REPO = str(token_comment_case_launchd)
+        mod.HOOKS_REPO = str(token_comment_case_config / "hooks.json")
+        mod.CODEX_HOOKS_SRC = str(token_comment_home / ".codex" / "hooks.json")
+        mod.CODEX_HOOKS_REPO = str(token_comment_case_config / "codex-hooks.json")
+        mod.CODEX_CONFIG = str(token_comment_home / ".codex" / "config.toml")
+        mod.CODEX_PERMISSIONS_REPO = str(token_comment_case_config / "codex-permissions.toml")
+        (Path(mod.LAUNCHD_SRC)).mkdir(parents=True, exist_ok=True)
+        token_comment_source = token_comment_case_launchd / token_comment_name
+        token_comment_source.write_text(token_comment_body, encoding="utf-8")
+        token_comment_live = Path(mod.LAUNCHD_SRC) / token_comment_name
+        token_comment_live.write_text(mod.concrete(token_comment_body), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as token_comment_out:
+            token_comment_clean_check_rc = mod.cmd_check()
+        token_comment_clean_output = token_comment_out.getvalue()
+        token_comment_live.write_text(
+            mod.concrete(token_comment_body).replace("<string>zsh</string>", "<string>bash</string>"),
+            encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as token_comment_drift_out:
+            token_comment_drift_check_rc = mod.cmd_check()
+        token_comment_drift_output = token_comment_drift_out.getvalue()
+        for name, value in original_state.items():
+            setattr(mod, name, value)
+        token_comment_source.unlink(missing_ok=True)
+
         # PIN THE MACHINE ROLE FOR THE LAUNCHD CASES. This used to restore the
         # real machine's role here, which silently made the three launchd
         # assertions below mean different things on different Macs: the synthetic
@@ -342,6 +425,44 @@ def main():
             and "SKIP  scheduled task calendar-prebrief-am (definition only:" in guard_output
             and not (Path(mod.TASKS_SRC) / "calendar-prebrief-am" / "SKILL.md").exists()
         )
+
+        # A hooks block that invokes a script the machine does not have must
+        # refuse to install. Applied anyway, it blocks EVERY session at its
+        # next prompt — the 2026-08-24 overnight outage, where settings were
+        # installed while the checkout they point into was one commit behind
+        # the merged hook wrapper they reference.
+        mod.IS_PRIMARY = True
+        hooks_dir = repo / "hooks"
+        hooks_dir.mkdir(exist_ok=True)
+        present_script = hooks_dir / "present-gate.py"
+        present_script.write_text("# present\n", encoding="utf-8")
+        absent_script = hooks_dir / "meter-run.py"
+        (config / "hooks.json").write_text(json.dumps({
+            "UserPromptSubmit": [{"hooks": [{
+                "type": "command",
+                "command": f"/usr/bin/env python3 {absent_script} {present_script}",
+                "timeout": 10,
+            }]}],
+        }, indent=2) + "\n", encoding="utf-8")
+        settings_before_refusal = Path(mod.SETTINGS).read_text(encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as absent_out:
+            absent_install_rc = mod.cmd_install(True)
+        absent_output = absent_out.getvalue()
+        absent_refused = (
+            absent_install_rc == 1
+            and str(absent_script) in absent_output
+            and str(present_script) not in absent_output
+            and Path(mod.SETTINGS).read_text(encoding="utf-8") == settings_before_refusal
+        )
+        absent_script.write_text("# restored\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            restored_install_rc = mod.cmd_install(True)
+        restored_settings = json.loads(Path(mod.SETTINGS).read_text(encoding="utf-8"))
+        restored_installed = (
+            restored_install_rc == 0
+            and str(absent_script) in json.dumps(restored_settings.get("hooks", {}))
+        )
+        mod.IS_PRIMARY = original_primary
     cases = [
         ("ephemeral marker is honoured inside frontmatter",
          ephemeral_marker_honoured),
@@ -355,6 +476,9 @@ def main():
          definition_only_excluded_from_drift),
         ("the installer skips a definition-only scheduled task",
          definition_only_not_installed),
+        ("install refuses a hooks block whose script is missing, names only the "
+         "missing path, and leaves settings untouched", absent_refused),
+        ("install proceeds once the missing hook script exists", restored_installed),
         ("unrelated top-level key preserved", merged.get("user_setting") == {"keep": True}),
         ("unrelated event preserved", "PostToolUse" in merged["hooks"] and "/Users/booko/other/hooks/post.py" in commands(merged)),
         ("unrelated Stop hook preserved", "/Users/booko/other/hooks/keep.py" in names),
@@ -398,12 +522,14 @@ def main():
         ("fresh primary install renders all tracked scheduled-task definitions",
          primary_task_install_rc == 0 and primary_task_rendered
          and "WRITE  scheduled task task-01" in primary_task_out.getvalue()),
+        ("nightly consumer installs as an exact concrete render of canonical source",
+         nightly_task_rendered),
         ("fresh primary scheduled-task install leaves check clean",
          primary_task_check_rc == 0),
         ("secondary dry run names quarantine work without moving active tasks",
          secondary_dry_rc == 0 and secondary_dry_preserves_active
          and "would quarantine  scheduled task task-01" in secondary_dry_output),
-        ("secondary quarantines all 16 exact managed definitions",
+        ("secondary quarantines every exact managed definition",
          secondary_quarantine_complete),
         ("secondary exact-task retry is idempotent",
          secondary_retry_rc == 0 and "QUARANTINE" not in secondary_retry_output),
@@ -422,6 +548,11 @@ def main():
         ("secondary refuses to quarantine or overwrite a modified CARR task",
          secondary_bad_install_rc == 1 and "refusing to move or overwrite" in secondary_bad_output
          and modified_task_preserved),
+        ("installed launchd comment tokens compare clean when the live copy differs only by concrete expansion",
+         token_comment_clean_check_rc == 0),
+        ("launchd comment-token case reports a true byte drift",
+         token_comment_drift_check_rc == 1 and "TRACKED BUT DIFFERENT from the live copy" in token_comment_drift_output
+         and "launchd com.carr.literal-comment-token.plist" in token_comment_drift_output),
         ("LaunchAgent load failure and idempotent retry both stay nonzero",
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
         ("definition-only control-plane tick is not installed before cutover",

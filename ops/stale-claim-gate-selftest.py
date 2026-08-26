@@ -53,6 +53,14 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "stale-claim-gate.py")
 
+# The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
+# at the repository that invoked it, and on 2026-08-14 that leaked a fixture
+# commit onto live main; the seeded history here and the hook's own reads of
+# it must run against the throwaway repo, never whatever GIT_DIR an inherited
+# hook invocation exports.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 # Commit subjects seeded into the fixture repo. The first is the real one from
 # 2026-08-14 that the session read past; the others exist so a claim about an
 # unrelated subject has plenty of history to NOT match against.
@@ -127,7 +135,7 @@ CASES = [
 
 
 def seed_repo(path):
-    env = dict(os.environ,
+    env = dict(fixture_env(),
                GIT_AUTHOR_NAME="selftest", GIT_AUTHOR_EMAIL="s@e.test",
                GIT_COMMITTER_NAME="selftest", GIT_COMMITTER_EMAIL="s@e.test")
     def git(*args):
@@ -139,6 +147,17 @@ def seed_repo(path):
             fh.write(subject)
         git("add", "-A")
         git("commit", "-q", "-m", subject)
+
+
+def spoken(stdout):
+    """The gate's announcement, or "" for silence."""
+    try:
+        emitted = json.loads(stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return ""
+    if "decision" in emitted:            # a block wearing an announce's clothes
+        return ""
+    return (emitted.get("hookSpecificOutput") or {}).get("additionalContext") or ""
 
 
 def run_stop(assistant_text, repo, stop_active=False):
@@ -153,11 +172,23 @@ def run_stop(assistant_text, repo, stop_active=False):
                                          "text": assistant_text}]}}) + "\n")
         payload = {"hook_event_name": "Stop", "transcript_path": path,
                    "session_id": "selftest", "stop_hook_active": stop_active}
+        # The hook itself shells out to git against CARR_STALE_CLAIM_REPO, so
+        # this invocation gets the same scrub as the seeded fixture — an
+        # inherited GIT_DIR must not redirect the hook's reads either.
         p = subprocess.run(
             [sys.executable, HOOK], input=json.dumps(payload),
             capture_output=True, text=True, timeout=60,
-            env=dict(os.environ, CARR_STALE_CLAIM_REPO=repo))
-        return p.returncode == 2, (p.stdout or "") + (p.stderr or "")
+            env=dict(fixture_env(), CARR_STALE_CLAIM_REPO=repo))
+        # DEMOTED 2026-08-23 (the gates-audit council's Stop-gate rationing).
+        # This gate exited 2, which reopens the turn and costs a whole extra
+        # assistant message; it now announces into context instead. So "caught"
+        # is an announcement, and an exit 2 is itself the regression — the same
+        # inversion ops/chat-lint-gate-selftest.py made in 2026-08-16 when that
+        # gate was demoted for the same reason.
+        if p.returncode == 2:
+            return False, "REGRESSION: the gate reopened the turn instead of "
+        said = spoken(p.stdout or "")
+        return bool(said), said + (p.stderr or "")
     finally:
         try:
             os.unlink(path)
@@ -203,6 +234,32 @@ def main():
         else:
             bad.append("block-names-the-commit")
             print(f"  FAIL the block quotes the commit subject — {out[:160]}")
+
+        # THE REGISTER ITSELF, asserted rather than inferred. Every case above
+        # reads "caught" through spoken(), so a gate that went back to exit 2
+        # would fail them all as silence — but it would fail them with a
+        # confusing message. This says the thing directly.
+        fd, tpath = tempfile.mkstemp(suffix=".jsonl")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"type": "user", "origin": {"kind": "user"},
+                "message": {"content": [{"type": "text", "text": "what's left?"}]}}) + "\n")
+            fh.write(json.dumps({"type": "assistant",
+                "message": {"content": [{"type": "text",
+                                         "text": CASES[0][1]}]}}) + "\n")
+        proc = subprocess.run(
+            [sys.executable, HOOK],
+            input=json.dumps({"hook_event_name": "Stop", "transcript_path": tpath,
+                              "session_id": "selftest", "stop_hook_active": False}),
+            capture_output=True, text=True, timeout=60,
+            env=dict(os.environ, CARR_STALE_CLAIM_REPO=repo))
+        os.unlink(tpath)
+        if proc.returncode == 0 and "decision" not in (proc.stdout or ""):
+            passed += 1
+            print("  ok   it announces without reopening the turn")
+        else:
+            bad.append("announces-without-reopening")
+            print(f"  FAIL it reopened the turn — exit {proc.returncode}: "
+                  f"{(proc.stdout or proc.stderr or '')[:120]}")
 
         # Fails open rather than wedging the session when git is unreachable.
         got, _ = run_stop(CASES[0][1], os.path.join(repo, "does-not-exist"))

@@ -67,11 +67,14 @@ meant to be run through tools/db-tap.py.
 """
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -95,6 +98,7 @@ DSN_FOR = {
     "owner": ("DATABASE_URL", "CARR_DB_EXPORTER_URL"),
     "read":  ("DATABASE_URL", "CARR_DB_EXPORTER_URL", "CARR_DB_JOBS_URL"),
     "authority": ("CARR_DB_AUTHORITY_JOE_URL",),
+    "forward_fix_verifier": ("CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL",),
 }
 
 TERMINAL_RUN_STATES = {"succeeded", "failed", "timed_out", "cancelled", "skipped"}
@@ -207,6 +211,10 @@ def staging_readback_projection(path: str, expected_sha: str,
             or not migration.endswith(".sql")
             or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789_-." for ch in migration)):
         raise ValueError("staging readback schema identity is invalid")
+    schema_ledger = schema.get("ledger_sha256")
+    if (not isinstance(schema_ledger, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", schema_ledger) is None):
+        raise ValueError("staging readback schema ledger is invalid")
     doctrine_value = _object_field(raw.get("doctrine_generation")).get("value")
     return {
         "git_sha": expected_sha,
@@ -216,6 +224,7 @@ def staging_readback_projection(path: str, expected_sha: str,
         "verb_count": _exact_int(raw.get("verb_count"), "verb_count", minimum=1),
         "schema_highest_migration": migration,
         "schema_applied_count": _exact_int(schema.get("applied_count"), "schema applied count", minimum=1),
+        "schema_ledger_sha256": schema_ledger,
         "doctrine_generation": _exact_int(doctrine_value, "doctrine generation"),
         # The boolean is the only database type: posture text is derived from
         # it and malformed values have already been refused above.
@@ -262,7 +271,7 @@ def staging_worker_target(config_path: Path = WRANGLER_CONFIG) -> dict[str, str]
     variables = staging.get("vars") or {}
     account_id = config.get("account_id")
     worker_name = staging.get("name")
-    host = variables.get("DEALROOM_HOST")
+    host = variables.get("APP_HOST")
     if account_id != STAGING_ACCOUNT_ID:
         raise ValueError("staging account_id is not the reviewed account")
     if worker_name != STAGING_WORKER_NAME or staging.get("workers_dev") is not True:
@@ -324,6 +333,100 @@ def claim_staging_deployment_attempt(cur, idempotency_key: str) -> dict:
     return row[0]
 
 
+def prepare_staging_forward_fix_rehearsal(cur, args) -> dict:
+    cur.execute("select ops.prepare_staging_forward_fix_rehearsal(%s::uuid,%s::uuid,%s,%s)",
+                (args.idempotency_key, args.correlation, args.release_key, args.git_sha))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal writer returned no durable state")
+    return row[0]
+
+
+def claim_staging_forward_fix_rehearsal(cur, idempotency_key: str) -> dict:
+    cur.execute("select ops.claim_staging_forward_fix_rehearsal(%s::uuid)", (idempotency_key,))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal claim returned no durable state")
+    return row[0]
+
+
+def record_staging_forward_fix_rehearsal(cur, args, projection: dict) -> dict:
+    cur.execute("""select ops.record_staging_forward_fix_rehearsal(
+      %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s,%s)""",
+                (args.idempotency_key, projection["provider_version_id"], projection["provider_tag"],
+                 projection["verb_count"], projection["schema_highest_migration"],
+                 projection["schema_applied_count"], projection["schema_ledger_sha256"],
+                 projection["doctrine_generation"], projection["program6_actions_enabled"]))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal result writer returned no durable state")
+    return row[0]
+
+
+def forward_fix_rehearsal_declaration(cur, idempotency_key: str) -> dict:
+    """Read only the verifier-scoped immutable declaration projection."""
+    cur.execute("""select * from ops.read_staging_forward_fix_rehearsal_declaration(%s::uuid)""",
+                (idempotency_key,))
+    row = cur.fetchone()
+    if not row:
+        raise RuntimeError("forward-fix rehearsal has no immutable prepared declaration")
+    # The function RETURNS TABLE with six columns (0315); building the dict
+    # here mirrors that exact shape. Until 2026-08-26 this returned row[0]
+    # as if the projection were one composite column, so every real read
+    # died with "string indices must be integers" — unseen because the
+    # selftest's fake cursor returned a dict in column zero.
+    if len(row) != 6:
+        raise RuntimeError("forward-fix declaration projection has an unexpected shape")
+    return {
+        "expected_provider_tag": row[0],
+        "declared_migration_set_sha256": row[1],
+        "declared_migration_count": row[2],
+        "declared_schema_highest_migration": row[3],
+        "declared_schema_applied_count": row[4],
+        "declared_schema_ledger_sha256": row[5],
+    }
+
+
+def prepare_staging_restore_only_attempt(cur, args) -> dict:
+    """Persist a recovery repair that is structurally outside bundle evidence."""
+    cur.execute(
+        """select ops.prepare_staging_restore_only_attempt(
+               %s::uuid,%s::uuid,%s,%s,%s::uuid,%s)
+        """,
+        (args.idempotency_key, args.correlation, args.release_key,
+         args.prior_release_key, args.recovery_attempt_id, args.git_sha))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("restore-only attempt writer returned no durable state")
+    return row[0]
+
+
+def claim_staging_restore_only_attempt(cur, idempotency_key: str) -> dict:
+    cur.execute("select ops.claim_staging_restore_only_attempt(%s::uuid)",
+                (idempotency_key,))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("restore-only attempt claim returned no durable state")
+    return row[0]
+
+
+def record_staging_restore_only_result(cur, args, projection: dict | None) -> dict:
+    """Write a bounded repair outcome; it can never create a recovery bundle."""
+    values = (None,) * 7 if projection is None else (
+        projection["provider_version_id"], projection["provider_tag"],
+        projection["verb_count"], projection["schema_highest_migration"],
+        projection["schema_applied_count"], projection["doctrine_generation"],
+        projection["program6_actions_enabled"])
+    cur.execute(
+        """select ops.record_staging_restore_only_result(
+               %s::uuid,%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s)
+        """, (args.idempotency_key, args.status, *values, args.reason))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("restore-only result writer returned no durable state")
+    return row[0]
+
+
 def credential_names() -> tuple[str, ...]:
     """Every environment variable this recorder will read a DSN from, in
     declaration order.
@@ -369,6 +472,8 @@ def dsn(kind: str) -> str:
                 raise SystemExit("ops-record: CARR_DB_JOBS_URL must authenticate as carr_jobs")
             if kind == "authority" and not _is_authority_dsn(value):
                 raise SystemExit("ops-record: CARR_DB_AUTHORITY_JOE_URL must authenticate as carr_authority_joe")
+            if kind == "forward_fix_verifier" and not _is_forward_fix_verifier_dsn(value):
+                raise SystemExit("ops-record: CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL must authenticate as carr_program5_forward_fix_verifier")
             return value
     raise SystemExit(
         f"ops-record: no credential — set one of {', '.join(DSN_FOR[kind])} "
@@ -390,20 +495,32 @@ def _is_authority_dsn(value: str) -> bool:
     return any(part == "user=carr_authority_joe" for part in value.split())
 
 
+def _is_forward_fix_verifier_dsn(value: str) -> bool:
+    parsed = urlsplit(value)
+    if parsed.scheme:
+        return unquote(parsed.username or "") == "carr_program5_forward_fix_verifier"
+    return any(part == "user=carr_program5_forward_fix_verifier" for part in value.split())
+
+
 def connect(kind: str):
     try:
         import psycopg
     except ImportError:
         raise SystemExit("ops-record: psycopg not installed (pip install 'psycopg[binary]')")
     conn = psycopg.connect(dsn(kind), autocommit=True)
-    if kind in ("routine", "authority"):
+    if kind in ("routine", "authority", "forward_fix_verifier"):
         with conn.cursor() as cur:
-            cur.execute("select session_user,current_user")
+            if kind == "forward_fix_verifier":
+                cur.execute("select session_user,current_user,pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')")
+            else:
+                cur.execute("select session_user,current_user")
             row = cur.fetchone()
-        expected = "carr_jobs" if kind == "routine" else "carr_authority_joe"
-        if row != (expected, expected):
+        expected = ("carr_jobs" if kind == "routine" else "carr_authority_joe"
+                    if kind == "authority" else "carr_program5_forward_fix_verifier")
+        exact_row = (expected, expected) if kind != "forward_fix_verifier" else (expected, expected, True)
+        if row != exact_row:
             conn.close()
-            raise SystemExit(f"ops-record: {kind} connection is not {expected}")
+            raise SystemExit(f"ops-record: {kind} connection is not the exact scoped identity")
     return conn
 
 
@@ -671,7 +788,18 @@ def cmd_run(args) -> int:
                  args.evidence_ref, (args.detail or None),
                  sid, args.environment))
             run_id = cur.fetchone()[0]
-            if args.state in ("failed", "timed_out"):
+            recovered = []
+            if args.state == "succeeded":
+                # THE NONZERO-TO-ZERO TRANSITION, on the path that already runs.
+                # The council preferred this to the spool flusher precisely
+                # because it is where the transition is visible: the flusher
+                # replays argv it is forbidden to interpret, while this is the
+                # writer that already decides what a failed run means and is
+                # the only place both halves of the rule can stay together.
+                recovered = _record_success_recovery(
+                    cur=cur, service_key=args.service, environment=args.environment,
+                    run_key=args.key, run_id=run_id)
+            elif args.state in ("failed", "timed_out"):
                 cur.execute("select criticality from ops.service where id = %s", (sid,))
                 criticality = cur.fetchone()[0]
                 _record_failure_incident(
@@ -697,6 +825,22 @@ def cmd_run(args) -> int:
                   "migration 0115 is unapplied here. Nothing recorded.",
                   file=sys.stderr)
             return 78
+        # THE SAME STATE, ONE MIGRATION LATER. 0293 added the occurrence
+        # counters this writer now sets on every incident and the
+        # clear_recovered_incident function it calls on a recovery, so a
+        # database carrying 0115 but not 0293 fails on a column or a function
+        # rather than on a relation. That is still "not provisioned here" and
+        # still deserves 78 — a deploy that runs ahead of its migration should
+        # say which migration, once, not fail every step of the night with a
+        # constraint name.
+        if ("clear_recovered_incident" in str(e)
+                or ('column "occurrence_count"' in str(e)
+                    or 'column "last_seen_at"' in str(e)
+                    or 'column "first_seen_at"' in str(e))):
+            print("ops-record: incident fingerprint columns and the recovery "
+                  "function are missing — migration 0293 is unapplied here. "
+                  "Nothing recorded.", file=sys.stderr)
+            return 78
         # Otherwise the caller ignores this exit code on purpose. The failure is
         # still not hidden: an absent run row makes this service read unknown on
         # the next health look, which is the honest outcome and the reason
@@ -706,6 +850,8 @@ def cmd_run(args) -> int:
         return 1
 
     print(f"{corr} {run_id}")
+    for ref, action, reason in recovered:
+        print(f"  {'cleared' if action == 'clear' else 'recovering'} {ref}  {reason}")
     return 0
 
 
@@ -738,6 +884,178 @@ SEVERITY_BY_CRITICALITY = {
 # The doctrine requires a monitoring interval on resolution; this is the interval
 # the machine proposes, never the resolution itself.
 MONITORING_HOURS = 24
+
+
+# ── the fingerprint, and why a raw exit code is not one ──────────────────────
+# THE MEASUREMENT, 2026-08-23 (process-audit council, recommendation 3, marked
+# safe by both chairs). 26 incidents open, and the ledger showed exactly which
+# ones the machine should never have asked a human about:
+#
+#   nightly.vault-drift-watch   open twice — exit_2 and exit_69
+#   nightly.portability-mirror  failed exit_1, exit_2 and exit_69 across four days
+#
+# 0116 made the signature service|environment|run_key|failure_class and made two
+# open incidents with the same signature impossible, which is right. What it
+# could not know is that `failure_class` arrives in two different registers.
+# Some callers name a diagnosis — pubkey_mismatch, keepalive_not_accepting,
+# performance_budget_exceeded — and two of those on one job really are two
+# problems with two remedies. bin/run-scheduled.sh and bin/nightly.sh instead
+# pass the wrapper's exit code through as `exit_<n>`, and an exit code is not a
+# diagnosis: exit_1 and exit_2 from one step mean "it returned nonzero" twice.
+# Splitting a row on that number pages a human a second time for the same job
+# failing the same way, which is the churn the council measured.
+#
+# SO NORMALIZATION IS DELIBERATELY NARROW. It touches ONLY the `exit_<n>` shape,
+# and even there it keeps every code this codebase has given its own meaning —
+# 69 is "a dependency was unavailable" and 78 is "not configured here", which
+# call for different work than a plain nonzero and must not be folded into it.
+# A named class is never rewritten. That is the council's kill-test condition
+# ("distinct failure classes on the same job must NOT collapse into one row")
+# expressed as a rule rather than a hope, and ops/incident-fingerprint-selftest.py
+# is where it is held.
+NAMED_EXIT_CLASSES = {
+    64:  "usage",                   # EX_USAGE — the caller invoked it wrong
+    69:  "dependency_unavailable",  # EX_UNAVAILABLE — a seam it needs was down
+    77:  "permission_denied",       # EX_NOPERM
+    78:  "configuration",           # EX_CONFIG — this repo's "not provisioned here"
+    124: "timed_out",               # coreutils timeout(1)
+    137: "killed",                  # SIGKILL
+    143: "terminated",              # SIGTERM
+}
+
+# What an unnamed nonzero exit collapses to. It says exactly what is known —
+# the step returned nonzero — and no more. The exact code stays on the run row
+# and in the incident's facts, so nothing is lost, only un-paged.
+GENERIC_EXIT_CLASS = "exit_status"
+
+_EXIT_CLASS_RE = re.compile(r"^exit[_-]?([0-9]{1,3})$", re.IGNORECASE)
+
+# A failure with no class at all. The `run` subcommand refuses one, but
+# deployments and hand-written rows can still arrive without it, and a
+# fingerprint ending in an empty field silently matched every other classless
+# failure on the same job.
+UNCLASSIFIED = "unclassified"
+
+
+def normalize_failure_class(failure_class: str | None) -> str:
+    """The failure class as the fingerprint should see it.
+
+    Named classes pass through untouched — that is the whole guard. Only the
+    `exit_<n>` shape is rewritten, and only where the number carries no meaning
+    of its own.
+    """
+    raw = (failure_class or "").strip()
+    if not raw:
+        return UNCLASSIFIED
+    m = _EXIT_CLASS_RE.match(raw)
+    if not m:
+        return raw
+    return NAMED_EXIT_CLASSES.get(int(m.group(1)), GENERIC_EXIT_CLASS)
+
+
+def incident_fingerprint(service_key: str, environment: str, operation: str,
+                         failure_class: str | None) -> str:
+    """service|environment|operation|failure-class — the identity of one problem.
+
+    Kept in the `signature` column 0116 already constrains, in 0116's exact
+    four-field shape, so the partial unique index over open incidents remains
+    the guarantee and every existing reader (ops.v_trace, the sweep, the
+    Worker's own recordWorkerFailure) keeps working unchanged. The only thing
+    that moved is which string goes in the fourth field.
+    """
+    return "|".join((service_key, environment, operation,
+                     normalize_failure_class(failure_class)))
+
+
+def fingerprint_job(signature: str | None) -> tuple[str, str, str] | None:
+    """(service, environment, run_key) for a run-sourced fingerprint, or None.
+
+    The failure class is dropped on purpose: "has this job recovered?" is a
+    question about the job, not about the way it last broke.
+    """
+    parts = (signature or "").split("|", 3)
+    if len(parts) != 4 or not all(parts[:3]):
+        return None
+    return parts[0], parts[1], parts[2]
+
+
+# ── success-clears ───────────────────────────────────────────────────────────
+# THE OTHER HALF OF THE SAME MEASUREMENT. On 2026-08-23 five incidents sat open
+# with twelve consecutive green runs behind them: partner-ping, rules-refresh,
+# run-spool-flush, room-bridge and doc-engine's liveness probe. Nothing was
+# wrong with any of them and nothing could say so, because the only close path
+# in the repo (`sweep`) needs the owner credential — 0117 withholds resolved_at
+# from carr_jobs — and bin/nightly.sh, which runs as carr_jobs, therefore prints
+# `incident sweep (admin capability unavailable)` every single night instead of
+# sweeping. A close path a scheduled job cannot reach never runs.
+#
+# AND THE 24-HOUR WINDOW CANNOT BE MET BY A TICKER. sweep_decision asks for a
+# full MONITORING_HOURS with no failure recorded. partner-ping runs every 120s;
+# one bad minute anywhere in a day resets that, so a job that flaps hourly and
+# is healthy in between can never clear on the clock even though it is fine
+# right now. The council asked for a success SEQUENCE instead — three
+# consecutive healthy RUN ROWS — which a genuinely broken job never satisfies
+# at all and a recovered one satisfies in bounded time.
+#
+# HOW LONG THAT ACTUALLY IS, measured rather than assumed: it is three recorded
+# rows, not three wakes. bin/run-scheduled.sh's --heartbeat-interval throttles
+# a SUCCEEDED row to one per 1800s for partner-ping and capture-poll and one
+# per 900s for room-bridge, because recording ~720 fires a day from a healthy
+# channel is noise. So partner-ping clears about 90 minutes after it recovers,
+# not six. That is the right trade and worth stating plainly: the alternative
+# is counting wakes nobody recorded. Every FAILURE is still recorded
+# immediately regardless of the throttle, so nothing delays the incident — only
+# the all-clear.
+#
+# SEV-1 IS UNTOUCHED, HERE AND IN THE DATABASE. This function refuses it, and
+# ops.clear_recovered_incident (migration 0293) refuses it again in a
+# SECURITY DEFINER body the job role cannot edit — so the automatic path cannot
+# close a critical incident even if this Python is wrong. Evidence-required,
+# human-approved SEV-1 closure stays exactly where 0117 put it.
+HEALTHY_RUNS_TO_CLEAR = 3
+
+# Severities the machine may close on its own. SEV-0 and SEV-1 are absent on
+# purpose and the absence is the rule.
+AUTO_CLEARED_SEVERITIES = frozenset({"SEV-2", "SEV-3", "SEV-4"})
+
+
+def recovery_decision(incident, healthy_streak, required=HEALTHY_RUNS_TO_CLEAR):
+    """('clear' | 'monitor' | 'none', reason) for one open incident.
+
+    Pure, and separated from the write for the same reason
+    resolve_preconditions is: the guards ARE the substance, and a clear path
+    that rubber-stamps anything is worse than none because then the pile only
+    LOOKS handled. ops/incident-fingerprint-selftest.py holds every branch.
+
+    `healthy_streak` is how many consecutive terminal runs of this job ended
+    succeeded, counting back from the most recent one. It is derived from
+    ops.run by the caller and re-derived inside the database function before
+    anything closes, so a wrong number here cannot close anything.
+    """
+    state = (incident.get("state") or "")
+    if state in ("resolved", "reviewed"):
+        return "none", f"already {state}"
+    if (incident.get("source_kind") or "") != "collector":
+        return "none", ("opened by hand, so a human closes it — the machine only "
+                        "clears what the machine opened")
+    if not incident.get("signature"):
+        return "none", "no fingerprint, so there is no job whose health to read"
+    if healthy_streak <= 0:
+        return "none", "the latest run of this job is not green"
+
+    severity = (incident.get("severity") or "")
+    if severity not in AUTO_CLEARED_SEVERITIES:
+        return "monitor", (
+            f"{severity} never closes on a machine's say-so — recovery is recorded "
+            f"and the close stays with a human")
+    if healthy_streak < required:
+        return "monitor", (
+            f"{healthy_streak} of {required} consecutive healthy runs — recovery "
+            f"recorded, watching for the rest")
+    return "clear", (
+        f"the job has run green {healthy_streak} consecutive times, "
+        f"{required} being the sequence this system calls recovered. Closed by "
+        f"the success-clears path with the green runs as evidence.")
 
 
 # THE CLOSE PATH, added 2026-08-14. Until this existed, nothing in the repo
@@ -843,8 +1161,8 @@ def _record_failure_incident(
         raise ValueError("incident source must be run or deployment")
 
     signature_label = source_label if source_kind == "run" else "deployment"
-    signature = (f"{service_key}|{environment}|{signature_label}|"
-                 f"{failure_class or ''}")
+    signature = incident_fingerprint(service_key, environment, signature_label,
+                                     failure_class)
 
     # ONE JOURNEY FIRST. A golden/performance check and the failed deployment
     # that follows it have different signatures but one correlation, so they
@@ -915,10 +1233,12 @@ def _record_failure_incident(
             """insert into ops.incident
                    (ref, correlation_id, title, severity, state, environment,
                     owner_actor, next_action, detected_source, detected_at,
-                    source_kind, source_ref, signature, observed_at, expires_at)
+                    source_kind, source_ref, signature, observed_at, expires_at,
+                    occurrence_count, first_seen_at, last_seen_at)
                values (%s,%s,%s,%s,'detected',%s,'joe',%s,%s, now(),
                        'collector','tools/ops-record.py immediate',%s, now(),
-                       now() + make_interval(hours => %s))
+                       now() + make_interval(hours => %s),
+                       1, now(), now())
                returning id""",
             (_next_incident_ref(cur), correlation_id,
              f"{source_label} {state} on {service_key} ({environment})",
@@ -969,7 +1289,148 @@ def _record_failure_incident(
             """insert into ops.incident_fact (incident_id, text, source_ref)
                values (%s, %s, %s)""",
             (incident_id, fact, f"ops.{source_kind}:{source_id}"))
+
+    # A RECURRENCE IS A HEARTBEAT ON THE OPEN ROW, NOT A SECOND PAGE (0293).
+    # Before this, the append wrote a fact and nothing else, so all 26 open
+    # incidents read alike on 2026-08-23: nothing distinguished partner-ping's
+    # 89 failures from a verb that threw once. last_seen_at and the count are
+    # the two numbers that separate a fire from a blip, and they cost one UPDATE
+    # on a row this transaction already holds.
+    #
+    # COUNTED OFF THE LINK, not off the call, so it counts DISTINCT evidence
+    # rows. ops.incident_link's primary key already refuses a second link to the
+    # same run, and the spool replays a row it could not land — without this
+    # condition a retried flush would inflate the count while adding no new
+    # evidence, and a count that drifts from the evidence is worse than none.
+    #
+    # IT ALSO ENDS A LIE THE LEDGER WAS TELLING. `assess` moves an incident to
+    # monitoring the moment its job goes green and never moves it back, so
+    # partner-ping and room-bridge both read `monitoring` while actively
+    # failing. A failure recorded against a monitoring incident means the watch
+    # found something: the row returns to detected and drops the recovery
+    # evidence it can no longer stand on. carr_jobs holds a column-scoped update
+    # on exactly these fields (0117, widened for the counters in 0293), so this
+    # runs on the collector path without any escalation. This transition can
+    # only reopen the watch: it never writes resolved_at/root_cause and never
+    # moves state toward resolved. A replay has linked=False, so it cannot
+    # invalidate recovery or alter readiness.
+    if linked and not opened:
+        cur.execute(
+            """update ops.incident
+                  set occurrence_count = occurrence_count + 1,
+                      last_seen_at = now(),
+                      observed_at = now(),
+                      state = case when state = 'monitoring'
+                                   then 'detected' else state end,
+                      recovery_evidence_ref = case when state = 'monitoring'
+                                   then null else recovery_evidence_ref end,
+                      monitoring_until = case when state = 'monitoring'
+                                   then null else monitoring_until end,
+                      next_action = case when state = 'monitoring'
+                                   then 'failed again during its watch — read the '
+                                        'trace: ops-record trace ' || %s::text
+                                   else next_action end
+                where id = %s""",
+            (str(correlation_id), incident_id))
     return incident_id, opened, linked
+
+
+def _healthy_streak(cur, service_key, environment, run_key,
+                    limit=HEALTHY_RUNS_TO_CLEAR) -> int:
+    """Consecutive succeeded runs of one job, counting back from the latest.
+
+    skipped and cancelled runs are neither health nor failure and are left out
+    of the sequence entirely rather than breaking it — a nightly step that was
+    gated out is not evidence that anything recovered, and it is not evidence
+    that anything broke either.
+    """
+    cur.execute(
+        """select r.state
+             from ops.run r join ops.service s on s.id = r.service_id
+            where s.key = %s and r.environment = %s and r.run_key = %s
+              and r.state in ('succeeded','failed','timed_out')
+         order by r.observed_at desc, r.id desc
+            limit %s""",
+        (service_key, environment, run_key, limit))
+    streak = 0
+    for (state,) in cur.fetchall():
+        if state != "succeeded":
+            break
+        streak += 1
+    return streak
+
+
+def _record_success_recovery(*, cur, service_key, environment, run_key, run_id):
+    """Let a green run speak for the incidents its own job opened.
+
+    CALLED FROM THE WRITE PATH THAT ALREADY RUNS — every `ops-record.py run`
+    that records a success, which is also every row tools/ops-spool.py replays
+    at its 30-minute flush. No new scheduled job, no agent, no LLM: the council
+    ruled out a 21st launchd entry for a fleet that already fails daily, and a
+    recovery nobody is running is the state this is fixing.
+
+    Returns [(ref, action, reason)] for the caller to print. Silent when the
+    job has no open incidents, which is the overwhelmingly common case and the
+    reason this costs one indexed lookup on a healthy fleet.
+    """
+    prefix = f"{service_key}|{environment}|{run_key}|"
+    cur.execute(
+        # The predicate is 0116's partial-index predicate verbatim, so this
+        # reads the open rows through incident_one_open_per_signature rather
+        # than the whole history of everything that ever broke.
+        """select ref, state, severity, source_kind, signature, occurrence_count
+             from ops.incident
+            where state not in ('resolved','reviewed')
+              and starts_with(signature, %s)
+         order by detected_at""",
+        (prefix,))
+    cols = ("ref", "state", "severity", "source_kind", "signature",
+            "occurrence_count")
+    open_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    if not open_rows:
+        return []
+
+    streak = _healthy_streak(cur, service_key, environment, run_key)
+    outcomes = []
+    for inc in open_rows:
+        action, reason = recovery_decision(inc, streak)
+        if action == "none":
+            continue
+        if action == "monitor":
+            # 0117's column grant covers exactly these fields. This is the same
+            # move `assess` has always made on a green run, with two
+            # differences: it now also refreshes an incident ALREADY in
+            # monitoring, so recovery_evidence_ref points at the latest green
+            # run instead of the first one ever seen, and it says how far
+            # through the sequence the job has got.
+            cur.execute(
+                """update ops.incident
+                      set state = 'monitoring',
+                          recovery_evidence_ref = %s,
+                          monitoring_until = now() + make_interval(hours => %s),
+                          next_action = %s,
+                          observed_at = now()
+                    where ref = %s and state not in ('resolved','reviewed')""",
+                (f"ops.run:{run_id}", MONITORING_HOURS, reason, inc["ref"]))
+        elif action == "clear":
+            # THE ONLY AUTOMATIC CLOSE, AND THE DATABASE IS STILL THE GATE.
+            # carr_jobs has no grant on resolved_at or root_cause and does not
+            # get one here (0117 stands). It gets EXECUTE on one SECURITY
+            # DEFINER function that re-derives the success sequence from
+            # ops.run itself and refuses SEV-1, refuses anything a human
+            # opened, and refuses anything whose evidence does not hold up —
+            # so a wrong number in this Python cannot close anything.
+            #
+            # IT TAKES NO STORY FROM ITS CALLER. The root_cause written on a
+            # closed incident is built inside the function out of the numbers
+            # the function verified, so the sentence a human reads on a closed
+            # row can never be one this process made up.
+            cur.execute("select ops.clear_recovered_incident(%s, %s)",
+                        (inc["ref"], HEALTHY_RUNS_TO_CLEAR))
+            if not cur.fetchone()[0]:
+                action, reason = "none", "the database declined the close"
+        outcomes.append((inc["ref"], action, reason))
+    return outcomes
 
 
 def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
@@ -1004,22 +1465,25 @@ def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
             opened += int(was_opened)
 
         elif state == "succeeded":
-            # RECOVERY IS NOT RESOLUTION. One green run says the symptom stopped,
-            # not that the cause is understood — so this moves the incident to
-            # monitoring with evidence and an interval, and leaves resolved_at
-            # null for a human. The database would refuse the dishonest version
-            # anyway; this does not try it.
-            cur.execute(
-                """update ops.incident
-                      set state = 'monitoring',
-                          recovery_evidence_ref = %s,
-                          monitoring_until = now() + make_interval(hours => %s),
-                          next_action = %s
-                    where signature like %s
-                      and state in ('detected','triaged','investigating','mitigating')""",
-                (f"ops.run:{run_id}", MONITORING_HOURS,
-                 f"watch until {MONITORING_HOURS}h clear, then close with an outcome",
-                 f"{service_key}|{env}|{run_key}|%"))
+            # RECOVERY IS NOT RESOLUTION — for anything a machine may not close.
+            # One green run says the symptom stopped, not that the cause is
+            # understood, so a SEV-1 still moves only as far as monitoring and
+            # keeps its human close. What changed in 0293 is that a SEV-2 or
+            # SEV-3 job incident with a full success SEQUENCE behind it now
+            # closes here, because "watch until 24h clear" was a promise this
+            # chain could not keep: the sweep that performs it needs the owner
+            # credential 0117 withholds from carr_jobs, so bin/nightly.sh has
+            # printed `incident sweep (admin capability unavailable)` every
+            # night since it shipped and five fully-recovered incidents were
+            # still open with twelve green runs behind them on 2026-08-23.
+            #
+            # SHARED WITH THE `run` PATH ON PURPOSE. This nightly pass is the
+            # backstop, not the mechanism: the same function runs inside every
+            # successful `ops-record.py run`, so a ticker that recovers at
+            # 09:02 clears at 09:06 rather than waiting for the night.
+            _record_success_recovery(
+                cur=cur, service_key=service_key, environment=env,
+                run_key=run_key, run_id=run_id)
 
         # skipped and cancelled raise nothing. exit 78 means a step ran, found
         # something it needs absent, wrote nothing and said so — alarming on that
@@ -1227,7 +1691,8 @@ def cmd_assess(args) -> int:
     with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
         opened = assess(cur, environment=args.environment, window_hours=args.window_hours)
         cur.execute(
-            """select ref, severity, state, title, next_action
+            """select ref, severity, state, title, next_action,
+                      occurrence_count, last_seen_at
                  from ops.incident
                 where state not in ('resolved','reviewed')
                   and (%s::text is null or environment = %s)
@@ -1236,8 +1701,15 @@ def cmd_assess(args) -> int:
         live = cur.fetchall()
 
     print(f"assess: {opened} incident(s) opened · {len(live)} live incident(s)")
-    for ref, severity, state, title, next_action in live:
+    for ref, severity, state, title, next_action, count, last_seen in live:
         print(f"  {severity}  {state:<12} {ref}  {title}")
+        # THE TWO NUMBERS THAT SEPARATE A FIRE FROM A BLIP. Before 0293 this
+        # list printed 26 lines that all read alike, so partner-ping failing 89
+        # times and a verb that threw once were the same single line and a
+        # reader had no way to sort the pile by anything but date.
+        if count and count > 1:
+            seen = f", last {last_seen:%Y-%m-%d %H:%M}Z" if last_seen else ""
+            print(f"        {count} occurrences{seen}")
         if next_action:
             print(f"        next: {next_action}")
     if not live:
@@ -1294,6 +1766,136 @@ def cmd_staging_attempt(args) -> int:
             print("true" if value else "false")
         else:
             print(value)
+    else:
+        print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def cmd_staging_restore_only(args) -> int:
+    """Operate the staging-only repair lane without exposing a bundle step."""
+    try:
+        args.idempotency_key = str(uuid.UUID(args.idempotency_key))
+        if args.action == "prepare":
+            if not args.release_key or not args.prior_release_key or not args.git_sha:
+                raise ValueError("restore-only prepare is missing exact release inputs")
+            args.recovery_attempt_id = str(uuid.UUID(args.recovery_attempt_id or ""))
+            args.correlation = correlation_of(args.correlation)
+            if args.correlation != args.recovery_attempt_id:
+                raise ValueError("restore-only correlation must equal recovery attempt")
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = prepare_staging_restore_only_attempt(cur, args)
+        elif args.action == "claim":
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = claim_staging_restore_only_attempt(cur, args.idempotency_key)
+        else:
+            projection = None
+            if args.status == "succeeded":
+                if not args.staging_readback_file or not args.expected_provider_tag \
+                        or not args.expected_program6_actions:
+                    raise ValueError("restore-only success requires typed staging readback")
+                projection = staging_readback_projection(
+                    args.staging_readback_file, args.git_sha, args.expected_provider_tag,
+                    args.expected_program6_actions)
+                if args.reason:
+                    raise ValueError("restore-only success cannot carry a reason")
+            elif not args.reason:
+                raise ValueError("restore-only non-success requires a bounded reason")
+            elif args.staging_readback_file or args.expected_provider_tag \
+                    or args.expected_program6_actions:
+                raise ValueError("restore-only non-success cannot carry readback fields")
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = record_staging_restore_only_result(cur, args, projection)
+    except (ValueError, RuntimeError) as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print("ops-record: could not persist restore-only outcome: "
+              f"{str(exc).splitlines()[0][:240]}", file=sys.stderr)
+        return 1
+    if args.field:
+        value = result.get(args.field)
+        if value is None:
+            print("")
+        elif isinstance(value, bool):
+            print("true" if value else "false")
+        else:
+            print(value)
+    else:
+        print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def cmd_staging_forward_fix(args) -> int:
+    """The sole staging controller for an approval-eligible forward-fix proof."""
+    try:
+        args.idempotency_key = str(uuid.UUID(args.idempotency_key))
+        if args.action == "prepare":
+            if not args.release_key or not args.git_sha:
+                raise ValueError("forward-fix prepare is missing exact release inputs")
+            args.correlation = correlation_of(args.correlation)
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = prepare_staging_forward_fix_rehearsal(cur, args)
+        elif args.action == "claim":
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = claim_staging_forward_fix_rehearsal(cur, args.idempotency_key)
+        else:
+            if (not args.git_sha or not args.expected_provider_tag or not args.expected_program6_actions
+                    or not args.staging_readback_file or not args.provider_versions_file or not args.manifest):
+                raise ValueError("forward-fix result requires manifest, readback, provider versions, and exact identity")
+            projection = staging_readback_projection(args.staging_readback_file, args.git_sha,
+                                                     args.expected_provider_tag,
+                                                     args.expected_program6_actions)
+            staging_provider_version(args.provider_versions_file, args.expected_provider_tag,
+                                     projection["provider_version_id"])
+            manifest = json.loads(_read_bounded_regular_file(args.manifest))
+            if not isinstance(manifest, dict):
+                raise ValueError("forward-fix manifest is not an object")
+            for key, observed in (("git_sha", projection["git_sha"]),
+                                  ("schema_highest_migration", projection["schema_highest_migration"]),
+                                  ("schema_applied_count", projection["schema_applied_count"]),
+                                  ("schema_ledger_sha256", projection["schema_ledger_sha256"])):
+                if manifest.get(key) != observed:
+                    raise ValueError("forward-fix readback does not match the exact candidate manifest")
+            migration_set = manifest.get("migration_set")
+            # tools/release-manifest.py migration_set() emits NUMBER BASES
+            # ("0315"), not filenames — accept that canonical form (and full
+            # filenames for older hand-built fixtures). Until 2026-08-26 this
+            # check demanded filenames the builder never produced, so the
+            # typed forward-fix readback refused every real manifest.
+            if (not isinstance(migration_set, list) or not migration_set
+                    or any(not isinstance(item, str)
+                           or not re.fullmatch(r"[0-9]{4}[a-z]?(_[a-z0-9_.-]+\.sql)?", item)
+                           for item in migration_set)):
+                raise ValueError("forward-fix manifest lacks its exact migration set")
+            if manifest.get("program6_actions") != {"enabled": args.expected_program6_actions == "enabled",
+                                                    "posture": args.expected_program6_actions}:
+                raise ValueError("forward-fix manifest Program 6 posture is not exact")
+            with connect("forward_fix_verifier") as conn, conn.transaction(), conn.cursor() as cur:
+                declared = forward_fix_rehearsal_declaration(cur, args.idempotency_key)
+                # ops.program5_migration_set_sha256 is the canon: it hashes
+                # to_jsonb(text[])::text, which PostgreSQL renders with ", "
+                # between elements — not compact JSON. Until 2026-08-26 this
+                # hashed compact JSON, so the boundary comparison could never
+                # match a real declaration.
+                manifest_set_hash = "sha256:" + hashlib.sha256(
+                    json.dumps(migration_set, separators=(", ", ": ")).encode()).hexdigest()
+                if (declared["expected_provider_tag"] != args.expected_provider_tag
+                        or declared["declared_migration_set_sha256"] != manifest_set_hash
+                        or declared["declared_migration_count"] != len(migration_set)):
+                    raise ValueError("forward-fix manifest does not match the immutable candidate migration boundary")
+                result = record_staging_forward_fix_rehearsal(cur, args, projection)
+    except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print("ops-record: could not persist forward-fix rehearsal: "
+              f"{str(exc).splitlines()[0][:240]}", file=sys.stderr)
+        return 1
+    if args.field:
+        value = result.get(args.field)
+        print("" if value is None else ("true" if value is True else "false" if value is False else value))
     else:
         print(json.dumps(result, sort_keys=True))
     return 0
@@ -1491,6 +2093,96 @@ def cmd_deployment(args) -> int:
 
 
 # ── release ──────────────────────────────────────────────────────────────────
+def release_candidate_manifest_refusal(args, manifest: dict) -> str | None:
+    """Return a fail-closed candidate-manifest refusal, or ``None``.
+
+    The release row's target and approval preimage must come from the same
+    verified manifest.  Keeping this check outside the database block proves a
+    malformed candidate cannot consume a writer credential or leave a row.
+    """
+    if not isinstance(manifest, dict):
+        return "release candidate manifest must be a JSON object"
+
+    manifest_target = (manifest.get("service"), manifest.get("environment"))
+    requested_target = (args.service, args.environment)
+    if manifest_target != requested_target:
+        return ("release candidate manifest service/environment must exactly "
+                f"match the requested target; manifest={manifest_target!r} "
+                f"requested={requested_target!r}")
+
+    manifest_identity = (manifest.get("provider"),
+                         manifest.get("provider_version_id"))
+    requested_identity = (args.provider, args.provider_version_id)
+    if manifest_identity != requested_identity:
+        return ("release candidate provider/version must exactly match the bound "
+                "release manifest so the approval plan hash covers the version "
+                "that can be promoted")
+
+    # A release row is an immutable source binding, not a movable Git ref.  The
+    # manifest verifier can rebuild HEAD, tags, and abbreviated SHAs, so reject
+    # those forms here before either verification or a database credential is
+    # reached.  Also prove that the recorded object is a commit present in this
+    # exact checkout rather than trusting its shape alone.
+    recorded_sha = manifest.get("git_sha")
+    if (not isinstance(recorded_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}", recorded_sha) is None):
+        return "release candidate manifest git_sha must be an exact lowercase 40-hex commit SHA"
+    resolved = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "--verify",
+         f"{recorded_sha}^{{commit}}"],
+        capture_output=True, text=True, check=False,
+    )
+    if resolved.returncode != 0 or resolved.stdout.strip() != recorded_sha:
+        return ("release candidate manifest git_sha must resolve to that exact "
+                "commit in the canonical source checkout")
+
+    assurance_fields = (
+        manifest.get("performance_budget_ref"),
+        manifest.get("performance_budget_ms"),
+        manifest.get("recovery_strategy"),
+        manifest.get("rollback_plan_ref"),
+    )
+    if args.environment in ("staging", "production"):
+        if (not isinstance(assurance_fields[0], str)
+                or not assurance_fields[0].strip()
+                or isinstance(assurance_fields[1], bool)
+                or not isinstance(assurance_fields[1], int)
+                or assurance_fields[1] <= 0
+                or assurance_fields[2] not in ("rollback", "forward_fix")
+                or not isinstance(assurance_fields[3], str)
+                or not assurance_fields[3].strip()
+                or manifest.get("rollback_ready") is not True):
+            return (f"{args.environment} candidate manifest requires complete "
+                    "performance/recovery assurance and a ready rollback plan")
+
+    # Legacy flags are accepted only as exact repetitions of the manifest. They
+    # no longer supply a second, unhashed staging recovery plan.
+    if (getattr(args, "rollback_ready", False)
+            and manifest.get("rollback_ready") is not True):
+        return "--rollback-ready differs from the candidate manifest"
+    supplied_plan = getattr(args, "rollback_plan", None)
+    if supplied_plan is not None and supplied_plan != manifest.get("rollback_plan_ref"):
+        return "--rollback-plan differs from the candidate manifest"
+
+    # Verify the already-parsed object that will be inserted, not a second read
+    # of a caller-controlled path that could change between parse and verify.
+    with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix="carr-release-candidate-",
+            suffix=".json") as exact_manifest:
+        json.dump(manifest, exact_manifest, sort_keys=True, separators=(",", ":"))
+        exact_manifest.flush()
+        verified = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+             "verify", "--manifest", exact_manifest.name],
+            cwd=REPO, capture_output=True, text=True, check=False,
+        )
+    if verified.returncode != 0:
+        detail = (verified.stdout + verified.stderr).strip().splitlines()
+        summary = detail[-1][:240] if detail else "verification returned no evidence"
+        return f"release candidate manifest verification failed: {summary}"
+    return None
+
+
 def cmd_release(args) -> int:
     """Record one release candidate from a manifest built by
     tools/release-manifest.py, or approve / read one back.
@@ -1542,46 +2234,10 @@ def cmd_release(args) -> int:
         except Exception as e:                                   # noqa: BLE001
             print(f"ops-record: could not read the manifest: {e}", file=sys.stderr)
             return 2
-    if args.action == "candidate" and args.environment == "production":
-        manifest_target = (manifest.get("service"), manifest.get("environment"))
-        requested_target = (args.service, args.environment)
-        if manifest_target != requested_target:
-            print("ops-record: Production candidate manifest service/environment "
-                  "must exactly match the requested release target", file=sys.stderr)
-            return 2
-        manifest_identity = (manifest.get("provider"),
-                             manifest.get("provider_version_id"))
-        requested_identity = (args.provider, args.provider_version_id)
-        if manifest_identity != requested_identity:
-            print("ops-record: Production candidate provider/version must exactly "
-                  "match the bound release manifest so the approval plan hash "
-                  "covers the version that can be promoted", file=sys.stderr)
-            return 2
-        assurance = (manifest.get("performance_budget_ref"),
-                     manifest.get("performance_budget_ms"),
-                     manifest.get("recovery_strategy"),
-                     manifest.get("rollback_ready"),
-                     manifest.get("rollback_plan_ref"))
-        if (not isinstance(assurance[0], str) or not assurance[0].strip()
-                or isinstance(assurance[1], bool)
-                or not isinstance(assurance[1], int) or assurance[1] <= 0
-                or assurance[2] not in ("rollback", "forward_fix")
-                or assurance[3] is not True
-                or not isinstance(assurance[4], str) or not assurance[4].strip()):
-            print("ops-record: Production candidate manifest requires a positive "
-                  "performance budget/ref, recovery strategy "
-                  "(rollback or forward_fix), and ready recovery plan",
-                  file=sys.stderr)
-            return 2
-        verified = subprocess.run(
-            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
-             "verify", "--manifest", args.manifest],
-            cwd=REPO, capture_output=True, text=True, check=False)
-        if verified.returncode != 0:
-            detail = (verified.stdout + verified.stderr).strip().splitlines()
-            summary = detail[-1][:240] if detail else "verification returned no evidence"
-            print("ops-record: Production candidate manifest verification failed "
-                  f"before ledger intake: {summary}", file=sys.stderr)
+    if args.action == "candidate":
+        refusal = release_candidate_manifest_refusal(args, manifest)
+        if refusal:
+            print(f"ops-record: {refusal}", file=sys.stderr)
             return 2
 
     try:
@@ -1636,10 +2292,8 @@ def cmd_release(args) -> int:
                      # now explains it instead of surfacing a raw constraint name.
                      args.verifier, args.verifier_evidence,
                      args.test_evidence, args.security_evidence,
-                     (manifest.get("rollback_ready") if args.environment == "production"
-                      else args.rollback_ready),
-                     (manifest.get("rollback_plan_ref") if args.environment == "production"
-                      else args.rollback_plan),
+                     manifest.get("rollback_ready"),
+                     manifest.get("rollback_plan_ref"),
                      args.work_request, manifest.get("plan_hash"),
                      parse_ts(args.expires_at) if args.expires_at else None))
                 row = cur.fetchone()
@@ -1723,17 +2377,35 @@ def cmd_release(args) -> int:
                               "--plan-hash <bound-hash> --idempotency-key <uuid>",
                               file=sys.stderr)
                     else:
+                        if args.environment == "staging":
+                            build_instruction = (
+                                f"    tools/release-manifest.py build --sha {args.sha} "
+                                "--environment staging --performance-budget-ref <immutable-ref> "
+                                "--performance-budget-ms <milliseconds> "
+                                "--recovery-strategy <rollback|forward_fix> "
+                                "--rollback-plan-ref <immutable-ref> > out/release.json\n"
+                            )
+                            approval_instruction = (
+                                "    tools/ops-record.py release staging-approve --key <key> "
+                                "--environment staging --plan-hash <hash> "
+                                "--idempotency-key <uuid>"
+                            )
+                        else:
+                            build_instruction = (
+                                f"    tools/release-manifest.py build --sha {args.sha} "
+                                f"--environment {args.environment} > out/release.json\n"
+                            )
+                            approval_instruction = (
+                                "    no staging approval door exists for this non-serving "
+                                "environment"
+                            )
                         print(f"NO LIVE APPROVAL for {release_identity} in {args.environment}.\n"
-                              "  Build the manifest, record the candidate, and have Joe "
-                              "approve the plan hash it prints:\n"
-                              f"    tools/release-manifest.py build --sha {args.sha} "
-                              "> out/release.json\n"
+                              "  Build the exact-target manifest, record the candidate, "
+                              "and use that environment's governed approval door:\n"
+                              f"{build_instruction}"
                               "    tools/ops-record.py release candidate --key <key> "
-                              "--environment staging --manifest out/release.json\n"
-                              "    tools/ops-record.py release staging-approve --key <key> "
-                              "--environment staging "
-                              "--plan-hash <hash> --idempotency-key <uuid>",
-                              file=sys.stderr)
+                              f"--environment {args.environment} --manifest out/release.json\n"
+                              f"{approval_instruction}", file=sys.stderr)
                     return 3
                 key, state, expires, stored_plan, release_sha = row
                 if args.plan_hash and args.plan_hash != stored_plan:
@@ -1777,19 +2449,46 @@ def cmd_release(args) -> int:
                 # candidate overtaken before signing has none of that evidence and
                 # is not superseded in the sense this table means; it is abandoned,
                 # and its reason can name the successor in words.
-                if not args.reason or len(args.reason.strip()) < 12:
+                successor_key = (getattr(args, "superseded_by", None) or "").strip()
+                supplied_reason = (args.reason or "").strip()
+                if successor_key and supplied_reason:
+                    print("ops-record: release abandon accepts either --reason or "
+                          "--superseded-by, not both", file=sys.stderr)
+                    return 2
+                if successor_key == args.key:
+                    print("ops-record: a release cannot supersede itself", file=sys.stderr)
+                    return 2
+                if successor_key:
+                    supplied_reason = ("superseded before approval by recorded release "
+                                       f"{successor_key}")
+                if len(supplied_reason) < 12:
                     print("ops-record: release abandon needs --reason (at least a "
-                          "dozen characters). A terminal row nobody can explain is "
-                          "the thing this action exists to prevent.", file=sys.stderr)
+                          "dozen characters) or --superseded-by naming an existing "
+                          "same-target release. A terminal row nobody can explain "
+                          "is the thing this action exists to prevent.", file=sys.stderr)
                     return 2
                 cur.execute(
-                    """update ops.release
+                    """with eligible_successor as (
+                          select id, service_id, environment
+                            from ops.release
+                           where release_key = %s
+                             and state in
+                                 ('candidate','approved','deploying','verifying','complete')
+                             for share
+                        )
+                        update ops.release target
                           set state = 'abandoned', abandoned_reason = %s,
                               ended_at = now()
-                        where release_key = %s
-                          and state in ('draft','candidate','approved')
+                        where target.release_key = %s
+                          and target.state in ('draft','candidate','approved')
+                          and (%s = '' or exists (
+                                select 1 from eligible_successor successor
+                                 where successor.id <> target.id
+                                   and successor.service_id = target.service_id
+                                   and successor.environment = target.environment
+                              ))
                     returning state""",
-                    (args.reason.strip(), args.key))
+                    (successor_key, supplied_reason, args.key, successor_key))
                 row = cur.fetchone()
                 if not row:
                     cur.execute("select state from ops.release where release_key = %s",
@@ -1798,10 +2497,16 @@ def cmd_release(args) -> int:
                     if not existing:
                         print(f"ops-record: no release {args.key!r}", file=sys.stderr)
                     else:
-                        print(f"ops-record: {args.key!r} is {existing[0]} and cannot be "
-                              f"abandoned. Only a release that never shipped can be "
-                              f"ended this way; one that deployed is history.",
-                              file=sys.stderr)
+                        if successor_key:
+                            print(f"ops-record: {successor_key!r} is not an eligible "
+                                  "same-service, same-environment successor for "
+                                  f"{args.key!r}; the original release is unchanged.",
+                                  file=sys.stderr)
+                        else:
+                            print(f"ops-record: {args.key!r} is {existing[0]} and cannot be "
+                                  f"abandoned. Only a release that never shipped can be "
+                                  f"ended this way; one that deployed is history.",
+                                  file=sys.stderr)
                     return 2
                 print(f"{args.key} {row[0]}")
                 return 0
@@ -2099,6 +2804,9 @@ def main() -> int:
     rel.add_argument("--reason", help="abandon only: why this release will never "
                                       "ship. Required unless --superseded-by names "
                                       "the release that replaced it.")
+    rel.add_argument("--superseded-by", dest="superseded_by",
+                     help="abandon only: an existing same-service, same-environment "
+                          "release that replaces this unshipped candidate")
     rel.add_argument("--expires-hours", type=int, default=24,
                      help="approve/staging-approve: how long the approval stays live. An "
                           "approval that never expires is how a plan-hash check "
@@ -2126,6 +2834,40 @@ def main() -> int:
     sa.add_argument("--field", choices=["attempt_id", "state", "deploy_claimed",
                                          "deploy_allowed", "expected_provider_tag",
                                          "provider_version_id", "receipt_ref"])
+
+    sro = sub.add_parser("staging-restore-only",
+                         help="record a staging-only safety restore outside approval-bundle evidence")
+    sro.add_argument("action", choices=["prepare", "claim", "result"])
+    sro.add_argument("--idempotency-key", required=True)
+    sro.add_argument("--release-key")
+    sro.add_argument("--prior-release-key")
+    sro.add_argument("--recovery-attempt-id")
+    sro.add_argument("--git-sha")
+    sro.add_argument("--correlation")
+    sro.add_argument("--status", choices=["succeeded", "failed", "unknown"])
+    sro.add_argument("--reason")
+    sro.add_argument("--staging-readback-file")
+    sro.add_argument("--expected-provider-tag")
+    sro.add_argument("--expected-program6-actions", choices=["enabled", "disabled"])
+    sro.add_argument("--field", choices=["restore_attempt_id", "state", "mutation_claimed",
+                                            "mutation_allowed", "expected_provider_tag", "result_ref",
+                                            "status"])
+
+    sff = sub.add_parser("staging-forward-fix",
+                         help="prepare, claim, and record one verified forward-fix staging rehearsal")
+    sff.add_argument("action", choices=["prepare", "claim", "result"])
+    sff.add_argument("--idempotency-key", required=True)
+    sff.add_argument("--release-key")
+    sff.add_argument("--git-sha")
+    sff.add_argument("--correlation")
+    sff.add_argument("--staging-readback-file")
+    sff.add_argument("--provider-versions-file")
+    sff.add_argument("--manifest")
+    sff.add_argument("--expected-provider-tag")
+    sff.add_argument("--expected-program6-actions", choices=["enabled", "disabled"])
+    sff.add_argument("--field", choices=["forward_fix_rehearsal_attempt_id", "state", "mutation_claimed",
+                                            "mutation_allowed", "expected_provider_tag", "result_ref",
+                                            "bundle_id", "recovery_run_id"])
 
     srv = sub.add_parser("staging-readback-verify",
                          help="verify one bounded staging /release file without writing")
@@ -2177,6 +2919,8 @@ def main() -> int:
         "health": cmd_health,
         "staging-target": cmd_staging_target,
         "staging-attempt": cmd_staging_attempt,
+        "staging-restore-only": cmd_staging_restore_only,
+        "staging-forward-fix": cmd_staging_forward_fix,
         "staging-readback-verify": cmd_staging_readback_verify,
         "staging-provider-version": cmd_staging_provider_version,
         "assess": cmd_assess,

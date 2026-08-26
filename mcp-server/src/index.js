@@ -80,14 +80,16 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken, hermesActorForToken } from "./identity.js";
+import { actorFromProps, agentActorForToken, hermesActorForTokenMaps,
+         hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
-import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
+import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
-import { appendRoomTurn, DEFAULT_ROOM, readRoomTurns } from "./partner-room.js";
+import { appendRoomTurn, DEFAULT_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
+import { readCommandCenterSummary } from "./workspace-command-center.js";
 import { wrapWithCorrelation } from "./correlation.js";
 import { withFailureRecording, scheduleFailureRecord, actorUnresolvedFailureClass } from "./trace.js";
 
@@ -402,7 +404,15 @@ function reviewActorFor(request, env) {
 // before a deploy. A boundary that can only be tested by deploying is not a
 // boundary anyone should trust.
 function hermesActorFor(request, env) {
-  return hermesActorForToken(request.headers.get("authorization"), env.HERMES_TOKENS);
+  return hermesActorForTokenMaps(request.headers.get("authorization"),
+    env.HERMES_TOKENS, env.HERMES_TOKENS_EXTRA);
+}
+
+// The CoS capability is a separate server-controlled secret map. Check it
+// first so a credential explicitly provisioned for the bounded grant cannot
+// fall through to the ordinary Hermes/projector profile.
+function hermesCosActorFor(request, env) {
+  return hermesCosActorForToken(request.headers.get("authorization"), env.HERMES_COS_TOKENS);
 }
 
 // ---------- agent tokens (outside-model CLIs at full scope, loop #227/#239) ----------
@@ -479,10 +489,10 @@ function agentActorFor(request, env) {
 // job (agentActorForToken, extended rather than duplicated — see its own
 // comment); nothing about it lives in this file.
 //
-// EVERY VERB EXCEPT humanOnly FALLS OUT OF EXISTING MECHANISMS, ON PURPOSE.
-// No profile lock here (unlike probe/reviewer): full parity minus humanOnly
-// IS the grant, exactly like the agent-token door above, because human:false
-// makes tools.js's `if (tool.humanOnly && !actor.human) throw ...` refuse
+// EVERY VERB EXCEPT partner-authority FALLS OUT OF EXISTING MECHANISMS, ON PURPOSE.
+// No profile lock here (unlike probe/reviewer): full parity minus partner authority
+// IS the grant, exactly like the agent-token door above, because joe-local and
+// dell-local are not approved native Codex/Claude runtime identities and therefore refuse
 // teach / retire-rule / confirm-merge / reassign-deal / new-deal / … by
 // construction — never a list this file has to maintain. A credential sitting
 // in a 600 file on a Mac must not be able to teach a rule that binds both
@@ -495,8 +505,7 @@ function agentActorFor(request, env) {
 // HUMAN actor, which is exactly what carried the humanOnly verbs on a
 // credential in a config file. This one resolves to human:false with a
 // server-derived sponsor, which is a different, narrower shape — sponsored
-// but never human — and the humanOnly gate answers to `actor.human`, not to
-// whether a sponsor exists.
+// but never eligible for partner authority merely because a sponsor exists.
 //
 // The machine's actor row (kind='automation') must exist before any write verb
 // runs, exactly like every other machine actor above. Joe's runbook is
@@ -561,6 +570,11 @@ const dealroomHandler = createDealroomHandler({
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
   program6Handler: (request, env, ctx, actor, session) =>
     program6RoutineController.fetch(request, env, ctx, actor, session),
+  commandCenterReader: async (env, actor, correlationId) => {
+    const sql = neon(env.DATABASE_URL_READER);
+    const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
+    return readCommandCenterSummary({ client, actor, correlationId: correlationId || env.CORRELATION_ID });
+  },
   // The Model Room observatory's two doors onto the partner room. Both call the
   // SAME functions the read-room / add-room-turn verbs call (partner-room.js) —
   // these two adapters supply a connection and nothing else, so the panel can
@@ -569,6 +583,11 @@ const dealroomHandler = createDealroomHandler({
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
     return readRoomTurns(client, { room: DEFAULT_ROOM, ...params });
+  },
+  queueReadFn: (env, params) => {
+    const sql = neon(env.DATABASE_URL_READER);
+    const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
+    return readRoomQueue(client, { room: DEFAULT_ROOM, ...params });
   },
   roomWriteFn: async (env, params) => {
     const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
@@ -589,6 +608,10 @@ const dealroomHandler = createDealroomHandler({
 // owned by OAuthProvider/defaultHandler.
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
+  // The old Deal Room hostname is a browser bookmark bridge only. Keep it
+  // ahead of machine-token doors so /mcp and other API paths fail closed on
+  // that hostname instead of reaching an unrelated machine surface.
+  if (isLegacyDealroomRequest(request, env)) return dealroomHandler.fetch(request, env, ctx);
   if (url.pathname.startsWith("/capture/")) {
     return captureHandler(env).fetch(request, env, ctx);
   }
@@ -597,6 +620,8 @@ async function routeRequest(request, env, ctx) {
     if (probeActor) return dispatch(request, env, ctx, probeActor);
     const reviewActor = reviewActorFor(request, env);
     if (reviewActor) return dispatch(request, env, ctx, reviewActor);
+    const hermesCosActor = hermesCosActorFor(request, env);
+    if (hermesCosActor) return dispatch(request, env, ctx, hermesCosActor);
     const hermesActor = hermesActorFor(request, env);
     if (hermesActor) return dispatch(request, env, ctx, hermesActor);
     const agentActor = agentActorFor(request, env);

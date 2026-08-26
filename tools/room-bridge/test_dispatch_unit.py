@@ -205,6 +205,32 @@ def main() -> int:
 
     check("an unknown desk kind is refused", refuse_unknown_kind)
 
+    def refuse_bad_effort():
+        try:
+            reg.register(
+                "bad-effort", "codex-session", model="gpt-5.1-codex-mini",
+                effort="extra-spicy", cwd=str(root),
+            )
+        except desks.DeskError as e:
+            assert e.code == "bad_effort", e.code
+        else:
+            raise AssertionError("an invalid codex reasoning effort was accepted")
+
+    check("invalid codex reasoning effort is refused", refuse_bad_effort)
+
+    def refuse_claude_effort():
+        try:
+            reg.register(
+                "claude-effort", "claude-session", socket=str(sock_dir / "cl.sock"),
+                effort="low",
+            )
+        except desks.DeskError as e:
+            assert e.code == "bad_effort", e.code
+        else:
+            raise AssertionError("claude-session accepted effort")
+
+    check("claude-session effort is refused", refuse_claude_effort)
+
     # ---- dispatch to a live Claude session --------------------------------
 
     def dispatch_to_claude():
@@ -251,8 +277,21 @@ def main() -> int:
     )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
 
+    def requires_model_and_effort():
+        reg.register("codex-naked", "codex-session", model="gpt-5.1-codex-mini", cwd=str(root))
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        try:
+            dispatch.dispatch("codex-naked", "no effort", registry=reg, results_path=results, env=env)
+        except desks.DeskError as e:
+            assert e.code == "unnamed_model_or_effort", e.code
+        else:
+            raise AssertionError("a codex desk without effort was dispatched")
+
+    check("codex dispatch without effort is refused", requires_model_and_effort)
+
     def dispatch_to_codex():
-        reg.register("codex-desk", "codex-session", model="gpt-5.1-codex-mini", cwd=str(root))
+        reg.register("codex-desk", "codex-session", model="gpt-5.1-codex-mini", effort="low",
+                     cwd=str(root))
         env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
         out = dispatch.dispatch(
             "codex-desk", "rename the variable", registry=reg,
@@ -263,6 +302,7 @@ def main() -> int:
         argv = json.loads(argv_log.read_text().splitlines()[0])
         assert argv[0] == "exec", argv
         assert "-m" in argv and argv[argv.index("-m") + 1] == "gpt-5.1-codex-mini", argv
+        assert "-c" in argv and argv[argv.index("-c") + 1] == "model_reasoning_effort=low", argv
         assert "-C" in argv and argv[argv.index("-C") + 1] == str(root), argv
         assert argv[-1] == "rename the variable", argv
 
@@ -324,6 +364,7 @@ def main() -> int:
         second = argv[-1]
         assert second[:2] == ["exec", "resume"], second
         assert first in second, f"the thread id was not passed to resume: {second}"
+        assert "-c" in second and second[second.index("-c") + 1] == "model_reasoning_effort=low", second
         # `codex exec resume` refuses -C/-s/--add-dir outright ("unexpected
         # argument '-C' found") — caught live 2026-08-22 dispatching a second
         # task through this exact path against the real binary, which the
@@ -360,6 +401,7 @@ def main() -> int:
         """
         env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
         reg.register("codex-wide", "codex-session", model="m", cwd=str(root),
+                     effort="medium",
                      sandbox="workspace-write", add_dirs=[str(root / "probe")])
         dispatch.dispatch("codex-wide", "bind something", registry=reg,
                           results_path=results, env=env)

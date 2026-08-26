@@ -66,6 +66,8 @@ def make_fixture_map(entries):
     os.makedirs(os.path.join(tmp, "ops", "config"))
     with open(os.path.join(tmp, "hooks", "rule-shape-gate.py"), "w") as fh:
         fh.write(open(HOOK).read())
+    with open(os.path.join(tmp, "hooks", "hook_meter.py"), "w") as fh:
+        fh.write(open(os.path.join(REPO, "hooks", "hook_meter.py")).read())
     with open(os.path.join(tmp, "ops", "config", "rule-enforcement-map.json"), "w") as fh:
         json.dump({"rule_controls": entries}, fh)
     return tmp

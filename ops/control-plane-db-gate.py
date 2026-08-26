@@ -354,13 +354,20 @@ def main() -> int:
             if fetchone_required(cur.fetchone(), "content-fuel source policy")[0] != 0:
                 fail("content-fuel projection fabricates a primary-source class")
 
-            # Deal-history sizing is allowed only after a Thursday enrichment
-            # completion receipt has a typed exact subject count.  The view may
-            # not substitute unrelated record_flag volume for that receipt.
+            # An absent receipt cannot make the backlog vanish, but it also
+            # cannot manufacture an execution cap.  Only receipt_bound rows
+            # may carry sizing metadata; receipt_missing is a visible,
+            # deliberately non-executable queue state.
             cur.execute("""
                 select count(*)
                   from public.v_control_plane_deal_history_queue q
-                 where not exists (
+                 where q.sizing_state not in ('receipt_bound','receipt_missing')
+                    or (q.sizing_state='receipt_missing' and (
+                         q.slice_limit is not null
+                      or q.enrichment_subject_count is not null
+                      or q.enrichment_scheduled_for is not null
+                      or q.enrichment_mode is not null))
+                    or (q.sizing_state='receipt_bound' and not exists (
                    select 1 from ops.job_receipt r join ops.job j on j.id=r.job_id
                     where j.definition_key='contact-enrichment-weekly'
                       and r.kind='completion'
@@ -369,10 +376,62 @@ def main() -> int:
                       and (r.evidence->>'subjects_processed')::integer=q.enrichment_subject_count
                       and j.scheduled_for=q.enrichment_scheduled_for
                       and j.mode=q.enrichment_mode
-                 )
+                 ))
             """)
             if fetchone_required(cur.fetchone(), "deal-history enrichment receipt binding")[0] != 0:
-                fail("deal-history slice exists without its Thursday enrichment receipt/count")
+                fail("deal-history queue has fabricated sizing state or unbound receipt evidence")
+
+            # Discriminative schema proof: with every receipt temporarily
+            # absent, a Salesforce-linked unverified client stays visible but
+            # has no execution metadata.  Adding one typed Thursday receipt
+            # restores the exact legacy receipt-bound behavior.
+            cur.execute("select id from actor where slug='joe'")
+            deal_history_actor = fetchone_required(cur.fetchone(), "Joe actor for deal-history fixture")[0]
+            cur.execute("savepoint deal_history_queue_fixture")
+            try:
+                cur.execute("delete from ops.job_receipt")
+                cur.execute("""insert into party(kind,name,created_by,updated_by)
+                               values ('person','Deal-history receipt fixture',%s,%s) returning id""",
+                            (deal_history_actor, deal_history_actor))
+                deal_history_party = fetchone_required(cur.fetchone(), "deal-history fixture party")[0]
+                cur.execute("""insert into client(party_id,created_by,updated_by)
+                               values (%s,%s,%s) returning id""",
+                            (deal_history_party, deal_history_actor, deal_history_actor))
+                deal_history_client = fetchone_required(cur.fetchone(), "deal-history fixture client")[0]
+                cur.execute("""insert into deal(client_id,name,salesforce_id,deal_type,phase,created_by,updated_by)
+                               values (%s,'Deal-history receipt fixture','fixture-salesforce-id','lease','closing',%s,%s)""",
+                            (deal_history_client, deal_history_actor, deal_history_actor))
+                cur.execute("""select count(*), bool_and(sizing_state='receipt_missing'),
+                                      bool_and(slice_limit is null and enrichment_subject_count is null
+                                               and enrichment_scheduled_for is null and enrichment_mode is null)
+                                 from public.v_control_plane_deal_history_queue
+                                where subject_type='client' and subject_id=%s""", (deal_history_client,))
+                missing_receipt = fetchone_required(cur.fetchone(), "deal-history missing-receipt queue")
+                if tuple(missing_receipt) != (1, True, True):
+                    fail("missing Thursday receipt hid a deal-history queue row or fabricated a cap")
+                fixture_job = uuid.uuid4()
+                cur.execute("""insert into ops.job
+                                  (id,definition_key,definition_version,idempotency_key,scheduled_for,mode,state,
+                                   attempt,max_attempts,next_attempt_at,timeout_seconds)
+                               values (%s,'contact-enrichment-weekly',1,%s,
+                                       (date_trunc('week', now() at time zone 'America/Chicago')
+                                        + interval '3 days 10 hours') at time zone 'America/Chicago',
+                                       'shadow','queued',0,1,now(),60)""",
+                            (fixture_job, str(fixture_job)))
+                cur.execute("""insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+                               values (%s,0,'completion','fixture:deal-history-receipt',
+                                       '{"subjects_processed":30}'::jsonb)""", (fixture_job,))
+                cur.execute("""select count(*), bool_and(sizing_state='receipt_bound'),
+                                      bool_and(slice_limit=15 and enrichment_subject_count=30
+                                               and enrichment_mode='shadow'
+                                               and enrichment_scheduled_for is not null)
+                                 from public.v_control_plane_deal_history_queue
+                                where subject_type='client' and subject_id=%s""", (deal_history_client,))
+                receipt_bound = fetchone_required(cur.fetchone(), "deal-history receipt-bound queue")
+                if tuple(receipt_bound) != (1, True, True):
+                    fail("typed Thursday receipt did not restore the deal-history execution slice")
+            finally:
+                cur.execute("rollback to savepoint deal_history_queue_fixture")
 
             # A new rule cannot activate on prose alone.
             cur.execute("select id from actor where slug='joe'")

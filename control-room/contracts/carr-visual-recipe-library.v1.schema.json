@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr://control-room/contracts/carr-visual-recipe-library.v1.schema.json",
+  "version": "1.0.0",
+  "status": "phase1_contract_active_not_a_runtime_or_authority",
+  "title": "CARR Visual Recipe Library v1",
+  "description": "CARR-owned visual archetypes. Recipes select presentation grammar only; the Design Kernel remains the source for authority, truth, accessibility, tokens, and component states.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "library_id", "version", "status", "inherits", "selection_policy", "workflow", "recipes", "provenance"],
+  "properties": {
+    "schema_version": {"const": "carr-visual-recipe-library.v1"},
+    "library_id": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "status": {"const": "active_contract_not_a_runtime_or_authority"},
+    "inherits": {"$ref": "#/$defs/inherits"},
+    "selection_policy": {"$ref": "#/$defs/selection_policy"},
+    "workflow": {"$ref": "#/$defs/workflow"},
+    "recipes": {"type": "array", "minItems": 8, "maxItems": 12, "items": {"$ref": "#/$defs/recipe"}},
+    "provenance": {"$ref": "#/$defs/provenance"}
+  },
+  "$defs": {
+    "strings": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "inherits": {"type": "object", "additionalProperties": false, "required": ["design_kernel_contract_id", "design_kernel_version", "inheritance_rule"], "properties": {"design_kernel_contract_id": {"const": "contract:carr-design-kernel"}, "design_kernel_version": {"const": "v1"}, "inheritance_rule": {"const": "recipes_may_not_redefine_authority_truth_accessibility_tokens_or_component_states"}}},
+    "selection_policy": {"type": "object", "additionalProperties": false, "required": ["candidate_count", "human_confirmation_required", "hidden_taste_selection_forbidden", "evaluation_posture"], "properties": {"candidate_count": {"const": [2, 4]}, "human_confirmation_required": {"const": true}, "hidden_taste_selection_forbidden": {"const": true}, "evaluation_posture": {"const": "recipe_conformance_is_advisory_critical_design_kernel_gates_remain_unmaskable"}}},
+    "workflow": {"type": "object", "additionalProperties": false, "required": ["steps"], "properties": {"steps": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "object", "additionalProperties": false, "required": ["step_id", "instruction", "enforcement"], "properties": {"step_id": {"enum": ["request", "compare", "confirm", "bind"]}, "instruction": {"type": "string", "minLength": 1}, "enforcement": {"type": "string", "minLength": 1}}}}}},
+    "recipe": {"type": "object", "additionalProperties": false, "required": ["recipe_id", "label", "fit_statement", "intent_ids", "audiences", "jobs", "layout_grammar", "information_density", "hierarchy", "visualization_choices", "motion_posture", "component_emphasis", "evidence_freshness", "responsive_behavior", "exclusions"], "properties": {"recipe_id": {"type": "string", "pattern": "^recipe:[a-z0-9-]+$"}, "label": {"type": "string", "minLength": 1}, "fit_statement": {"type": "string", "minLength": 1}, "intent_ids": {"$ref": "#/$defs/strings"}, "audiences": {"$ref": "#/$defs/strings"}, "jobs": {"$ref": "#/$defs/strings"}, "layout_grammar": {"$ref": "#/$defs/strings"}, "information_density": {"enum": ["low", "medium", "high", "adaptive"]}, "hierarchy": {"$ref": "#/$defs/strings"}, "visualization_choices": {"$ref": "#/$defs/strings"}, "motion_posture": {"enum": ["still", "restrained", "ambient_optional"]}, "component_emphasis": {"$ref": "#/$defs/strings"}, "evidence_freshness": {"$ref": "#/$defs/strings"}, "responsive_behavior": {"$ref": "#/$defs/strings"}, "exclusions": {"$ref": "#/$defs/strings"}}},
+    "provenance": {"type": "object", "additionalProperties": false, "required": ["source_class", "external_inspiration", "data_class"], "properties": {"source_class": {"const": "carr_owned_general_design_patterns"}, "external_inspiration": {"const": "general_visual_archetype_pattern_only_no_third_party_files_brand_names_or_licensed_content_copied"}, "data_class": {"const": "metadata_only"}}}
+  }
+}

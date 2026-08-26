@@ -121,14 +121,105 @@ SAFE = [
 ]
 
 
-def fire(cmd):
+def fire(cmd, cwd=None):
+    payload = {"tool_name": "Bash", "tool_input": {"command": cmd},
+               "session_id": "selftest"}
+    if cwd:
+        payload["cwd"] = cwd
     p = subprocess.run(
         [sys.executable, HOOK],
-        input=json.dumps({"tool_name": "Bash",
-                          "tool_input": {"command": cmd},
-                          "session_id": "selftest"}),
+        input=json.dumps(payload),
         capture_output=True, text=True, timeout=30)
     return p.returncode == 2
+
+
+# ── does the gate ASK the shared resolver at all ─────────────────────────────
+# WHICH TREE the gate judges is proved in ops/worktree-scope-selftest.py, against
+# a throwaway directory, because hooks/worktree_scope.py answers that question
+# for three gates and one copy of those fixtures is the point of the module.
+#
+# What has to be proved HERE is the wiring: that this gate reads the payload's
+# `cwd` and hands it to that resolver. A gate can import a correct module and
+# then never pass it the one argument that matters — which is exactly the shape
+# of the bug being fixed, where a correct worktree exemption existed and the
+# call site fed it only the command text. So this fires the REAL hook twice with
+# the same command and different `cwd`, and requires the answers to differ.
+def wiring_cases():
+    """(name, ok, detail) proving the hook hands the payload's cwd to the resolver.
+
+    AN END-TO-END VERSION OF THIS WOULD SKIP ON EVERY MACHINE THAT MATTERS, which
+    is why it is not written that way. A `cwd` only earns the worktree reading if
+    it names a REGISTERED worktree of the tree the hook resolved, and this suite
+    runs from inside a worktree (in CI, from a bare checkout) where no nested
+    `.claude/worktrees/` exists. A case that skips everywhere is not coverage.
+
+    So the resolver is replaced with a spy and the REAL main() is driven over a
+    real payload. The assertion is the narrow one this file owes: the call site
+    passes `cwd` through. WHICH TREE that cwd resolves to is proved exhaustively,
+    against a throwaway directory, in ops/worktree-scope-selftest.py.
+    """
+    import contextlib
+    import importlib.util
+    import io
+    import tempfile
+    results = []
+
+    spec = importlib.util.spec_from_file_location("git_writer_gate_probe", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    seen = {}
+
+    def spy(cmd, cwd=None, *a, **kw):
+        seen["cmd"], seen["cwd"] = cmd, cwd
+        return None                       # judge the shared tree, as before
+
+    mod.target_tree = spy
+    sentinel = "/nowhere/session/cwd"
+    payload = {"tool_name": "Bash", "tool_input": {"command": "git add -A"},
+               "session_id": "selftest", "cwd": sentinel}
+
+    stdin = sys.stdin
+    sys.stdin = io.StringIO(json.dumps(payload))
+    try:
+        with contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            mod.main()
+    except SystemExit:
+        pass
+    finally:
+        sys.stdin = stdin
+
+    results.append(("payload-cwd-reaches-resolver", seen.get("cwd") == sentinel,
+                    f"resolver saw cwd={seen.get('cwd')!r}"))
+    # The command must arrive too, and must be the raw command rather than the
+    # inert-text-stripped copy — `cd <path>` inside a heredoc is not a `cd`, but
+    # a `cd` that leads a real clause is, and stripping first would lose it.
+    results.append(("payload-cmd-reaches-resolver", seen.get("cmd") == "git add -A",
+                    f"resolver saw cmd={seen.get('cmd')!r}"))
+
+    with tempfile.TemporaryDirectory(prefix="gwg-cwd-") as outside:
+        # End to end, unspied: a cwd that is not a worktree of this repo cannot
+        # earn the worktree reading, so the gate falls back to the shared tree
+        # and behaves exactly as it always did.
+        #
+        # THE EXPECTATION IS DERIVED, NOT HARDCODED, and hardcoding it is what
+        # made this case fail on the hosted runner: a fresh CI checkout is CLEAN,
+        # the gate is silent on a clean tree by design, and asserting DENY was
+        # asserting the state of the machine rather than the behaviour of the
+        # gate. The whole point of the case is that an outside cwd is judged
+        # against the shared tree — so the shared tree's own dirtiness is the
+        # only honest expectation, and it holds on a dirty laptop and a clean
+        # runner alike.
+        shared_dirty = bool(subprocess.run(
+            ["git", "-C", REPO, "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True, text=True).stdout.strip())
+        got = fire("git add -A", cwd=outside)
+        results.append(("cwd-outside-still-judged-shared", got is shared_dirty,
+                        f"shared tree dirty={shared_dirty} "
+                        f"got={'DENY' if got else 'allow'}"))
+
+    return results
 
 
 def tree_is_dirty():
@@ -177,6 +268,13 @@ def main():
 
     passed = failed = skipped = 0
     bad = []
+
+    for name, ok, detail in wiring_cases():
+        passed, failed = (passed + 1, failed) if ok else (passed, failed + 1)
+        if not ok:
+            bad.append(name)
+        print(f"  {'ok  ' if ok else 'FAIL'} {name:34} {detail}")
+    print()
 
     for name, cmd in DANGEROUS:
         if not dirty:

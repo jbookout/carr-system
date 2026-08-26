@@ -133,6 +133,7 @@ export function agentProfileTools({ withEnvelope, writeEvent, ToolError }) {
             status: profile.status,
           } }),
           msgId: crypto.randomUUID(),
+          originChannel: "mcp", originActor: actor.slug,
         });
         if (receipt.ok !== true)
           throw new ToolError({ error: "profile_receipt_failed", detail: receipt.error });

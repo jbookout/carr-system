@@ -31,6 +31,10 @@ export const ROOM_BODY_MAX = 20000;
 export const ROOM_READ_DEFAULT = 50;
 export const ROOM_READ_MAX = 200;
 export const ROOM_KINDS = ["turn", "system", "receipt"];
+export const QUEUE_STALE_MS = 120_000;
+const QUEUE_EVENT_KEYS = ["v", "board", "event_id", "event", "task_id", "card", "summary", "projected_at"];
+const QUEUE_CARD_KEYS = ["title", "target", "effective_model", "status", "priority", "cap", "updated_at", "source_seq"];
+const QUEUE_HEALTH_KEYS = ["v", "board", "source", "status", "checked_at", "event_cursor", "projection_digest"];
 
 /** null when the name is not a room slug; the normalized name otherwise. */
 export function normalizeRoomName(value) {
@@ -56,7 +60,7 @@ export async function readRoomTurns(c, args = {}) {
   if (room === null) return { ok: false, error: "room_invalid" };
   const { after, limit } = normalizeRoomPaging(args);
   const r = await c.query(
-    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id
+    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id, origin_channel, origin_actor
        from v_partner_room_turn
       where room_id=$1 and id > $2
       order by id asc limit $3 /* partner-room:read */`,
@@ -68,29 +72,134 @@ export async function readRoomTurns(c, args = {}) {
     more: turns.length === limit };
 }
 
+function exactKeys(value, keys) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+/** Only fully-validated, projector-shaped receipts become Queue data.  A room
+ * turn is untrusted prose even when it claims to be JSON. */
+export function queueEventFromTurn(turn) {
+  if (turn?.kind !== "receipt" || typeof turn.body !== "string") return null;
+  try {
+    const outer = JSON.parse(turn.body);
+    const event = outer?.queue_event;
+    if (!exactKeys(outer, ["queue_event"]) || !exactKeys(event, QUEUE_EVENT_KEYS) ||
+        event.v !== 1 || event.board !== "carr-build" || !Number.isInteger(event.event_id) ||
+        typeof event.event !== "string" || !/^t_[a-z0-9]+$/i.test(event.task_id) ||
+        !exactKeys(event.card, QUEUE_CARD_KEYS) || typeof event.summary !== "string" ||
+        !Number.isFinite(Date.parse(event.projected_at))) return null;
+    const card = event.card;
+    if (!(["string", "object"].includes(typeof card.effective_model)) ||
+        !["title", "target", "status", "priority", "cap", "updated_at"].every((key) => typeof card[key] === "string") ||
+        !(card.source_seq === null || (Number.isInteger(card.source_seq) && card.source_seq >= 0)) ||
+        !Number.isFinite(Date.parse(card.updated_at))) return null;
+    return event;
+  } catch { return null; }
+}
+
+/** Only a server-attributable Hermes projector receipt can extend queue
+ * freshness. It carries no task/card data and never participates in the task
+ * state map. */
+export function queueProjectionHealthFromTurn(turn) {
+  if (turn?.kind !== "receipt" || turn.seat !== "hermes" ||
+      turn.sponsor !== "joe" ||
+      turn.origin_channel !== "mcp" || turn.origin_actor !== "hermes-pilot" ||
+      typeof turn.body !== "string") return null;
+  try {
+    const outer = JSON.parse(turn.body);
+    const health = outer?.queue_projection_health;
+    if (!exactKeys(outer, ["queue_projection_health"]) ||
+        !exactKeys(health, QUEUE_HEALTH_KEYS) || health.v !== 1 ||
+        health.board !== "carr-build" || health.source !== "hermes-queue-projector.v1" ||
+        health.status !== "ok" || !Number.isInteger(health.event_cursor) ||
+        health.event_cursor < 0 || typeof health.checked_at !== "string" ||
+        !/Z$|\+00:00$/.test(health.checked_at) ||
+        !Number.isFinite(Date.parse(health.checked_at)) ||
+        !/Z$|\+00:00$/.test(String(turn.at || "")) ||
+        !Number.isFinite(Date.parse(turn.at)) || Date.parse(health.checked_at) > Date.parse(turn.at) ||
+        !(health.projection_digest === null || UUID.test(health.projection_digest)) ||
+        ((health.event_cursor === 0) !== (health.projection_digest === null))) return null;
+    return health;
+  } catch { return null; }
+}
+
+/** The queue projector's only write shape.  Both event and health receipts
+ * must carry the exact server-derived Hermes provenance the reader trusts. */
+export function queueProjectionReceiptFromTurn(turn) {
+  if (turn?.kind !== "receipt" || turn.seat !== "hermes" || turn.sponsor !== "joe" ||
+      turn.origin_channel !== "mcp" || turn.origin_actor !== "hermes-pilot") return null;
+  return queueProjectionHealthFromTurn(turn) || queueProjectionEventFromTurn(turn);
+}
+
+/** A Queue event is data only when it came through the same locked projector
+ * provenance as health. Shape alone never turns ordinary room prose into Queue. */
+export function queueProjectionEventFromTurn(turn) {
+  if (turn?.kind !== "receipt" || turn.seat !== "hermes" || turn.sponsor !== "joe" ||
+      turn.origin_channel !== "mcp" || turn.origin_actor !== "hermes-pilot") return null;
+  return queueEventFromTurn(turn);
+}
+
+/** Shared queue read: latest state-complete event per canonical task. */
+export async function readRoomQueue(c, args = {}, { now = Date.now() } = {}) {
+  const room = normalizeRoomName(args.room);
+  if (room === null) return { ok: false, error: "room_invalid" };
+  const r = await c.query(
+    `select id as seq, room_id, to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, msg_id, origin_channel, origin_actor
+       from v_partner_room_turn where room_id=$1 and kind='receipt'
+      order by id desc limit 800 /* partner-room:queue */`, [room],
+  );
+  const latest = new Map();
+  let projectionHealthAt = null;
+  let latestQueueEventAt = null;
+  for (const turn of r.rows) {
+    const health = queueProjectionHealthFromTurn(turn);
+    if (health && (!projectionHealthAt || Date.parse(turn.at) > Date.parse(projectionHealthAt)))
+      projectionHealthAt = turn.at;
+    const event = queueProjectionEventFromTurn(turn);
+    if (event && Number.isFinite(Date.parse(turn.at)) &&
+        (!latestQueueEventAt || Date.parse(turn.at) > Date.parse(latestQueueEventAt)))
+      latestQueueEventAt = turn.at;
+    if (!event || latest.has(event.task_id)) continue;
+    latest.set(event.task_id, event);
+  }
+  const events = [...latest.values()].filter((event) => event.card.status !== "archived")
+    .sort((a, b) => Date.parse(b.card.updated_at) - Date.parse(a.card.updated_at));
+  const projectedAt = events.reduce((latestAt, event) =>
+    !latestAt || Date.parse(event.projected_at) > Date.parse(latestAt) ? event.projected_at : latestAt, null);
+  const healthCanExtend = projectionHealthAt &&
+    (!latestQueueEventAt || Date.parse(projectionHealthAt) > Date.parse(latestQueueEventAt));
+  const freshest = healthCanExtend ? projectionHealthAt : (latestQueueEventAt || projectedAt);
+  return { ok: true, room, events, projected_at: freshest,
+    live: Boolean(freshest) && now >= Date.parse(freshest) && now - Date.parse(freshest) <= QUEUE_STALE_MS };
+}
+
 // THE ONE ROOM APPEND, for the same reason. Sponsor is always resolved by the
 // CALLER from a verified credential and passed in — this function never reads
 // it off an argument object that came from a request body.
-export async function appendRoomTurn(c, { room, sponsor, seat, kind, body, msgId }) {
+export async function appendRoomTurn(c, { room, sponsor, seat, kind, body, msgId, originChannel, originActor }) {
+  if (!(["mcp", "browser-human"].includes(originChannel)) || !SLUG.test(originActor || ""))
+    throw new TypeError("room provenance must be server-derived");
   const ins = await c.query(
-    `insert into partner_room_turn (room_id, sponsor, seat, kind, body, msg_id)
-     values ($1,$2,$3,$4,$5,$6)
+    `insert into partner_room_turn (room_id, sponsor, seat, kind, body, msg_id, origin_channel, origin_actor)
+     values ($1,$2,$3,$4,$5,$6,$7,$8)
      on conflict (msg_id) do nothing
      returning id, to_jsonb(at)#>>'{}' as at /* partner-room:say */`,
-    [room, sponsor, seat, kind, body, msgId],
+    [room, sponsor, seat, kind, body, msgId, originChannel, originActor],
   );
   if (!ins.rows.length) {
     const prior = await c.query(
-      "select id, room_id, sponsor, seat from partner_room_turn where msg_id=$1 /* partner-room:dedup-read */",
+      "select id, room_id, sponsor, seat, kind, origin_channel, origin_actor from partner_room_turn where msg_id=$1 /* partner-room:dedup-read */",
       [msgId],
     );
     if (!prior.rows.length) return { ok: false, error: "dedup_row_vanished", msg_id: msgId };
     const p = prior.rows[0];
     return { ok: true, deduplicated: true, room: p.room_id, seq: p.id,
-      sponsor: p.sponsor, seat: p.seat, msg_id: msgId };
+      sponsor: p.sponsor, seat: p.seat, kind: p.kind, origin_channel: p.origin_channel,
+      origin_actor: p.origin_actor, msg_id: msgId };
   }
   return { ok: true, room, seq: ins.rows[0].id, at: ins.rows[0].at,
-    sponsor, seat, kind, msg_id: msgId };
+    sponsor, seat, kind, origin_channel: originChannel, origin_actor: originActor, msg_id: msgId };
 }
 
 export function partnerRoomTools({ withEnvelope, ToolError }) {
@@ -128,8 +237,53 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
             hint: "the room only takes turns from a credential a partner sponsors; this one has no partner behind it" });
 
         const msgId = args.msg_id === undefined ? crypto.randomUUID() : String(args.msg_id).toLowerCase();
-        const appended = await appendRoomTurn(c, { room, sponsor: scope.sponsor, seat, kind, body, msgId });
+        const appended = await appendRoomTurn(c, { room, sponsor: scope.sponsor, seat, kind, body, msgId,
+          originChannel: "mcp", originActor: actor.slug });
         if (appended.ok !== true) { const { ok: _ok, ...failure } = appended; throw new ToolError(failure); }
+        return appended;
+      }),
+    },
+
+    "project-room-queue": {
+      write: true,
+      description: "Append one shape-checked carr-build projection receipt through the locked Hermes machine identity. The server fixes partner-line/joe/hermes/receipt and rejects arbitrary room prose. This is the unattended room bridge's projection door, not a general transcript writer.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        body: { type: "string", description: "exact queue_event or queue_projection_health JSON envelope" },
+        msg_id: { type: "string", description: "deterministic UUID replay id from the projector" },
+      }, required: ["idempotency_key", "body", "msg_id"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "project-room-queue", args, async () => {
+        if (actor?.hermes !== true || actor.slug !== "hermes-pilot")
+          throw new ToolError({ error: "queue_projector_identity_required",
+            hint: "this door requires the server-derived hermes-pilot identity" });
+        const body = typeof args.body === "string" ? args.body : "";
+        if (body.length > ROOM_BODY_MAX)
+          throw new ToolError({ error: "body_too_long", limit: ROOM_BODY_MAX, got: body.length });
+        if (!UUID.test(String(args.msg_id || "")))
+          throw new ToolError({ error: "msg_id_invalid", hint: "msg_id must be a UUID" });
+        const msgId = String(args.msg_id).toLowerCase();
+        const fixed = { sponsor: "joe", seat: "hermes", kind: "receipt", body,
+          origin_channel: "mcp", origin_actor: "hermes-pilot", at: new Date().toISOString() };
+        if (!queueProjectionReceiptFromTurn(fixed))
+          throw new ToolError({ error: "queue_projection_receipt_invalid",
+            hint: "body must be an exact reader-valid queue_event or queue_projection_health envelope" });
+
+        const appended = await appendRoomTurn(c, { room: DEFAULT_ROOM, sponsor: "joe", seat: "hermes",
+          kind: "receipt", body, msgId, originChannel: "mcp", originActor: "hermes-pilot" });
+        if (appended.ok !== true) {
+          const { ok: _ok, ...failure } = appended;
+          throw new ToolError(failure);
+        }
+        let observed = { ...fixed, at: appended.at || fixed.at };
+        if (appended.deduplicated) {
+          const prior = await c.query(
+            `select to_jsonb(at)#>>'{}' as at, sponsor, seat, kind, body, origin_channel, origin_actor
+               from partner_room_turn where msg_id=$1 /* partner-room:projection-dedup-proof */`, [msgId]);
+          observed = prior.rows[0] || {};
+        }
+        if (observed.body !== body || !queueProjectionReceiptFromTurn(observed))
+          throw new ToolError({ error: "queue_projection_provenance_rejected",
+            hint: "the durable row does not satisfy the same provenance and body parser as read-room-queue" });
         return appended;
       }),
     },
@@ -143,6 +297,15 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
       } },
       handler: async (c, _actor, args) => {
         const read = await readRoomTurns(c, args);
+        if (read.ok !== true) { const { ok: _ok, ...failure } = read; throw new ToolError(failure); }
+        return read;
+      },
+    },
+    "read-room-queue": {
+      description: "Read the current non-archived carr-build Queue projection. Hermes task state is authoritative; this returns only the latest validated, state-complete projection receipt per task and declares live:false when its projection is stale.",
+      inputSchema: { type: "object", properties: { room: { type: "string", description: "room name; default partner-line" } } },
+      handler: async (c, _actor, args) => {
+        const read = await readRoomQueue(c, args);
         if (read.ok !== true) { const { ok: _ok, ...failure } = read; throw new ToolError(failure); }
         return read;
       },

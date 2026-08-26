@@ -63,6 +63,7 @@
 // built against.
 
 import { program6ActionPosture } from "./program6-feature-flag.js";
+import { workspaceCommandCenterPosture } from "./workspace-feature-flag.js";
 
 export async function buildRelease({ env, sql, verbCount, now = () => new Date() }) {
   const sha = (env && env.GIT_SHA) || null;
@@ -89,18 +90,25 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
   let schema;
   try {
     const rows = await sql`
-      select count(*)::int as applied_count, max(filename) as highest_applied_migration
+      select count(*)::int as applied_count, max(filename) as highest_applied_migration,
+             'sha256:' || encode(public.digest(coalesce(string_agg(
+               convert_to(filename, 'UTF8') || decode('00', 'hex') ||
+               convert_to(sha256, 'UTF8') || decode('0a', 'hex'),
+               ''::bytea order by filename collate "C"), ''::bytea),
+               'sha256'), 'hex') as ledger_sha256
         from v_schema_ledger`;
     const row = (rows && rows[0]) || {};
     schema = {
       highest_applied_migration: row.highest_applied_migration ?? null,
       applied_count: row.applied_count != null ? Number(row.applied_count) : 0,
+      ledger_sha256: row.ledger_sha256 ?? null,
       reason: null,
     };
   } catch (e) {
     schema = {
       highest_applied_migration: null,
       applied_count: null,
+      ledger_sha256: null,
       reason: "database unreachable: " + String((e && e.message) || e).slice(0, 200),
     };
   }
@@ -156,6 +164,7 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
     schema: {
       highest_applied_migration: schema.highest_applied_migration,
       applied_count: schema.applied_count,
+      ledger_sha256: schema.ledger_sha256,
       reason: schema.reason,
       note: "what the tracking table claims, not ground truth — tools/ledger-repair.py "
           + "records a past drift where schema_migrations fell behind migrations already "
@@ -166,5 +175,6 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
     // checked-in Wrangler configuration is fingerprinted in each release plan,
     // so changing false→true requires a reviewed immutable version promotion.
     program6_actions: program6ActionPosture(env),
+    workspace_command_center: workspaceCommandCenterPosture(env),
   };
 }

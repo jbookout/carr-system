@@ -65,6 +65,17 @@
     }
   },
   "control_catalog": {
+    "pack_delivery": {
+      "implementation": [
+        "hooks/rule-pack-drift-gate.py"
+      ],
+      "test": [
+        "ops/rule-pack-drift-gate-selftest.py",
+        "ops/rule-load-layer-check-selftest.py"
+      ],
+      "failure_mode": "Stop block naming the pack the turn's own work needed, once ops.rule_delivery_policy says enforced; a recorded observation until then",
+      "_note": "NOT YET CLAIMED BY ANY RULE, and that is deliberate. Nine rules whose control is `session_boot` move to this one at the enforcement flip (see load_layer_flip_owed). While shadow mode leaves recitation intact, session_boot is still what carries them, and naming a control that is not yet carrying the rule is what rule ab814a26 forbids."
+    },
     "conduct_stop": {
       "implementation": [
         "hooks/conduct-stop-gate.py"
@@ -83,6 +94,16 @@
         "ops/delegation-gate-selftest.py"
       ],
       "failure_mode": "PreToolUse block"
+    },
+    "delegation_names_model_and_effort": {
+      "implementation": [
+        "tools/room-bridge/dispatch.py",
+        "tools/room-bridge/desks.py"
+      ],
+      "test": [
+        "ops/room-bridge-selftest.py"
+      ],
+      "failure_mode": "DeskError unnamed_model_or_effort at dispatch, before anything reaches the desk, when a codex-kind desk lacks a named model or reasoning effort"
     },
     "artifact_read": {
       "implementation": [
@@ -207,7 +228,6 @@
     "record_home": {
       "implementation": [
         "hooks/record-home-gate.py",
-        "hooks/install-record-home-gate.py",
         "hooks/bash-write-gate.py",
         "hooks/guard-unattended.py",
         "hooks/write-effect-check.py"
@@ -366,15 +386,6 @@
         "command:python3 hooks/gate-integrity.py --selftest"
       ],
       "failure_mode": "SessionStart attestation"
-    },
-    "ledger_boundary": {
-      "implementation": [
-        "hooks/ledger-boundary-sweep.py"
-      ],
-      "test": [
-        "external:no dedicated suite yet"
-      ],
-      "failure_mode": "Stop reminder"
     },
     "model_floor": {
       "implementation": [
@@ -708,6 +719,13 @@
       "binding_moment": "before opening a loop",
       "control": "loop_guard",
       "exceptions": "named external blocker"
+    },
+    "6cfb67f5": {
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "at dispatch of a delegated task to another seat",
+      "control": "delegation_names_model_and_effort",
+      "exceptions": "claude-session desks - a live person's seat picks its own model"
     },
     "aa411351": {
       "category": "hard_pre_action",
@@ -2048,7 +2066,7 @@
   },
   "active_rule_ids": {
     "shared": [
-      "9310827b", "2271e684", "236ca227", "25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "9d80fd2d", "c1db316c", "f5beac20", "fa217e48", "6901cc3b", "14e0408b", "c6f69dee", "75c2e4c9", "e313a3ca", "1e62c007", "fb110a39", "8c1e6057", "5be2f462", "c315befa", "d8c9b1f0", "70e372f0", "0c1bac27", "8c812bed", "b42e217e", "767f9b41", "80def9d2", "d367188d", "86647daf", "3d185f2b", "57d83b75", "2ca2add2", "97326357", "5d44d3f3", "d26d63b0", "d5dcfe26", "2b889e80", "81709f57", "c20dc3d5", "2e362970", "94806da2", "49c627cc", "faf1b643", "ca841807", "54e2bcb9", "4c21d86b", "c53beeaa", "d7e6de46", "7105955b", "5409731b", "424ba0cc", "4dd44fd7", "4399df76", "f92dfab2", "9f15f21a", "ede4c735", "412d37d3", "51d9f05f", "725dff46", "ce12c11e", "f5bac101", "1b8e7f43", "a8c55a47", "61551180", "17ffd587", "6a4e6283", "708c2150", "b1521526", "c1547ed1", "f04a05aa", "b587f6c2", "590b11e1", "f0f9156e", "0e22e34a", "1fddcffb", "99e951b9", "a3f6c7f9", "b01edd26", "fb2b263d", "fc4d7753", "14181e60", "b42f11a0", "f5d97b4a", "8aefcdce", "4f7c348f", "4a9188f3", "f47a8fe9", "73381d78", "f2d58a30", "48083552", "581cb3fe", "015183f5", "4e104d4c", "2a3ff869", "0f38532e", "61c64d91", "def3e84e", "388cc81e", "df8f1da0", "2dbb0ad8", "9873a0d2", "9e3fb6d0", "3578d799", "9ff56260", "5697071b", "c4a284b2", "006a7eaa", "d9ce2b08", "2e8b4840", "185013c6", "a9ecd5b4", "23ea0607", "76a53dfe", "308ef1de", "179be4b8", "43e2ef76", "fc21a431", "efbdfb1a", "a6e6ab4e", "df55c398", "8cddc6ad", "1f3a7372", "af7de070", "647f843d", "aa411351", "e8868cbe", "d9874334", "740bb505", "9530fb1c", "347a9ca6", "3a9dbafd", "eaa31ac5", "dff58fef", "e4d965d9", "847f9995", "e065aa82", "4fae20f4", "cff429f5", "d7c69aa6", "bc9188b4", "88e9b5eb", "c0b38d80", "38b15dc6", "5e89c211", "4402973a", "24e10ee8", "cd84d22a", "614c1209", "58b44ccb", "152ceb65", "e65efc68", "1c21263c", "1d50a3bb", "67580c28", "a8f159ad", "9293d609", "eeb3d106", "4039b9b5", "173119a8", "4a53ff82", "596f7549", "ab814a26", "5cd8d0f6", "1c42d80c", "c8ebeb5b", "d7f74c93", "937252fb", "bd4a6d22",
+      "9310827b", "2271e684", "236ca227", "25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "9d80fd2d", "c1db316c", "f5beac20", "fa217e48", "6901cc3b", "14e0408b", "c6f69dee", "75c2e4c9", "e313a3ca", "1e62c007", "fb110a39", "8c1e6057", "5be2f462", "c315befa", "d8c9b1f0", "70e372f0", "0c1bac27", "8c812bed", "b42e217e", "767f9b41", "80def9d2", "d367188d", "86647daf", "3d185f2b", "57d83b75", "2ca2add2", "97326357", "5d44d3f3", "d26d63b0", "d5dcfe26", "2b889e80", "81709f57", "c20dc3d5", "2e362970", "94806da2", "49c627cc", "faf1b643", "ca841807", "54e2bcb9", "4c21d86b", "c53beeaa", "d7e6de46", "7105955b", "5409731b", "424ba0cc", "4dd44fd7", "4399df76", "f92dfab2", "9f15f21a", "ede4c735", "412d37d3", "51d9f05f", "725dff46", "ce12c11e", "f5bac101", "1b8e7f43", "a8c55a47", "61551180", "17ffd587", "6a4e6283", "708c2150", "b1521526", "c1547ed1", "f04a05aa", "b587f6c2", "590b11e1", "f0f9156e", "0e22e34a", "1fddcffb", "99e951b9", "a3f6c7f9", "b01edd26", "fb2b263d", "fc4d7753", "14181e60", "b42f11a0", "f5d97b4a", "8aefcdce", "4f7c348f", "4a9188f3", "f47a8fe9", "73381d78", "f2d58a30", "48083552", "581cb3fe", "015183f5", "4e104d4c", "2a3ff869", "0f38532e", "61c64d91", "def3e84e", "388cc81e", "df8f1da0", "2dbb0ad8", "9873a0d2", "9e3fb6d0", "3578d799", "9ff56260", "5697071b", "c4a284b2", "006a7eaa", "d9ce2b08", "2e8b4840", "185013c6", "a9ecd5b4", "23ea0607", "76a53dfe", "308ef1de", "179be4b8", "43e2ef76", "fc21a431", "efbdfb1a", "a6e6ab4e", "df55c398", "8cddc6ad", "1f3a7372", "af7de070", "647f843d", "aa411351", "e8868cbe", "d9874334", "740bb505", "9530fb1c", "347a9ca6", "3a9dbafd", "eaa31ac5", "dff58fef", "e4d965d9", "847f9995", "e065aa82", "4fae20f4", "cff429f5", "d7c69aa6", "bc9188b4", "88e9b5eb", "c0b38d80", "38b15dc6", "5e89c211", "4402973a", "24e10ee8", "cd84d22a", "614c1209", "58b44ccb", "152ceb65", "e65efc68", "1c21263c", "1d50a3bb", "67580c28", "a8f159ad", "9293d609", "eeb3d106", "4039b9b5", "173119a8", "4a53ff82", "596f7549", "ab814a26", "5cd8d0f6", "1c42d80c", "c8ebeb5b", "d7f74c93", "937252fb", "bd4a6d22", "6cfb67f5",
       "e6e0b0e7", "3b0cd546", "defee176", "ba5730c5", "83b9a362", "5f8c661d", "7e4ca905", "76a1ae2b", "cf1c13a6", "bddb0e7b", "6ec7312d", "893aeec5", "7b4ba3aa", "1f750181", "3fa422b7"
     ],
     "joe": [
@@ -2107,7 +2125,7 @@
       "2e8b4840",
       "76a53dfe",
       "308ef1de",
-      "647f843d",
+      "647f843d", "6cfb67f5",
       "aa411351",
       "eaa31ac5",
       "e065aa82",
@@ -2206,5 +2224,1551 @@
       "49533583",
       "557838a5", "3fa422b7"
     ]
-  }
+  },
+    "load_layer_note": "THE DELIVERY HALF of the enforcement recategorization (2026-08-23 rules council, both chairs unanimous). `rule_controls` above says HOW a rule is enforced; this says WHEN its text is delivered to a session. layer0 = recited at every boot, and nothing task-specific belongs here (rule 1fddcffb). control = an installed deny/stop/schema control prints the rule at the moment it binds, so boot recitation is belt-and-suspenders; ops/rule-load-layer-check.py REFUSES this value for any rule whose enforcement_class is not built, which is what stops 'scoped' from meaning 'silently dropped'. pack = delivered when the observed work matches a pack's triggers. A wildcard pack is refused by the same check: grok's warning was that shipping wildcard tags and calling it scoping is how rules go silent on an undeclared session.",
+    "load_layer_flip_owed": "AT THE ENFORCEMENT FLIP, NOT BEFORE: nine rules whose `control` is session_boot move to a pack, so their delivery stops being the boot recitation — 25fcddee, 3fa17fa0, 72e06bdf, 581cb3fe, 113b3833, 57d13061, c66dc739, 49533583, 557838a5. Their control must change to the pack compiler in the SAME change that flips the mode, and not while shadow mode leaves recitation intact: claiming a control that is not yet carrying the rule is exactly what rule ab814a26 forbids.",
+    "layer0_shared_cap": 35,
+    "rule_packs": {
+      "client-deal": {
+        "title": "Clients, prospects, LOIs and deals",
+        "triggers": [
+          "deal",
+          "loi",
+          "letter of intent",
+          "lead",
+          "client",
+          "prospect",
+          "landlord",
+          "listing agent",
+          "search packet",
+          "tour",
+          "outreach",
+          "commission",
+          "salesforce",
+          "national account",
+          "practice owner",
+          "franchisee",
+          "market commentary"
+        ],
+        "description": "Everything binding on work a client, prospect or counterparty will feel."
+      },
+      "records-intake": {
+        "title": "Parties, vendors, contacts and merges",
+        "triggers": [
+          "party",
+          "vendor",
+          "contact",
+          "attendee",
+          "merge",
+          "duplicate",
+          "dedupe",
+          "enrichment",
+          "npi",
+          "nppes",
+          "intake",
+          "new client",
+          "new lead",
+          "new vendor",
+          "add-party",
+          "verification stamp"
+        ],
+        "description": "Creating, verifying, merging and enriching identity records."
+      },
+      "surface-doctrine": {
+        "title": "CARR surfaces, documents and visual design",
+        "triggers": [
+          "surface",
+          "dashboard",
+          "lead board",
+          "deal board",
+          "deal room",
+          "command center",
+          "control room",
+          "artifact",
+          "render",
+          "html",
+          "css",
+          "svg",
+          "ux",
+          "design",
+          "proposal",
+          "packet",
+          "document",
+          "brand",
+          "motion",
+          "diagram"
+        ],
+        "description": "Building, restyling or reviewing anything a human looks at."
+      },
+      "engineering-git": {
+        "title": "Repo, git, gates, migrations and deploys",
+        "triggers": [
+          "git",
+          "branch",
+          "worktree",
+          "commit",
+          "push",
+          "pull request",
+          "ci",
+          "gate",
+          "hook",
+          "migration",
+          "schema",
+          "deploy",
+          "wrangler",
+          "test",
+          "selftest",
+          "config file",
+          "baseline",
+          "refactor",
+          "architecture fork"
+        ],
+        "description": "Changing the code, the checks or the database shape."
+      },
+      "delegation-council": {
+        "title": "Subagents, councils and outside models",
+        "triggers": [
+          "subagent",
+          "delegate",
+          "fan-out",
+          "council",
+          "chair",
+          "red team",
+          "executor",
+          "codex",
+          "grok",
+          "copilot",
+          "workflow",
+          "seat",
+          "brief"
+        ],
+        "description": "Handing work to another seat, and judging what comes back."
+      },
+      "governance-rules": {
+        "title": "Rules, doctrine, loops and decisions",
+        "triggers": [
+          "teach",
+          "rule",
+          "doctrine",
+          "loop",
+          "decision",
+          "capture",
+          "defect",
+          "retire",
+          "amend",
+          "admission",
+          "enforcement map",
+          "precedent",
+          "index",
+          "handoff",
+          "checkpoint",
+          "partner sync"
+        ],
+        "description": "Writing to the system's own memory, and the deferral discipline around it."
+      },
+      "scheduled-automation": {
+        "title": "Unattended runs, schedules and health",
+        "triggers": [
+          "scheduled",
+          "launchd",
+          "cron",
+          "nightly",
+          "heartbeat",
+          "health",
+          "unattended",
+          "routine",
+          "job",
+          "credential",
+          "away mode",
+          "tombstone",
+          "metric",
+          "alarm",
+          "long job",
+          "estimate"
+        ],
+        "description": "Anything that will run when nobody is watching."
+      },
+      "source-study": {
+        "title": "Sources Joe hands over, and first-of-its-kind research",
+        "triggers": [
+          "article",
+          "link",
+          "video",
+          "thread",
+          "x.com",
+          "paper",
+          "arxiv",
+          "repo",
+          "source",
+          "study",
+          "research pass",
+          "new implementation",
+          "new capability"
+        ],
+        "description": "Reading something outside the system and merging what it changes."
+      },
+      "joe-comms": {
+        "title": "Joe's X, mail, calendar and social lanes",
+        "triggers": [
+          "x.com",
+          "tweet",
+          "quote tweet",
+          "post",
+          "social",
+          "email",
+          "mail",
+          "inbox",
+          "calendar",
+          "meeting",
+          "gmail",
+          "outlook",
+          "apple mail",
+          "draft"
+        ],
+        "description": "Reaching Joe's own accounts and drafting from them."
+      },
+      "joe-development": {
+        "title": "Joe's development and calibration ledgers",
+        "triggers": [
+          "ledger",
+          "calibration",
+          "override",
+          "prediction",
+          "monthly review",
+          "curriculum",
+          "compression",
+          "timing call",
+          "close-before-open"
+        ],
+        "description": "The mechanisms that watch and build Joe's own judgment."
+      },
+      "vendor-intros": {
+        "title": "Vendor introduction politics",
+        "triggers": [
+          "introduction",
+          "intro",
+          "who do we know",
+          "refer",
+          "vendor compatibility",
+          "competing vendors"
+        ],
+        "description": "The intro-politics domain, which renders to its own surface and is not recited."
+      }
+    },
+    "rule_load_layers": {
+      "006a7eaa": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "015183f5": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "0156e9fa": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Binds the closing line of every message."
+      },
+      "018ce972": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-development"
+        ]
+      },
+      "0c1bac27": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "0e22e34a": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "0f38532e": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "1021fa84": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Corrects a standing misreading of Joe that every session inherits from its context."
+      },
+      "113b3833": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "11b2b73b": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "14181e60": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "14e0408b": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "152ceb65": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Governs how every reply is shaped; it has no domain trigger."
+      },
+      "173119a8": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "179be4b8": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "17ffd587": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "185013c6": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "19304882": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-development"
+        ]
+      },
+      "1b8e7f43": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Any withheld capability in any session; the filing is what survives the block."
+      },
+      "1c21263c": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "1c42d80c": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Fires on unexpected friction, which is by definition unpredicted."
+      },
+      "1d50a3bb": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "1e62c007": {
+        "load_layer": "control",
+        "packs": [
+          "scheduled-automation"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "1f3a7372": {
+        "load_layer": "control",
+        "packs": [
+          "scheduled-automation"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "1f750181": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "1fddcffb": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The core-routing law this whole scoping change enforces; it must survive an undeclared boot."
+      },
+      "20d106f1": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-development"
+        ]
+      },
+      "2271e684": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "236ca227": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "23ea0607": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "24e10ee8": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "25fab860": {
+        "load_layer": "control",
+        "packs": [
+          "joe-comms"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "25fcddee": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "27277539": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Binds whenever a technical explanation is given, which is most turns."
+      },
+      "2a3ff869": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "2b66211d": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "2b889e80": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Negative findings are produced in every domain; nothing triggers this but the sentence."
+      },
+      "2ca2add2": {
+        "load_layer": "pack",
+        "packs": [
+          "records-intake"
+        ]
+      },
+      "2dbb0ad8": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "2e362970": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "2e8b4840": {
+        "load_layer": "control",
+        "packs": [
+          "records-intake"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "308ef1de": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "30a189fb": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The non-CARR routing check has to fire before the work is classified into a lane."
+      },
+      "347a9ca6": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Scoping is only safe while this is loaded — it is what forbids reasoning from a session's name."
+      },
+      "3578d799": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "388cc81e": {
+        "load_layer": "control",
+        "packs": [
+          "records-intake"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "38b15dc6": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "3a9dbafd": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "3b0cd546": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "3d185f2b": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "3fa17fa0": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "3fa422b7": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "4039b9b5": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "412d37d3": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "424ba0cc": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "4399df76": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "43e2ef76": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "4402973a": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "466a545a": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "48083552": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "49533583": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-comms"
+        ]
+      },
+      "49c627cc": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Claims about what the record layer cannot do arise in every domain."
+      },
+      "4a53ff82": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "4a9188f3": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "4c21d86b": {
+        "load_layer": "control",
+        "packs": [
+          "records-intake"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "4dd44fd7": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "4e104d4c": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "4f7c348f": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The boot recitation contract itself. Layer 0 until the amendment batch replaces its wording."
+      },
+      "4fae20f4": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Fires the moment any rate, average or trend is stated."
+      },
+      "51d9f05f": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "5409731b": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "54e2bcb9": {
+        "load_layer": "control",
+        "packs": [
+          "records-intake"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "557838a5": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-comms"
+        ]
+      },
+      "5697071b": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "57d13061": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-comms"
+        ]
+      },
+      "57d83b75": {
+        "load_layer": "control",
+        "packs": [
+          "records-intake"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "581cb3fe": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "58b44ccb": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "58cef3a1": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Steelmanning a mislabel binds whenever Joe states something slightly off."
+      },
+      "590b11e1": {
+        "load_layer": "control",
+        "packs": [
+          "scheduled-automation"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "596f7549": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Tool errors that blame a subsystem occur in every lane."
+      },
+      "5be2f462": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "5cd8d0f6": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Companion to the run-the-command deny gate, and it fires before that gate does."
+      },
+      "5d44d3f3": {
+        "load_layer": "pack",
+        "packs": [
+          "records-intake"
+        ]
+      },
+      "5e896ed6": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "5e89c211": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "5f8c661d": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "614c1209": {
+        "load_layer": "pack",
+        "packs": [
+          "records-intake"
+        ]
+      },
+      "61551180": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The reversible-protection test applies to any live exposure found in any lane."
+      },
+      "6172e7d5": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "61c64d91": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "6330bec8": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The crux discipline runs before options on any non-trivial problem."
+      },
+      "634a2d94": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Mechanical steps inside approved work occur in every session."
+      },
+      "6437ae15": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "647f843d": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "67580c28": {
+        "load_layer": "pack",
+        "packs": [
+          "surface-doctrine"
+        ]
+      },
+      "6901cc3b": {
+        "load_layer": "pack",
+        "packs": [
+          "surface-doctrine"
+        ]
+      },
+      "6a4e6283": {
+        "load_layer": "control",
+        "packs": [
+          "surface-doctrine"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "6cfb67f5": {
+        "load_layer": "control",
+        "packs": [
+          "delegation-council"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "6ec7312d": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "708c2150": {
+        "load_layer": "control",
+        "packs": [
+          "scheduled-automation"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "70e372f0": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "7105955b": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "725dff46": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "72e06bdf": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "73381d78": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "740bb505": {
+        "load_layer": "pack",
+        "packs": [
+          "scheduled-automation"
+        ]
+      },
+      "75c2e4c9": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "767f9b41": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "76a1ae2b": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "76a53dfe": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "7b4ba3aa": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "7e4ca905": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "7e9739f2": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Governs every reply to Joe; there is no turn it does not bind."
+      },
+      "80def9d2": {
+        "load_layer": "pack",
+        "packs": [
+          "surface-doctrine"
+        ]
+      },
+      "8117b414": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Do-the-beneficial-thing binds before any message asking for a go-ahead."
+      },
+      "81709f57": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "83b9a362": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "847f9995": {
+        "load_layer": "control",
+        "packs": [
+          "scheduled-automation"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "86647daf": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "88e9b5eb": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "893aeec5": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "8aefcdce": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "8c1e6057": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "8c812bed": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "8cddc6ad": {
+        "load_layer": "control",
+        "packs": [
+          "records-intake"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "9293d609": {
+        "load_layer": "pack",
+        "packs": [
+          "surface-doctrine"
+        ]
+      },
+      "9310827b": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The safety check for both partners; no task predicts a wrong instruction."
+      },
+      "937252fb": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "94806da2": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Raw-bytes reading binds any source that will change doctrine, rules or records."
+      },
+      "9530fb1c": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Fires on a sentence ('the real fix is X'), not on a domain."
+      },
+      "95e76c1f": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The register corrections are delivered in; it shapes every reply."
+      },
+      "9730f565": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Dates are computed in every session and its only bind today is boot recitation."
+      },
+      "97326357": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "9873a0d2": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "98e74e7c": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "99e951b9": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "9b081605": {
+        "load_layer": "control",
+        "packs": [
+          "joe-comms"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "9d80fd2d": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "9e3fb6d0": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "9f15f21a": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "9ff56260": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "a3f6c7f9": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "a6e6ab4e": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "a8c55a47": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "a8f159ad": {
+        "load_layer": "pack",
+        "packs": [
+          "surface-doctrine"
+        ]
+      },
+      "a9ecd5b4": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "aa411351": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The audience gate that decides escalation; the installed gate only sees AskUserQuestion."
+      },
+      "ab814a26": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "af7de070": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "A classifier block can interrupt any tool call in any session."
+      },
+      "b01edd26": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "b1521526": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "b3ea627f": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Binds the closing line of every message; the companion to ending with one action."
+      },
+      "b42e217e": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "b42f11a0": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "b587f6c2": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "ba5730c5": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "bbffc139": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-development"
+        ]
+      },
+      "bc4145f6": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-development"
+        ]
+      },
+      "bc9188b4": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "bd4a6d22": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "bddb0e7b": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "c0b38d80": {
+        "load_layer": "control",
+        "packs": [
+          "engineering-git"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "c1547ed1": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "c1db316c": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "c20dc3d5": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "c315befa": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "c4a284b2": {
+        "load_layer": "pack",
+        "packs": [
+          "source-study"
+        ]
+      },
+      "c53beeaa": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "c66dc739": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-comms"
+        ]
+      },
+      "c6f69dee": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "c864b8cb": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "One question at a time binds any question put to Joe."
+      },
+      "c8ebeb5b": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "ca841807": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "cd84d22a": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "A publication event that can be offered in any session, with no configuration to stop it."
+      },
+      "ce12c11e": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "cf1c13a6": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "cff429f5": {
+        "load_layer": "control",
+        "packs": [
+          "records-intake"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "d26d63b0": {
+        "load_layer": "pack",
+        "packs": [
+          "records-intake"
+        ]
+      },
+      "d367188d": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "d3774a28": {
+        "load_layer": "pack",
+        "packs": [
+          "joe-development"
+        ]
+      },
+      "d5dcfe26": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "The most frequent failure class on record (standing-context returns the live ledger); fires on any present-tense claim."
+      },
+      "d7c69aa6": {
+        "load_layer": "control",
+        "packs": [
+          "records-intake"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "d7e6de46": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed schema delivers this at its binding moment."
+      },
+      "d7f74c93": {
+        "load_layer": "control",
+        "packs": [
+          "delegation-council"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "d8c9b1f0": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Whether a finding reached a human is a property of the message, not of the domain."
+      },
+      "d9874334": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Permission-versus-throughput is misclassified in every lane; its only bind today is boot."
+      },
+      "d9ce2b08": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "dcf98880": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "def3e84e": {
+        "load_layer": "pack",
+        "packs": [
+          "scheduled-automation"
+        ]
+      },
+      "defee176": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "df55c398": {
+        "load_layer": "pack",
+        "packs": [
+          "delegation-council"
+        ]
+      },
+      "df8f1da0": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Decides whether work is authorised at all, before any pack could be chosen."
+      },
+      "dff58fef": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Binds at the end of every message, in every session."
+      },
+      "e065aa82": {
+        "load_layer": "control",
+        "packs": [
+          "governance-rules"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "e313a3ca": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "e4d965d9": {
+        "load_layer": "layer0",
+        "packs": [],
+        "why": "Binds at the moment of writing 'I cannot', which no task predicts."
+      },
+      "e65efc68": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "e6e0b0e7": {
+        "load_layer": "pack",
+        "packs": [
+          "vendor-intros"
+        ]
+      },
+      "e8868cbe": {
+        "load_layer": "control",
+        "packs": [
+          "scheduled-automation"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "eaa31ac5": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "ede4c735": {
+        "load_layer": "pack",
+        "packs": [
+          "surface-doctrine"
+        ]
+      },
+      "eeb3d106": {
+        "load_layer": "pack",
+        "packs": [
+          "surface-doctrine"
+        ]
+      },
+      "efbdfb1a": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "f04a05aa": {
+        "load_layer": "control",
+        "packs": [
+          "scheduled-automation"
+        ],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "f0f9156e": {
+        "load_layer": "pack",
+        "packs": [
+          "engineering-git"
+        ]
+      },
+      "f2d58a30": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "f47a8fe9": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "f5bac101": {
+        "load_layer": "pack",
+        "packs": [
+          "client-deal"
+        ]
+      },
+      "f5beac20": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "f5d97b4a": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "f92dfab2": {
+        "load_layer": "control",
+        "packs": [
+          "client-deal"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "fa217e48": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed stop gate delivers this at its binding moment."
+      },
+      "faae6748": {
+        "load_layer": "control",
+        "packs": [],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "faf1b643": {
+        "load_layer": "pack",
+        "packs": [
+          "records-intake"
+        ]
+      },
+      "fb110a39": {
+        "load_layer": "control",
+        "packs": [
+          "delegation-council"
+        ],
+        "why": "An installed deny gate delivers this at its binding moment."
+      },
+      "fb2b263d": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "fc21a431": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      },
+      "fc4d7753": {
+        "load_layer": "pack",
+        "packs": [
+          "governance-rules"
+        ]
+      }
+    }
 }

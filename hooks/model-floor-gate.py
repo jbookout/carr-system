@@ -60,7 +60,12 @@ from datetime import datetime, timezone
 # fails open when it cannot read its floors — so the failure mode is a gate
 # that reports healthy while enforcing nothing.
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LOG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.join(REPO, "out", "hook-guard.log")
 CONFIG = os.path.join(REPO, "ops", "config", "model-floors.json")
 CACHE_DIR = os.path.join(REPO, "out", "model-floor-cache")
 

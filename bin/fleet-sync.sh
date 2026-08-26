@@ -36,6 +36,8 @@ EX_CONFIG=78
 
 REPO="${0:A:h:h}"
 cd "$REPO" || { print -ru2 -- "fleet-sync: cannot enter $REPO"; exit 1 }
+PY="$REPO/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
 
 # Canonical checkout only. --git-common-dir differs from --git-dir inside a
 # worktree, which is the cheapest reliable test.
@@ -65,10 +67,9 @@ if [ "$local_sha" = "$remote_sha" ]; then
 else
   # Tracked changes only. Untracked scratch is a session's business, not this
   # job's, and refusing on it would mean this never runs on a working machine.
-  dirty="$(git status --porcelain --untracked-files=no)"
-  if [ -n "$dirty" ]; then
+  if ! dirt_reason="$("$PY" "$REPO/tools/fleet_sync_safety.py" "$REPO" origin/main)"; then
     print -r -- "fleet-sync: SKIP — local changes present, refusing to fast-forward over them:"
-    print -r -- "$dirty" | sed 's/^/    /'
+    print -r -- "    $dirt_reason"
     exit $EX_CONFIG
   fi
 
@@ -88,8 +89,44 @@ fi
 # Re-render the installed wiring from whatever the checkout now holds. Idempotent
 # by design and the same installer bin/migrate-dell.sh runs; on an already-correct
 # machine it changes nothing.
-PY="$REPO/.venv/bin/python"
-[ -x "$PY" ] || PY=python3
+# run-scheduled preserves a PID-bound launchd identity before the nested zsh
+# replaces XPC_SERVICE_NAME with `0`.  Re-prove that the attested PID is our
+# actual parent and is still launchd's loaded fleet process.  A manual ambient
+# variable therefore cannot claim the exemption.
+attested_pid="${CARR_RUN_SCHEDULED_LAUNCHD_PID:-}"
+loaded_parent=0
+if launchctl print "gui/$UID/com.carr.fleet-sync" 2>/dev/null \
+   | grep -Eq "^[[:space:]]*pid = ${PPID}[[:space:]]*$"; then
+  loaded_parent=1
+fi
+valid_attestation=0
+if [ "${CARR_RUN_SCHEDULED_XPC_SERVICE_NAME:-}" = "com.carr.fleet-sync" ] \
+    && [[ "$attested_pid" = <-> ]] \
+    && [ "$PPID" = "$attested_pid" ] \
+    && [ "$loaded_parent" -eq 1 ]; then
+  valid_attestation=1
+fi
+if [ "$valid_attestation" -eq 1 ]; then
+  export CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL=com.carr.fleet-sync
+elif [ "${CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM:-}" = 1 ] \
+    || [ -n "${CARR_RUN_SCHEDULED_XPC_SERVICE_NAME:-}" ] \
+    || [ -n "${CARR_RUN_SCHEDULED_LAUNCHD_PID:-}" ] \
+    || [ "$loaded_parent" -eq 1 ]; then
+  unset CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL
+  unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
+  unset CARR_RUN_SCHEDULED_LAUNCHD_PID
+  unset CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM
+  print -ru2 -- "fleet-sync: ACTIVE-SELF PROOF REFUSED — self evidence exists, but"
+  print -ru2 -- "    the exact fleet-sync/fleet.sync canonical tuple, wrapper parent PID,"
+  print -ru2 -- "    and live launchctl PID do not all agree; refusing config install so"
+  print -ru2 -- "    this job cannot unload itself"
+  exit 1
+else
+  unset CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL
+fi
+unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
+unset CARR_RUN_SCHEDULED_LAUNCHD_PID
+unset CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM
 if ! "$PY" "$REPO/ops/config-as-code.py" install --apply </dev/null; then
   print -ru2 -- "fleet-sync: config-as-code install --apply failed"
   exit 1

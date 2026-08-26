@@ -47,6 +47,46 @@
 #                         pipelines/provision-dell-local-client.sql for Dell
 #                         (both mirror provision-smoke-probe.sql) + a key in
 #                         ~/.config/carr/mcp-tokens.env (CARR_MCP_LOCAL_TOKEN).
+#   HERMES_TOKENS       — JSON map for the locked Hermes runtime, including
+#                         { "hermes-pilot": "<token>" }. The unattended room
+#                         bridge selects the matching value from the same 600
+#                         token file as CARR_HERMES_MCP_TOKEN only for its
+#                         shape-checked project-room-queue calls. The plist and
+#                         argv never carry the value; ordinary calls remain on
+#                         CARR_MCP_LOCAL_TOKEN / joe-local.
+#   HERMES_TOKENS_EXTRA — additive room-bridge projector map:
+#                         { "hermes-pilot": "<new-token>" }. Never replace
+#                         HERMES_TOKENS just to add this client: secret values
+#                         cannot be read back, so replacement could invalidate
+#                         the existing Hermes runtime.
+#   HERMES_COS_TOKENS — separate JSON map for the server-locked Hermes
+#                       chief-of-staff door, e.g. { "hermes-pilot": "<token>" }.
+#                       This map is checked before HERMES_TOKENS and selects only
+#                       the `hermes-cos` profile (ordinary Hermes/projector
+#                       credentials remain on their existing profile). Joe
+#                       provisions the secret value; it never appears here.
+#                       Local proof uses CARR_MCP_CLIENT_PROFILE=hermes-cos and
+#                       CARR_HERMES_COS_MCP_TOKEN in the existing 0600
+#                       ~/.config/carr/mcp-tokens.env. It must never reuse
+#                       CARR_HERMES_MCP_TOKEN / HERMES_TOKENS_EXTRA.
+#                       Native Hermes Desktop is provisioned separately through
+#                       its sanctioned CLI:
+#                         hermes mcp add carr-cos \
+#                           --url https://api.doctorcre.com/mcp --auth header
+#                       Enter the same dedicated CoS bearer only at the prompt.
+#                       Hermes stores it as MCP_CARR_COS_API_KEY in its 0600
+#                       ~/.hermes/.env and stores only ${MCP_CARR_COS_API_KEY}
+#                       interpolation in ~/.hermes/config.yaml. Post-merge:
+#                         hermes config path; hermes config env-path
+#                         stat -f %Lp ~/.hermes/.env ~/.hermes/config.yaml
+#                         hermes mcp list; hermes mcp test carr-cos
+#                       Both files must read 600, carr-cos must be enabled, and
+#                       a fresh native session's tools/list must include
+#                       update-deal/add-premises. The ordinary/projector server
+#                       must remain distinct and must omit both verbs. Rollback:
+#                         hermes mcp remove carr-cos
+#                       then remove only MCP_CARR_COS_API_KEY through the Hermes
+#                       credential owner; never edit or reuse the plain token.
 #   (PARTNER_TOKENS     — RETIRED 2026-08-03. Was an interim per-partner bearer
 #                         for /mcp during the OAuth rollout. Both partners are on
 #                         provider-issued tokens; the secret is deleted and the
@@ -74,6 +114,7 @@ compatibility_flags = ["global_fetch_strictly_public"]
 routes = [
   { pattern = "api.practicecre.com", custom_domain = true },
   { pattern = "api.doctorcre.com", custom_domain = true },
+  { pattern = "app.doctorcre.com", custom_domain = true },
   { pattern = "dealroom.doctorcre.com", custom_domain = true }
 ]
 
@@ -95,11 +136,15 @@ routes = [
 # that one.
 [vars]
 CARR_ENV = "production"
-DEALROOM_HOST = "dealroom.doctorcre.com"
+APP_HOST = "app.doctorcre.com"
+LEGACY_DEALROOM_HOST = "dealroom.doctorcre.com"
 # A reviewed, public deployment setting. Program 6 is enabled only through the
 # immutable release that fingerprints this exact config value; the shared
 # parser still fails closed for a missing or non-literal value.
 DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true"
+# Authenticated Command Center cutover: / serves workspace.html while enabled;
+# /deals remains the explicit Deal Room route. Disable to roll back the root.
+WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"
 
 # Cloudflare supplies the immutable version ID, optional tag, and creation
 # timestamp at runtime. /release reads this binding as provider identity; it is
@@ -166,7 +211,7 @@ workers_dev = true
 # assumption that declaring no routes meant inheriting none. Wrangler treats
 # `routes` as an INHERITABLE key, so the staging Worker inherited all three
 # production custom domains and took them over on deploy — api.doctorcre.com,
-# api.practicecre.com and dealroom.doctorcre.com all began answering from
+# api.practicecre.com, app.doctorcre.com and dealroom.doctorcre.com all began answering from
 # carr-mcp-staging, which is bound to the EMPTY staging database. /release on
 # api.doctorcre.com returned doctrine_generation null, "doctrine_meta has no row
 # with id=1", for about two minutes until production was redeployed and
@@ -183,8 +228,9 @@ routes = []
 # so a var added there must be repeated here.
 [env.staging.vars]
 CARR_ENV = "staging"
-DEALROOM_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
+APP_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
 DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true"
+WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"
 
 # Environment configuration is explicit: staging's separate Worker needs the
 # same runtime version-identity binding and must not depend on inheritance.

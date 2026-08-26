@@ -26,6 +26,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   httpFailureClass,
+  isExpectedPolicyRefusal,
   rpcInternalErrorFailureClass,
   actorUnresolvedFailureClass,
   RPC_INTERNAL_ERROR_CODE,
@@ -69,12 +70,75 @@ test("rpcInternalErrorFailureClass: -32603 (the outer catch's only code) is verb
   assert.equal(RPC_INTERNAL_ERROR_CODE, -32603);
 });
 
+test("every failure class this Worker can produce is a name, not a bare exit code", () => {
+  // 0293 gave the incident fingerprint a normalized fourth field: ops-record.py
+  // rewrites `exit_<n>` before it lands, because bin/nightly.sh passes wrapper
+  // exit codes through and exit_1 and exit_2 from one step are one problem. The
+  // Worker does NOT run that rule — restating it in a third language is how two
+  // writers drift — and it does not have to, because every class it can emit is
+  // already a name. This is the assertion that keeps that true: a new class
+  // shaped like an exit code would fingerprint one failure two ways depending
+  // on which writer saw it, silently.
+  const everyClass = [
+    httpFailureClass(500),
+    httpFailureClass(503),
+    rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE),
+    actorUnresolvedFailureClass(),
+  ];
+  for (const cls of everyClass) {
+    assert.ok(cls, "a producible failure class must not be empty");
+    assert.ok(!/^exit[_-]?\d{1,3}$/i.test(cls),
+      `${cls} is shaped like a bare exit code; ops-record.py would normalize it ` +
+      `and this Worker would not, so one failure would get two fingerprints`);
+  }
+});
+
 test("rpcInternalErrorFailureClass: every ToolError-shaped JSON-RPC code is null — a refusal is not a failure", () => {
   // -32601 (method not found) and every ToolError the system returns at 200 —
   // this file records neither; the inclusion rule names -32603 specifically
   // because it is the ONE code an uncaught exception can produce.
   for (const code of [-32601, -32600, -32602, 1, 0]) {
     assert.equal(rpcInternalErrorFailureClass(code), null);
+  }
+});
+
+test("policy/admission refusals do not become incidents, while same-verb runtime faults still do", () => {
+  const expected = [
+    ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged or triaged-to-ready transitions"],
+    ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, or triaged-to-ready transitions"],
+    ["activate-context-bundle", "context compilation tenant must match authenticated tenant context"],
+    ["issue-execution-envelope", "execution envelope requires an active conformance-passed environment provider binding"],
+    ["read-attempt-reliability", "attempt reliability is not visible to tenant"],
+    ["approve-rule", "rule approval refused: exact enforcement is not installed; missing {delegation_names_model_and_effort}"],
+    ["approve-rule", "exact registered controls must be implemented before approval"],
+  ];
+  for (const [verb, message] of expected) {
+    const error = new Error(message);
+    assert.equal(isExpectedPolicyRefusal(verb, error), true, `${verb} refusal must be recognized`);
+    assert.equal(rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE, { verb, error }), null,
+      `${verb} refusal must not produce an incident class`);
+  }
+
+  const unexpected = [
+    ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape disposition, or triaged-to-ready transitions"],
+    ["set-work-shape-disposition", "sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, and triaged-to-ready transitions"],
+    ["approve-rule", "TypeError: Invalid URL string."],
+    ["complete-capability-project", "permission denied for table capability_verification"],
+    ["activate-context-bundle", "connection terminated unexpectedly"],
+    ["activate-context-bundle", "attempt reliability is not visible to tenant"],
+    ["read-attempt-reliability", "attempt reliability is not visible to tenant for attempt 123"],
+    ["read-attempt-reliability", "attempt reliability is not visible to tenant\npermission denied for table attempt"],
+    ["read-attempt-reliability", "permission denied for table attempt_reliability"],
+    ["read-attempt-reliability", "relation attempt_reliability does not exist"],
+    ["read-attempt-reliability", "malformed attempt id: expected UUID"],
+    ["read-attempt-reliability", "missing attempt id"],
+    ["approve-rule", "rule approval refused: exact enforcement is not installed; missing"],
+  ];
+  for (const [verb, message] of unexpected) {
+    const error = new Error(message);
+    assert.equal(isExpectedPolicyRefusal(verb, error), false, `${verb} unexpected fault must not match`);
+    assert.equal(rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE, { verb, error }), "verb_internal_error",
+      `${verb} unexpected fault must remain an incident`);
   }
 });
 
@@ -217,7 +281,7 @@ test("recordWorkerFailure: a fact's source_ref matches the regex migration 0123'
   assert.equal(parsed[1], A_CORR, "the arm must recover the recurrence's own correlation id, unchanged");
 });
 
-test("recordWorkerFailure: NEVER writes state, resolved_at, recovery_evidence_ref or monitoring_until — closing an incident is a human's call", async () => {
+test("recordWorkerFailure: a new recurrence invalidates monitoring evidence but can never close an incident", async () => {
   const svcId = "svc-1", incId = "inc-open";
   const { query, calls } = fakeQuery([
     { match: /select id from ops\.service/, rows: [{ id: svcId }] },
@@ -227,13 +291,15 @@ test("recordWorkerFailure: NEVER writes state, resolved_at, recovery_evidence_re
   await recordWorkerFailure(query, {
     environment: "staging", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
   });
-  const writes = calls.filter((c) => /^update ops\.incident|^insert into ops\.incident\b/.test(c.text.trim()));
-  for (const w of writes) {
-    assert.doesNotMatch(w.text, /\bstate\s*=/, `must never set state: ${w.text}`);
-    assert.doesNotMatch(w.text, /resolved_at/, `must never touch resolved_at: ${w.text}`);
-    assert.doesNotMatch(w.text, /recovery_evidence_ref/, `must never touch recovery_evidence_ref: ${w.text}`);
-    assert.doesNotMatch(w.text, /monitoring_until/, `must never touch monitoring_until: ${w.text}`);
-  }
+  const update = calls.find((c) => /^\s*update ops\.incident set observed_at/.test(c.text));
+  assert.ok(update, "the new fact must invalidate a stale recovery watch");
+  assert.match(update.text, /state = case when state = 'monitoring' then 'detected'/);
+  assert.match(update.text, /recovery_evidence_ref = case when state = 'monitoring'\s+then null/);
+  assert.match(update.text, /monitoring_until = case when state = 'monitoring'\s+then null/);
+  assert.doesNotMatch(update.text, /resolved_at|root_cause/,
+    "failure recording may invalidate recovery but still carries no closure authority");
+  assert.doesNotMatch(update.text, /then\s+'resolved'|then\s+'reviewed'/,
+    "the only state transition this writer may make is back to detected");
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -582,6 +648,14 @@ test("scheduleFailureRecord: never schedules anything when DATABASE_URL_WRITER i
   const waited = [];
   scheduleFailureRecord({ CARR_ENV: "staging", CORRELATION_ID: A_CORR }, { waitUntil: (p) => waited.push(p) },
     { routeKey: "/mcp", failureClass: "http_5xx", detail: null });
+  assert.equal(waited.length, 0);
+});
+
+test("scheduleFailureRecord: a classifier-suppressed refusal does not even schedule a recorder promise", () => {
+  const waited = [];
+  scheduleFailureRecord({ DATABASE_URL_WRITER: "postgres://fake:fake@localhost.invalid/fake", CARR_ENV: "production" },
+    { waitUntil: (p) => waited.push(p) },
+    { routeKey: "mcp:tools/call:approve-rule", failureClass: null, detail: "expected control refusal" });
   assert.equal(waited.length, 0);
 });
 

@@ -37,7 +37,7 @@
 //      own wrapWithCorrelation produces for an uncaught throw anywhere in the
 //      stack. These are unambiguous: the Worker is telling a caller it failed.
 //
-//   2. rpcInternalErrorFailureClass(code) — the /mcp JSON-RPC transport's own
+//   2. rpcInternalErrorFailureClass(code, context) — the /mcp JSON-RPC transport's own
 //      "internal error" envelope, code -32603. THIS ROUTE NEEDS ITS OWN RULE
 //      because it deliberately returns HTTP 200 for a JSON-RPC-level error (the
 //      MCP spec's isError-in-body convention — see mcp.js's `reply`/`rpcError`,
@@ -52,9 +52,10 @@
 //      version_conflict, key_reuse, actor_not_provisioned, invalid_field_value,
 //      …) — and recording those would flood the ledger with the system doing
 //      its job, not with the system malfunctioning. -32603 is the one code
-//      that can ONLY mean an uncaught exception (dispatch()'s own outer catch
-//      in mcp.js is its sole producer), so it is the one JSON-RPC code this
-//      file records.
+//      considered for this route: dispatch() passes the verb and thrown error
+//      so a narrow, verb-specific allowlist can exclude known raw
+//      policy/admission raises while preserving unexpected exceptions and
+//      runtime/database faults as incidents.
 //
 //   3. actorUnresolvedFailureClass — mcpApiHandler's and protectedApiHandler's
 //      own `if (!actor) return json({error:"unauthorized"},401)` (index.js): a
@@ -90,6 +91,37 @@ const VALID_ENVIRONMENTS = new Set(["local", "rehearsal", "staging", "production
 
 export const RPC_INTERNAL_ERROR_CODE = -32603;
 
+// These are durable policy/admission refusals from stored procedures. They are
+// expected outcomes of the verb's business guard, not failures of the Worker
+// or database runtime. Keep this allowlist narrow and verb-specific: a matching
+// phrase on another verb, a different database error, or an unexpected TypeError
+// must remain an incident.
+const EXPECTED_POLICY_REFUSALS = Object.freeze({
+  "set-work-shape-disposition": [
+    /^sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged or triaged-to-ready transitions$/,
+    /^sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, or triaged-to-ready transitions$/,
+  ],
+  "activate-context-bundle": [
+    /^context compilation tenant must match authenticated tenant context$/,
+  ],
+  "issue-execution-envelope": [
+    /^execution envelope requires an active conformance-passed environment provider binding$/,
+  ],
+  "read-attempt-reliability": [
+    /^attempt reliability is not visible to tenant$/,
+  ],
+  "approve-rule": [
+    /^rule approval refused: exact enforcement is not installed; missing\s+\S/,
+    /^exact registered controls must be implemented before approval$/,
+  ],
+});
+
+/** Pure. A stored-procedure refusal that the named verb is expected to surface. */
+export function isExpectedPolicyRefusal(verb, error) {
+  const message = String(error?.message || "");
+  return (EXPECTED_POLICY_REFUSALS[verb] || []).some((pattern) => pattern.test(message));
+}
+
 /** Pure. status >= 500 is unambiguous Worker-reported failure; everything else
  * (including every 4xx) is out of scope for THIS classifier — see the actor-
  * unresolved 401 case, which is deliberately its own explicit call site rather
@@ -99,10 +131,11 @@ export function httpFailureClass(status) {
   return typeof status === "number" && status >= 500 ? "http_5xx" : null;
 }
 
-/** Pure. See the file header for why -32603 is the one JSON-RPC error code
- * this file ever records. */
-export function rpcInternalErrorFailureClass(code) {
-  return code === RPC_INTERNAL_ERROR_CODE ? "verb_internal_error" : null;
+/** Pure. See the file header for why -32603 is the only JSON-RPC error code
+ * considered here; known expected policy refusals are excluded. */
+export function rpcInternalErrorFailureClass(code, { verb, error } = {}) {
+  if (code !== RPC_INTERNAL_ERROR_CODE) return null;
+  return isExpectedPolicyRefusal(verb, error) ? null : "verb_internal_error";
 }
 
 /** Pure. A provider-validated grant with no resolvable actor — see the file
@@ -116,7 +149,18 @@ export function actorUnresolvedFailureClass() {
  * batch job/check incident interleave under one dedup rule (0116's partial
  * unique index) rather than two incompatible ones. routeKey plays run_key's
  * role: the path for a generic failure, or `mcp:<verb>` where the verb is
- * known (a more specific signature than the bare route gives). */
+ * known (a more specific signature than the bare route gives).
+ *
+ * THE FOURTH FIELD IS NOT NORMALIZED HERE, AND DOES NOT NEED TO BE (0293).
+ * ops-record.py rewrites the bare `exit_<n>` shape before it lands in this
+ * column, because bin/nightly.sh passes wrapper exit codes through and exit_1
+ * and exit_2 from one step are one problem. Every class this file can produce
+ * — http_5xx, verb_internal_error, actor_unresolved — is already a name, so
+ * the two writers agree by construction rather than by a rule restated in a
+ * third language. That agreement holds only while that stays true, which is
+ * why trace.test.mjs asserts it directly. A new class here shaped like
+ * `exit_<n>` would silently fingerprint differently from the same failure
+ * recorded by a job. */
 export function incidentSignature({ serviceKey, environment, routeKey, failureClass }) {
   return `${serviceKey}|${environment}|${routeKey}|${failureClass}`;
 }
@@ -141,13 +185,13 @@ export function incidentFactText({ routeKey, failureClass, correlationId, detail
 // (a 23505 on it is caught below and treated as "another writer already opened
 // this incident", not as an error) rather than by an application-level lock.
 //
-// NEVER WRITES state, resolved_at, recovery_evidence_ref or monitoring_until
-// on an EXISTING incident — only observed_at/expires_at, a pure freshness
-// bump. carr_writer (unlike carr_jobs — 0117's column-scoped grant) holds a
-// table-level UPDATE on ops.incident and COULD write those columns; the
-// migration's own proof exercises the 0115 CHECK constraint as the real
-// backstop precisely because this file's discipline is the only thing
-// stopping it otherwise. Closing an incident is a human's call, always.
+// A genuinely NEW occurrence may invalidate a recovery watch: monitoring goes
+// back to detected and its recovery evidence/window are cleared.  The exact
+// correlation source_ref is the idempotency boundary, so a replay does none of
+// that.  This writer NEVER writes resolved_at or root_cause and can only move
+// state toward detected, never toward resolved/reviewed. carr_writer has broad
+// table UPDATE, so these structural limits and their tests are the boundary;
+// closing an incident remains a human's call, always.
 export async function recordWorkerFailure(query, {
   environment, routeKey, failureClass, correlationId, detail,
   severity = DEFAULT_SEVERITY, serviceKey = SERVICE_KEY,
@@ -264,17 +308,27 @@ async function appendFactIfNew(query, incidentId, sourceRef, text) {
   const dup = await query(
     "select 1 from ops.incident_fact where incident_id=$1 and source_ref=$2 limit 1",
     [incidentId, sourceRef]);
-  if (dup.rows.length) return; // this exact correlation id already left a fact — never grow the list on a retry
+  if (dup.rows.length) return false; // replay: never grow the list or invalidate recovery twice
   await query(
     "insert into ops.incident_fact (incident_id, text, source_ref) values ($1,$2,$3)",
     [incidentId, text, sourceRef]);
-  // A pure freshness bump — never state, resolved_at, recovery_evidence_ref or
-  // monitoring_until. See the file header: closing an incident is a human's
-  // call, and this function structurally never touches the columns that do it.
+  // The old values drive every CASE expression in PostgreSQL's one UPDATE, so
+  // a monitoring row loses both recovery markers in the same transition that
+  // returns it to detected. A row already under investigation keeps its state.
   await query(
-    `update ops.incident set observed_at = now(), expires_at = now() + interval '${MONITORING_HOURS} hours'
+    `update ops.incident set observed_at = now(),
+            expires_at = now() + interval '${MONITORING_HOURS} hours',
+            state = case when state = 'monitoring' then 'detected' else state end,
+            recovery_evidence_ref = case when state = 'monitoring'
+                                       then null else recovery_evidence_ref end,
+            monitoring_until = case when state = 'monitoring'
+                                    then null else monitoring_until end,
+            next_action = case when state = 'monitoring'
+              then 'failed again during its watch — read the newest correlation fact'
+              else next_action end
        where id = $1`,
     [incidentId]);
+  return true;
 }
 
 // ── THE ROOT CAUSE OF THE FIRST DEPLOY (2026-08-14, defect cae5be2e, live
@@ -350,7 +404,7 @@ export function wrapNeonRows(sqlLike) {
  * mcpApiHandler, exactly the "a recorder must never change a response"
  * failure this whole file exists to prevent. */
 export function scheduleFailureRecord(env, ctx, { routeKey, failureClass, detail }) {
-  if (!env || !env.DATABASE_URL_WRITER || !ctx || typeof ctx.waitUntil !== "function") return;
+  if (!failureClass || !env || !env.DATABASE_URL_WRITER || !ctx || typeof ctx.waitUntil !== "function") return;
   let query;
   try {
     query = wrapNeonRows(neon(env.DATABASE_URL_WRITER));

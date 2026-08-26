@@ -50,10 +50,16 @@ fi
 # clean report that was clean because nothing was looking.
 #
 # Usage:
-#   ops/ci.sh                  # every class, local tolerances
-#   ops/ci.sh --strict         # a SKIP is a failure (what CI runs)
-#   ops/ci.sh --only secret    # one class, by name
-#   ops/ci.sh --list           # the classes and what each one is the gate for
+#   ops/ci.sh                       # every class, local tolerances
+#   ops/ci.sh --strict              # a SKIP is a failure (what CI runs)
+#   ops/ci.sh --only secret         # one class, by name
+#   ops/ci.sh --only secret,pushfloor   # several, comma- or space-separated
+#   ops/ci.sh --list                # the classes and what each one is the gate for
+#
+# CARR_CI_RANGE=<A>..<B> narrows the scopeable classes to the commits in that
+# range instead of the whole repository. ops/githooks/pre-push sets it to the
+# refs actually being pushed. Unset -- which is what hosted CI does -- means
+# full depth, and that is the only mode any merge is judged in.
 
 set -uo pipefail
 
@@ -62,13 +68,24 @@ cd "$REPO"
 
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
+# Every gate selftest is an untrusted child: it may exercise a deliberately
+# failing fixture, and a hung fixture must not hold the whole CI run forever.
+# 120s is below the observed 249–317s full-run budget while leaving room for
+# the slowest ordinary selftest and for room-bridge's own 60s suite bound.
+CI_SELFTEST_TIMEOUT_SECONDS=120
+CI_TIMEOUT_HELPER="$REPO/bin/with-timeout.py"
 
 STRICT=0
 ONLY=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --strict) STRICT=1 ;;
-    --only)   ONLY="${2:-}"; shift ;;
+    # A LIST, not a single name. ops/githooks/pre-push selects the fast local
+    # floor by naming its classes, which is what keeps rule a8c55a47 intact:
+    # the hook chooses from THIS file's classes rather than reimplementing a
+    # cheaper suite of its own that could then drift from the one CI runs.
+    # Commas are translated to spaces so both spellings work.
+    --only)   ONLY="$ONLY $(echo "${2:-}" | tr ',' ' ')"; shift ;;
     --list)   LIST=1 ;;
     -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
     *) echo "ci.sh: unknown argument: $1" >&2; exit 64 ;;
@@ -87,10 +104,14 @@ done
 # mean this script behaved differently in its two callers — which is the exact
 # failure this one-script design exists to prevent. Plain arrays and a case
 # statement run identically on both.
-CLASS_ORDER="unit types contract gates secret dependency migration binding artifact freshness"
+# pushfloor is FIRST deliberately. It is the cheapest class and the one the
+# local pre-push hook runs, so when a push is going to be refused it is refused
+# in the first seconds rather than after the expensive classes have run.
+CLASS_ORDER="pushfloor unit types contract gates secret dependency migration binding artifact freshness"
 
 class_desc() {
   case "$1" in
+    pushfloor)  echo "seeded defect that must not leave the machine (local pre-push floor)" ;;
     unit)       echo "seeded failing unit test" ;;
     freshness)  echo "seeded stale rewrite of a generated config file" ;;
     types)      echo "seeded shape mistake in a data hand-off" ;;
@@ -143,6 +164,105 @@ run_quiet() {  # run_quiet <logfile> <cmd...>  — capture output, return status
 
 LOGDIR="$(mktemp -d)"
 trap 'rm -rf "$LOGDIR"' EXIT
+
+# ------------------------------------------- inherited-from-main short-circuit
+# 2026-08-22, 01:38-02:17 UTC: six unrelated branches failed the SAME gates-class
+# selftest, none of them had touched it, and something merged to main was the
+# reason. Because the required check builds refs/pull/N/merge -- the PR head
+# merged into CURRENT main -- main's break is inside every open PR's run. Six
+# sessions each spent a six-minute run and a session's worth of diagnostic
+# tokens reading a trace for a defect none of them wrote.
+#
+# This is the 2026-08-23 CI-failures council's layer 1, which both chairs marked
+# safe and told us to ship regardless of the other two.
+#
+# THE RUN STAYS RED. It exits 1 below, deliberately and on both chairs' explicit
+# instruction: a victim of a broken main must not merge onto that broken main.
+# Codex put the kill criterion on exactly this point -- kill any implementation
+# under which a skipped or neutral check accidentally satisfies branch
+# protection. What changes is the TIME, the billed minutes, and the tokens.
+#
+# IT ABORTS THE WHOLE RUN, hiding classes that had not run yet. That is
+# deliberate too: no verdict computed on a poisoned base is worth having, and
+# the branch's own defects surface on the next run once main is green.
+#
+# AT MOST ONCE PER RUN, on the FIRST failure only. If the first thing to go red
+# is the branch's own, the branch owns the run and there is nothing to attribute;
+# if it is inherited, we stop there. That bounds the cost at one merge-base
+# materialisation, which is what keeps this cheap enough to leave switched on.
+#
+# The verdict itself is NOT computed here -- ops/inherited-from-main.py re-runs
+# the failing check at the merge base, and ops/inherited-from-main-selftest.py
+# seeds both directions against a real repository, including the case that must
+# never misfire: a branch that broke a check without touching it.
+# ------------------------------------------------------------ name the move
+# THE RETRY-LOOP FINDING, 2026-08-23 council: the same defect went red two and
+# three times in a row because the message said WHAT failed and never what to
+# do about it. A session reads "failed: gate-integrity", re-runs it, gets the
+# same line, and pushes again. Cluster C -- gate work failing the gate web --
+# is near-structurally a first-try red, so this is the class where the cost of
+# not naming the move is paid most often.
+#
+# Only the four co-change moves are named here, because those are the ones the
+# failing check CANNOT name itself: each is a demand to edit a DIFFERENT file
+# from the one that went red. Everything else already names its own remedy in
+# its own output, and repeating it here would only teach people to scroll past.
+gates_name_the_move() {  # gates_name_the_move <failed check names...>
+  local named=0 f
+  for f in "$@"; do
+    case "$f" in
+      gate-integrity)
+        printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+          "re-bless IN THE SAME COMMIT (rule c0b38d80): hooks/gate-integrity.py --bless, then commit ops/config/gate-baseline.json together with the gate you edited" >&2
+        named=1 ;;
+      enforcement-coverage-check|rule-enforcement-map-check)
+        printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+          "register the control you added: run ops/$f.py directly — it prints the exact row it wants and where it goes" >&2
+        named=1 ;;
+      mechanism-doctrine-gate)
+        printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+          "add '# doctrine: <slug>' to the mechanism you ADDED, naming its section in the doctrine store (a slug, never a file path — the markdown renders were retired 2026-08-19)" >&2
+        named=1 ;;
+      *-selftest.py)
+        printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+          "$f is the PAIRED suite for the gate of the same name: a gate and its selftest change in the same commit, or the pair has stopped meaning anything" >&2
+        named=1 ;;
+    esac
+  done
+  [ "$named" = "1" ] || printf '        \033[36mTHE MOVE\033[0m  %s\n' \
+    "each check above names its own remedy in its output — read the 12-line tail, not just this summary line" >&2
+}
+
+INHERIT_ASKED=0
+inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if inherited
+  [ "$INHERIT_ASKED" = "0" ] || return 0
+  INHERIT_ASKED=1
+  [ -f ops/inherited-from-main.py ] || return 0
+  local name="$1"; shift
+  local verdict rc
+  # SPLIT ASSIGNMENT, not `local verdict="$(...)"`. local is itself a command and
+  # its own exit status would overwrite the substitution's, so the one-line form
+  # reads 0 from every verdict and short-circuits on all three of them.
+  verdict="$("$PY" ops/inherited-from-main.py --check "$name" -- "$@" 2>&1)"; rc=$?
+  if [ "$rc" -eq 1 ]; then
+    # Worth saying out loud: the merge base is clean, so this red is the
+    # branch's own. That is half of naming the move.
+    printf '        \033[33mattribution\033[0m  %s\n' "$verdict" >&2
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || return 0         # 2 = cannot tell; behave exactly as before
+  bad gates "INHERITED FROM MAIN: $name"
+  echo "$verdict" >&2
+  echo
+  echo "ci-timing:${CLASS_TIMINGS}"
+  echo "ci-failed-classes:${FAILED_CLASSES}"
+  echo "ci-inherited-from-main:$name"
+  echo
+  echo "CI FAILED — a break this branch did not cause. Still red, still unmergeable:"
+  echo "main is broken, and merging onto a broken main is what this refuses to do."
+  echo "Classes after gates were not run; they are not worth computing on this base."
+  exit 1
+}
 
 # ---------------------------------------------------------------- unit
 check_unit() {
@@ -273,7 +393,51 @@ check_contract() {
 # the ledger-sweep scope gate swallowing its own headline trigger, so they are a
 # promotion gate in their own right rather than developer convenience.
 check_gates() {
-  local failures="" count=0 skiplist=""
+  local failures="" count=0 skiplist="" gates_timed_out=0
+
+  # EVERY GATE FIRED IN THIS CLASS IS A FIXTURE, and saying so once here is what
+  # keeps the enforcement numbers honest. A selftest drives a real gate with an
+  # attack payload; the gate then writes its ordinary log line. Before this
+  # marker existed those lines went to out/hook-guard.log beside live refusals,
+  # which is how that file reached 134,595 DENY events that the 2026-08-23
+  # council could not use: an upper bound with an unknown amount of test traffic
+  # in it. hooks/hook_meter.py reads this variable, children inherit it, and the
+  # fixture traffic lands in out/fixtures/ instead. It changes no verdict —
+  # only which file the line is written to.
+  export CARR_HOOK_FIXTURE=1
+
+  # THE INVOKING TREE MUST SURVIVE ITS OWN TEST SUITE, and on 2026-08-14 it did
+  # not. A selftest built a throwaway repository with tempfile.mkdtemp and called
+  # git with cwd=<temp>, which git ignored entirely because GIT_DIR — exported
+  # into every hook, inherited straight through to here — OVERRIDES cwd. Every
+  # fixture commit landed on the LIVE checkout: local main six commits ahead of
+  # origin on a tree of THREE files, five commits named "seed", all 818 paths
+  # staged as additions.
+  #
+  # Three layers now stand between that and this line. ops/githooks/pre-push
+  # strips the variables before invoking CI; ops/git_env.py gives every selftest
+  # its own scrubber; ops/selftest-git-isolation-check.py (in the inventory list
+  # below) fails when a git-fixture selftest is not wired to it. This is the
+  # fourth, and it is the only one that does not depend on knowing HOW a test
+  # might reach the real tree: it simply reads the tree's identity before and
+  # after, and fails the class if the suite moved it.
+  #
+  # Council recommendation 1, 2026-08-23 process audit, is explicit that this is
+  # the acceptance criterion rather than a nicety: "the canonical HEAD, index,
+  # and file set remain unchanged". Cost is two git invocations for the whole
+  # class. NOTE the scope word: this reads the tree ci.sh was INVOKED in, which
+  # under pre-push is the session's own worktree — never a hardcoded canonical
+  # path — so it makes exactly the assertion the same recommendation demands
+  # everywhere else.
+  tree_fingerprint() {
+    printf '%s\n' "$(git rev-parse HEAD 2>/dev/null)"
+    # Tracked modifications and the staged index. Untracked files are excluded
+    # deliberately: out/ is gitignored and every class in this file writes logs
+    # there, so counting them would fail the class on its own bookkeeping.
+    git status --porcelain --untracked-files=no 2>/dev/null
+    git diff --cached --name-only 2>/dev/null
+  }
+  local tree_before; tree_before="$(tree_fingerprint)"
 
   # Exceptions come from ops/config/ci-check-scope.json and are ANNOUNCED, never
   # applied silently. A quarantined check is skipped everywhere; a local_only one
@@ -309,7 +473,8 @@ PYEOF
     fi
     count=$((count+1))
     local grc
-    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$t"
+    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$CI_TIMEOUT_HELPER" \
+      "$CI_SELFTEST_TIMEOUT_SECONDS" "$PY" "$t"
     grc=$?
     # EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE. It is EX_CONFIG, and it is
     # already the repo's convention: bin/type-check.sh's header states it and the
@@ -319,11 +484,19 @@ PYEOF
     # past it was CARR_SKIP_CI on every push. Deliberately narrow: ONLY 78 skips,
     # the reason is printed every run, and every other nonzero still fails.
     # ops/ci-selftest.py seeds both cases and fails if this widens.
-    if [ "$grc" -eq 78 ]; then
+    if [ "$grc" -eq 124 ]; then
+      failures="$failures TIMEOUT:$base"
+      gates_timed_out=1
+      printf '        \033[31mTIMEOUT\033[0m  %s — exceeded %ss; aborting remaining gate selftests\n' \
+        "$base" "$CI_SELFTEST_TIMEOUT_SECONDS" >&2
+      tail -12 "$LOGDIR/gate-$base.log" >&2
+      break
+    elif [ "$grc" -eq 78 ]; then
       skiplist="$skiplist $base"
       printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
         "$base" "$(tail -1 "$LOGDIR/gate-$base.log" 2>/dev/null)" >&2
     elif [ "$grc" -ne 0 ]; then
+      inherited_abort "$base" "$PY" "$t"
       failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2
     fi
   done
@@ -336,7 +509,7 @@ PYEOF
   # Python wrapper around them would only shell out to the same script.
   # Everything else is identical to the loop above: same exclusion scope, same
   # counting, same captured log and same 12-line tail on failure.
-  for t in tools/test-*.sh; do
+  if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh; do
     [ -f "$t" ] || continue
     local sbase; sbase="$(basename "$t")"
     local swhy; swhy="$(excluded_reason "$sbase")"
@@ -346,9 +519,21 @@ PYEOF
       continue
     fi
     count=$((count+1))
-    run_quiet "$LOGDIR/gate-$sbase.log" "$t" \
-      || { failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2; }
-  done
+    run_quiet "$LOGDIR/gate-$sbase.log" "$PY" "$CI_TIMEOUT_HELPER" \
+      "$CI_SELFTEST_TIMEOUT_SECONDS" "$t"
+    grc=$?
+    if [ "$grc" -eq 124 ]; then
+      failures="$failures TIMEOUT:$sbase"
+      gates_timed_out=1
+      printf '        \033[31mTIMEOUT\033[0m  %s — exceeded %ss; aborting remaining gate selftests\n' \
+        "$sbase" "$CI_SELFTEST_TIMEOUT_SECONDS" >&2
+      tail -12 "$LOGDIR/gate-$sbase.log" >&2
+      break
+    elif [ "$grc" -ne 0 ]; then
+      inherited_abort "$sbase" "$t"
+      failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2
+    fi
+  done; fi
   # gate-integrity is the baseline check itself: a gate edited without a
   # re-bless in the same commit (rule c0b38d80) fails here.
   #
@@ -366,7 +551,8 @@ PYEOF
   # co-change check cannot: the clobber happens inside GitHub's merge, where no
   # local hook runs.
   run_quiet "$LOGDIR/gate-integrity.log" "$PY" hooks/gate-integrity.py --strict \
-    || { failures="$failures gate-integrity"; tail -12 "$LOGDIR/gate-integrity.log" >&2; }
+    || { inherited_abort gate-integrity "$PY" hooks/gate-integrity.py --strict
+         failures="$failures gate-integrity"; tail -12 "$LOGDIR/gate-integrity.log" >&2; }
 
   # THE THREE INVENTORY CHECKS, run against THIS REPO rather than a synthetic
   # tree. The selftest loop above runs their *-selftest.py, and every one of
@@ -405,16 +591,48 @@ PYEOF
   # threshold, because coverage stands at three of twenty-three and a check that
   # fails every run is one people learn to scroll past. It fails only when a job
   # that HAD a workflow binding loses it.
+  # rule-load-layer-check JOINED 2026-08-23, alongside the delivery tags it
+  # validates. Same kind again: one repository file, no machine state, no
+  # database. It is the check that stops the scoping change from becoming the
+  # thing the council warned about — a wildcard tag, an untagged rule, or a
+  # `control` claim on a rule nothing can actually refuse would all ship a
+  # smaller boot payload that silently drops law, and the failure is invisible
+  # afterwards because a session that boots with fewer rules looks exactly like
+  # one that boots correctly.
+  # reachability-check JOINED 2026-08-23, from the completion-integrity council's
+  # fix D: it is the one question none of the others ask — whether anything
+  # CALLS a declared control.
+  # selftest-git-isolation-check JOINED 2026-08-23, council recommendation 1.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             rule-enforcement-map-check \
+             rule-enforcement-map-check rule-load-layer-check \
+             reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
-      || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
+      || { inherited_abort "$inv" "$PY" "ops/$inv.py"
+           failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
+
+  # Did the suite move the tree it was invoked in? See tree_fingerprint() above.
+  if [ "$(tree_fingerprint)" != "$tree_before" ]; then
+    failures="$failures tree-mutated-by-selftests"
+    {
+      echo "  A selftest in this class CHANGED THE WORKING TREE it was invoked in."
+      echo "  HEAD, tracked-file state, or the index differs from before the suite ran."
+      echo "  This is the 2026-08-14 failure mode: git exports GIT_DIR into hooks and"
+      echo "  it OVERRIDES cwd, so a fixture built with cwd=<tempdir> and no scrub"
+      echo "  writes into whatever repository GIT_DIR names."
+      echo "  Find the culprit with: ops/selftest-git-isolation-check.py"
+      echo "  Recover with a mixed reset; do not commit anything from this tree until"
+      echo "  you have read what changed:"
+      git status --porcelain --untracked-files=no 2>/dev/null | head -20
+    } >&2
+  fi
+
   if [ -n "$failures" ]; then
     bad gates "failed:$failures"
+    gates_name_the_move $failures
   elif [ -n "$skiplist" ]; then
     # Deliberately NOT a plain OK. The class ran with reduced coverage, and the
     # summary line says so — an exception that reads as a clean pass is how a
@@ -427,11 +645,246 @@ PYEOF
 
 # ---------------------------------------------------------------- secret
 check_secret() {
-  if run_quiet "$LOGDIR/secret.log" "$PY" ops/ci-secret-scan.py; then
-    ok secret "no shaped credential in tracked files"
+  # SCOPE IS A FLAG ON ONE SCANNER, never a second scanner (rule a8c55a47).
+  # Unset CARR_CI_RANGE -- hosted CI -- reads every tracked file, which is the
+  # depth a merge is judged at. Set, it reads only the blobs the range
+  # introduces, which is O(what is being pushed) rather than O(repo): 1,514
+  # files read on this tree today versus the handful in a normal branch.
+  local scope_args="" scope_words="tracked files"
+  if [ -n "${CARR_CI_RANGE:-}" ]; then
+    scope_args="--range $CARR_CI_RANGE"
+    scope_words="blobs pushed in $CARR_CI_RANGE"
+  fi
+  # shellcheck disable=SC2086  # scope_args is a deliberate two-word argument
+  if run_quiet "$LOGDIR/secret.log" "$PY" ops/ci-secret-scan.py $scope_args; then
+    ok secret "no shaped credential in $scope_words"
   else
     cat "$LOGDIR/secret.log" >&2
-    bad secret "credential-shaped content found"
+    bad secret "credential-shaped content found in $scope_words"
+  fi
+}
+
+# THE LOCAL PRE-PUSH FLOOR — gates-audit council 2026-08-23, amended by the
+# ci-failures council 2026-08-24.
+#
+# WHY IT IS LESS THAN THE WHOLE SUITE. ops/githooks/pre-push used to run all ten
+# classes on every push: minutes on one contended Mac, paid by each of the ~20
+# sessions pushing from it, and paid again by hosted CI. That was correct when
+# written on 2026-08-13, and the reason is in that file — the repo was private on
+# a free plan, a red hosted run could not BLOCK anything, so the hook WAS the
+# merge envelope. GitHub Pro closed that gap on 2026-08-14: `ops/ci.sh --strict`
+# is the required check on main and nothing merges red. The full local run became
+# defence-in-depth paid for in the scarcest resource here.
+#
+# WHY IT IS MORE THAN "OWNER AND SECRETS", which is the amendment and it came
+# from this branch's own failure. The first hosted run of the pull request that
+# REMOVED the local suite went red on types and gates — exactly the two classes
+# the local suite would have caught in seconds. The ci-failures council took that
+# as its exhibit and ruled: ship the fast subset only with a diff-scoped floor
+# that PREDICTS the classes that actually go red. Pure fast-push optimises the
+# 82% of pushes that were green anyway and inflates the 18% that were not.
+#
+# So this class is a PREDICTOR, not a duplicate suite. It runs what the diff
+# implicates and nothing else:
+#
+#   typed Python touched      -> mypy, CI's own binary and config, on the
+#                                changed files
+#   a gate surface touched    -> the gate-impact closure: each touched gate's
+#                                paired selftest, the enforcement-coverage
+#                                check, the baseline co-change check, and the
+#                                mechanism-doctrine check when the diff adds a
+#                                mechanism
+#   impact not classifiable   -> fall back to the FULL gates class locally.
+#                                Codex's chair asked for this explicitly and the
+#                                direction is deliberate: an unclassifiable gate
+#                                change is the case where guessing is worst, so
+#                                it buys the 222 seconds rather than assume.
+#   always                    -> baseline integrity, path shape, isolation
+#
+# NOT HERE, on purpose: unit, contract, dependency, binding, artifact, and the
+# 252-suite gates web. Zero first-try failures between them across the council's
+# classified 30-run window. They all still run hosted, strict, as the gate on
+# the merge. That is the wall-clock win and it is the whole point.
+#
+# EVERY FAILURE NAMES THE MOVE. Also the council's, and it is why each branch
+# below prints a remedy rather than only a verdict: a red that says "gates
+# failed" and stops has handed the reader a search, not an answer.
+check_pushfloor() {
+  local failures="" ran=""
+  local _floor_t0; _floor_t0="$(date +%s)"
+
+  # The diff this push actually carries. Without a range there is nothing to
+  # scope to, so the predictors stay silent rather than inventing a whole-repo
+  # verdict — the always-on checks below still run.
+  local changed=""
+  if [ -n "${CARR_CI_RANGE:-}" ]; then
+    changed="$(git diff --name-only --diff-filter=ACMR "$CARR_CI_RANGE" 2>/dev/null || true)"
+  fi
+
+  floor_fail() {  # floor_fail <name> <remedy>
+    failures="$failures $1"
+    printf '        \033[31m%s\033[0m — %s\n' "$1" "$2" >&2
+  }
+
+  # ── always: the checks whose failure is far more expensive to find later ──
+  run_quiet "$LOGDIR/pushfloor-gate-integrity.log" \
+    "$PY" hooks/gate-integrity.py --strict \
+    || { tail -12 "$LOGDIR/pushfloor-gate-integrity.log" >&2
+         floor_fail gate-integrity \
+           "a gate moved without its baseline. Re-bless what you changed and stage it in the SAME commit: python3 hooks/gate-integrity.py --bless <gate> && git add ops/config/gate-baseline.json"; }
+
+  if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
+    local added
+    added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"
+    if [ -n "$added" ]; then
+      # shellcheck disable=SC2086
+      run_quiet "$LOGDIR/pushfloor-path-hygiene.log" \
+        "$PY" ops/githooks/path-hygiene-check.py --paths $added \
+        || { tail -12 "$LOGDIR/pushfloor-path-hygiene.log" >&2
+             floor_fail path-hygiene \
+               "rename the path before it is published — depth or draft/final naming (rule 0e22e34a). After the push it needs a history rewrite."; }
+    fi
+  fi
+
+  # ── predictor: typed Python ──────────────────────────────────────────────
+  # CI's `types` class is `mypy pipelines tools exporters lib generators shared
+  # fill-engine bin hooks ops` under the repo's mypy.ini. This is the SAME binary
+  # and the same config, narrowed to the changed files, so a rule cannot hold in
+  # one place and not the other (rule a8c55a47).
+  #
+  # HONEST LIMIT, and the council said so too (codex: "medium on whether
+  # changed-file mypy alone is sufficient"): a change that breaks a caller it
+  # does not itself touch is invisible here and dies hosted instead. This is a
+  # predictor, not the class.
+  local changed_py=""
+  if [ -n "$changed" ]; then
+    changed_py="$(printf '%s\n' "$changed" | grep -E '\.py$' || true)"
+  fi
+  if [ -n "$changed_py" ]; then
+    local existing_py=""
+    local f
+    for f in $changed_py; do
+      [ -f "$f" ] && existing_py="$existing_py $f"
+    done
+    if [ -n "$existing_py" ]; then
+      local MYPY="$REPO/.venv/bin/mypy"
+      [ -x "$MYPY" ] || MYPY="$(command -v mypy 2>/dev/null || true)"
+      if [ -n "$MYPY" ] && [ -x "$MYPY" ]; then
+        ran="$ran types"
+        # shellcheck disable=SC2086
+        run_quiet "$LOGDIR/pushfloor-types.log" "$MYPY" $existing_py \
+          || { tail -20 "$LOGDIR/pushfloor-types.log" >&2
+               floor_fail types \
+                 "mypy on the files this push changes. Fix them, or iterate with: .venv/bin/mypy$existing_py"; }
+      else
+        printf '        \033[33mnot run\033[0m  types — mypy absent; the hosted types class still covers this\n' >&2
+      fi
+    fi
+  fi
+
+  # ── predictor: the gate-impact closure ───────────────────────────────────
+  local gate_surface=""
+  if [ -n "$changed" ]; then
+    gate_surface="$(printf '%s\n' "$changed" | grep -E '^(hooks/[^/]+\.py|ops/ci\.sh|ops/githooks/|ops/config/(gate-baseline|rule-enforcement-map|delegation-gate-hook|codex-hooks|model-floors)\.json|ops/[^/]+-selftest\.py)' || true)"
+  fi
+  if [ -n "$gate_surface" ]; then
+    ran="$ran gate-closure"
+    local unclassified="" touched_gate base paired
+
+    # Each touched gate's PAIRED selftest. A gate with no pair is the
+    # unclassifiable case: we cannot predict its blast radius, so we stop
+    # guessing and buy the full class below.
+    for touched_gate in $(printf '%s\n' "$gate_surface" | grep -E '^hooks/[^/]+\.py$' | grep -v -- '-selftest\.py$' || true); do
+      base="$(basename "$touched_gate" .py)"
+      paired="ops/$base-selftest.py"
+      if [ -f "$paired" ]; then
+        run_quiet "$LOGDIR/pushfloor-$base-selftest.log" "$PY" "$paired" \
+          || { tail -15 "$LOGDIR/pushfloor-$base-selftest.log" >&2
+               floor_fail "$base-selftest" \
+                 "the gate you changed fails its own acceptance test: .venv/bin/python $paired"; }
+      else
+        unclassified="$unclassified $base"
+      fi
+    done
+
+    # A touched selftest runs itself, whatever it is paired to.
+    for paired in $(printf '%s\n' "$gate_surface" | grep -E '^ops/[^/]+-selftest\.py$' || true); do
+      [ -f "$paired" ] || continue
+      run_quiet "$LOGDIR/pushfloor-$(basename "$paired").log" "$PY" "$paired" \
+        || { tail -15 "$LOGDIR/pushfloor-$(basename "$paired").log" >&2
+             floor_fail "$(basename "$paired")" "run it alone: .venv/bin/python $paired"; }
+    done
+
+    # The isolation checks are part of the CLOSURE, not the always-on set. They
+    # answer "can a selftest reach the real repository" and "does pre-push still
+    # strip the git environment before it runs CI" — both of which can only have
+    # changed if this push touched a hook, a selftest or ci.sh, which is exactly
+    # the condition guarding this block. Running them on a push that edits a
+    # markdown file was 4 seconds of asking a question whose answer could not
+    # have moved.
+    local iso ibase
+    for iso in ops/hook-env-isolation-selftest.py ops/selftest-git-isolation-check.py; do
+      [ -f "$iso" ] || continue
+      ibase="$(basename "$iso")"
+      run_quiet "$LOGDIR/pushfloor-$ibase.log" "$PY" "$iso" \
+        || { tail -12 "$LOGDIR/pushfloor-$ibase.log" >&2
+             floor_fail "$ibase" "run it alone to iterate: .venv/bin/python $iso"; }
+    done
+
+    if [ -f ops/enforcement-coverage-check.py ]; then
+      run_quiet "$LOGDIR/pushfloor-enforcement-coverage.log" \
+        "$PY" ops/enforcement-coverage-check.py \
+        || { tail -15 "$LOGDIR/pushfloor-enforcement-coverage.log" >&2
+             floor_fail enforcement-coverage \
+               "a blessed gate is named by no control. Add it to the enforcement map, or record it in ops/config/enforcement-coverage-backlog.json with a reason."; }
+    fi
+
+    # The mechanism-doctrine check reads the change against origin/main, so it
+    # is a no-op on a branch that adds no gate, hook, launchd job or scheduled
+    # task — which is nearly every branch.
+    if [ -f ops/mechanism-doctrine-gate.py ]; then
+      run_quiet "$LOGDIR/pushfloor-mechanism-doctrine.log" \
+        "$PY" ops/mechanism-doctrine-gate.py \
+        || { tail -15 "$LOGDIR/pushfloor-mechanism-doctrine.log" >&2
+             floor_fail mechanism-doctrine \
+               "a new mechanism must name the doctrine section explaining it (open loop 504 — knowledge ships with the mechanism)."; }
+    fi
+
+    # ...but never when the full gates class is ALREADY going to run in this
+    # invocation. Hosted CI runs every class, so the fallback there would simply
+    # run the 252 suites twice. It is a substitute for the class, not a second
+    # copy of it.
+    if [ -n "$unclassified" ] && [ -n "$ONLY" ] && ! selected gates; then
+      # THE DELIBERATE EXPENSE. Codex's chair asked for this by name: when the
+      # gate impact cannot be classified, fall back to the full gates class
+      # locally rather than assume it is fine. It costs ~222s and it fires only
+      # on a gate with no paired selftest, which is itself worth fixing.
+      printf '        \033[33mfull gates\033[0m — no paired selftest for:%s — running the whole class rather than guessing\n' \
+        "$unclassified" >&2
+      ran="$ran full-gates-fallback"
+      check_gates
+      if [ -n "$FAILED_CLASSES" ]; then
+        case " $FAILED_CLASSES " in
+          *" gates "*) floor_fail gates-fallback \
+            "give each gate a paired ops/<gate>-selftest.py so this push does not have to run all 252 suites." ;;
+        esac
+      fi
+    fi
+  fi
+
+  # THE FLOOR'S OWN WALL-CLOCK, printed every run. The council's kill metric for
+  # this design is not an opinion about speed — it is the rate at which sessions
+  # start passing --no-verify, and that rises when the floor gets slow. A number
+  # nobody can see cannot be the thing a ruling turns on, so it is stated here
+  # and the class summary carries it.
+  local _floor_secs=$(( $(date +%s) - _floor_t0 ))
+  if [ -n "$failures" ]; then
+    bad pushfloor "failed:$failures (${_floor_secs}s)"
+  else
+    # The summary names what actually RAN, not a fixed list. It said "baseline,
+    # path shape, isolation" even after isolation moved into the diff-scoped
+    # closure, which is a green line describing work that did not happen.
+    ok pushfloor "${_floor_secs}s · baseline, path shape${ran:+ +}${ran}"
   fi
 }
 
@@ -670,7 +1123,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
       return
     fi
 
-    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate(s) pass"
+    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate program(s) pass (each program reports its own assertions)"
   else
     tail -15 "$LOGDIR/migration-grants.log" >&2
     bad migration "the app roles' grants did not survive into the built database"
@@ -826,13 +1279,25 @@ echo "carr-system CI — $(git rev-parse --short HEAD) on $(git rev-parse --abbr
 [ "$STRICT" = "1" ] && echo "  strict: a SKIP counts as a failure"
 echo
 
-if [ -n "$ONLY" ] && [ -z "$(class_desc "$ONLY")" ]; then
-  echo "ci.sh: no such class: $ONLY (try --list)" >&2
-  exit 64
-fi
+# EVERY name is validated, not just the first. A typo inside a list would
+# otherwise select the classes it spelled right and silently drop the rest --
+# a suite reporting green because nothing was looking, which is the exact shape
+# of the 2026-08-13 runaway-job finding this file already guards elsewhere.
+for _want in $ONLY; do
+  if [ -z "$(class_desc "$_want")" ]; then
+    echo "ci.sh: no such class: $_want (try --list)" >&2
+    exit 64
+  fi
+done
+
+# Does $1 appear in the (space-separated) $ONLY list? Padded on both sides so
+# "secret" cannot match a class named "secrets".
+selected() {
+  case " $ONLY " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
 
 for c in $CLASS_ORDER; do
-  if [ -n "$ONLY" ] && [ "$ONLY" != "$c" ]; then continue; fi
+  if [ -n "$ONLY" ] && ! selected "$c"; then continue; fi
   # Snapshot the class name: check functions reuse the global `c` as their own
   # loop variable (check_migration's psql probe at least), so after "check_$c"
   # returns, $c may name whatever that inner loop ended on. The very first CI
@@ -856,6 +1321,34 @@ echo
 echo "ci-timing:${CLASS_TIMINGS}"
 [ -n "$FAILED_CLASSES" ]  && echo "ci-failed-classes:${FAILED_CLASSES}"
 [ -n "$SKIPPED_CLASSES" ] && echo "ci-skipped-classes:${SKIPPED_CLASSES}"
+
+# THE CONFIRM-OR-KILL LINE for the 2026-08-23 push-path change, and the reason
+# it is emitted here rather than measured by hand later.
+#
+# That change moved eight of the ten classes off the local push path and left
+# them hosted-only. The council attached one acceptance test to it: count, over
+# the first week, the hosted failures that the OLD local-full run would have
+# caught before the push. A small count means the relocation was free and the
+# minutes were sediment. A large one means local-full was doing real work and
+# the change should be reverted -- and that decision is worthless if the number
+# has to be reconstructed from memory or from forty job logs.
+#
+# So every red run states its own verdict, in one greppable line, at the moment
+# it has the facts. `relocated` names classes that used to be caught locally and
+# now are not; `floor` names classes the local hook still runs, whose failure
+# means the floor let something past rather than that the relocation cost
+# anything. ops/push-floor-telemetry.py adds these up across runs.
+if [ -n "$FAILED_CLASSES" ]; then
+  FLOOR_CLASSES="pushfloor secret"
+  _floor=""; _relocated=""
+  for f in $FAILED_CLASSES; do
+    case " $FLOOR_CLASSES " in
+      *" $f "*) _floor="$_floor $f" ;;
+      *)        _relocated="$_relocated $f" ;;
+    esac
+  done
+  echo "ci-floor-verdict: floor:${_floor:- none} relocated:${_relocated:- none}"
+fi
 
 # KNOWN GAPS. A class that is red because a DESIGN RULING is outstanding, not
 # because of a bug someone could fix. It still runs, it still prints its failure

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr-control-room-observatory-attempt-projection-v1",
+  "contract": "carr-control-room-observatory-attempt-projection",
+  "version": "1.0.0",
+  "status": "phase0_contract_foundation_not_deployed",
+  "$comment": "Deterministic read projection for the eventual Model Room. Work Request is the grouping key; repository/worktree is only a resource. Persistent profile identity is presentation metadata and must remain visually distinct from the observed adapter/model/harness staffing. This projection has no control authority and contains no raw transcript.",
+  "title": "CARR Observatory Attempt Projection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "projection_digest", "generated_at", "work_request_id", "source_state", "declared_intent", "component_map", "attempt_lane", "state", "observed_movement", "timeline", "evidence_refs"],
+  "properties": {
+    "schema_version": {"const": "observatory-attempt-projection.v1"}, "projection_digest": {"$ref": "#/$defs/Digest"}, "generated_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"}, "work_request_id": {"$ref": "#/$defs/OpaqueId"}, "source_state": {"$ref": "#/$defs/SourceState"}, "declared_intent": {"$ref": "execution-envelope.v1.schema.json#/$defs/DeclaredExpectations"}, "component_map": {"type": "array", "items": {"$ref": "#/$defs/Component"}}, "attempt_lane": {"$ref": "#/$defs/AttemptLane"}, "state": {"$ref": "#/$defs/State"}, "observed_movement": {"$ref": "attempt-receipt.v1.schema.json#/$defs/Observation"}, "timeline": {"type": "array", "items": {"$ref": "#/$defs/TimelineEvent"}}, "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "OpaqueId": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"}, "Digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}, "SourceState": {"type": "object", "additionalProperties": false, "required": ["state_version", "canonical_record_digest", "plan_revision_digest"], "properties": {"state_version": {"type": "integer", "minimum": 1}, "canonical_record_digest": {"$ref": "#/$defs/Digest"}, "plan_revision_digest": {"$ref": "#/$defs/Digest"}}},
+    "Component": {"type": "object", "additionalProperties": false, "required": ["component_ref", "depends_on_component_refs", "current"], "properties": {"component_ref": {"type": "string", "minLength": 1}, "depends_on_component_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}, "current": {"type": "boolean"}}},
+    "Profile": {"type": "object", "additionalProperties": false, "required": ["profile_id", "display_label"], "properties": {"profile_id": {"$ref": "#/$defs/OpaqueId"}, "display_label": {"type": "string", "minLength": 1}}},
+    "AttemptLane": {"type": "object", "additionalProperties": false, "required": ["attempt_id", "persistent_profile", "actual_staffing"], "properties": {"attempt_id": {"$ref": "#/$defs/OpaqueId"}, "persistent_profile": {"$ref": "#/$defs/Profile"}, "actual_staffing": {"$ref": "execution-envelope.v1.schema.json#/$defs/Adapter"}}},
+    "State": {"type": "object", "additionalProperties": false, "required": ["lifecycle", "progress", "verification"], "properties": {"lifecycle": {"enum": ["succeeded", "failed", "timed_out", "cancelled", "partial", "unknown"]}, "progress": {"enum": ["active", "quiet", "stale", "blocked", "failed", "unknown", "verified_complete"]}, "verification": {"enum": ["verified_success", "verified_failure", "partial", "unknown", "not_attempted"]}}},
+    "TimelineEvent": {"type": "object", "additionalProperties": false, "required": ["sequence", "occurred_at", "event_type", "declared_step_ref", "observed_resource_ref", "observed_component_ref", "tool_class", "state", "evidence_refs", "retention"], "properties": {"sequence": {"type": "integer", "minimum": 1}, "occurred_at": {"type": "string"}, "event_type": {"type": "string"}, "declared_step_ref": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "observed_resource_ref": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "observed_component_ref": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "tool_class": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "state": {"type": "string"}, "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}, "retention": {"enum": ["ephemeral", "material_redacted"]}}}
+  }
+}

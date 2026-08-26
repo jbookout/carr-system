@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr-context-bundle-v1",
+  "contract": "carr-context-bundle",
+  "version": "1.0.0",
+  "status": "phase1_contract_active_with_db_admission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "header", "items", "bundle_digest"],
+  "properties": {
+    "schema_version": {"const": "context-bundle.v1"},
+    "header": {"$ref": "#/$defs/Header"},
+    "items": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/Item"}},
+    "bundle_digest": {"$ref": "#/$defs/Digest"}
+  },
+  "$defs": {
+    "Digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "Id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"},
+    "Timestamp": {"type": "string", "format": "date-time"},
+    "Header": {"type": "object", "additionalProperties": false, "required": ["tenant_id", "work_request_id", "accepted_plan_revision_id", "accepted_plan_revision", "accepted_plan_digest", "issued_at", "mode", "retrieval_policy", "retrieval_policy_version", "compiler_id", "compiler_version", "compiler_digest", "query_basis_digest", "grounding_plan"], "properties": {"tenant_id": {"$ref": "#/$defs/Id"}, "work_request_id": {"$ref": "#/$defs/Id"}, "accepted_plan_revision_id": {"$ref": "#/$defs/Id"}, "accepted_plan_revision": {"type": "integer", "minimum": 1}, "accepted_plan_digest": {"$ref": "#/$defs/Digest"}, "issued_at": {"$ref": "#/$defs/Timestamp"}, "mode": {"enum": ["shadow", "canary", "live", "enforced"]}, "retrieval_policy": {"$ref": "#/$defs/Id"}, "retrieval_policy_version": {"type": "string", "minLength": 1}, "compiler_id": {"$ref": "#/$defs/Id"}, "compiler_version": {"type": "string"}, "compiler_digest": {"$ref": "#/$defs/Digest"}, "query_basis_digest": {"$ref": "#/$defs/Digest"}, "grounding_plan": {"type": "object", "additionalProperties": false, "required": ["inline_budget", "retrieval_policy", "cache_segment", "modalities", "freshness_sla"], "properties": {"inline_budget": {"type": "integer", "minimum": 1}, "retrieval_policy": {"type": "string"}, "cache_segment": {"type": "string"}, "modalities": {"type": "array", "items": {"type": "string"}}, "freshness_sla": {"type": "string"}}}}},
+    "Item": {"type": "object", "additionalProperties": false, "required": ["kind", "canonical_ref", "revision", "digest", "required", "trigger", "consumer", "enforcement", "redaction_class", "freshness"], "properties": {"kind": {"enum": ["doctrine", "rule", "decision", "memory", "skill", "prior_failure", "architecture_constraint"]}, "canonical_ref": {"$ref": "#/$defs/Id"}, "revision": {"$ref": "#/$defs/Id"}, "digest": {"$ref": "#/$defs/Digest"}, "required": {"type": "boolean"}, "trigger": {"type": "string", "minLength": 1}, "consumer": {"type": "string", "minLength": 1}, "enforcement": {"type": "string", "minLength": 1}, "redaction_class": {"type": "string", "minLength": 1}, "freshness": {"enum": ["fresh", "stale", "unknown"]}, "artifact_kind": {"type": "string"}, "scope_redaction": {"type": "string"}, "requirement_class": {"enum": ["required", "advisory"]}, "trigger_ref": {"type": "string"}, "consumer_ref": {"type": "string"}, "delivery_mode": {"enum": ["inline", "on_demand_tool", "tool_affordance", "reference_only"]}, "representation_kind": {"type": "string"}, "freshness_sla": {"type": "string"}, "selection_reason": {"type": "string"}, "selection_rank": {"type": "integer", "minimum": 0}}}
+  }
+}

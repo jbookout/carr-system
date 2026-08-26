@@ -145,6 +145,44 @@ SERVICE="$1"; shift
 RUN_KEY="$1"; shift
 
 REPO="${0:A:h:h}"
+
+# XPC_SERVICE_NAME belongs to the process launchd starts directly.  A nested
+# interpreter may replace it with `0`, so preserve the identity only after the
+# loaded service, this wrapper PID, and the complete canonical fleet tuple all
+# agree.  Ambient variables and a forged XPC name are not evidence.
+unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
+unset CARR_RUN_SCHEDULED_LAUNCHD_PID
+unset CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM
+wrapper_pid=$$
+fleet_self_proof_refused=0
+if [ "$SERVICE" = "fleet-sync" ] \
+    && [ "${XPC_SERVICE_NAME:-}" = "com.carr.fleet-sync" ]; then
+  # This is not authorization. It ensures malformed tuple/PID proof fails
+  # closed in the child instead of degrading to an external self-unload.
+  export CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM=1
+fi
+fleet_loaded_wrapper=0
+if [ "${CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM:-}" = 1 ] \
+    && launchctl print "gui/$UID/com.carr.fleet-sync" 2>/dev/null \
+       | grep -Eq "^[[:space:]]*pid = ${wrapper_pid}[[:space:]]*$"; then
+  fleet_loaded_wrapper=1
+fi
+fleet_tuple_valid=0
+if [ "$RUN_KEY" = "fleet.sync" ] \
+    && [ "$#" -eq 2 ] \
+    && [ "$1" = "/bin/zsh" ] \
+    && [ "${2:A}" = "$REPO/bin/fleet-sync.sh" ]; then
+  fleet_tuple_valid=1
+fi
+if [ "${CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM:-}" = 1 ]; then
+  if [ "$fleet_loaded_wrapper" -eq 1 ] && [ "$fleet_tuple_valid" -eq 1 ]; then
+    export CARR_RUN_SCHEDULED_XPC_SERVICE_NAME=com.carr.fleet-sync
+    export CARR_RUN_SCHEDULED_LAUNCHD_PID=$wrapper_pid
+  else
+    fleet_self_proof_refused=1
+  fi
+fi
+
 LOG="$REPO/out/run-scheduled.log"
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
@@ -155,8 +193,17 @@ STARTED="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 # No redirection of any kind. Whatever the caller gave this process for stdout
 # and stderr is what the child gets, which is how the existing per-job launchd
 # logs keep working unchanged.
-"$@"
-rc=$?
+if [ "$fleet_self_proof_refused" -eq 1 ]; then
+  print -ru2 -- "run-scheduled: ACTIVE-SELF PROOF REFUSED — launchd names this as"
+  print -ru2 -- "    com.carr.fleet-sync, but the loaded wrapper PID and exact"
+  print -ru2 -- "    fleet-sync/fleet.sync canonical command tuple do not all agree"
+  print -ru2 -- "    remedy: run the sanctioned external config-as-code install to restore"
+  print -ru2 -- "    and reload the canonical plist; supplied child was not executed"
+  rc=1
+else
+  "$@"
+  rc=$?
+fi
 
 # Captured HERE, not at recording time: the spool may replay this row into the
 # ledger half an hour from now, and without an explicit end stamp ops-record

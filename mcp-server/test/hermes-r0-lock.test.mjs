@@ -28,6 +28,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   hermesActorForToken,
+  hermesActorForTokenMaps,
   agentActorForToken,
   authorizationClassForActor,
   personalScopeForActor,
@@ -54,6 +55,14 @@ test("a matching HERMES_TOKENS bearer resolves to a locked actor sponsored by Jo
   assert.equal(a.sponsoring_human_slug, "joe",
     "Joe sponsored the pilot 2026-08-16 so it can carry his personal work");
   assert.equal(a.via, "hermes-token", "the door is legible in tool_call rows");
+});
+
+test("an additive projector token resolves without replacing the primary Hermes map", () => {
+  const projected = hermesActorForTokenMaps("Bearer projector-secret", TOKENS,
+    JSON.stringify({ "hermes-pilot": "projector-secret" }));
+  assert.equal(projected.slug, "hermes-pilot");
+  assert.equal(projected.via, "hermes-token");
+  assert.equal(hermesActorForTokenMaps("Bearer wrong", TOKENS, "{}"), null);
 });
 
 test("an unlisted Hermes slug stays shared-only", () => {
@@ -94,17 +103,21 @@ test("dispatch forces the hermes profile and ignores ?profile=", () => {
   }
 });
 
-test("the hermes write set is a strict subset of capture", () => {
+test("the hermes business-write set is a strict subset of capture", () => {
   // The set is written out rather than spread from capture, so a verb added to
   // capture never lands in a persistent daemon's hands unreviewed. This is the
   // assertion that keeps the two honest in the other direction: hermes may
   // never hold a verb capture does not.
+  const runtimeOnly = new Set(["project-room-queue"]);
   for (const verb of PROFILES.hermes) {
+    if (runtimeOnly.has(verb)) continue;
     assert.ok(PROFILES.capture.has(verb),
       `${verb} is in hermes but not in capture — hermes must never exceed the additive set`);
   }
-  assert.ok(PROFILES.hermes.size < PROFILES.capture.size,
+  assert.ok(PROFILES.hermes.size - runtimeOnly.size < PROFILES.capture.size,
     "strict subset: hermes deliberately excludes the investigation verbs");
+  assert.equal(allowedIn("hermes", "project-room-queue", WRITE), true,
+    "the server-bound projector door is the only runtime-only write");
 });
 
 test("the investigation verbs stay out of the hermes set", () => {
@@ -175,6 +188,12 @@ test("the granted additive verbs are allowed", () => {
                       "record-finding", "record-defect"]) {
     assert.equal(allowedIn("hermes", verb, WRITE), true, `${verb} should be callable`);
   }
+});
+
+test("raw room writing stays out while the shape-checked projector door is allowed", () => {
+  assert.equal(allowedIn("hermes", "add-room-turn", WRITE), false,
+    "the unattended runtime must not gain an arbitrary transcript writer");
+  assert.equal(allowedIn("hermes", "project-room-queue", WRITE), true);
 });
 
 test("close-loop is excluded even though add-loop is granted", () => {

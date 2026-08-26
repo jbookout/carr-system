@@ -15,8 +15,16 @@ import { workRequestIntakeTools } from "./work-request-intake.js";
 import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { partnerRoomTools } from "./partner-room.js";
 import { agentProfileTools } from "./agent-profiles.js";
+import { botBriefTools } from "./bot-brief.js";
+import { memoryTools } from "./memory.js";
+import { incidentTools } from "./incident.js";
+import { evidenceActivationTools } from "./evidence-activation.js";
+import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { stripDealPlaceholders } from "./dealroom.js";
-import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
+         personalScopeForActor } from "./identity.js";
+import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
+export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
 
@@ -159,7 +167,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease")
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice")
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -2810,6 +2818,26 @@ export const TOOLS = {
     handler: async (c, _a, args) => ({ leads: (await c.query("select * from v_lead_hot order by score desc nulls last limit $1", [args.limit || 30])).rows }),
   },
 
+  "lead-board": {
+    write: false,
+    description: "The complete, safe worked-lead board. All leads surface, including weak, suppressed, and terminal rows: qualification is the human's job and this read is never pre-qualified or silently truncated. Returns the authoritative base_version needed by update-lead, ordered stage vocabulary including empty stages, score/confidence/freshness signals, and no phone, email, address, notes, or raw source detail.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (c) => {
+      const stages = (await c.query(
+        `select slug,label,sort
+           from v_lead_board_stage
+          order by sort,slug`)).rows;
+      const leads = (await c.query(
+        `select id,registry_ref,name,specialty,city,county,state,lane,stage,
+                stage_label,stage_sort,score,segment,suppressed,est_lease_event,
+                event_confidence,last_touch,next_action_date,owner,owner_label,
+                base_version,created_at,updated_at
+           from v_lead_board
+          order by stage_sort,suppressed,score desc nulls last,name,registry_ref`)).rows;
+      return { generated_at: new Date().toISOString(), stages, leads };
+    },
+  },
+
   "claim-card": {
     write: false,
     description: "The claimable candidate reservoir: who Joe or Dell could turn into a lead today, nearest lease window first. THE GAP THIS CLOSES, and it is the same one read-loop closed for loops: promote-pool and decline-candidate both refuse without base_version and both tell the caller to 'read the row from v_pool / v_claim_card first' — and nothing in the verb layer could perform that read. The only reader was a generated markdown card in the vault, which the doctrine cutoff retired on 2026-08-19; without this verb the two claim verbs would name a surface that no longer exists. Returns pool_id and base_version on every row, so a promote or decline follows directly with no guess and no version_conflict. SAFE COLUMNS ONLY — the view carries no email, phone or address by construction (has_channel says a channel exists; the human reads the number off the lead record after claiming). Ranked, never filtered: rows whose window has already PASSED are shown with a negative days_to_window rather than dropped, because a passed window is still a live conversation and three of them expired unread the last time this list had no reader. `needs_contact_count` is the tail with no channel at all — research, not calls, counted rather than hidden.",
@@ -3123,35 +3151,52 @@ export const TOOLS = {
 
   "set-next-action": {
     write: true,
-    description: "Set YOUR one open ball on a subject (replaces your previous open one; Dell's stays untouched — one ball per person per subject). Say whose turn it is and by when. Writes next_action (owner, due_on); set hold_until to keep a dated row from surfacing in today-triage.",
+    description: "Set ONE open ball on a subject (replaces that owner's previous open one; the other partner's stays untouched). Defaults to your ball. Only the server-issued Hermes CoS door may name its Joe sponsor as owner; created_by remains the runtime.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, ref: { type: "string" },
-      description: { type: "string" }, due_on: { type: "string", description: "YYYY-MM-DD, optional" } },
+      description: { type: "string" }, due_on: { type: "string", description: "YYYY-MM-DD, optional" },
+      owner: { type: "string", description: "optional server-derived owner; only the caller or a Hermes CoS runtime's Joe sponsor" } },
       required: ["idempotency_key","ref","description"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-next-action", args, async () => {
       const s = await resolveSubject(c, args.ref);
+      const permitted = permittedActionOwnerSlugs(actor);
+      const ownerSlug = args.owner === undefined || args.owner === null || args.owner === ""
+        ? actor.slug : String(args.owner).trim().toLowerCase();
+      if (!permitted.includes(ownerSlug))
+        throw new ToolError({ error: "owner_not_permitted", owner: ownerSlug, permitted,
+          hint: "a ball may be set for yourself; only the Hermes CoS door may hand one to its verified Joe sponsor, never Dell" });
+      let ownerId = actor.id;
+      if (ownerSlug !== actor.slug) {
+        const owner = await c.query("select id from actor where slug=$1", [ownerSlug]);
+        if (!owner.rows.length) throw new ToolError({ error: "actor_not_provisioned", slug: ownerSlug,
+          hint: "the selected owner has no actor row" });
+        ownerId = owner.rows[0].id;
+      }
       // [amendment 8] Replacing an unfinished ball used to record the old one as
       // 'done'. It wasn't done — it was superseded. No-fabrication applies to
       // metadata too, and 'done' would inflate any completion measure built on this.
       await c.query(
-        `update next_action set status='dropped', updated_by=$1 where subject_type=$2 and subject_id=$3
-         and owner_id=$1 and status='open'`, [actor.id, s.type, s.id]);
+        `update next_action set status='dropped', updated_by=$4 where subject_type=$2 and subject_id=$3
+         and owner_id=$1 and status='open'`, [ownerId, s.type, s.id, actor.id]);
       const droppedPostCall = s.type === "deal" ? (await c.query(
         `update capture_post_call_action
             set status='dropped',updated_at=now(),completed_at=null
           where deal_id=$1 and owner_id=$2 and status='open'
           returning id,description /* capture:replace-post-call-actions */`,
-        [s.id, actor.id])).rows : [];
+        [s.id, ownerId])).rows : [];
       const r = await c.query(
         `insert into next_action (subject_type, subject_id, owner_id, due_on, description, created_by)
-         values ($1,$2,$3,$4,$5,$3) returning id`, [s.type, s.id, actor.id, args.due_on || null, args.description]);
+         values ($1,$2,$3,$4,$5,$6) returning id`,
+        [s.type, s.id, ownerId, args.due_on || null, args.description, actor.id]);
       await writeEvent(c, actor, "set-next-action", s.type, s.id,
         { old: droppedPostCall.length ? { post_call_actions: droppedPostCall.map(x =>
             ({ id: x.id, description: x.description, status: "open" })) } : null,
-          new: { next_action: args.description, due: args.due_on,
+          new: { summary: `ball → ${ownerSlug}: ${args.description}`,
+            next_action: args.description, due: args.due_on, owner: ownerSlug,
+            set_by: actor.slug,
             dropped_post_call_action_ids: droppedPostCall.map(x => x.id) },
           idempotency_key: args.idempotency_key });
-      return { ok: true, next_action_id: r.rows[0].id, subject: s,
+      return { ok: true, next_action_id: r.rows[0].id, subject: s, owner: ownerSlug,
         dropped_post_call_action_ids: droppedPostCall.map(x => x.id) };
     }),
   },
@@ -3307,11 +3352,11 @@ export const TOOLS = {
 
   "update-deal": {
     write: true,
-    description: "Field-level change to a deal (phase, segment, outcome, notes_path, salesforce_id). Requires base_version from a fresh read; a conflict means someone else wrote — ask the human, never retry blind. Phase must be an existing slug (list: pending/research/site_selection/negotiation/closing/closed + imported). salesforce_id is the reconciliation key back to the system of record and was NULL on all 40 deals as of 2026-08-02, which forced salesforce-diff to match on name — the matching that mis-filed thirteen deals in the first place; fill it during the Salesforce read. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
+    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a conflict means someone else wrote — ask the human, never retry blind. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
-      fields: { type: "object", description: "subset of: phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
+      fields: { type: "object", description: "subset of: deal_type, phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
       required: ["idempotency_key","deal","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-deal", args, async () => {
       const s = await resolveSubject(c, args.deal);
@@ -3320,7 +3365,7 @@ export const TOOLS = {
       // city and lane joined the list in 0074, when they stopped being source_row
       // passthrough and became real columns. Before that they were unsettable,
       // which is why salesforce-diff could only ever REPORT a city move.
-      const allowed = ["phase","segment","outcome","closed_on","won_value","notes_path",
+      const allowed = ["deal_type","phase","segment","outcome","closed_on","won_value","notes_path",
                        "salesforce_id","city","lane"];
       if ("client_id" in args.fields) throw new ToolError({ error: "use_reassign_deal",
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
@@ -4134,7 +4179,7 @@ export const TOOLS = {
   // behind. update-lead is that writer.
   "update-lead": {
     write: true,
-    description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
+    description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. do_not_contact is inseparable from suppressed=true, and only a human may clear an existing suppression instruction. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, lead: { type: "string" },
       base_version: { type: "integer" },
@@ -4162,6 +4207,21 @@ export const TOOLS = {
             valid: all.rows.map(x => x.slug),
             hint: `${field} is a foreign key into ${table}; pass one of the listed slugs, never the label.` });
         }
+      }
+      const current = (await c.query("select stage,suppressed from lead where id=$1", [s.id])).rows[0];
+      const nextStage = keys.includes("stage") ? args.fields.stage : current.stage;
+      const nextSuppressed = keys.includes("suppressed") ? args.fields.suppressed : current.suppressed;
+      if (nextStage === "do_not_contact" && nextSuppressed !== true) {
+        throw new ToolError({ error: "do_not_contact_requires_suppression",
+          hint: "do_not_contact is a standing instruction, not only a funnel label; pass stage='do_not_contact' and suppressed=true together" });
+      }
+      if (current.stage === "do_not_contact" && nextStage !== "do_not_contact" && nextSuppressed !== false) {
+        throw new ToolError({ error: "suppression_clear_required",
+          hint: "moving a do_not_contact lead requires the same explicit human correction to set suppressed=false" });
+      }
+      if (current.suppressed && nextSuppressed === false && !canExercisePartnerAuthority(actor)) {
+        throw new ToolError({ error: "suppression_clear_requires_human",
+          hint: "a standing suppression instruction may be cleared only by an authenticated human" });
       }
       const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [s.id])).rows[0];
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
@@ -6145,7 +6205,7 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       loop_id: { type: "string" },
-      number: { type: "string", description: "alternative to loop_id; refuses when the number is ambiguous, and several are" },
+      number: { type: "string", description: "alternative to loop_id; refuses when the number is ambiguous, and several are. To RENUMBER the row, pass a different number and renumber_reason: two open rows of the same kind can carry the same number, and every verb that resolves by number then refuses. Refused if the target number is already taken by another OPEN row of this kind." },
       kind: { type: "string", enum: LOOP_KINDS, description: "narrows an ambiguous number" },
       base_version: { type: "integer" },
       title: { type: "string" }, body: { type: "string" }, owner: { type: "string" },
@@ -6164,7 +6224,6 @@ export const TOOLS = {
       blocker: { type: "string", enum: ["human_only","counterparty","ruling","external_event","other_lane","capability"],
         description: "REVISE what the loop is waiting on. add-loop refuses a loop without a blocker, but until 2026-08-09 nothing could change one, so a blocker named on day one was permanent even after the real obstacle turned out to be different — found on loop #295, whose blocker read human_only until building it revealed the actual block was a missing corpus (other_lane). Changing this requires blocker_detail too: a reclassification with the old specifics attached is worse than the original, because it reads as current and is not." },
       blocker_detail: { type: "string", description: "the SPECIFIC thing, restated for the new class: which person, which ruling, which date, which prerequisite. Required whenever blocker changes; may also be passed alone to sharpen the detail without reclassifying." },
-      number: { type: "string", description: "RENUMBER the row. Only reason this exists: two open rows of the same kind can carry the same number, and then every verb that resolves by number refuses — correctly, but a human saying 'close 95' is saying something the system cannot act on, and anyone working around it with loop_id silently picks whichever row they happened to look up. Requires renumber_reason in the same call. Refused if the target number is already taken by another OPEN row of this kind, which is the collision this exists to end." },
       renumber_reason: { type: "string", description: "REQUIRED whenever number changes: why, and where the old number still appears. Rule 7105955b binds here — a renumbered row is not an abandoned one, and the note recording the change has to say so in its first words, because the old number lives on in other rows' prose and in every generated render." },
       last_surfaced: { type: "string", description: "IDEA ROWS ONLY: stamp the idea bank's 'Last surfaced' column, YYYY-MM-DD. This is what the monthly resurface writes when a parked idea is presented and KEPT — the column its own rotation reads to pick the oldest ideas next month. Blank or '—' means never surfaced, so leaving it unwritten is not neutral: it keeps re-presenting the same rows." },
       section: { type: "string", enum: ["hot", "backlog", "open"], description: "move the row to this section of its file" } },
@@ -7175,6 +7234,12 @@ const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
   "write", "writes_records", "calls_models", "call_models",
 ]);
 
+// Partner-authority operations are performed through agent sessions in normal
+// use.  The server already resolves and audits the sponsor separately from the
+// runtime actor; do not force a second interactive OAuth seat after that exact
+// identity binding exists.  Keep the delegation deliberately closed to the two
+// native implementation agents.  Local tokens, reviewers, probes, Hermes, Grok,
+// and unsponsored runtimes remain outside this boundary.
 export function assertNoCallerAuthorityFields(args) {
   if (args && typeof args === "object" && !Array.isArray(args) &&
       Object.keys(args).some((key) => RESERVED_AUTHORITY_ARGUMENT_FIELDS.has(key)))
@@ -7192,20 +7257,13 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
   // Phase 1, 2026-08-13 (decision 97e76a2f): the hint now names the remedy,
-  // not just the refusal. Every non-human door (probe/reviewer/agent-token,
-  // and — since this same day — the LOCAL_TOKENS machine door local-verb.mjs
-  // now uses) refuses here identically, actor.human being the only switch;
-  // this is the one message all of them show. A credential in a config file
-  // must never be able to teach a rule, retire one, confirm a merge, or
-  // reassign a deal — that refusal is a feature. The one deliberate exception
-  // is a receipted local break-glass act (mcp-server/local-verb.mjs), which
-  // still authenticates as a human via ~/.config/carr/local-actor.json, so it
-  // is named too.
-  if (tool.humanOnly && !actor.human)
+  // not just the refusal. The server admits a verified partner or a sponsored
+  // native Codex/Claude actor. Probe, reviewer, local-token, other-model, and
+  // unsponsored doors refuse identically; caller fields cannot select the
+  // sponsor. The local break-glass route remains separately receipted.
+  if (tool.humanOnly && !canExercisePartnerAuthority(actor))
     throw new ToolError({ error: "human_only",
-      hint: "this verb never accepts automation — reconnect through the interactive OAuth " +
-            "connector (Joe's or Dell's own Claude session), or, if there is truly no interactive " +
-            "session available, use a receipted local break-glass act (see mcp-server/local-verb.mjs)" });
+      hint: "this verb requires Joe or Dell, or a server-verified Codex/Claude session sponsored by one of them; caller fields can never select the sponsor" });
   // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
   // coerceArgsToSchema above for what this fixes and why it is here rather than
   // in the seventeen handlers that would otherwise each need to remember. It
@@ -7823,7 +7881,8 @@ Object.assign(TOOLS, {
       accept: { type: "boolean" }, note: { type: "string" },
     }, required: ["idempotency_key", "candidate_id", "accept"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "resolve-post-call-candidate", args, async () => {
-      if (!actor.human) throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
+      if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_only",
+        hint: "this verb requires a partner or a server-verified Codex/Claude session sponsored by one" });
       if (typeof args.accept !== "boolean") throw new ToolError({ error: "accept_required" });
       const found = await c.query(
         `select id,kind,deal_id,assignee_slug,action_description,due_on,recipient_party_id,
@@ -8206,3 +8265,23 @@ Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));
 // turns, server-derived attribution, human-watchable. See src/partner-room.js.
 Object.assign(TOOLS, partnerRoomTools({ withEnvelope, ToolError }));
 Object.assign(TOOLS, agentProfileTools({ withEnvelope, writeEvent, ToolError }));
+Object.assign(TOOLS, botBriefTools({ ToolError, assertNoCallerAuthorityFields }));
+Object.assign(TOOLS, evidenceActivationTools({ withEnvelope, ToolError }));
+// Phase 1 CARR-native learning memory: evidence-backed context with explicit
+// candidate/promotion/correction/forgetting lifecycle. Memory never grants
+// authority; actor and sponsor scope are resolved by the server.
+Object.assign(TOOLS, memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }));
+
+// The operational incident ledger gets a front door (2026-08-23 rules-and-verbs
+// council, item 1 from both chairs). ops.incident has been written by two
+// collectors since 0115 and read by none: seeing it meant tools/ops-record.py on
+// a partner's Mac, and closing one meant the break-glass database tap. Five
+// verbs — board, card, open, close, adjudicate — with the close and the
+// adjudication carrying partner authority, because 0117 already wrote that
+// boundary into the grants and the verb surface should not be laxer than the
+// grants are. See migrations/0286 for the permission half.
+Object.assign(TOOLS, incidentTools({ withEnvelope, writeEvent, ToolError, authorizationClassForActor }));
+
+// Engineering Passport runtime: typed plan registration, server-derived
+// admission, and read-only closure projection over the canonical job ledger.
+Object.assign(TOOLS, engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }));

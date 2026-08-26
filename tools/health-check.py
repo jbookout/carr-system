@@ -853,6 +853,52 @@ WATCH = [
      "KNOWN BLOCKED on Dell's OS update (memory: dell-calendar-fetch-blocked) — expected stale until he updates"),
 ]
 
+def _retired_watch_entries(watch, retired_paths):
+    """Drop only dead-man rows whose exact output is a retired export target."""
+    retired = [entry for entry in watch if entry[1] in retired_paths]
+    active = [entry for entry in watch if entry[1] not in retired_paths]
+    return active, retired
+
+
+# THE CUTOFF REACHES THIS LIST TOO, and until 2026-08-23 it did not.
+#
+# The markdown-render cutoff fired 2026-08-19: exporters/run_exports.py skips
+# every .md target and prints RETIRED instead of writing it. Both export-freshness
+# checks in this file already ask the same flag function and drop the retired
+# targets. This dead-man list did not, so four rows watched files the exporter now
+# refuses to write and reported a CHOSEN state as four failures every single day —
+# the compiled shared rules, Joe's personal rules, the introduction rules, and the
+# active-client roster.
+#
+# Worse than noise: the remedy those rows printed was bin/refresh-rules.sh, which
+# exits 0 and writes nothing after the cutoff. A red row whose fix silently does
+# nothing costs more than no row, because somebody runs it and believes it.
+#
+# MATCHED AGAINST THE EXPORT REGISTRY, NOT AGAINST ".md". The first version of
+# this block dropped any row whose path ended in .md, which took the radar digest
+# and the two repo-local job reports with it — three files still written nightly
+# by tools the cutoff never touched. The cutoff is about EXPORT TARGETS, so this
+# asks the registry which paths it has stopped writing and drops exactly those.
+#
+# Gated on the same flag rather than deleted, so flipping doctrine.md_renders_retired
+# back to false restores the rows with no code change — one contract, no second
+# place to decide what "retired" means.
+try:
+    from exporters.run_exports import md_renders_retired as _md_retired
+    from exporters.targets import TARGETS as _EXPORT_TARGETS
+    if _md_retired():
+        _retired_paths = {rel for rel, _fn in _EXPORT_TARGETS.values()
+                          if rel.lower().endswith(".md")}
+        WATCH, _retired_watch = _retired_watch_entries(WATCH, _retired_paths)
+        for _w in _retired_watch:
+            print(f"  -- {_w[0]:<18} RETIRED at the markdown-render cutoff; the store "
+                  f"serves this (standing-context / read-doctrine / catch-me-up)")
+except Exception as _exc:
+    # Fails OPEN, the same direction run_exports.py chose: a dead config lookup
+    # keeps every row rather than silently hiding a watch that still matters.
+    print(f"  -- {'md cutoff':<18} could not read the cutoff registry "
+          f"({type(_exc).__name__}); watching every row")
+
 # --- credential gates (added 2026-08-02) -------------------------------------
 # A JOB THAT CANNOT RUN IS NOT A JOB THAT FAILED, and reporting both as MISSING
 # is how a dashboard loses its readers. The matcher and the cadence engine exit
@@ -1206,9 +1252,17 @@ try:
     # refusal script warned about. It is not a failure either — see the argument
     # at the 69 branch in bin/nightly.sh. So it gets its own count, printed
     # beside the verdict on every line below, and it never sets rc.
-    _done: list[tuple[bool, list[str], list[str]]] = []  # newest-last: (clean?, failed, blocked)
+    # TOMBSTONE is tracked beside BLOCKED for the reason BLOCKED is tracked
+    # beside FAIL, one step further along (2026-08-23). A tombstoned step was
+    # gated out before the chain ran it, so blocked-count going to zero must not
+    # be readable as "the seams got built" — the debt moved from one column to
+    # another and this row has to show both or it reports a fix that did not
+    # happen. Neither count ever sets rc: a known, named, filed debt is not
+    # tonight's alarm. What IS tonight's alarm is a step failing, which still is.
+    _done: list[tuple[bool, list[str], list[str], list[str]]] = []
     _pending: list[str] = []
     _blocked: list[str] = []
+    _tombs: list[str] = []
     _begins = _overlaps = 0
     _open = 0
     for _ln in open(_nightly_log, errors="replace"):
@@ -1221,25 +1275,39 @@ try:
             _pending.append(_ln.split("  FAIL  ", 1)[1].strip())
         elif "  BLOCKED  " in _ln:
             _blocked.append(_ln.split("  BLOCKED  ", 1)[1].strip())
-        elif "chain OK" in _ln or "FINISHED WITH FAILURES" in _ln:
-            _done.append(("chain OK" in _ln, _pending, _blocked))
+        elif "  TOMBSTONE  " in _ln:
+            _tombs.append(_ln.split("  TOMBSTONE  ", 1)[1].strip())
+        else:
+            _outcome = _health_sub.nightly_completion(_ln)
+            if _outcome is None:
+                continue
+            _done.append((_outcome, _pending, _blocked, _tombs))
             _pending = []
             _blocked = []
+            _tombs = []
             _open = max(0, _open - 1)
     if not _done:
         print(f"  -- {'nightly chain result':<22} no completed run in the log — the chain "
               f"has not finished since the log was last trimmed")
     else:
-        _last_ok, _last_fails, _last_blocked = _done[-1]
+        _last_ok, _last_fails, _last_blocked, _last_tombs = _done[-1]
         _bl_names = sorted({s.split(" (exit")[0] for s in _last_blocked})
         _bl = (f"  · {len(_bl_names)} step(s) BLOCKED on a missing canonical seam, "
                f"not counted as failures: {', '.join(_bl_names)}" if _bl_names else "")
+        # The label is everything before the " — gated out" the chain writes, so
+        # the row names the steps rather than reprinting every reopen condition.
+        # The conditions themselves are one grep of out/nightly.log away and this
+        # row has to stay one line.
+        _tb_names = sorted({s.split(" — gated out")[0] for s in _last_tombs})
+        _bl += (f"  · {len(_tb_names)} step(s) TOMBSTONED, gated out rather than run: "
+                f"{', '.join(_tb_names)} — each names what it is missing in "
+                f"out/nightly.log" if _tb_names else "")
         if _last_ok:
             print(f"  OK {'nightly chain result':<22} last run exited clean, all steps OK{_bl}")
         else:
             # how many consecutive completed runs, newest-first, ended red
             _streak = 0
-            for _ok, _, _ in reversed(_done):
+            for _ok, _, _, _ in reversed(_done):
                 if _ok:
                     break
                 _streak += 1
@@ -1710,6 +1778,10 @@ try:
         _first = _lines[0] if _lines else "(no output)"
         if _p.returncode == 0:
             print(f"  OK {'machine config':<18} {_first.split('— ', 1)[-1]}")
+        elif "PREREQUISITES MISSING" in _first:
+            print(f"  ✗✗ {'machine setup':<18} {_first.split(': ', 1)[-1]}")
+            print(f"     {'':<18} config-as-code lists each missing dependency and its fix")
+            rc = 1
         elif "MISSING FROM MACHINE" in _first:
             # The 2026-08-08 case: a plugin install deleted the hooks block from
             # ~/.claude/settings.json and all five gates stopped running. The old

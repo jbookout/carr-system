@@ -29,6 +29,13 @@ human asks for it and never starts on its own.
 ruleset. Nothing in this file restates it, because a copy would drift the day
 the doctrine changed.
 
+**Then load the narrow design contract for the surface intent.**
+`design/carr-design-kernel.v1.json` is the machine-readable companion to the
+doctrine: select only the matching `design_intent` context slices, preserve
+`design/tokens.css` as canon, and use its visual-gate profile as the evidence
+checklist. It does not replace doctrine, authorize a redesign, or let an
+aesthetic verdict outweigh truth or accessibility.
+
 **The trap this skill exists to avoid.** Generic interface-review instincts are
 tuned to a light, minimal, low-motion web baseline. CARR is deliberately the
 opposite: near-black cinematic grounds, glass, heavy ambient motion, mandatory

@@ -53,6 +53,7 @@ PID_SOCKET = re.compile(r"^\d+\.sock$")
 KINDS = ("claude-session", "codex-session", "codex-live")
 # the old name for the Codex kind, before it carried a thread
 KIND_ALIASES = {"codex-exec": "codex-session"}
+EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
 
 DEFAULT_REGISTRY = Path(
     os.environ.get(
@@ -94,6 +95,23 @@ def refuse_pid_socket(sock: str) -> None:
         )
 
 
+def _normalize_effort(kind: str, effort: str | None) -> str | None:
+    if effort is None:
+        return None
+    if effort not in EFFORT_CHOICES:
+        raise DeskError(
+            "bad_effort",
+            "reasoning effort must be one of minimal, low, medium, high, xhigh",
+        )
+    if kind == "claude-session":
+        raise DeskError(
+            "bad_effort",
+            "a claude-session desk does not take effort; a live person's seat "
+            "chooses its own model and reasoning profile",
+        )
+    return effort
+
+
 class Registry:
     def __init__(self, path: str | Path = DEFAULT_REGISTRY):
         self.path = Path(path)
@@ -119,6 +137,7 @@ class Registry:
         kind: str,
         socket: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
         cwd: str | None = None,
         sandbox: str | None = None,
         add_dirs: list[str] | None = None,
@@ -132,6 +151,7 @@ class Registry:
         kind = KIND_ALIASES.get(kind, kind)
         if kind not in KINDS:
             raise DeskError("bad_kind", f"{kind!r} is not one of {', '.join(KINDS)}")
+        effort = _normalize_effort(kind, effort)
 
         # dict[str, object]: a desk entry's values are a genuine mix (str,
         # None, list[str]) depending on kind — a bare literal makes mypy infer
@@ -149,6 +169,7 @@ class Registry:
             refuse_pid_socket(socket)
             entry = {"kind": kind, "socket": str(socket), "thread_id": None,
                      "cwd": str(cwd or Path.cwd())}
+            entry["effort"] = effort
             if model:
                 entry["model"] = model
         else:
@@ -156,7 +177,7 @@ class Registry:
                 raise DeskError("missing_model", "a codex-session desk needs --model")
             # thread_id is filled in by the first dispatch and reused after
             entry = {"kind": kind, "model": model, "cwd": str(cwd or Path.cwd()),
-                     "thread_id": None}
+                     "thread_id": None, "effort": effort}
             # A seat that cannot bind a socket or write where the work lives
             # reports its own cage as a fact about the machine. Carrying the
             # posture on the desk is how a task that genuinely needs more room

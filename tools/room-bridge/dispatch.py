@@ -49,6 +49,7 @@ import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
+import execution_contract  # noqa: E402 — portable Job Passport v1 seam
 
 DEFAULT_RESULTS = Path(
     os.environ.get(
@@ -134,6 +135,10 @@ def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> 
             "--dangerously-bypass-hook-trust",
             "--json",
             "-m", entry["model"],
+            # Verified from CLI help on 2026-08-24: `codex exec --help` and
+            # `codex exec resume --help` both list `-c <config>`, so this
+            # delegation-specific effort is passed on both fresh and resumed paths.
+            "-c", f"model_reasoning_effort={entry['effort']}",
             "-o", str(last),
         ]
         # `codex exec resume` does not accept -C/-s/--add-dir at all — a
@@ -222,6 +227,21 @@ def dispatch(
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
     msg_id = str(uuid.uuid4())
+    if entry["kind"] in ("codex-session", "codex-live"):
+        if not entry.get("model") or not str(entry.get("model")).strip():
+            raise DeskError(
+                "unnamed_model_or_effort",
+                "dispatch refused: a delegation names its specific model and reasoning "
+                "effort (cheapest qualified, stated explicitly). Re-register this desk "
+                "with --model and --effort.",
+            )
+        if not entry.get("effort") or not str(entry.get("effort")).strip():
+            raise DeskError(
+                "unnamed_model_or_effort",
+                "dispatch refused: a delegation names its specific model and reasoning "
+                "effort (cheapest qualified, stated explicitly). Re-register this desk "
+                "with --model and --effort.",
+            )
 
     if entry["kind"] == "claude-session":
         outcome = _to_claude(entry, task, msg_id)
@@ -249,6 +269,35 @@ def dispatch(
     }
     _record(results_path, row)
     return row
+
+
+def dispatch_envelope(
+    name: str,
+    envelope: dict,
+    task: str,
+    *,
+    dispatch_fn=None,
+    receipt_sink=None,
+    **dispatch_kwargs,
+) -> dict:
+    """Compatibility seam for a server-issued ExecutionEnvelope v1.
+
+    The legacy ``dispatch`` signature and local NDJSON row are deliberately
+    untouched.  This wrapper validates the portable envelope, delegates over
+    the exact same path (or an injected fake in tests), and returns a redacted
+    AttemptReceipt.  It neither derives authority nor persists a transcript;
+    future server admission/audit slices own those responsibilities.
+    """
+    execution_contract.validate_execution_envelope(envelope)
+    if not isinstance(task, str) or not task.strip():
+        raise execution_contract.ContractError("runtime task must be a non-empty string")
+    fn = dispatch_fn or dispatch
+    row = fn(name, task, **dispatch_kwargs)
+    receipt = execution_contract.receipt_from_dispatch_row(envelope, row)
+    execution_contract.validate_attempt_receipt(receipt, envelope)
+    if receipt_sink is not None:
+        receipt_sink(receipt)
+    return {"dispatch": row, "attempt_receipt": receipt}
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +493,7 @@ def main(argv: list[str]) -> int:
     r.add_argument("--kind", default=None, choices=list(desks.KINDS))
     r.add_argument("--socket", default=None)
     r.add_argument("--model", default=None)
+    r.add_argument("--effort", default=None, choices=list(desks.EFFORT_CHOICES))
     r.add_argument("--cwd", default=None)
     r.add_argument("--sandbox", default=None,
                    choices=["read-only", "workspace-write", "danger-full-access"],
@@ -497,6 +547,7 @@ def main(argv: list[str]) -> int:
         if a.cmd == "register":
             kind = a.kind or ("claude-session" if a.socket else "codex-exec")
             entry = reg.register(a.name, kind, socket=a.socket, model=a.model, cwd=a.cwd,
+                                 effort=a.effort,
                                  sandbox=getattr(a, "sandbox", None),
                                  add_dirs=getattr(a, "add_dirs", None))
             print(json.dumps({a.name: entry}, indent=2))

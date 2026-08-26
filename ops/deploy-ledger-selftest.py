@@ -94,7 +94,12 @@ def write_executable(path: Path, body: str) -> None:
 
 def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subprocess.CompletedProcess[str]:
     """Run the Production promotion path with every external boundary mocked."""
-    with tempfile.TemporaryDirectory(prefix="deploy-ledger-", dir=REPO) as raw:
+    # PRIVATE TMP, NOT THE REPO ROOT (2026-08-23 load-flake sweep). This used
+    # to be dir=REPO, which left a deploy-ledger-* directory sitting in the
+    # checkout for the duration of the run and made every concurrent ci.sh run
+    # share one filesystem namespace with it. tempfile's own default is already
+    # per-process private; nothing here needs the fixture inside the repo.
+    with tempfile.TemporaryDirectory(prefix="deploy-ledger-") as raw:
         root = Path(raw)
         script = root / "bin" / "deploy-worker.sh"
         write_executable(script, SCRIPT.read_text(encoding="utf-8"))
@@ -110,7 +115,15 @@ def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subp
             args = sys.argv[1:]
             failure = os.environ.get("FAKE_PROGRAM5_FAILURE", "")
             if args and args[0] == "-c":
-                print("100")
+                expression = args[1] if len(args) > 1 else ""
+                if "schema_ledger_sha256" in expression:
+                    print("sha256:" + "7" * 64)
+                elif "schema_highest_migration" in expression:
+                    print("0300_operational_hermes_bot_profiles.sql")
+                elif "schema_applied_count" in expression:
+                    print("236")
+                else:
+                    print("100")
                 raise SystemExit(0)
             tool = Path(args[0]).name if args else ""
             rest = args[1:]

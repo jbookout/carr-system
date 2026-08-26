@@ -74,7 +74,7 @@ curl -s https://api.doctorcre.com/release
 match what that build carried. **A deploy returning success and a registry that
 answers are two different claims.**
 
-### 4. Expect the verb-loss guard, and expect it to be right
+### 4. Typed recovery is the only verb-shrink authority
 
 A rollback usually removes verbs the newer build added, so the preflight
 refuses:
@@ -86,14 +86,13 @@ REFUSED: this deploy would REMOVE 1 verb(s) from staging.
 ```
 
 That guard exists because production silently went from 75 verbs to 66 in the
-middle of a working session. A rollback is the legitimate case for overriding
-it, and the override is deliberate rather than automatic:
-
-```sh
-./bin/deploy-worker.sh --env staging --allow-shrink
-```
-
-Say out loud, in the incident record, which verbs are going away.
+middle of a working session. There is no `--allow-shrink` override. For any
+exact typed recovery step (`current_before`, `prior`, `current_after`, or the
+isolated `restore_only` repair), the wrapper first calls that step's matching
+database writer. The writer must durably prepare the exact candidate/prior,
+SHA, service, recovery attempt, and correlation, then return the deterministic
+provider tag that the later prepare must replay idempotently. Standalone/source,
+manual-flag, and mismatched-prior deploys remain refused.
 
 ## The rehearsal, and why it is required before approval
 
@@ -121,17 +120,15 @@ RECOVERY_ATTEMPT_ID=<one-new-uuid>
   --recovery-step current_before \
   --staging-receipt-idempotency-key <current-before-uuid>
 
-# From a clean worktree at <prior-sha>. Run the guard first without an override:
+# From a clean worktree at <prior-sha>. The wrapper can permit a lower count
+# only after it has prepared this exact typed step against the completed prior;
+# the same rule applies to current_before, current_after, and restore_only:
 ./bin/deploy-worker.sh --env staging --release-sha <prior-sha> \
   --release-key <production-candidate-key> \
   --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" \
   --recovery-prior-release-key <completed-production-prior-key> \
   --recovery-step prior \
   --staging-receipt-idempotency-key <prior-uuid>
-
-# If and only if the refusal reports the exact verb loss expected from the
-# named prior release, repeat that same prior command with --allow-shrink.
-# An unexpected count is a stop condition, not permission to use the override.
 
 # Back in the clean <current-sha> worktree:
 ./bin/deploy-worker.sh --env staging --release-sha <current-sha> \
@@ -148,6 +145,16 @@ receipt. The final `current_after` step creates the recovery bundle and its
 receipt and do not create or approve separate staging releases for these three
 steps; either would describe a different, unbound procedure.
 
+### If a staging leg fails after it may have changed staging
+
+Do not repeat `current_after`. The recovery controller invokes the wrapper with
+the internal `restore_only` safety step, bound to the same candidate, prior,
+rollback plan, migration set, and recovery attempt. Its result is audited as
+`succeeded`, `failed`, or `unknown`, but it is structurally outside the three
+receipt tables and can never complete, repair, promote, or approve a recovery
+bundle. A repaired partial run remains ineligible; start a new three-step
+rehearsal after diagnosing the original failure.
+
 ## Verified execution, 2026-08-19
 
 Run against staging while promoting the `export-email-domains` verb:
@@ -158,9 +165,10 @@ Run against staging while promoting the `export-email-domains` verb:
 | Rolled back to `8e761a0c` | `8e761a0c`, **139 verbs** |
 | Restored forward | `7c7e1bd1`, **140 verbs** |
 
-The verb-loss guard fired on the rollback exactly as documented above and was
-cleared with `--allow-shrink`. Both directions were confirmed from the Worker's
-own `/release` endpoint rather than from the deploy output.
+The typed recovery path allowed the expected temporary verb reduction only
+after the matching database writer bound each exact step to the candidate and
+completed prior. Both directions were confirmed from the Worker's own
+`/release` endpoint rather than from deploy output.
 
 ## Two things that will bite you
 

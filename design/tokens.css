@@ -24,6 +24,15 @@
    ============================================================ */
 
 :root{
+  /* ---- Primitive layer -------------------------------------------------
+     These are stable physical values.  Theme changes happen through the
+     semantic layer below; consumers should normally use semantic/component
+     aliases, never a raw primitive.  Legacy canon names remain intact so this
+     is additive rather than a disruptive token migration. */
+  --primitive-brand-navy: #002F6C;
+  --primitive-brand-navy-deep: #00224D;
+  --primitive-brand-orange: #F57F29;
+
   /* ---- Brand / chrome colors (never data colors) ---- */
   --navy:        #002F6C;
   --navy-deep:   #00224D;
@@ -73,6 +82,36 @@
 
   /* ---- Touch target minimum ---- */
   --touch-min: 44px;
+
+  /* ---- Semantic layer --------------------------------------------------
+     Theme-dependent meaning, not palette.  New surface CSS uses these names;
+     the original variables above remain CARR's canonical compatibility layer. */
+  --surface-canvas: var(--paper);
+  --surface-raised: var(--card);
+  --surface-field: var(--field);
+  --content-primary: var(--ink);
+  --content-secondary: var(--muted);
+  --content-tertiary: var(--quiet);
+  --border-subtle: var(--line);
+  --action-primary: var(--navy);
+  --action-focus: var(--orange);
+  --status-risk: var(--risk);
+  --status-risk-surface: var(--risk-bg);
+  --status-warning: var(--warn);
+  --status-warning-surface: var(--warn-bg);
+  --status-good: var(--good);
+  --status-information-surface: var(--blue-bg);
+
+  /* ---- Component layer -------------------------------------------------
+     Component CSS consumes these aliases.  They preserve intent when the
+     semantic layer changes for dark mode, accessibility, or a future adapter. */
+  --component-card-background: var(--surface-raised);
+  --component-card-border: var(--border-subtle);
+  --component-card-shadow: var(--shadow);
+  --component-control-min-size: var(--touch-min);
+  --component-control-focus-ring: var(--action-focus);
+  --component-control-focus-outline: 3px solid var(--component-control-focus-ring);
+  --component-control-focus-offset: 3px;
 }
 
 /* ---- Dark scheme (deep navy ground, navy-tinted shadow) ---- */

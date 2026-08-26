@@ -21,6 +21,14 @@ from typing import Any
 REPO = pathlib.Path(__file__).resolve().parent.parent
 GATE = REPO / "ops" / "mechanism-doctrine-gate.py"
 
+# The one scrubber (ops/git_env.py), not the hand-rolled author-only env dict
+# this file used to build: git hands every hook a GIT_DIR pointing at the
+# repository that invoked it, and on 2026-08-14 that leaked a fixture commit
+# onto live main. run_in_fixture()'s throwaway repo must not be reachable
+# through an inherited GIT_DIR.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("mdg", GATE)
 assert spec is not None and spec.loader is not None, f"cannot load {GATE}"
 mdg: Any = importlib.util.module_from_spec(spec)
@@ -155,7 +163,7 @@ def run_in_fixture(files, base_files=None):
     """Build a throwaway git repo, commit base_files, add files, run the gate."""
     with tempfile.TemporaryDirectory() as td:
         td = pathlib.Path(td)
-        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+        env = dict(fixture_env(), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                    GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
         def git(*a):
             return subprocess.run(["git", *a], cwd=td, env=env,

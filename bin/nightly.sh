@@ -89,7 +89,14 @@ if [ "${1:-}" = "--preflight" ]; then
     ops/vendor-level-drift-check.py bin/backup-dump.sh bin/archive-calendar.sh
     bin/sync-settings.sh bin/type-check.sh ops/store-markup-scan.py
     generators/build-open-items-dashboard.py ops/nightly-verb-probe.py
-    bin/smoke-and-record.sh tools/ops-record.py bin/routine-canonical-seam-refusal.sh
+    bin/smoke-and-record.sh tools/ops-record.py
+    # bin/routine-canonical-seam-refusal.sh came off this list on 2026-08-23: the
+    # chain stopped launching it when the refusals became tombstones, and a
+    # preflight that requires a file no step runs is checking the wrong thing.
+    # It and bin/routine-admin-refusal.sh stay in the tree and keep their exit
+    # contracts (69 and 78), asserted by running them in
+    # ops/scheduled-drive-writer-selftest.py and
+    # ops/nightly-capability-skip-selftest.py rather than through this chain.
   )
   missing=0
   for path in "${required[@]}"; do
@@ -117,6 +124,92 @@ else
 fi
 LOG="$REPO/out/nightly.log"
 mkdir -p "$REPO/out"
+
+say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
+
+# ── THE DEATH THAT LEFT NO LINE (2026-08-23) ─────────────────────────────────
+# On 2026-08-17, 08-18 and 08-19 this chain ran ZERO steps and out/nightly.log
+# held nothing to find it by. An unset variable under `set -u` (line 33) does
+# not fail a step — it kills the shell where it stands, and the shell's own
+# complaint goes to STDERR, which no part of this file was reading. `say` writes
+# to the log; the shell writes to fd 2; the two never met. Three nights of no
+# cadence, no matcher, no exports, no boards, no graph, no backup, and every
+# dead-man check green because the pings are the last step and the chain never
+# reached them.
+#
+# The default a few lines below stops that ONE variable from killing the chain.
+# It does nothing for the next unset variable somebody adds, and the failure MODE
+# is what made the outage expensive, not the particular name. So this closes the
+# mode rather than the instance, in two parts:
+#
+#   1. THE SHELL'S OWN STDERR IS CAPTURED AND LANDS IN THE LOG. Steps already
+#      redirect their own output there; what was never captured is what the
+#      chain script itself says when it dies. Captured to a file rather than
+#      teed through a co-process on purpose: a `set -u` death is exactly the
+#      moment a background tee is least likely to have flushed.
+#   2. AN EXIT HANDLER THAT KNOWS WHETHER THE CHAIN FINISHED. CHAIN_OUTCOME is
+#      `incomplete` until the completion block at the bottom sets it. Any exit
+#      that reaches the handler still holding `incomplete` died mid-run, so the
+#      handler names the variable out of the captured stderr, writes the FATAL
+#      and completion lines a reader looks for, and FIRES THE CHAIN PING — a
+#      night that ran no steps must alarm on the same clock as a night that ran
+#      them and failed, not wait out the dead-man grace period.
+#
+# It also owns the lock release, so the chain has ONE exit path instead of an
+# EXIT trap that releases and a separate death that reports nothing. LOCK_HELD
+# keeps that safe here, above where bin/run-lock.sh has even been sourced.
+CHAIN_OUTCOME=incomplete
+LOCK_HELD=0
+CHAIN_EXIT_RAN=0
+CHAIN_STDERR="$REPO/out/.nightly-stderr.$$"
+# The handler removes this file; SIGKILL, a panic and a reboot all run no
+# handler, so sweep anything a previous run left behind. A day old, not an hour:
+# a capture belonging to a chain still running must never be taken out from
+# under it, and no run of this chain lasts anywhere near that long.
+find "$REPO/out" -maxdepth 1 -name '.nightly-stderr.*' -mtime +1 -delete 2>/dev/null
+exec 3>&2
+exec 2>"$CHAIN_STDERR"
+
+carr_chain_exit() {             # carr_chain_exit <exit-status>
+  local rc="${1:-0}"
+  # Re-entrant: the INT/TERM handler calls this and then exits, which fires the
+  # EXIT trap on the way out. Reporting one death twice is its own confusion.
+  [ "$CHAIN_EXIT_RAN" -eq 1 ] && return 0
+  CHAIN_EXIT_RAN=1
+  exec 2>&3 3>&-
+  local captured=""
+  if [ -s "$CHAIN_STDERR" ]; then
+    captured="$(cat "$CHAIN_STDERR")"
+    print -r -- "$captured" >&2
+    print -r -- "--- shell stderr this run ---" >> "$LOG"
+    print -r -- "$captured" >> "$LOG"
+  fi
+  rm -f "$CHAIN_STDERR"
+  if [ "$CHAIN_OUTCOME" = incomplete ]; then
+    local named
+    named="$(print -r -- "$captured" | grep -E 'parameter not set|unbound variable' | head -1)"
+    if [ -n "$named" ]; then
+      # zsh reports "<path>:<line>: <NAME>: parameter not set". Stripping the
+      # path leaves the file, the line and the variable — which is the whole
+      # question a morning asks — instead of somebody's home directory.
+      say "FATAL  set -u killed the chain at ${named##*/} — every step below that line did not run tonight"
+    else
+      say "FATAL  the chain exited $rc without reaching its completion line — every step below that point did not run tonight"
+    fi
+    say "===== nightly chain FINISHED WITH FAILURES — died before its completion line ====="
+    # The named steps' outcomes are deliberately NOT supplied: the chain died, so
+    # nobody knows what exports or the backup did. hc-ping.sh pings nothing for an
+    # unsupplied outcome and lets those checks go late on their own clock, which
+    # is the honest signal. The WHOLE-CHAIN check is supplied and alarms now.
+    HC_CHAIN_RC="$rc" "$REPO/bin/hc-ping.sh" >> "$LOG" 2>&1
+    print -r -- "nightly receipt: died_before_completion=1 exit=$rc"
+    print -r -- "nightly result: chain_failed"
+  fi
+  [ "$LOCK_HELD" -eq 1 ] && carr_release_lock
+  return 0
+}
+trap 'carr_chain_exit $?; exit 143' INT TERM HUP
+trap 'carr_chain_exit $?' EXIT
 
 # Routine work receives only named least-privilege database capabilities.  Do
 # not source db.env: it also holds owner/admin credentials and shell syntax.
@@ -151,8 +244,6 @@ carr_load_routine_db_env CARR_DB_JOBS_URL CARR_DB_EXPORTER_URL CARR_DB_BACKUP_UR
 # fallback cannot run if dereferencing the variable kills the caller first.
 CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}"
 
-say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
-
 rc_total=0
 # LAST_STEP_RC carries the outcome of the step that just ran (0 = OK, 78 = SKIP,
 # 69 = BLOCKED, anything else = FAIL). Added 2026-08-07 so the dead-man pings can
@@ -179,6 +270,34 @@ seam_blocked=0
 # behind the limit.
 timed_out=0
 source "$REPO/bin/step-timeout.zsh"
+
+# ── TOMBSTONES (2026-08-23, process-audit council R2) ────────────────────────
+# How many steps were GATED OUT tonight rather than run. A tombstoned step does
+# not execute, so it cannot be OK, SKIP, BLOCKED, TIMEOUT or FAIL — it is a
+# fourth thing and it gets its own count.
+#
+# WHY IT IS NOT JUST A DELETED STEP. On a typical night eleven of these thirty
+# steps did no work: six refused for a missing canonical seam, four for an admin
+# capability nobody has provisioned here, one was a retired no-op still being
+# executed. Every one of them printed its refusal into the log every night for a
+# week or more, and this file's own comments call that expected. That is the
+# alarm-fatigue failure the chain has now learned three separate times — the
+# boards before the ORDER 2 addendum, the mypy tripwire hiding behind an
+# already-red row from 08-08 to 08-10, and the fourteen nightly seam refusals
+# that made BLOCKED a word people skip. A reader who learns to skip BLOCKED
+# skips it on the night it means something.
+#
+# AND NOT A SILENT DELETION EITHER (rule 1b8e7f43: a blocked action is filed,
+# never dropped). Cutting the line would remove the duty along with the noise,
+# and nothing would remember the system once owed this. A tombstone IS the file:
+# the step does not run, and the log states in one line what is missing and what
+# would reopen it. Executing a refusal to produce that sentence was always the
+# expensive way to say it — it costs a process launch, a ledger write, a wall
+# clock, and a word in the log that also means "something broke".
+#
+# BUILDING THE MISSING SEAMS IS PRODUCT WORK AND IS NOT IN SCOPE HERE. The
+# tombstone records the debt; it does not pay it.
+tombstoned=0
 
 # ── THE JOB-RUN LEDGER (Program 3, 2026-08-14) ───────────────────────────────
 # Until this existed, step() computed exactly the right outcome for every step,
@@ -300,17 +419,56 @@ step() {                        # step <label> <command...>
   fi
 }
 
+tombstone() {                   # tombstone <label> <what is missing> <what reopens it>
+  local label="$1" missing="$2" reopen="$3"
+  local t0; t0="$(date -u +%FT%TZ)"
+  # NOTHING IS EXECUTED. No wall clock, no credential boundary, no child — there
+  # is no command here to bound or to strip an environment for.
+  #
+  # LAST_STEP_RC IS 69, NOT 0. A tombstoned step did not do its work, and the two
+  # variables this carries into (EXPORTS_RC, BACKUP_RC) are read by the dead-man
+  # pings. Reporting 0 would tell hc-ping.sh the work succeeded, which is the
+  # 2026-08-07 corrupt-backup defect one layer up: a success signal that never
+  # looked at the thing it reports on. No step with a registered ping is
+  # tombstoned today, and this is what keeps that safe by construction rather
+  # than by whoever adds the next tombstone remembering.
+  LAST_STEP_RC=69
+  say "TOMBSTONE  $label — gated out, not run · missing: $missing · reopens when: $reopen"
+  # `cancelled`, not `skipped`: skipped means the step ran and found it could not
+  # proceed, which is what the 78 branch above records and is a different fact.
+  # tools/ops-record.py opens incidents from failed/timed_out only, so a tombstone
+  # keeps its row in the ledger every night — the file that says the duty still
+  # exists — without raising a nightly incident for a debt already named here.
+  record_run "$label" cancelled 69 "$t0"
+  tombstoned=$((tombstoned + 1))
+}
+
 # Keep the exact old projection commands available only behind the recovery
 # envelope.  In normal scheduled operation each names the concrete canonical
 # seam that still has to exist before the work may resume; none falls back to a
 # Drive mount just because it happens to be present on this Mac.
+#
+# ON THE NORMAL PATH THIS IS NOW A TOMBSTONE, not an executed refusal (2026-08-23).
+# It used to launch bin/routine-canonical-seam-refusal.sh under the step wrapper
+# purely so that process could exit 69 and have step() print BLOCKED. The sentence
+# was the whole product; the process was overhead. The callsites are unchanged —
+# a projection still declares its label, its missing seam and the command the
+# recovery envelope runs — so nothing about the recovery path or the Drive
+# registry moves.
 drive_projection() {            # drive_projection <label> <missing-seam> <command...>
   local label="$1" seam="$2"; shift 2
   if [ "$RECOVERY" -eq 1 ]; then
     step "RECOVERY NONCANONICAL $label" "$@"
   else
-    step "$label (missing canonical seam)" sh ./bin/routine-canonical-seam-refusal.sh \
-      "MISSING_CANONICAL_SEAM: $seam"
+    # THE REOPEN CONDITION POINTS AT THE STEP'S OWN BLOCK rather than asserting
+    # what reopening takes. For most projections it is a build; for upstream
+    # corroborate it is not — #539 established that the block there is a decision
+    # about how external provider datasets are acquired and how long they may be
+    # kept, which no amount of wiring settles. A line that told every reader "that
+    # seam exists" would send them looking for something to build, which is the
+    # exact wrong turn the old seam NAME already cost two sessions.
+    tombstone "$label" "canonical seam — $seam" \
+      "that seam exists — read this step's block in bin/nightly.sh for what it would take — and the step moves out of drive_projection onto the normal route"
   fi
 }
 
@@ -340,13 +498,30 @@ cd "$REPO" || { say "FATAL cannot cd $REPO"; exit 2; }
 # The traps are here at top level and not inside carr_take_lock because zsh runs
 # an EXIT trap set inside a function when the FUNCTION returns — see the header
 # of bin/run-lock.sh, where that cost the first cut of this fix.
+#
+# A HOLDER THAT NEVER LETS GO IS THE OTHER FAILURE, and it is not hypothetical
+# either: on 2026-08-23 a stalled holder took three launch attempts and the run
+# that finally completed started 76 MINUTES LATE. pid liveness alone cannot see
+# that — the stalled process was alive, so every later invocation read a live
+# claim and exited 0 as a well-behaved duplicate. The bound in bin/run-lock.sh is
+# what turns "alive" into "alive and still plausibly working".
+#
+# THE TRAPS ARE INSTALLED FAR ABOVE, at the top of the file, and carr_chain_exit
+# releases the lock as one of the things it does. That is a change from the two
+# bare `carr_release_lock` traps that used to sit right here: a trap installed
+# only after the lock is taken cannot report the deaths that happen before it,
+# which is every death the 2026-08-17..19 outage consisted of. LOCK_HELD is what
+# tells the one handler whether there is yet a lock to release.
 source "$REPO/bin/run-lock.sh"
 if ! carr_take_lock nightly >> "$LOG" 2>&1; then
   say "SKIP  chain already running — this invocation is a no-op (see the LOCKED line above)"
+  # A duplicate is a deliberate no-op, not a death: without this the exit handler
+  # would read `incomplete`, call it a chain failure and ping /fail for a night
+  # the holder is handling fine.
+  CHAIN_OUTCOME=duplicate
   exit 0
 fi
-trap 'carr_release_lock; exit 143' INT TERM HUP
-trap 'carr_release_lock' EXIT
+LOCK_HELD=1
 
 # ONE ID FOR THE WHOLE NIGHT. Exported so every step, and anything a step itself
 # records, threads onto the same journey — `tools/ops-record.py trace <id>`
@@ -468,7 +643,9 @@ fi
 # a green check measuring the wrong database, which is the failure mode this
 # whole session kept finding. It runs HERE and not in CI because it needs
 # production, and CI cannot reach production by construction.
-step "schema snapshot drift (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "schema snapshot requires separately provisioned admin capability"
+tombstone "schema snapshot drift" \
+  "admin capability — a separately provisioned admin database credential this Mac does not hold" \
+  "that credential is provisioned here and bin/schema-snapshot.sh is restored to this line"
 
 # ── PROGRAM 1's GATE, ASKED NIGHTLY (2026-08-15) ─────────────────────────────
 # "Staging cannot access Production data or credentials" is G1's gate, and until
@@ -488,7 +665,9 @@ step "schema snapshot drift (admin capability unavailable)" sh ./bin/routine-adm
 # opens production read-only at the session level rather than merely intending
 # to. step() records the outcome to the operational ledger, so a night it fails
 # is a row rather than a line in a log nobody opens (rule 1f3a7372).
-step "environment isolation gate (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "environment isolation gate requires separately provisioned admin capability"
+tombstone "environment isolation gate" \
+  "admin capability — the two real Neon projects, which the routine boundary's two credentials cannot open" \
+  "an admin credential is provisioned here and ops/p1-environment-gate.py is restored to this line"
 
 # ── PROGRAM 1's REBUILD CLAUSE, PROVEN NIGHTLY (2026-08-15) ──────────────────
 # "A fresh non-production environment can be reconstructed from repository
@@ -504,7 +683,9 @@ step "environment isolation gate (admin capability unavailable)" sh ./bin/routin
 # The nightly cost is one Neon branch created and deleted. The thing it buys is
 # that the repository's sufficiency is a measured fact each morning rather than
 # an argument nobody has tested.
-step "environment rebuild proof (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "environment rebuild proof requires separately provisioned admin capability"
+tombstone "environment rebuild proof" \
+  "admin capability — creating and destroying a Neon branch off staging" \
+  "an admin credential is provisioned here and ops/p1-rebuild-gate.py is restored to this line"
 
 # Program 1's INTEGRATION clause, the third use of the rehearsal lane. The
 # rebuild gate above proves the SCHEMA stands up; this proves the APPLICATION
@@ -512,7 +693,9 @@ step "environment rebuild proof (admin capability unavailable)" sh ./bin/routine
 # value reads back, and the grant surface matches production's. The distinction
 # is not academic: on 2026-08-16 a table whose CREATE had succeeded refused every
 # write, which `to_regclass` calls perfect.
-step "environment integration proof (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "environment integration proof requires separately provisioned admin capability"
+tombstone "environment integration proof" \
+  "admin capability — the same rehearsal lane the rebuild proof above cannot open" \
+  "an admin credential is provisioned here and ops/p1-integration-gate.py is restored to this line"
 
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
@@ -781,7 +964,36 @@ step "control-plane registry drift (reports, never installs)" ./.venv/bin/python
 # Same contract as its sibling: 0 whether or not it finds a gap, 78 = SKIP.
 step "rule-admission drift (reports, never admits)" ./.venv/bin/python ops/rule-admission-drift.py
 
+# RULE-DELIVERY SHADOW, added 2026-08-23 with the load-layer tags. The 2026-08-23
+# rules council required a week of running the scoped selector beside the full
+# recitation before a single rule stops being recited, and a week of measurement
+# has exactly one failure mode: it stops, and its silence reads as a clean
+# result. That is what happened to the admission contract for months and it is
+# the reason its watch two lines above exists. This one reports the same way —
+# whether the recorder is still writing at all, then what it found — and takes
+# the log half even with no credential, because the log is on this Mac. Same
+# contract as its siblings: 0 whether or not it finds a miss, 78 = SKIP.
+step "rule-delivery shadow (reports, never scopes)" ./.venv/bin/python ops/rule-delivery-shadow-watch.py
+
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+# CAPTURED HERE, ON THE NEXT LINE, AND THAT IS THE WHOLE POINT (fixed 2026-08-23).
+# This assignment used to sit at the bottom of the portability mirror below, so
+# `HC_BACKUP_RC` — the value the "backup" dead-man check is pinged with — carried
+# the MIRROR's exit code and not the backup's. Two different steps: one dumps and
+# encrypts the database, the other renders markdown and csv.
+#
+# WHAT THAT WOULD HAVE COST. A backup that FAILED while the mirror succeeded
+# pinged the backup check OK. That is the 2026-08-07 corrupt-backup defect
+# exactly — "a success signal that does not look at the thing it reports on is
+# worse than no signal, because it is believed" — reintroduced one variable over,
+# and hidden because on this Mac both steps happen to SKIP for the same absent
+# credential, so the wrong answer and the right answer have been identical.
+#
+# LAST_STEP_RC is overwritten by every step() call, so the only safe place to
+# read it is immediately after the step you mean. ops/nightly-tombstone-selftest.py
+# replays this region with a fake step() and asserts that the value reaching the
+# ping is the backup's, wherever this assignment happens to sit.
+BACKUP_RC=$LAST_STEP_RC
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
 # NO GUARD HERE. #391 wrapped this in `if [ -n "$CARR_DB_BACKUP_URL" ]` because
@@ -828,7 +1040,10 @@ step "portability mirror (md+csv, 2 locations)" \
   env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py \
     --out "$portability_root/Backups/portability-mirror" \
     --also "$HOME/carr-system/out/mirror"
-BACKUP_RC=$LAST_STEP_RC
+# NO BACKUP_RC HERE ANY MORE — it is captured beside the encrypted backup above,
+# which is the step the check is named after. The mirror has no registered ping
+# of its own: it fails into rc_total and alarms through the whole-chain check,
+# and it skips silently on an absent credential like every other 78 in this file.
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
 # (~1 month back on current publish settings), so history that scrolls out is
@@ -877,6 +1092,16 @@ step "type-check tripwire (mypy)"                    ./bin/type-check.sh
 # first and each parameter returned to its own field, per row.
 step "tool-call markup sweep (records)"              ./.venv/bin/python ops/store-markup-scan.py
 
+# Added 2026-08-25 (loop #314's named work). tools/check.sh verifies code
+# integrity (every manifest.tsv row clean vs HEAD), canonical export receipts,
+# and the manifest-governed runtime fork. It is read-only. Both of its
+# historical blockers are gone: the twin-copy SPLIT retired as an intentional
+# runtime fork (manifest-governed) and export receipts are current. A chronically
+# red check detects nothing; it is green today and wired so a new drift is seen
+# by the chain that runs every night, not only by a session that remembers to
+# run it.
+step "code integrity (manifest rows vs HEAD)"        ./tools/check.sh
+
 # The legacy one-page file is recovery-only. Normal dashboard delivery is the
 # record-native Front Door composition (today-triage, deal-room-board, and
 # loop-board), so the nightly chain must not call a missing-seam refusal for a
@@ -885,7 +1110,12 @@ if [ "$RECOVERY" -eq 1 ]; then
   step "RECOVERY NONCANONICAL open-items dashboard (one-page view)" \
     ./.venv/bin/python generators/build-open-items-dashboard.py --recovery --reason "$RECOVERY_REASON"
 else
-  step "open-items dashboard replaced by record-native Front Door" true
+  # A step whose command was literally `true` — it launched a process every night
+  # to succeed at nothing, and then read OK in the log beside steps that had done
+  # work.
+  tombstone "open-items dashboard replaced by record-native Front Door" \
+    "nothing — the duty moved, it was not lost: today-triage, deal-room-board and loop-board serve it record-natively" \
+    "never on the normal route; the one-page file is recovery-only and the branch above still builds it"
 fi
 
 # Added 2026-08-02 (cold-session audit): the smoke canary runs IN the chain and records
@@ -982,36 +1212,66 @@ step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 # exists to remove.
 #
 # It opens an incident for each job whose LATEST run failed, appends a fact to
-# one that is already open rather than raising a second, and moves an incident to
-# monitoring when its job starts passing again. It cannot close one — the grant
-# withholds resolved_at, so only a human declares an incident resolved (0117).
+# one that is already open rather than raising a second, and counts recurrences
+# on the row instead of reprinting them (0293). Since 0293 it also CLOSES a
+# SEV-2 or SEV-3 job incident whose job has run green three consecutive times,
+# through ops.clear_recovered_incident — a SECURITY DEFINER function that
+# re-derives that sequence itself. 0117's grant is untouched: carr_jobs still
+# cannot write resolved_at, and a SEV-1 still waits for a human.
+#
+# THIS PASS IS THE BACKSTOP, NOT THE MECHANISM. The same recovery runs inside
+# every successful `ops-record.py run`, so a ticker that recovers at 09:02 is
+# cleared by 09:06 rather than by the next night.
 step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/ops-record.py assess --environment production
 
-# THE OTHER HALF OF THAT SENTENCE. Every incident assess opens carries the line
-# "watch until 24h clear, then close with an outcome", and until 2026-08-14
-# nothing performed the close: assess only moves a recovered incident INTO
-# monitoring, and no job, agent or service entry called a close path, because
-# none existed. The windows expired and the pile stayed, reprinted in full every
-# night — a list that can only grow teaches people to stop reading it, the same
-# way a check that goes red on normal work does.
+# WHAT IS LEFT FOR A HUMAN. 0293 closes recovered lower-severity collector
+# incidents from their own three-run evidence. It deliberately does not touch:
 #
-# WHAT THIS DOES NOT DO. It does not close on one green run, which is the thing
-# 0117's grant was written to prevent. It closes only what has nothing left to
-# decide: recovered against real evidence, window fully elapsed, and NO failure
-# recorded against that same service/environment/run_key for the whole window.
-# Anything still flapping, never recovered, or missing evidence stays open and
-# keeps its human outcome — that is what `ops-record.py resolve` is for.
+#   SEV-1 closure. Evidence-required and human-approved, in the grant, on
+#   purpose: critical incidents are the work, not hygiene.
+#
+#   Anything a human opened, or anything that never recovered. The run ledger
+#   cannot see what a person saw and has no standing to declare either over.
 #
 # WHY BREAK-GLASS. carr_jobs cannot write resolved_at or root_cause at all
-# (0117's column-scoped grant), so this needs the owner credential, and db-tap
-# holds every write behind default_transaction_read_only unless break-glass is
-# set. The reason is stated here rather than typed fresh each night, and every
-# run appends to out/break-glass-receipts.log, so the escalation is auditable
-# instead of invisible.
-step "incident sweep (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "incident closure requires separately provisioned authority capability"
+# (0117's column-scoped grant), so the owner credential remains the only close
+# route for those cases. The tombstone says that explicitly and records the
+# restoration condition rather than claiming an unreachable automatic sweep.
+tombstone "incident sweep" \
+  "authority capability — 0117 withholds resolved_at and root_cause from carr_jobs, so closing needs the owner credential through break-glass" \
+  "that credential is provisioned here and the break-glass close path is restored to this line"
+
+# WHAT THE ENFORCEMENT STACK COST LAST WEEK, printed where the rest of the
+# night's reporting already lands. 13 hook processes fire per Bash tool call and
+# 11 per turn on this machine; until 2026-08-23 nobody could say what that cost
+# or which of those gates had caught anything real, because live refusals and
+# selftest fixtures were written to the same file. They are separate streams now
+# and hooks/hook-meter-run.py records one line per firing, so this prints per-
+# gate p95 latency, live denies, turn reopens and the 7-day trend.
+#
+# IT REPORTS AND NEVER ACTS, including the retire-candidate list, which is a
+# list of gates to LOOK at — a gate whose deterrent is working looks exactly
+# like a gate nobody needs. It exits 0 even when a provisional budget is
+# exceeded (--strict is for a human at a terminal), because a chain step that
+# goes red on a latency number would be the check that teaches people to stop
+# reading the chain.
+#
+# NO NEW SCHEDULED JOB: this is the council's "piggyback on what already runs",
+# and one more step on a chain that is already awake is the whole cost.
+step "hook telemetry rollup (reports, never retires)"  ./.venv/bin/python ops/hook-telemetry-rollup.py --days 7
 
 if [ "$seam_blocked" -gt 0 ]; then
   say "===== $seam_blocked step(s) BLOCKED on a missing canonical seam — not counted as failures ====="
+fi
+
+# The tombstone backlog rides the completion line for the same reason the other
+# two counts do: a count nobody sees is a count nobody acts on. It is deliberately
+# NOT folded into the blocked count. Blocked means a step ran tonight and refused;
+# tombstoned means it was gated out and did not run at all. Reading a healthy
+# night's blocked=0 as "the seams got built" would be exactly wrong, so the
+# receipt below prints both numbers together, always, including when they are zero.
+if [ "$tombstoned" -gt 0 ]; then
+  say "===== $tombstoned step(s) TOMBSTONED — gated out of execution, each naming what is missing and what reopens it ====="
 fi
 
 # A timeout rides the completion line for the same reason the seam backlog does:
@@ -1021,6 +1281,21 @@ fi
 if [ "$timed_out" -gt 0 ]; then
   say "===== $timed_out step(s) TIMED OUT — cut off for making no progress; the chain continued past them ====="
 fi
+
+# THE RECEIPT, one line, every night, whether or not any count is non-zero. A
+# figure that appears only when it is non-zero cannot be read as a measurement:
+# "nothing to report" and "the code that would report it never ran" look
+# identical, and the second is what three silent nights in August were.
+#
+# It is emitted BEFORE the result line, never after, because tools/control-plane.py
+# matches `nightly result: chain_ok` against this command's stdout TAIL and the
+# result line has to stay the last thing said.
+say "===== nightly receipt: blocked=$seam_blocked tombstoned=$tombstoned timed_out=$timed_out ====="
+print -r -- "nightly receipt: blocked=$seam_blocked tombstoned=$tombstoned timed_out=$timed_out"
+
+# The chain reached its own end. Everything below this point is bookkeeping, so
+# the exit handler must stop treating this run as a death — see carr_chain_exit.
+CHAIN_OUTCOME=complete
 
 if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="

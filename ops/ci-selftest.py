@@ -698,6 +698,47 @@ def test_gates_treats_only_78_as_not_configured():
         check(f"the gates loop does not weaken with {bad!r}", bad not in body, bad)
 
 
+def test_gates_selftests_have_a_process_group_watchdog():
+    """A disposable hanging child must become a visible, non-green gate failure.
+
+    This drives the existing process-group helper directly rather than sleeping
+    through the 120-second production budget. The source assertions bind the
+    second half: exit 124 is named, the gate log is tailed, and the selftest
+    loop stops instead of continuing toward a false green verdict.
+    """
+    helper = REPO / "bin" / "with-timeout.py"
+    with tempfile.TemporaryDirectory() as td:
+        log = pathlib.Path(td) / "gate.log"
+        p = subprocess.run(
+            [sys.executable, str(helper), "0.2", sys.executable, "-c",
+             "import time; print('fixture-output', flush=True); time.sleep(2)"],
+            capture_output=True, text=True, timeout=10)
+        log.write_text(p.stdout + p.stderr)
+        text = log.read_text()
+        check("a hanging gate fixture exits 124", p.returncode == 124,
+              f"rc={p.returncode}")
+        check("the timeout is named in the captured gate log",
+              "with-timeout: TIMEOUT" in text and "fixture-output" in text,
+              text[-300:])
+
+    ci = CI.read_text(encoding="utf-8")
+    body = ci[ci.index("check_gates()"):]
+    check("gate selftests use the existing timeout helper",
+          "CI_TIMEOUT_HELPER" in body and "CI_SELFTEST_TIMEOUT_SECONDS" in body)
+    check("exit 124 is classified as a named timeout",
+          "TIMEOUT:$base" in body and "TIMEOUT:$sbase" in body)
+    check("a timed-out gate aborts the remaining selftest loop",
+          "gates_timed_out=1" in body and "break" in body)
+
+    for code in (0, 7):
+        p = subprocess.run(
+            [sys.executable, str(helper), "10", sys.executable, "-c",
+             f"raise SystemExit({code})"],
+            capture_output=True, text=True, timeout=10)
+        check(f"ordinary exit {code} remains unchanged", p.returncode == code,
+              f"rc={p.returncode}")
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -714,7 +755,8 @@ def main():
                test_known_gaps_all_expire,
                test_no_env_claims_a_production_hostname,
                test_mypy_pin_acceptance_is_narrow,
-               test_gates_treats_only_78_as_not_configured):
+               test_gates_treats_only_78_as_not_configured,
+               test_gates_selftests_have_a_process_group_watchdog):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip

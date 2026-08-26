@@ -17,6 +17,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "ops"))
 import ai_router_integration_review_gate as gate
 
+# Every git hook exports GIT_DIR, and GIT_DIR outranks both cwd and `-C` when
+# git decides which repository to act on. Without scrubbing it, the `git
+# init`/`git add` calls below — meant to build a disposable fixture in
+# tempfile.TemporaryDirectory() — would instead land on whatever repository
+# invoked this selftest (the 2026-08-13 incident ops/git_env.py documents:
+# a "throwaway" fixture commit moved the shared main). ops/ is already on
+# sys.path from the insert above, so this reaches the one scrub definition.
+from git_env import fixture_env  # noqa: E402
+
 
 GATE = ROOT / "ops" / "ai_router_integration_review_gate.py"
 CANARY = "CARR-SECRET-CANARY-7F4A"
@@ -35,7 +44,7 @@ class IntegrationReviewGateTests(unittest.TestCase):
             "routes": [{"tool_name": "find"}, {"tool_name": "who-do-we-know"}],
         }))
         self.write("evals/ai/model-boundary.v1.json", json.dumps({"suite_id": "synthetic"}))
-        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True, env=fixture_env())
 
     def tearDown(self):
         self.temp.cleanup()
@@ -46,13 +55,16 @@ class IntegrationReviewGateTests(unittest.TestCase):
         target.write_text(text)
 
     def track(self):
-        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True, env=fixture_env())
 
     def run_gate(self):
         self.track()
+        # GATE's own _tracked_files() shells out to `git -C <root> ls-files`
+        # with no env of its own, so it inherits whatever we pass here. Same
+        # GIT_DIR leak as the calls above, one hop further down the stack.
         return subprocess.run(
             [sys.executable, str(GATE), "--repo", str(self.repo)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=fixture_env(),
         )
 
     def consumer(self, relative="mcp-server/src/router-consumer.mjs"):

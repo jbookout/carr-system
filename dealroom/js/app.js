@@ -1,5 +1,5 @@
 import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
-import { resolveDealroomBoot } from './boot-mode.js';
+import { deploymentIdentity, resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
 import { createPostCallClient } from './post-call-client.js';
 
@@ -8,7 +8,8 @@ const CALL_MODE_URL = 'http://127.0.0.1:4682';
 const CALL_MODE_HEADER = { 'X-CARR-Call-Mode': 'deal-room-v1' };
 const state = {
   client: null, selfActor: null, deals: new Map(), accounts: [], cursor: null,
-  workspace: 'team', accountId: null, filter: 'active', query: '',
+  mode: 'fixture',
+  workspace: 'team', accountId: null, filter: 'active', query: '', deepLinkMine: false,
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
   confirms: [], review: null, pollTimer: null, undoEventId: null,
   callMode: { state: 'idle' }, callModeTimer: null,
@@ -92,7 +93,9 @@ function showToast(message, undoEventId = null) {
 function setSync(ok, label = null) {
   const el = $('#syncStatus');
   el.classList.toggle('offline', !ok);
-  el.textContent = label || (ok ? 'Live' : 'Reconnecting');
+  el.textContent = label || (ok
+    ? (state.mode === 'live' ? 'Live sync' : 'Fixture ready')
+    : (state.mode === 'live' ? 'Reconnecting' : 'Fixture unavailable'));
 }
 
 async function loadHome() {
@@ -172,6 +175,7 @@ function workspaceDeals() {
   else deals = deals.filter((deal) => (deal.operating_state || 'active') === 'active');
   if (state.filter === 'mine') deals = deals.filter((deal) => deal.owner === state.selfActor);
   if (state.filter === 'attention') deals = deals.filter((deal) => deal.attention || (daysFromNow(deal.next_date) ?? 0) < 0);
+  if (state.filter === 'flagged') deals = deals.filter((deal) => deal.attention === true && (!state.deepLinkMine || deal.owner === state.selfActor));
   if (state.filter === 'stale') deals = deals.filter(isStale);
   if (state.filter === 'missing') deals = deals.filter((deal) => !deal.next_step);
   if (state.filter === 'delta') deals = deals.filter((deal) => state.changed.has(deal.id));
@@ -899,7 +903,7 @@ async function finishAgenda(status = 'completed') {
 function wireEvents() {
   document.addEventListener('click', async (event) => {
     const workspace = event.target.closest('[data-workspace]');
-    if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'active'; state.query = ''; $('#search').value = ''; render(); return; }
+    if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'active'; state.deepLinkMine = false; state.query = ''; $('#search').value = ''; render(); return; }
     const accountButton = event.target.closest('[data-account]');
     if (accountButton) { state.workspace = 'national_account'; state.accountId = accountButton.dataset.account; render(); return; }
     const operating = event.target.closest('[data-operating-state]');
@@ -913,7 +917,7 @@ function wireEvents() {
     const attention = event.target.closest('[data-attention]'); if (attention) { const deal=state.deals.get(attention.dataset.attention); await patchField(deal.id,'attention',!deal.attention); return; }
     const step = event.target.closest('[data-next-step],[data-agenda-step]'); if (step) { nextStepForm(step.dataset.nextStep || step.dataset.agendaStep); return; }
     const agent = event.target.closest('[data-market-agent]'); if (agent) { marketAgentForm(agent.dataset.marketAgent); return; }
-    const filter = event.target.closest('[data-filter]'); if (filter) { state.filter=filter.dataset.filter; $$('.filter').forEach((b)=>b.classList.toggle('on',b===filter)); renderBoardOnly(); return; }
+    const filter = event.target.closest('[data-filter]'); if (filter) { state.filter=filter.dataset.filter; state.deepLinkMine = false; $$('.filter').forEach((b)=>b.classList.toggle('on',b===filter)); renderBoardOnly(); return; }
     if (event.target.closest('[data-close-deal]')) { $('#dealDialog').close(); return; }
     if (event.target.closest('[data-undo]') && state.undoEventId) { await state.client.revertDealField({ event_id:state.undoEventId,idempotency_key:uuidv4() }); state.undoEventId=null; await loadHome(); showToast('Change undone'); return; }
     const confirm = event.target.closest('[data-confirm]'); if (confirm) { const chip=confirm.closest('[data-proposal]'); const yes=confirm.dataset.confirm==='yes'; await state.client.resolveConfirm({proposal_id:chip.dataset.proposal,accept:yes,idempotency_key:uuidv4()}); state.confirms=state.confirms.filter((p)=>p.id!==chip.dataset.proposal); renderConfirms(); if(yes)await loadHome(); showToast(yes?'Suggestion confirmed':'Suggestion skipped'); return; }
@@ -973,6 +977,16 @@ async function boot() {
     $('#colorAssistButton').setAttribute('aria-label', 'Turn off color-blind-friendly view');
   }
   const bootConfig = resolveDealroomBoot(location);
+  const params = new URLSearchParams(location.search);
+  if (params.get('workspace') === 'team') state.workspace = 'team';
+  if (params.get('filter') === 'flagged') { state.filter = 'flagged'; state.deepLinkMine = params.get('owner') === 'me'; }
+  const identity = deploymentIdentity(bootConfig.mode);
+  state.mode = bootConfig.mode;
+  const badge = $('#deploymentBadge');
+  badge.textContent = identity.label;
+  badge.dataset.mode = identity.mode;
+  badge.title = identity.detail;
+  badge.setAttribute('aria-label', identity.detail);
   state.client = await createClient(bootConfig.mode, bootConfig.options);
   state.postCallClient = createPostCallClient({ loopbackUrl:CALL_MODE_URL,
     postHeaders:CALL_MODE_HEADER });

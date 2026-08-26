@@ -29,18 +29,58 @@ someone's stranded work, which is precisely the "line nobody reads" failure.
 Run: .venv/bin/python ops/session-brief-selftest.py
 """
 import importlib.util
+import atexit
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import json
+import re
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BRIEF = os.path.join(os.path.dirname(HERE), "hooks", "session-brief.py")
+
+# Keep every fixture below one owned root so a normal or failing interpreter
+# exit cannot leave repo-local TMPDIR litter behind.
+_ORIGINAL_MKDTEMP = tempfile.mkdtemp
+_ORIGINAL_MKSTEMP = tempfile.mkstemp
+_FIXTURE_ROOT = _ORIGINAL_MKDTEMP(prefix="session-brief-selftest-")
+atexit.register(shutil.rmtree, _FIXTURE_ROOT, ignore_errors=True)
+# Some platform git helpers create their own directory directly under TMPDIR;
+# point that boundary at the owned root too, so those helpers are collected.
+os.environ["TMPDIR"] = _FIXTURE_ROOT
+os.environ["TMP"] = _FIXTURE_ROOT
+os.environ["TEMP"] = _FIXTURE_ROOT
+
+
+def _fixture_mkdtemp(suffix=None, prefix=None, dir=None):
+    return _ORIGINAL_MKDTEMP(suffix=suffix, prefix=prefix,
+                             dir=_FIXTURE_ROOT)
+
+
+def _fixture_mkstemp(suffix=None, prefix=None, dir=None, text=False):
+    return _ORIGINAL_MKSTEMP(suffix=suffix, prefix=prefix,
+                             dir=_FIXTURE_ROOT, text=text)
+
+
+tempfile.mkdtemp = _fixture_mkdtemp
+tempfile.mkstemp = _fixture_mkstemp
+
+# The one scrubber (ops/git_env.py). git hands every hook a GIT_DIR pointing
+# at the repository that invoked it, and on 2026-08-14 that leaked a fixture
+# commit onto live main — these fixtures commit into throwaway repos (parent
+# AND a nested submodule) and must not be captured by an inherited GIT_DIR.
+sys.path.insert(0, HERE)
+from git_env import fixture_env  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("session_brief", BRIEF)
 assert spec is not None and spec.loader is not None, f"cannot load {BRIEF}"
 sb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sb)
+
+REPO = Path(HERE).parent
 
 CASES: list[tuple] = []
 
@@ -57,6 +97,35 @@ def write_log(text):
     with os.fdopen(fd, "w") as fh:
         fh.write(text)
     return path
+
+
+@case("Claude and connector-held Codex receive the same actionable pack protocol")
+def _(assert_):
+    rail = getattr(sb, "PACK_DELIVERY_RAIL", "")
+    assert_("canonical pack names" in rail and "packs_not_found" in rail,
+            f"session brief lacks exact-name refusal protocol: {rail!r}")
+    assert_("call standing-context again" in rail and "shadow" in rail.lower(),
+            f"session brief lacks drift remedy/shadow boundary: {rail!r}")
+
+    mcp = (REPO / "mcp-server/src/mcp.js").read_text(encoding="utf-8")
+    match = re.search(r"const RULE_DELIVERY_RAIL = `([^`]*)`;", mcp)
+    assert_(match is not None and match.group(1) == rail,
+            "MCP initialize rail does not exactly match the Claude session brief")
+    assert_("+ RULE_DELIVERY_RAIL" in mcp,
+            "shared connector instructions do not install the rule-delivery rail")
+
+    commands = []
+    for relative in ("claude-tree/settings/carr-ai-project.settings.json",
+                     "claude-tree/settings/my-drive-root.settings.json"):
+        document = json.loads((REPO / relative).read_text(encoding="utf-8"))
+        commands.append([
+            hook["command"]
+            for group in document["hooks"]["SessionStart"]
+            for hook in group["hooks"]
+            if "session-brief.py" in hook.get("command", "")
+        ])
+    assert_(commands[0] == commands[1] and len(commands[0]) == 1,
+            f"Claude session-brief install differs across managed roots: {commands!r}")
 
 
 # One failing run, then a second run that failed on ONE different step. This is
@@ -122,7 +191,7 @@ def _(assert_):
 
 def _git(cwd, *args):
     return subprocess.run(("git",) + args, cwd=cwd, capture_output=True,
-                          text=True, timeout=30)
+                          text=True, timeout=30, env=fixture_env())
 
 
 def _must(res, what):

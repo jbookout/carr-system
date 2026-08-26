@@ -182,7 +182,10 @@ def main() -> int:
     # 5. one digest decision, not two
     check("5. the manifest comes from tools/release-manifest.py",
           "tools/release-manifest.py" in source
-          and "sha256" not in source,
+          # The wrapper may validate the manifest's declared schema_ledger_sha256
+          # field, but it must not compute a competing digest itself.
+          and "sha256(" not in source
+          and "digest(" not in source,
           "the wrapper appears to compute a digest of its own")
 
     # 6. a source rehearsal still refuses without a SHA, with no DB in sight
@@ -193,6 +196,22 @@ def main() -> int:
     check("6. staging `release require` refuses with no --sha",
           out.returncode == 2 and "needs --sha" in (out.stderr + out.stdout),
           f"rc={out.returncode} err={out.stderr.strip()[:120]}")
+
+    check("6a. one builder binds target and assurance for every deploy rebuild",
+          "build_release_manifest()" in source
+          and source.count("build_release_manifest ") >= 3
+          and 'build --sha "$BUILD_MANIFEST_SHA"' in source
+          and '--environment "$BUILD_MANIFEST_ENVIRONMENT"' in source,
+          "candidate and deploy can recompute different approval preimages")
+    check("6b. standalone staging requires the full assurance preimage",
+          "standalone staging release requires performance/recovery assurance" in source,
+          "staging can still approve a recovery plan the deploy does not rebuild")
+    record_source = RECORD.read_text(encoding="utf-8")
+    check("6c. staging refusal prints an explicit target and assurance build",
+          "--environment staging --performance-budget-ref <immutable-ref>" in record_source
+          and "--performance-budget-ms <milliseconds>" in record_source
+          and "--rollback-plan-ref <immutable-ref>" in record_source,
+          "the recovery instruction can recreate the production-default manifest defect")
 
     check("7. rollback instruction uses immutable provider promotion",
           "bin/deploy-worker.sh --promote-version "
@@ -224,11 +243,23 @@ def main() -> int:
           and "finish all\nthree within one hour" in rollback_runbook
           and "within 24\nhours of the completed bundle" in rollback_runbook,
           "the typed bundle and approval both fail closed when their timing windows expire")
-    check("8d. rollback runbook preserves the verb-loss guard",
-          "Run the guard first without an override" in rollback_runbook
-          and "If and only if the refusal reports the exact verb loss expected" in rollback_runbook
-          and "unexpected count is a stop condition" in rollback_runbook,
-          "an unconditional --allow-shrink can hide an unrelated verb loss")
+    check("8d. only a DB-prepared typed recovery step can temporarily shrink",
+          "--allow-shrink" not in source
+          and '[ "$RECOVERY_STEP" != "standalone" ] || fail "standalone deploys cannot authorize verb shrink."' in source
+          and 'staging-attempt prepare' in source
+          and 'staging-restore-only prepare' in source
+          and 'current_before|prior|current_after)' in source
+          and 'restore_only)' in source
+          and "exact prepared typed recovery step" in source
+          and "There is no `--allow-shrink` override" in rollback_runbook,
+          "a standalone/source deploy or manual flag can still waive verb loss")
+
+    check("9. restore-only is a separate staging writer, not a fourth bundle step",
+          '"restore_only"' in source
+          and "staging-restore-only" in source
+          and "record_staging_restore_only_result" in RECORD.read_text(encoding="utf-8")
+          and "structurally outside the three\nreceipt tables" in rollback_runbook,
+          "a repair could be routed through current_after and forge a bundle leg")
 
     print()
     if FAILURES:

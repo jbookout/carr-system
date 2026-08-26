@@ -47,7 +47,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEBUG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    DEBUG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    DEBUG = os.path.join(REPO, "out", "hook-guard.log")
 
 # Both partners work the Florida Panhandle and South Alabama, which is Central.
 # Same zone the rest of the repo uses.

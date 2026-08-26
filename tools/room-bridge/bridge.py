@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -69,7 +70,12 @@ sys.path.insert(0, str(HERE))
 import auth_control  # noqa: E402
 import desks  # noqa: E402
 import dispatch  # noqa: E402
+import execution_contract  # noqa: E402
 import grammar  # noqa: E402
+import kanban_adapter  # noqa: E402
+import queue_dispatch  # noqa: E402
+import queue_grammar  # noqa: E402
+import queue_projection  # noqa: E402
 import registry_ext  # noqa: E402
 import state as state_mod  # noqa: E402
 import verb_io  # noqa: E402
@@ -81,6 +87,63 @@ DEFAULT_STATE = Path(
 DEFAULT_ROOM = os.environ.get("CARR_ROOM_BRIDGE_ROOM", "partner-line")
 PENDING_TIMEOUT_S = float(os.environ.get("CARR_ROOM_BRIDGE_PENDING_TIMEOUT", "1800"))
 READ_LIMIT = int(os.environ.get("CARR_ROOM_BRIDGE_READ_LIMIT", "50"))
+_RECONCILIATION_CODES = {"queue_metadata_malformed", "queue_task_identity_invalid"}
+ENGINEERING_DISPATCH = HERE.parents[1] / "bin" / "run-engineering-dispatch.sh"
+
+
+def run_engineering_dispatch(*, command: Path = ENGINEERING_DISPATCH,
+                             timeout_s: float = 1850.0) -> dict:
+    """Run the fixed lease-bound controller after a normal bridge cycle.
+
+    The bridge itself retains its no-direct-DB stance.  The child loads the
+    narrow carr_jobs credential from the protected routine file, and the child
+    in turn strips that credential before sending a fresh execution packet to
+    Codex.  A job is never manufactured here: no admitted work means the
+    controller returns the compact ``claimed: 0`` readback.
+    """
+    try:
+        proc = subprocess.run([str(command)], capture_output=True, text=True,
+                              timeout=timeout_s, env=os.environ.copy())
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("engineering controller did not complete") from exc
+    if proc.returncode != 0:
+        # The controller deliberately emits only its typed error class.  Do
+        # not relay a subprocess stderr blob into a room receipt or service
+        # log, where a future dependency could accidentally expose context.
+        raise RuntimeError("engineering controller refused or failed")
+    try:
+        value = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("engineering controller returned invalid readback") from exc
+    if not isinstance(value, dict) or value.get("ok") is not True or not isinstance(value.get("claimed"), int):
+        raise RuntimeError("engineering controller returned unsupported readback")
+    return {"claimed": value["claimed"], "completed": value.get("completed", 0),
+            "results": value.get("results", [])}
+
+
+def _validated_reconciliation(value: object) -> kanban_adapter.ReconciliationResult | None:
+    """Accept only bounded, redacted reconciliation facts at the bridge seam."""
+    if not isinstance(value, dict) or set(value) != {"scanned", "blocked", "diagnostics"}:
+        return None
+    scanned = value["scanned"]
+    blocked = value["blocked"]
+    diagnostics = value["diagnostics"]
+    if (not isinstance(scanned, int) or isinstance(scanned, bool) or scanned < 0
+            or not isinstance(blocked, list) or not isinstance(diagnostics, list)
+            or len(diagnostics) > kanban_adapter.RECONCILIATION_DIAGNOSTIC_LIMIT):
+        return None
+    if any(not isinstance(task_id, str) or not queue_grammar.TASK_ID.fullmatch(task_id)
+           for task_id in blocked):
+        return None
+    for diagnostic in diagnostics:
+        if (not isinstance(diagnostic, dict) or set(diagnostic) != {"code", "task_id"}
+                or diagnostic["code"] not in _RECONCILIATION_CODES):
+            return None
+        task_id = diagnostic["task_id"]
+        if task_id != "unknown" and (not isinstance(task_id, str)
+                                      or not queue_grammar.TASK_ID.fullmatch(task_id)):
+            return None
+    return {"scanned": scanned, "blocked": list(blocked), "diagnostics": list(diagnostics)}
 # THE OBSERVATORY HEARTBEAT (Joe's ruling 0892c539). The Model Room panel reads
 # ONLY the room wire — no second API for desk state, no Worker reach into a
 # local file — so the one fact the wire could not otherwise carry, "which desks
@@ -90,6 +153,57 @@ READ_LIMIT = int(os.environ.get("CARR_ROOM_BRIDGE_READ_LIMIT", "50"))
 # process far more often than five minutes and an unthrottled heartbeat would
 # bury the conversation it is supposed to annotate.
 HEARTBEAT_INTERVAL_S = float(os.environ.get("CARR_ROOM_BRIDGE_HEARTBEAT_INTERVAL", "300"))
+
+
+def publish_job_passport_fact(kind: str, payload: dict, *, add_room_turn) -> dict:
+    """Publish one controller-validated, redacted Job Passport fact to the wire.
+
+    This is intentionally narrower than a dispatcher: it does not select a
+    model, derive identity, create authority, or persist any transcript. The
+    bridge is merely the existing server-attributed wire transport. The fixed
+    Hermes seat says that a deterministic orchestration host relayed the fact;
+    it does not turn Hermes into an authority source.
+    """
+    wire = execution_contract.job_passport_wire_receipt(kind, payload)
+    result = add_room_turn(
+        body=json.dumps(wire, separators=(",", ":")), seat="hermes", kind="receipt",
+        msg_id=str(uuid.uuid4()),
+    )
+    return {"kind": kind, "attempt_id": wire["job_passport"]["payload"].get("attempt_id"),
+            "result": result}
+
+
+def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], profile: dict, *, evaluation_kernel: dict | None = None, spatial_surface: dict | None = None, telemetry_measurements: list[dict] | None = None, add_room_turn) -> dict:
+    """Exercise the full typed wire path using only synthetic, read-only facts.
+
+    This is a rehearsal helper, never an autonomous runtime: caller-supplied
+    material must already be a synthetic v1 envelope with server-derived
+    read-only authority. It emits the exact envelope, progress, receipt, and
+    deterministic Observatory projection shapes the Model Room consumes. An
+    optional shared evaluation kernel is relayed as evidence, never promoted.
+    """
+    bound = execution_contract.validate_execution_envelope(envelope)
+    if bound["request"]["data_class"] != "synthetic_only" or bound["server_binding"]["authority"]["read_only"] is not True:
+        raise execution_contract.ContractError("Job Passport rehearsal is synthetic and read-only only")
+    completed = execution_contract.validate_attempt_receipt(receipt, bound)
+    projection = execution_contract.project_observatory_attempt(bound, completed, events, profile)
+    published = [publish_job_passport_fact("execution_envelope", bound, add_room_turn=add_room_turn)]
+    published.extend(publish_job_passport_fact("progress_event", event, add_room_turn=add_room_turn) for event in events)
+    published.append(publish_job_passport_fact("attempt_receipt", completed, add_room_turn=add_room_turn))
+    published.append(publish_job_passport_fact("observatory_projection", projection, add_room_turn=add_room_turn))
+    if evaluation_kernel is not None:
+        published.append(publish_job_passport_fact("evaluation_kernel", evaluation_kernel, add_room_turn=add_room_turn))
+    if spatial_surface is not None:
+        from spatial_surface import validate_spatial_surface
+        published.append(publish_job_passport_fact("spatial_surface", validate_spatial_surface(spatial_surface, projection), add_room_turn=add_room_turn))
+    from spatial_surface import measurements_from_attempt_receipt, validate_telemetry_measurement
+    for measurement in telemetry_measurements if telemetry_measurements is not None else measurements_from_attempt_receipt(completed):
+        validated = validate_telemetry_measurement(measurement)
+        if validated["attribution"]["attempt_id"] != completed["attempt_id"]:
+            raise execution_contract.ContractError("telemetry measurement does not bind rehearsal attempt")
+        published.append(publish_job_passport_fact("telemetry_measurement", validated, add_room_turn=add_room_turn))
+    return {"mode": "synthetic_read_only_rehearsal", "work_request_id": bound["work_request_id"],
+            "attempt_id": completed["attempt_id"], "projection": projection, "published": published}
 
 
 def _now() -> str:
@@ -159,17 +273,34 @@ def probe_live(entry: dict) -> bool:
 
 def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
                     log_path: Path, pending_timeout_s: float,
-                    scan=scan_for_result, now: str | None = None) -> dict | None:
+                    scan=scan_for_result, now: str | None = None,
+                    queue_executor: queue_dispatch.QueueDeskExecutor | None = None) -> dict | None:
     pending = state_mod.get_pending(state, name)
     if pending is None:
         return None
     result_text = scan(log_path, pending["log_offset"])
     if result_text is not None:
+        if pending.get("origin_kind") == "queue":
+            if queue_executor is None:
+                return {"desk": name, "outcome": "queue_executor_unavailable"}
+            terminal = queue_executor.finish_pending(pending, result_text)
+            state_mod.clear_pending(state, name)
+            return {"desk": name, **terminal}
         add_room_turn(body=result_text.strip() or "(empty reply)", seat=seat, kind="turn",
                       msg_id=str(uuid.uuid4()))
         state_mod.clear_pending(state, name)
         return {"desk": name, "outcome": "replied"}
     if _elapsed_seconds(pending.get("injected_at"), now=now) > pending_timeout_s:
+        if pending.get("origin_kind") == "queue":
+            if queue_executor is None:
+                return {"desk": name, "outcome": "queue_executor_unavailable"}
+            terminal = queue_executor.fail_pending(pending, "desk_result_timeout", now=now)
+            if terminal.get("outcome") == "retry_scheduled":
+                state_mod.set_queue_retry_at(state, terminal["task_id"], terminal["retry_at"])
+            else:
+                state_mod.clear_queue_retry_at(state, terminal.get("task_id"))
+            state_mod.clear_pending(state, name)
+            return {"desk": name, **terminal}
         add_room_turn(
             body=json.dumps({
                 "desk": name, "timed_out_after_s": pending_timeout_s,
@@ -366,6 +497,12 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              probe_auth=auth_control.probe_auth, launch_login=auth_control.launch_login,
              desk_stop=dispatch.desk_stop, desk_start=dispatch.desk_start,
              read_profiles=verb_io.read_profiles,
+             project_room_turn=verb_io.project_room_queue,
+             queue_service: kanban_adapter.QueueService | None = None,
+             queue_executor: queue_dispatch.QueueDeskExecutor | None = None,
+             queue_projector=queue_projection.project_once,
+             engineering_dispatcher=run_engineering_dispatch,
+             now_fn=_now,
              log=print) -> dict:
     registry = registry or desks.Registry()
     results_path = Path(results_path or dispatch.DEFAULT_RESULTS)
@@ -374,13 +511,61 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
     desk_entries = registry.entries()
     desk_seats = {n: e["room_seat"] for n, e in desk_entries.items() if e.get("room_seat")}
 
+    # The target catalog is configuration for command ingress, not a reason to
+    # stop the conversational bridge.  When it cannot be loaded, only an
+    # attempted @queue command is refused; ordinary turns still route.
+    queue_load_error = None
+    if queue_service is None:
+        try:
+            queue_service = kanban_adapter.QueueService()
+        except kanban_adapter.QueueError as exc:
+            queue_load_error = exc
+
+    if (queue_executor is None and queue_service is not None
+            and hasattr(queue_service, "catalog")
+            and hasattr(getattr(queue_service, "adapter", None), "ready_for")):
+        queue_executor = queue_dispatch.QueueDeskExecutor(
+            catalog=queue_service.catalog, adapter=queue_service.adapter)
+    desk_queue_targets = {}
+    if queue_executor is not None:
+        desk_queue_targets = {
+            target["desk"]: alias
+            for alias, target in queue_executor.catalog["targets"].items()
+            if target.get("enabled") and target.get("adapter") == "desk"
+        }
+
     result = read_room(state["last_seq"], room=room)
     turns = [t for t in result.get("turns", []) if int(t.get("seq", 0)) > state["last_seq"]]
 
     routed: dict[str, list[str]] = {}
     assignments: list[dict] = []
     controls: list[dict] = []
+    queue_events: list[dict] = []
     for t in turns:
+        # Queue commands are a control plane, never conversational work.  This
+        # check deliberately precedes route_turn: every @queue attempt is
+        # consumed, including malformed and unauthorized requests.
+        if queue_service is not None:
+            queued = queue_service.handle(t, room=room)
+        elif str(t.get("body") or "").strip().startswith("@queue"):
+            queued = {
+                "handled": True, "kind": "rejected", "receipt": {"queue_rejected": {
+                    "source_seq": t.get("seq"), "source_msg_id": t.get("msg_id"),
+                    "code": queue_load_error.code if queue_load_error else "queue_unavailable",
+                    "reason": queue_load_error.reason if queue_load_error else "queue is unavailable",
+                    "hint": "Try again after Hermes is available",
+                }},
+            }
+        else:
+            queued = {"handled": False}
+        if queued.get("handled"):
+            receipt = queued.get("receipt")
+            if receipt:
+                add_room_turn(body=json.dumps(receipt, separators=(",", ":")), seat="hermes",
+                              kind="receipt", msg_id=str(uuid.uuid4()))
+            routed[str(t.get("msg_id"))] = []
+            queue_events.append({"seq": t.get("seq"), "kind": queued.get("kind")})
+            continue
         routed[str(t.get("msg_id"))] = state_mod.route_turn(state, t, desk_seats)
         control = auth_control.parse_control(t)
         if control is not None:
@@ -399,6 +584,32 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             assignments.append({"seq": t.get("seq"), "outcome": outcome, "reason": reason})
     state_mod.advance_seq(state, turns)
 
+    # Quarantine cards for disabled catalog targets before any desk can claim
+    # or dispatch a ready card.  This is one bounded canonical read/reconcile
+    # per bridge cycle; Hermes remains the only state mutation authority.
+    queue_reconciliation: kanban_adapter.ReconciliationResult = {
+        "scanned": 0, "blocked": [], "diagnostics": []
+    }
+    errors: list[dict] = []
+    queue_reconciliation_failed = False
+    if queue_executor is not None and (
+            queue_service is None or not hasattr(queue_service, "reconcile_disabled_targets")):
+        queue_reconciliation_failed = True
+        errors = [{"desk": "(queue-reconciler)", "error": "queue_reconciliation_failed",
+                   "detail": "queue reconciliation unavailable"}]
+    elif queue_service is not None:
+        try:
+            queue_reconciliation = queue_service.reconcile_disabled_targets()
+            validated = _validated_reconciliation(queue_reconciliation)
+            if validated is None:
+                raise ValueError("invalid reconciliation result")
+            queue_reconciliation = validated
+        except Exception as exc:  # reconciliation failure must not enable fallback dispatch
+            queue_reconciliation_failed = True
+            queue_reconciliation = {"scanned": 0, "blocked": [], "diagnostics": []}
+            errors = [{"desk": "(queue-reconciler)", "error": "queue_reconciliation_failed",
+                       "detail": "queue reconciliation failed"}]
+
     # SIGN-IN STATE, probed once per cycle for EVERY registered desk — seated or
     # not, since an unseated desk can be signed out too and Joe's panel shows
     # it. Stamped onto the registry so the heartbeat below carries this cycle's
@@ -409,8 +620,18 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         auth_by_desk[name] = probe_auth(entry)
         registry_ext.stamp_auth(name, auth=auth_by_desk[name], path=registry.path)
 
+    # Exactly one socket liveness answer per desk per cycle.  Queue admission
+    # and the heartbeat below must consume this same fact; probing again after
+    # dispatch can otherwise turn one cycle into two contradictory truths.
+    live_by_desk = {name: probe_live(entry) for name, entry in desk_entries.items()}
+
     delivered: list[dict] = []
-    errors: list[dict] = []
+    # Global stale-timer pruning is safe only after reconciliation succeeded
+    # and every configured enabled desk target was actually scanned.
+    queue_scan_complete = queue_executor is not None and not queue_reconciliation_failed
+    queue_ready_task_ids: set[str] = set()
+    queue_scanned_desks: set[str] = set()
+    required_queue_desks = set(desk_queue_targets)
     for name, entry in desk_entries.items():
         seat = entry.get("room_seat")
         if not seat:
@@ -420,25 +641,118 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                 name, seat, state, add_room_turn=add_room_turn,
                 log_path=desk_state_dir / f"{name}.log",
                 pending_timeout_s=pending_timeout_s,
+                now=now_fn(),
+                queue_executor=queue_executor,
             )
             if pending_outcome:
                 delivered.append(pending_outcome)
+            if (name in desk_queue_targets and state_mod.get_pending(state, name) is not None):
+                queue_scan_complete = False
             if state_mod.get_pending(state, name) is None:
-                queued = state_mod.pop_next_queued(state, name)
-                if queued is not None:
+                next_queued = state_mod.pop_next_queued(state, name)
+                if next_queued is not None:
+                    if name in desk_queue_targets:
+                        queue_scan_complete = False
                     delivered.append(deliver(
-                        name, entry, seat, queued, state=state, registry=registry,
+                        name, entry, seat, next_queued, state=state, registry=registry,
                         results_path=results_path, add_room_turn=add_room_turn,
                         dispatch_fn=dispatch_fn, desk_state_dir=desk_state_dir,
                     ))
-            registry_ext.stamp_heartbeat(name, live=probe_live(entry), path=registry.path)
+                elif (queue_executor is not None and name in desk_queue_targets
+                      and not queue_reconciliation_failed):
+                    log_path = desk_state_dir / f"{name}.log"
+                    offset = log_path.stat().st_size if log_path.exists() else 0
+
+                    def dispatch_queue(prompt: str) -> dict:
+                        return dispatch_fn(
+                            name, prompt, registry=registry, results_path=results_path)
+
+                    queue_outcome = queue_executor.start(
+                        desk_queue_targets[name], dispatch_call=dispatch_queue,
+                        desk_busy=state_mod.has_queued(state, name),
+                        retry_at=state["queue_retry_at"], now=now_fn(),
+                        desk_live=live_by_desk.get(name, True),
+                        unavailable_since=state.get("queue_unavailable_since", {}),
+                    )
+                    queue_scan_complete = queue_scan_complete and bool(
+                        getattr(queue_executor, "last_ready_scan_complete", False))
+                    if getattr(queue_executor, "last_ready_scan_complete", False):
+                        queue_scanned_desks.add(name)
+                    queue_ready_task_ids.update(
+                        getattr(queue_executor, "last_ready_task_ids", set()))
+                    if queue_outcome.get("outcome") == "retry_scheduled":
+                        state_mod.set_queue_retry_at(
+                            state, queue_outcome["task_id"], queue_outcome["retry_at"])
+                    elif queue_outcome.get("outcome") not in {"retry_wait", "idle"}:
+                        state_mod.clear_queue_retry_at(state, queue_outcome.get("task_id"))
+                    if queue_outcome.get("outcome") == "desk_unavailable_wait":
+                        state_mod.set_queue_unavailable_since(
+                            state, str(queue_outcome["task_id"]),
+                            str(queue_outcome["unavailable_since"]))
+                    elif live_by_desk.get(name, True) or queue_outcome.get("outcome") == "idle":
+                        state_mod.clear_queue_unavailable_since(
+                            state, queue_outcome.get("task_id"))
+                    elif queue_outcome.get("outcome") == "blocked":
+                        state_mod.clear_queue_unavailable_since(
+                            state, queue_outcome.get("task_id"))
+                    pending = queue_outcome.get("pending")
+                    if isinstance(pending, dict):
+                        state_mod.set_pending(
+                            state, name,
+                            dispatch_msg_id=str(pending.get("dispatch_msg_id") or ""),
+                            log_offset=offset,
+                            injected_at=str(pending.get("injected_at") or _now()),
+                            source_msg_id=f"queue:{pending['kanban_task_id']}",
+                            source_seq=None,
+                            origin_kind="queue",
+                            kanban_task_id=pending["kanban_task_id"],
+                            target=pending["target"],
+                            finish=pending["finish"],
+                            cap=pending.get("cap"),
+                        )
+                    if queue_outcome.get("outcome") != "idle":
+                        delivered.append({"desk": name, **queue_outcome})
+            registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
         except desks.DeskError as e:
-            errors.append({"desk": name, "error": e.code, "detail": str(e)})
+            if name in required_queue_desks:
+                queue_scan_complete = False
+            code = e.code
+            errors.append({"desk": name, "error": code, "detail": str(e)[:500]})
             registry_ext.stamp_heartbeat(name, live=False, path=registry.path)
+        except (kanban_adapter.QueueError, queue_dispatch.QueueDispatchError) as e:
+            queue_scan_complete = False
+            code = getattr(e, "code", "queue_dispatch_failed")
+            errors.append({"desk": name, "error": code, "detail": str(e)[:500]})
+            # A queue outage says nothing about whether the named desk is live.
+            registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
+
+    # A complete ready-card scan across every relevant desk makes disappearance
+    # or terminal transition observable. Never prune on a busy/failed scan.
+    if (queue_executor is not None and required_queue_desks
+            and queue_scan_complete
+            and queue_scanned_desks == required_queue_desks):
+        state_mod.prune_queue_unavailable_since(state, queue_ready_task_ids)
 
     restarts = settle_restarts(desk_entries, auth_by_desk, state,
                                 add_room_turn=add_room_turn, registry=registry,
                                 stop=desk_stop, start=desk_start)
+
+    projection_events: list[dict] = []
+    if queue_service is not None:
+        projection_checked_at = now_fn()
+        state["queue_projection_checked_at"] = projection_checked_at
+        try:
+            projection_events = queue_projector(
+                state=state, add_room_turn=project_room_turn,
+                target_catalog=queue_service.catalog.get("targets", {}),
+                checked_at=projection_checked_at,
+            )
+            state["queue_projection_last_success_at"] = projection_checked_at
+            state["queue_projection_error"] = None
+        except Exception as exc:  # projection failure must be visible, never a live-looking board
+            state["queue_projection_error"] = "queue_projection_failed"
+            errors.append({"desk": "(queue-projector)", "error": "queue_projection_failed",
+                           "detail": str(exc)[:500] or "queue projector failed"})
 
     # Read the registry back AFTER the heartbeat stamps above, so the roster the
     # observatory sees carries this cycle's own liveness rather than the values
@@ -468,14 +782,34 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
 
     state_mod.save_state(state_path, state)
 
+    # This is deliberately after the ordinary room work, state save, and
+    # heartbeat: a bounded fresh Codex execution may run for minutes, but it
+    # must never delay the room's own cursor/health truth.  The existing 60s
+    # launchd wake is merely an opportunity to drain an already-admitted job;
+    # it does not create a second schedule or queue.
+    engineering = {"claimed": 0, "completed": 0, "results": []}
+    # Keep ad-hoc/manual bridge invocations observational.  The reviewed
+    # LaunchAgent explicitly opts in below; this makes the only live claim
+    # opportunity visible in its installed configuration and prevents a test
+    # or an operator's diagnostic one-shot from unexpectedly leasing work.
+    if os.environ.get("CARR_ENGINEERING_DISPATCH_ENABLED") == "true":
+        try:
+            engineering = engineering_dispatcher()
+        except Exception:
+            errors.append({"desk": "(engineering-controller)", "error": "engineering_controller_failed",
+                           "detail": "engineering controller failed"})
+
     summary = {
         "turns_read": len(turns), "last_seq": state["last_seq"], "routed": routed,
         "assignments": assignments, "delivered": delivered, "errors": errors,
         "heartbeat": heartbeat, "controls": controls, "restarts": restarts,
-        "auth": auth_by_desk,
+        "auth": auth_by_desk, "queue": queue_events,
+        "queue_projection": projection_events,
+        "queue_reconciliation": queue_reconciliation,
+        "engineering": engineering,
     }
     log(f"room-bridge: {len(turns)} turn(s), {len(delivered)} desk action(s), "
-        f"{len(assignments)} assignment event(s), {len(controls)} control(s), "
+        f"{len(assignments)} assignment event(s), {len(queue_events)} queue event(s), {len(controls)} control(s), "
         f"{len(restarts)} restart(s), {len(errors)} error(s), "
         f"heartbeat {'posted' if heartbeat else 'throttled'}; "
         f"cursor now {state['last_seq']}")

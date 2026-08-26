@@ -30,10 +30,17 @@ whether a release may ship. It computes evidence and compares evidence.
   program6-posture  Print the exact reviewed Program 6 posture in a manifest.
   plan-hash Hash the fields an approver actually reads, so a changed plan is
             detectable by the database trigger that voids stale approvals.
+  source-contract  Digest the FULL repository tree at a SHA as exact
+            (mode,type,object,path) tuples and print the migration ledger.  This
+            is the clean-staging reconstruction preimage; it is deliberately
+            broader than the Worker deployment artifact.
 
 USAGE
-  tools/release-manifest.py build --sha HEAD
-  tools/release-manifest.py build --sha HEAD > out/release.json
+  tools/release-manifest.py build --sha HEAD --environment production
+  tools/release-manifest.py build --sha HEAD --environment staging \
+    --performance-budget-ref <immutable-ref> --performance-budget-ms <ms> \
+    --recovery-strategy rollback --rollback-plan-ref <immutable-ref> \
+    > out/release.json
   tools/release-manifest.py bind-provider --manifest out/release.json \
       --provider cloudflare-workers --provider-version-id <version-id> > out/bound.json
   tools/release-manifest.py verify --manifest out/release.json
@@ -42,10 +49,12 @@ USAGE
 
 import argparse
 import hashlib
+import io
 import json
 import re
 import subprocess
 import sys
+import tarfile
 import tomllib
 from pathlib import Path
 
@@ -117,6 +126,16 @@ def git(*args: str) -> str:
     return out.stdout
 
 
+def git_bytes(*args: str) -> bytes:
+    out = subprocess.run(
+        ("git", "-C", str(REPO)) + args,
+        capture_output=True, check=False)
+    if out.returncode != 0:
+        detail = out.stderr.decode(errors="replace").strip()
+        sys.exit(f"release-manifest: git {' '.join(args)} failed: {detail}")
+    return out.stdout
+
+
 def resolve_sha(ref: str) -> str:
     sha = git("rev-parse", ref).strip()
     if len(sha) != 40:
@@ -153,6 +172,68 @@ def digest_entries(entries: list[tuple[str, str]]) -> str:
         h.update(blob.encode())
         h.update(b"\n")
     return "sha256:" + h.hexdigest()
+
+
+def full_tree_entries(sha: str) -> list[tuple[str, str, str, str]]:
+    """Exact tracked tree tuples: mode, type, object id, path.
+
+    A path/blob digest alone cannot distinguish a regular file from an
+    executable or a submodule commit.  Replacement staging reconstructs the
+    whole repository, so its preimage includes all four fields Git declares.
+    """
+    raw = git(
+        "ls-tree", "-r", "-z", "--full-tree",
+        "--format=%(objectmode) %(objecttype) %(objectname) %(path)", sha,
+    )
+    entries: list[tuple[str, str, str, str]] = []
+    for line in raw.split("\0"):
+        if not line:
+            continue
+        parts = line.split(" ", 3)
+        if len(parts) != 4 or not all(parts):
+            sys.exit("release-manifest: malformed full-tree entry")
+        entries.append((parts[0], parts[1], parts[2], parts[3]))
+    if not entries:
+        sys.exit("release-manifest: full repository tree is empty")
+    return sorted(entries, key=lambda row: row[3])
+
+
+def digest_full_tree(entries: list[tuple[str, str, str, str]]) -> str:
+    h = hashlib.sha256()
+    for mode, object_type, object_id, path in entries:
+        h.update(mode.encode())
+        h.update(b"\0")
+        h.update(object_type.encode())
+        h.update(b"\0")
+        h.update(object_id.encode())
+        h.update(b"\0")
+        h.update(path.encode())
+        h.update(b"\0")
+    return "sha256:" + h.hexdigest()
+
+
+def source_contract(sha_ref: str) -> dict[str, object]:
+    """The exact full-tree and migration preimage for clean reconstruction."""
+    sha = resolve_sha(sha_ref)
+    entries = full_tree_entries(sha)
+    ledger_rows = migration_tree_ledger(sha)
+    count, highest, ledger_digest = schema_ledger_identity(ledger_rows)
+    built = build(sha, "carr-mcp", "staging")
+    return {
+        "tree_mode": "full",
+        "tree_tuple": ["mode", "type", "object", "path"],
+        "git_sha": sha,
+        "source_tree_oid": git("rev-parse", f"{sha}^{{tree}}").strip(),
+        "source_tree_sha256": digest_full_tree(entries),
+        "source_tree_entry_count": len(entries),
+        "artifact_sha256": built["artifact_digest"],
+        "config_sha256": built["config_fingerprint"],
+        "dependency_sha256": built["dependency_lock_digest"],
+        "migration_ledger": dict(ledger_rows),
+        "migration_count": count,
+        "migration_highest": highest,
+        "migration_ledger_sha256": ledger_digest,
+    }
 
 
 def digest_files(sha: str, paths: tuple[str, ...]) -> str:
@@ -243,14 +324,15 @@ def migration_set(sha: str, since: str | None = None) -> tuple[list[str], str]:
 
 
 def applied_schema_ledger(sha: str) -> tuple[int, str, str]:
-    """Read the candidate's immutable applied-ledger snapshot.
+    """Read the candidate's immutable expected post-rollout ledger.
 
     ``db/schema.sql`` is generated from the canonical ``schema_migrations``
-    ledger and committed with a release candidate.  This is deliberately not
-    derived from the migration directory: that directory says what source is
-    available, while this COPY block says the exact full ledger the candidate
-    expects to observe after rollout.  Applied timestamps are excluded from
-    the digest because they are not schema identity.
+    ledger.  Its rows must be the exact filename/content prefix of the migration
+    tree: the snapshot says what was applied when it was generated, while a
+    pending suffix is the normal commit -> CI -> migrate -> refresh workflow.
+    The release itself binds the complete tree because that is the exact ledger
+    it must observe after rollout.  Applied timestamps are excluded from the
+    digest because they are not schema identity.
     """
     snapshot = git("show", f"{sha}:db/schema.sql")
     if snapshot.count(SCHEMA_LEDGER_COPY) != 1:
@@ -278,7 +360,67 @@ def applied_schema_ledger(sha: str) -> tuple[int, str, str]:
         sys.exit("release-manifest: applied schema ledger filenames must be unique")
     rows.sort()
 
-    material = "".join(f"{filename}\0{file_sha256}\n" for filename, file_sha256 in rows)
+    # The generated snapshot is a release input, not a second migration
+    # catalog.  Fail closed unless it is an exact filename/content PREFIX of
+    # the complete tree.  A suffix may be pending; a hole, rename, edit, or
+    # insertion before an applied row may not.  Compare full filenames
+    # (including optional letter suffixes), never numeric prefixes.
+    tree_rows = migration_tree_ledger(sha)
+    ensure_exact_schema_prefix(rows, tree_rows)
+    return schema_ledger_identity(tree_rows)
+
+
+def migration_tree_ledger(sha: str) -> list[tuple[str, str]]:
+    """Return the exact migration filename/content ledger at a SHA."""
+    # One archive transfer preserves exact bytes without one subprocess per
+    # migration file.
+    archive = git_bytes("archive", "--format=tar", sha, "--", "migrations")
+    rows = []
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+        for member in tar.getmembers():
+            prefix = "migrations/"
+            if not member.isfile() or not member.name.startswith(prefix):
+                continue
+            filename = member.name[len(prefix):]
+            if not filename.endswith(".sql"):
+                continue
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                sys.exit("release-manifest: could not read migration from git archive")
+            rows.append((filename, hashlib.sha256(extracted.read()).hexdigest()))
+    rows.sort()
+    if not rows:
+        sys.exit("release-manifest: target SHA has no migrations/*.sql files")
+    return rows
+
+
+def ensure_exact_schema_prefix(
+        snapshot_rows: list[tuple[str, str]],
+        migration_rows: list[tuple[str, str]]) -> None:
+    """Require snapshot rows to be the exact applied prefix of the tree."""
+    if len(snapshot_rows) <= len(migration_rows) \
+            and snapshot_rows == migration_rows[:len(snapshot_rows)]:
+        return
+    only_snapshot = sorted(set(snapshot_rows) - set(migration_rows))
+    only_tree = sorted(set(migration_rows) - set(snapshot_rows))
+    detail = []
+    if only_snapshot:
+        detail.append(f"snapshot-only={only_snapshot[:3]}")
+    if only_tree:
+        detail.append(f"migrations-only={only_tree[:3]}")
+    raise SystemExit(
+        "release-manifest: db/schema.sql exact migration ledger is not an "
+        "applied filename/content prefix of migrations/*.sql at the target SHA"
+        + (" (" + "; ".join(detail) + ")" if detail else ""))
+
+
+def schema_ledger_identity(
+        rows: list[tuple[str, str]]) -> tuple[int, str, str]:
+    """Count/highest/digest for the exact expected post-rollout ledger."""
+    if not rows:
+        raise SystemExit("release-manifest: expected schema ledger is empty")
+    material = "".join(f"{filename}\0{file_sha256}\n"
+                       for filename, file_sha256 in rows)
     digest = "sha256:" + hashlib.sha256(material.encode()).hexdigest()
     return len(rows), rows[-1][0], digest
 
@@ -526,7 +668,17 @@ def main() -> int:
     pp = sub.add_parser("program6-posture", help="print the manifest-bound Program 6 posture")
     pp.add_argument("--manifest", required=True)
 
+    sc = sub.add_parser(
+        "source-contract",
+        help="digest the full repository tree and exact migration ledger",
+    )
+    sc.add_argument("--sha", required=True)
+
     args = p.parse_args()
+
+    if args.cmd == "source-contract":
+        print(json.dumps(source_contract(args.sha), indent=2, sort_keys=True))
+        return 0
 
     if args.cmd == "build":
         print(json.dumps(

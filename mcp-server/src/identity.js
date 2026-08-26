@@ -39,7 +39,9 @@ const SERVER_MACHINE_IDENTITIES = Object.freeze({
   // scope resolves to shared-only, exactly like the probe and reviewer seats.
   // Adding a second evaluation seat is a deliberate edit here, never something
   // a token can claim.
-  "hermes-pilot": { marker: "hermes", via: "hermes-token" },
+  // The CoS door is separate, but it is still the same registered Hermes
+  // runtime. Accept only these two server-issued provenances.
+  "hermes-pilot": { marker: "hermes", via: ["hermes-token", "hermes-cos-token"] },
 });
 // CARR has one internal tenant at launch. This is intentionally a server
 // constant, not a claim accepted from an OAuth client, tool payload, or job.
@@ -173,7 +175,8 @@ export function personalScopeForActor(actor) {
   // security-relevant registration update, never an arbitrary token claim.
   const registration = actor && SERVER_MACHINE_IDENTITIES[actor.slug];
   const serverMachine = Boolean(registration && actor[registration.marker] === true &&
-    actor.via === registration.via);
+    (Array.isArray(registration.via) ? registration.via.includes(actor.via) :
+      actor.via === registration.via));
   if (!actor || (!isKnownActor(actor.slug) && !serverMachine))
     return { status: "error", error: "invalid_runtime_principal" };
 
@@ -199,6 +202,22 @@ export function personalScopeForActor(actor) {
   // authority or capability.
   return { status: "none", sponsor: null,
            source: serverMachine ? "server_machine_token" : "unsponsored_runtime" };
+}
+
+/**
+ * Server-derived owners allowed for set-next-action. Every actor may keep a
+ * ball in its own queue. Only the separately provisioned Hermes CoS door may
+ * hand a ball to its verified sponsor; plain Hermes and human sessions remain
+ * own-ball-only even when sponsor metadata is present.
+ */
+export function permittedActionOwnerSlugs(actor) {
+  const owners = [];
+  if (actor && typeof actor.slug === "string") owners.push(actor.slug);
+  if (actor?.hermesCos !== true || actor?.via !== "hermes-cos-token") return owners;
+  const scope = personalScopeForActor(actor);
+  if (scope.status === "personal" && isKnownPartner(scope.sponsor) &&
+      !owners.includes(scope.sponsor)) owners.push(scope.sponsor);
+  return owners;
 }
 
 /**
@@ -368,5 +387,44 @@ export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
   const sponsoring_human_slug = HERMES_SPONSOR[slug] || null;
   return { slug, display: `Hermes (${slug})`, human: false, hermes: true,
            via: "hermes-token", client_id: null,
+           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
+}
+
+/** Try additive Hermes token maps without replacing or reading back the
+ * primary Worker secret. */
+export function hermesActorForTokenMaps(authorizationHeader, ...tokenMaps) {
+  for (const raw of tokenMaps) {
+    const actor = hermesActorForToken(authorizationHeader, raw);
+    if (actor) return actor;
+  }
+  return null;
+}
+
+/**
+ * HERMES_COS_TOKENS bearer -> the separately provisioned chief-of-staff door.
+ * The Worker checks this map before the ordinary Hermes maps. The internal
+ * marker is server-created and is the only selector for the CoS profile.
+ */
+export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) {
+  const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  let tokens;
+  try {
+    tokens = JSON.parse(hermesCosTokensRaw || "{}");
+  } catch {
+    return null;
+  }
+  if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return null;
+  // This is deliberately not a generic machine-token map.  The CoS grant is
+  // bound to one registered runtime and one sponsor; accepting an arbitrary
+  // key here would create the actor before the profile/owner gates can help.
+  const slugs = Object.keys(tokens);
+  if (slugs.length !== 1 || slugs[0] !== "hermes-pilot") return null;
+  const slug = "hermes-pilot";
+  if (!tokens[slug] || tokens[slug] !== token) return null;
+  const sponsoring_human_slug = HERMES_SPONSOR[slug];
+  if (sponsoring_human_slug !== "joe") return null;
+  return { slug, display: `Hermes CoS (${slug})`, human: false,
+           hermes: true, hermesCos: true, via: "hermes-cos-token", client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
 }

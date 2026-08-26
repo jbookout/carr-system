@@ -107,6 +107,11 @@ import time
 from typing import Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# How long bin/key-recovery-test.sh is told to pause after writing the identity
+# file, so the interrupt lands while it is paused. Wide on purpose — see the
+# note at the interrupted-path case below.
+PAUSE_SECONDS = 45
 sys.path.insert(0, REPO)
 
 from lib.loadpy import load_module_from_path  # noqa: E402
@@ -358,28 +363,94 @@ def tier1_age(workdir: str) -> None:
     #    tried first while building this and did NOT interrupt the paused
     #    child; a process-group signal does), sent while the script is
     #    deliberately paused right after writing the identity file ──────────
-    tmp_glob = os.path.join(os.environ.get("TMPDIR", "/tmp"), "carr-key-recovery.*")
+    # A PRIVATE TMPDIR, BECAUSE THE SHARED ONE IS NOT THIS RUN'S TO WATCH.
+    # This globbed the whole of TMPDIR for carr-key-recovery.* and compared a
+    # before-set against an after-set. That is only sound while nothing else on
+    # the machine runs this script — and worktree-per-session is the default
+    # here, so two trees running the suite at once is ordinary. A directory
+    # created by the OTHER run appears in `after`, is absent from `before`, and
+    # this check reports a leaked identity file that never existed. Seen
+    # 2026-08-21: it failed once, then passed clean on a re-run with nothing
+    # changed, which is a race rather than a leak.
+    #
+    # Giving the child its own TMPDIR makes the glob describe exactly one run.
+    # Keep it under this invocation's already-private workdir so every return
+    # and exception path is covered by the outer TemporaryDirectory cleanup.
+    private_tmp = os.path.join(workdir, "interrupt-tmp")
+    os.mkdir(private_tmp, mode=0o700)
+    tmp_glob = os.path.join(private_tmp, "carr-key-recovery.*")
     before = set(glob.glob(tmp_glob))
+    ready_file = os.path.join(workdir, "pause-ready")
     env = unreachable_env({
+        "TMPDIR": private_tmp,
         "CARR_KEY_RECOVERY_TEST_SELFTEST": "1",
         "CARR_KEY_RECOVERY_TEST_SELFTEST_TYPED_KEY": secret,
         "CARR_KEY_RECOVERY_TEST_SELFTEST_PUBKEY_FILE": match_pubkey_file,
-        "CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE": "8",
+        "CARR_KEY_RECOVERY_TEST_SELFTEST_PAUSE_AFTER_WRITE": str(PAUSE_SECONDS),
+        # The script touches this file the moment it reaches its pause, so the
+        # signal below lands on the state under test no matter how loaded the
+        # machine is. A fixed post-spawn sleep was the old guess and it flaked
+        # under load: it could fire before the script reached the pause.
+        "CARR_KEY_RECOVERY_TEST_SELFTEST_READY_FILE": ready_file,
     })
-    t0 = time.time()
     proc2 = subprocess.Popen([SCRIPT], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, env=env, cwd=REPO, start_new_session=True)
-    time.sleep(1.5)
+    # WAIT FOR THE READY MARKER, NOT FOR THE CLOCK. Poll up to 90s for the
+    # script to arrive at its pause; under heavy load startup can take far
+    # longer than any fixed sleep, and signalling early makes THIS suite red
+    # for a scheduling reason that has nothing to do with the behaviour under
+    # test. If the marker never appears, the script died on the way — fail
+    # loudly with what it printed rather than signalling a corpse.
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        if proc2.poll() is not None:
+            out, err = proc2.communicate()
+            check("interrupted path: script reached its pause", False,
+                  f"script exited rc={proc2.returncode} before reaching the "
+                  f"pause; stdout={out[-400:]!r} stderr={err[-400:]!r}")
+            assert_no_leak((out, err), secret, "interrupted path (early exit)")
+            return
+        if os.path.exists(ready_file):
+            break
+        time.sleep(0.05)
+    else:
+        proc2.kill()
+        out, err = proc2.communicate()
+        check("interrupted path: script reached its pause", False,
+              f"ready marker never appeared within 90s; stdout={out[-400:]!r}")
+        assert_no_leak((out, err), secret, "interrupted path (timeout)")
+        return
+    # THE CLOCK STARTS AT THE SIGNAL, NOT AT THE SPAWN, and the pause is wide.
+    #
+    # This was `t0 = time.time()` before the Popen, a pause of 8 and a bound of
+    # `elapsed < 6` — 4.5 seconds of headroom covering a subprocess spawn, a
+    # 1.5s sleep, signal delivery and teardown. On 2026-08-23 that failed on
+    # main, with no branch changes, at load average ~380: the whole suite spent
+    # 4s of CPU against 45s of wall clock (9% CPU) and this one check went red,
+    # refusing every push from the machine for as long as the load lasted.
+    #
+    # A wall-clock proxy is the right idea and was simply cut too fine. Two
+    # changes, and neither weakens what is being proved: the window now excludes
+    # the spawn, which was never part of the question, and the pause is wide
+    # enough that thrash cannot close the gap between "died on the signal" and
+    # "sat out the pause". The distinction under test is 20s vs 45s instead of
+    # 6s vs 8s.
+    #
+    # THE BEHAVIOURAL PROOF WAS NEVER THE TIMER. The exit-code check directly
+    # below already establishes death by signal (130); this one exists only to
+    # rule out the script sleeping through its pause and dying afterwards for
+    # some other reason. Widening it costs nothing that was being caught.
+    signalled = time.time()
     os.killpg(os.getpgid(proc2.pid), signal.SIGINT)
     try:
-        out, err = proc2.communicate(timeout=15)
+        out, err = proc2.communicate(timeout=PAUSE_SECONDS - 5)
     except subprocess.TimeoutExpired:
         proc2.kill()
         out, err = proc2.communicate()
-    elapsed = time.time() - t0
-    check("interrupted path: the script actually terminated promptly on "
-          "SIGINT (well under the 8s pause, not after it)",
-          elapsed < 6, f"took {elapsed:.1f}s")
+    elapsed = time.time() - signalled
+    check(f"interrupted path: the script actually terminated promptly on "
+          f"SIGINT (well under the {PAUSE_SECONDS}s pause, not after it)",
+          elapsed < 20, f"took {elapsed:.1f}s after the signal")
     check("interrupted path: exit code is a signal-death code (130 for "
           "SIGINT), not a clean 0 or 1",
           proc2.returncode == 130, f"got {proc2.returncode}")

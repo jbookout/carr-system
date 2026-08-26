@@ -3,10 +3,25 @@
   com.carr.partner-ping — buzz this partner when the OTHER one needs them.
 
   Install (per machine, once):
-    cp ops/com.carr.partner-ping.plist ~/Library/LaunchAgents/
+    ./.venv/bin/python ops/config-as-code.py install
     # set CARR_PARTNER below to joe or dell FIRST — it is the one machine-specific
     # value, and a wrong one makes the watcher silently watch the wrong partner
-    launchctl load ~/Library/LaunchAgents/com.carr.partner-ping.plist
+
+  NOT `cp` — THIS FILE IS A SOURCE, NOT AN INSTALLABLE. It stores {{REPO}}
+  rather than your HOME directory so the same plist installs on Dell's machine, and
+  config-as-code renders that placeholder on the way out. Copying it by hand
+  installs a LaunchAgent whose program path is the literal string {{REPO}}.
+  This line used to read `cp ops/com.carr.partner-ping.plist`, naming a stale
+  duplicate that sat outside ops/launchd/ and was last touched at its first
+  commit — it never gained the run-scheduled.sh wrapper, the heartbeat flags or
+  the weekday-window flag described further down. That duplicate was deleted
+  2026-08-23 by the process-audit council's dead-weight sweep; ops/launchd/ is
+  the only home.
+
+  (No double hyphen appears anywhere in this comment, for the reason the
+  ProgramArguments note below spells out. Writing one here made this file
+  unparseable by plistlib while launchd accepted it — caught immediately by
+  ops/launchd-plist-portable-selftest.py, which is why that suite exists.)
 
   Stop it:
     launchctl unload ~/Library/LaunchAgents/com.carr.partner-ping.plist

@@ -208,16 +208,22 @@ export function workShapeTools({ withEnvelope, writeEvent, ToolError }) {
       handler: async (c, actor, args) => withEnvelope(c, actor, "set-work-shape-disposition", args, async () => {
         const validation = shapeDispositionError(args);
         if (validation) throw new ToolError(validation);
-        const work = (await c.query(`select id, ref, title, state, version, shape_disposition, shape_fixed_surface_ref, shape_rationale from ops.work_request where ref=$1 or id::text=$1 limit 1 for update`, [args.work_request])).rows[0];
+        const work = (await c.query(`select id, ref, title, state, version, capture_idempotency_key, shape_disposition, shape_fixed_surface_ref, shape_rationale from ops.work_request where ref=$1 or id::text=$1 limit 1 for update`, [args.work_request])).rows[0];
         if (!work) throw new ToolError({ error: "work_request_not_found", work_request: args.work_request });
         if (!PREBUILD_STATES.has(work.state))
           throw new ToolError({ error: "work_shape_disposition_frozen", work_request: work.ref, state: work.state, allowed_states: [...PREBUILD_STATES] });
         if (Number(args.base_version) !== Number(work.version))
           throw new ToolError({ error: "version_conflict", current_version: Number(work.version), base_version: Number(args.base_version), resolution: "re-read the Work Request and reconsider its shape disposition; never overwrite blind" });
-        const updated = (await c.query(
-          `update ops.work_request set shape_disposition=$2, shape_fixed_surface_ref=$3, shape_rationale=$4, shape_decided_by_actor_id=$5, shape_decided_at=now(), updated_at=now(), version=version+1 where id=$1 returning *`,
-          [work.id, args.disposition, args.disposition === "not_required" ? args.fixed_surface_ref.trim() : null, args.rationale.trim(), actor.id],
-        )).rows[0];
+        const fixedSurface = args.disposition === "not_required" ? args.fixed_surface_ref.trim() : null;
+        const updated = work.capture_idempotency_key
+          ? (await c.query(
+            `select * from ops.set_sourced_work_request_shape_disposition($1,$2,$3,$4,$5,$6,$7)`,
+            [work.ref, Number(args.base_version), args.disposition, fixedSurface, args.rationale.trim(), actor.id, args.idempotency_key],
+          )).rows[0]
+          : (await c.query(
+            `update ops.work_request set shape_disposition=$2, shape_fixed_surface_ref=$3, shape_rationale=$4, shape_decided_by_actor_id=$5, shape_decided_at=now(), updated_at=now(), version=version+1 where id=$1 returning *`,
+            [work.id, args.disposition, fixedSurface, args.rationale.trim(), actor.id],
+          )).rows[0];
         await writeEvent(c, actor, "set-work-shape-disposition", "ops_work_request", work.id, {
           field: "implementation_shape_disposition",
           old: { disposition: work.shape_disposition || null, fixed_surface_ref: work.shape_fixed_surface_ref || null, rationale: work.shape_rationale || null },

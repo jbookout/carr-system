@@ -35,6 +35,19 @@ export function compileSchema(rootSchema, entrySchema = rootSchema) {
       }
     }
     if (schema.$ref) inspectSchema(resolvePointer(rootSchema, schema.$ref));
+    const uniqueBy = schema["x-carr-unique-by"];
+    if (uniqueBy !== undefined && (typeof uniqueBy !== "string" || !uniqueBy.trim() || uniqueBy !== uniqueBy.trim() || !/^[A-Za-z][A-Za-z0-9._:-]*$/.test(uniqueBy))) {
+      throw new Error("x-carr-unique-by must be a non-empty property name");
+    }
+    if (uniqueBy !== undefined && schema.type !== "array") {
+      throw new Error("x-carr-unique-by is only valid on arrays");
+    }
+    if (uniqueBy !== undefined) {
+      const itemSchema = schema.items?.$ref ? resolvePointer(rootSchema, schema.items.$ref) : schema.items;
+      if (!isObject(itemSchema) || !isObject(itemSchema.properties) || !Object.prototype.hasOwnProperty.call(itemSchema.properties, uniqueBy)) {
+        throw new Error(`x-carr-unique-by item schema declares no ${uniqueBy} property`);
+      }
+    }
     if (schema.pattern) new RegExp(schema.pattern, "u");
     for (const child of schema.allOf ?? []) inspectSchema(child);
     for (const child of schema.oneOf ?? []) inspectSchema(child);
@@ -99,6 +112,22 @@ export function compileSchema(rootSchema, entrySchema = rootSchema) {
       if (schema.minItems !== undefined && value.length < schema.minItems) errors.push(`${path}: fewer than minItems`);
       if (schema.maxItems !== undefined && value.length > schema.maxItems) errors.push(`${path}: more than maxItems`);
       if (schema.uniqueItems && new Set(value.map(item => JSON.stringify(item))).size !== value.length) errors.push(`${path}: duplicate array items`);
+      if (schema["x-carr-unique-by"] !== undefined) {
+        const field = schema["x-carr-unique-by"];
+        const keys = value.map((item, index) => {
+          if (!isObject(item) || !(field in item)) {
+            errors.push(`${path}[${index}]: x-carr-unique-by field ${field} is required`);
+            return `__missing__${index}`;
+          }
+          const key = item[field];
+          if (key === null || typeof key === "object" || !["string", "number", "boolean"].includes(typeof key) || (typeof key === "number" && !Number.isFinite(key))) {
+            errors.push(`${path}[${index}]: x-carr-unique-by field ${field} must be scalar`);
+            return `__invalid__${index}`;
+          }
+          return `${typeof key}:${JSON.stringify(key)}`;
+        });
+        if (new Set(keys).size !== keys.length) errors.push(`${path}: duplicate values for x-carr-unique-by ${field}`);
+      }
       if (schema.items) value.forEach((item, index) => validateNode(schema.items, item, `${path}[${index}]`, errors, referenceStack));
     }
     if (isObject(value)) {

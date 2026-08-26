@@ -1,3 +1,5 @@
+import { deriveJobPassports, jobPassportStatusLabel } from "./job-passport.js?v=job-passport-spatial-v1";
+
 // MODEL ROOM OBSERVATORY — the panel Joe watches the model fleet from.
 //
 // Ruled by Joe on 2026-08-22 (decision 0892c539): "once you complete the desk —
@@ -169,6 +171,7 @@ export const RECEIPT_LABELS = {
   // Forward hook for the named-agent-profiles build (Joe's direction,
   // 2026-08-22): persistent agent names with interchangeable models.
   agent_profile: "Agent profile",
+  queue_event: "Queue milestone",
   receipt: "Receipt",
 };
 
@@ -232,6 +235,10 @@ export function describeReceipt(body, receiptAtMs) {
   const key = receiptKey(body);
   const value = parsed[key];
 
+  if (key === "queue_event" && value && typeof value === "object" && typeof value.summary === "string") {
+    return [value.summary];
+  }
+
   if (key === "heartbeat" && value && typeof value === "object") {
     const lines = [];
     for (const desk of Array.isArray(value.desks) ? value.desks : []) {
@@ -280,6 +287,14 @@ export function bridgeLagLabel(lag) {
  *  panel's default view shows. NOOP and *(silent)* are this wire's literal
  *  keep-alive conventions, and a receipt is machine traffic by definition. */
 export function isSubstantiveTurn(turn) {
+  if (turn?.kind === "receipt") {
+    const parsed = parseReceipt(turn.body)?.queue_event;
+    // Projector bookkeeping, bootstrap creates, and comments stay in
+    // Everything. Conversation gets only the moments a human needs to know:
+    // work started, returned, blocked, or finished.
+    return Boolean(parsed && typeof parsed.summary === "string" &&
+      ["claimed", "completed", "blocked", "gave_up", "unblocked"].includes(parsed.event));
+  }
   if (turn?.kind !== "turn" && turn?.kind !== "system") return false;
   const body = String(turn.body || "").trim();
   return Boolean(body) && body !== "NOOP" && body !== "*(silent)*";
@@ -504,6 +519,9 @@ export function deriveModel(turns, { now = Date.now(), viewer = "joe" } = {}) {
     authKnown: roster.filter((d) => d.auth !== null).length,
     presence: { partner: other, at: presenceAt,
       state: presenceAt && (now - presenceAt) / 1000 <= PRESENCE_ACTIVE_S ? "healthy" : "dormant" },
+    // Feature-gated: no typed projection, no Job Passport panel. The page
+    // never attempts to infer a job from prose or a raw transcript.
+    jobPassports: deriveJobPassports(turns, { now }),
   };
 }
 
@@ -614,6 +632,7 @@ function boot() {
     pending: new Map(),
     cursor: 0,
     oldestSeq: null,
+    latestSeqHint: null,
     model: null,
     viewer: "joe",
     csrf: null,
@@ -664,6 +683,11 @@ function boot() {
       if (node) { existing.delete(id); update?.(node, item); } else {
         node = create(item);
         node.dataset.key = id;
+        // New keyed rows need the same data pass as retained rows. Most
+        // surfaces build their static skeleton in create(), while Job Passport
+        // cards intentionally keep all live state in update(); doing both
+        // keeps first paint and later polls identical.
+        update?.(node, item);
       }
       return node;
     });
@@ -1387,6 +1411,236 @@ function boot() {
     });
   }
 
+  /* ----------------------------------------------------------- Job Passport */
+
+  function humanRef(ref) {
+    return String(ref || "unknown").replace(/^[^:]+:/, "").replace(/[-_]/g, " ");
+  }
+
+  function renderJobPassport(model) {
+    const feature = model.jobPassports;
+    const section = $("jobPassport");
+    if (!feature?.enabled) { section.hidden = true; return; }
+    section.hidden = false;
+    const rejected = feature.rejected.length;
+    $("jobPassportSummary").textContent = `${feature.passports.length} Work Request${feature.passports.length === 1 ? "" : "s"} · deterministic wire projection${rejected ? ` · ${rejected} stale, malformed, or conflicting update${rejected === 1 ? "" : "s"} withheld` : ""}`;
+    const host = $("jobPassportList");
+    reconcile(host, feature.passports, {
+      key: (passport) => `passport:${passport.work_request_id}`,
+      create: (passport) => {
+        const card = el("article", "passport-card");
+        card.tabIndex = 0;
+        card.setAttribute("aria-label", `Job Passport ${passport.work_request_id}`);
+        return card;
+      },
+      update: (card, passport) => {
+        card.dataset.status = passport.status;
+        card.replaceChildren();
+        const top = el("div", "passport-top");
+        const workLabel = el("span", "passport-work", passport.work_request_id); workLabel.tabIndex = -1;
+        top.appendChild(workLabel);
+        top.appendChild(el("span", "passport-status", jobPassportStatusLabel(passport.status)));
+        card.appendChild(top);
+        const freshness = passport.freshness === "stale" ? "STALE — last signal" : "Observed";
+        card.appendChild(el("p", "passport-freshness", `${freshness} ${relativeAgo(passport.observed_at, model.now)} · state v${passport.source_state.state_version}`));
+
+        const staffing = el("div", "passport-staffing");
+        const profile = el("div"); profile.appendChild(el("label", null, "Persistent profile"));
+        profile.appendChild(el("span", null, passport.attempt_lane.persistent_profile.display_label));
+        const actual = passport.attempt_lane.actual_staffing;
+        const execution = el("div"); execution.appendChild(el("label", null, "Actual staffing"));
+        execution.appendChild(el("span", null, `${humanRef(actual.surface)} · ${humanRef(actual.model_id)} · ${humanRef(actual.harness_id)}`));
+        staffing.append(profile, execution); card.appendChild(staffing);
+
+        if (passport.spatial_surface) {
+          const surface = passport.spatial_surface;
+          const home = el("section", "passport-home-zone");
+          home.setAttribute("aria-label", "Spatial Home Zone and list parity");
+          home.appendChild(el("h3", "passport-home-title", "Job Passport Home Zone"));
+          home.appendChild(el("p", "passport-home-summary", `${surface.semantic_zoom.overview.summary}. ${surface.home_zone.attention_node_ids.length ? "Needs attention: evidence or approval requires review." : "No inferred stuck state."}`));
+          const controls = el("div", "passport-home-controls");
+          const returnHome = el("button", "passport-home-action", surface.home_zone.return_label); returnHome.type = "button";
+          returnHome.addEventListener("click", () => card.querySelector(".passport-work")?.focus());
+          controls.appendChild(returnHome);
+          const detailToggle = el("button", "passport-home-action", "Show semantic detail"); detailToggle.type = "button";
+          detailToggle.setAttribute("aria-pressed", card.dataset.zoomDetail === "true" ? "true" : "false");
+          detailToggle.addEventListener("click", () => { card.dataset.zoomDetail = String(card.dataset.zoomDetail !== "true"); renderJobPassport(model); });
+          controls.appendChild(detailToggle); home.appendChild(controls);
+          const listView = el("ol", "passport-spatial-list");
+          for (const nodeId of surface.list_order) {
+            const nodeData = surface.nodes.find((row) => row.node_id === nodeId);
+            const item = el("li", null, `${nodeData.accessibility.non_color_status_token}: ${nodeData.accessibility.label}`);
+            item.tabIndex = 0; item.dataset.nodeId = nodeId;
+            item.addEventListener("click", () => { card.dataset.detailOpen = "true"; card.querySelector("details")?.setAttribute("open", ""); });
+            listView.appendChild(item);
+          }
+          home.appendChild(listView);
+          if (card.dataset.zoomDetail === "true") home.appendChild(el("p", "passport-home-detail", surface.semantic_zoom.detail.summary));
+          card.appendChild(home);
+        }
+
+        const map = el("div", "passport-map");
+        for (const component of passport.component_map) {
+          const node = el("button", "passport-node", humanRef(component.component_ref));
+          node.type = "button"; node.dataset.current = String(component.current);
+          node.title = component.depends_on_component_refs.length
+            ? `Depends on ${component.depends_on_component_refs.map(humanRef).join(", ")}` : "No declared dependencies";
+          const openDetail = () => {
+            card.dataset.detailOpen = "true";
+            card.querySelector("details")?.setAttribute("open", "");
+          };
+          node.addEventListener("click", openDetail);
+          // Native buttons should already activate for Enter/Space, but this
+          // explicit path keeps the component-to-evidence relationship intact
+          // across browser/harness keyboard implementations.
+          node.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDetail(); }
+          });
+          map.appendChild(node);
+        }
+        card.appendChild(map);
+        const observation = passport.observed_movement;
+        const alignment = observation.deviation_candidates?.length
+          ? `${observation.deviation_candidates.length} deviation candidate${observation.deviation_candidates.length === 1 ? "" : "s"}; review required.`
+          : `${observation.coverage_state.replace(/_/g, " ")} declared coverage · ${observation.activity_fidelity.replace(/_/g, " ")} observation · uncertainty: ${observation.uncertainty.replace(/_/g, " ")}`;
+        card.appendChild(el("p", "passport-alignment", alignment));
+        const timeline = el("div", "passport-timeline"); timeline.setAttribute("aria-label", "Observed progress timeline");
+        for (const event of passport.timeline) {
+          const step = event.declared_step_ref ? ` · ${humanRef(event.declared_step_ref)}` : "";
+          const entry = el("span", "passport-event", `${event.sequence}. ${humanRef(event.event_type)}${step}`);
+          entry.dataset.state = event.state; entry.title = `${event.occurred_at} · ${event.retention}`;
+          timeline.appendChild(entry);
+        }
+        if (!passport.timeline.length) timeline.appendChild(el("span", "passport-event", "No observed progress event"));
+        card.appendChild(timeline);
+        const telemetry = passport.telemetry_measurements || [];
+        if (!telemetry.length) {
+          card.appendChild(el("p", "passport-telemetry", "Telemetry: unavailable — no trustworthy provider quota or billed-cost measurement was supplied. Session tokens, terminal text, and activity are not substituted."));
+        } else {
+          const summary = telemetry.map((measurement) => {
+            const label = `${humanRef(measurement.metric_kind)} (${measurement.unit})`;
+            if (measurement.value.kind === "unavailable") return `${label}: unavailable — ${measurement.value.unavailable_reason}`;
+            const qualifier = measurement.value.kind === "estimate" ? `estimate via ${measurement.value.estimate_method}; uncertainty: ${measurement.value.uncertainty}` : "actual";
+            return `${label}: ${measurement.value.amount} · ${qualifier} · ${humanRef(measurement.source.type)} · ${measurement.freshness}`;
+          }).join("; ");
+          card.appendChild(el("p", "passport-telemetry", `Telemetry: ${summary}.`));
+        }
+        if (passport.eval_portfolio) {
+          const portfolio = passport.eval_portfolio;
+          const ladder = el("section", "passport-eval");
+          ladder.setAttribute("aria-label", "Evaluation ladder and stage diagnostics");
+          ladder.appendChild(el("h3", "passport-eval-title", "Evaluation ladder · synthetic/offline"));
+          const rungs = [...new Set(portfolio.cases.map((row) => row.rung))];
+          const requirement = portfolio.policy.risk_requirements.find((row) => row.risk_class === portfolio.binding.risk_class && row.lifecycle === portfolio.binding.lifecycle);
+          const completed = [...new Set(portfolio.results.filter((row) => row.status === "passed").map((row) => row.rung))];
+          ladder.appendChild(el("p", "passport-eval-rungs", `Required: ${requirement?.required_rungs?.join(", ") || "unknown / default deny"} · completed: ${completed.join(", ") || "not run"} · represented: ${rungs.join(", ")} · no aggregate score`));
+          const matrix = el("div", "passport-eval-matrix");
+          const baseline = portfolio.results.find((row) => row.result_id === "result:codex-baseline") || portfolio.results[0];
+          for (const stage of baseline.stage_results || []) {
+            const dimensions = stage.dimension_ids.map(humanRef).join(", ");
+            const cell = el("div", "passport-eval-cell", `${humanRef(stage.stage_id)} — ${stage.status.replace(/_/g, " ")} · ${dimensions}`);
+            cell.dataset.state = stage.status;
+            matrix.appendChild(cell);
+          }
+          ladder.appendChild(matrix);
+          const comparisons = portfolio.frontier_comparisons || [];
+          const candidate = portfolio.results.find((row) => row.result_id === comparisons[0]?.candidate_result_id);
+          const critical = candidate?.dimension_results?.filter((row) => row.direction_vs_baseline === "regressed" || row.status !== "passed") || [];
+          const frontier = el("p", "passport-eval-frontier", candidate
+            ? `Quality frontier vs cheaper candidate: ${comparisons[0]?.promotion_state.replace(/_/g, " ") || "unknown"}; critical: ${critical.map((row) => humanRef(row.dimension_id)).join(", ") || "none"}; latency ${candidate.telemetry.latency_ms} ms; cost ${candidate.telemetry.cost_usd}.`
+            : "Quality frontier comparison unavailable.");
+          ladder.appendChild(frontier);
+          const failures = portfolio.taxonomy.failure_modes || [];
+          ladder.appendChild(el("p", "passport-eval-failures", `Failure taxonomy: ${failures.map((row) => humanRef(row.class_name)).join(", ") || "none"}.`));
+          card.appendChild(ladder);
+        }
+        if (passport.activation_reliability) {
+          const facts = passport.activation_reliability;
+          const activation = facts.knowledge_activation;
+          const reliability = facts.reliability;
+          const canonical = facts.canonical;
+          const issuedEnvelope = passport.engineering_passport?.execution_envelopes?.find((envelope) => envelope.work_request_id === passport.work_request_id) || null;
+          const knowledge = el("section", "passport-activation-section");
+          knowledge.setAttribute("aria-label", "Knowledge and Grounding");
+          knowledge.appendChild(el("h3", null, "Knowledge & Grounding"));
+          knowledge.appendChild(el("p", null, activation
+            ? `Bound bundle ${activation.bundle_digest.slice(0, 16)}… · ${activation.closure.state.replace(/_/g, " ")} · ${activation.item_dispositions.length} redacted item disposition(s).`
+            : "No activation receipt is available; grounding is withheld rather than inferred."));
+          card.appendChild(knowledge);
+
+          const route = el("section", "passport-activation-section");
+          route.setAttribute("aria-label", "Route and Agent Topology");
+          route.appendChild(el("h3", null, "Route & Agent Topology"));
+          const environment = issuedEnvelope?.runtime_profile?.environment_provider_ref
+            ? ` Execution environment: ${humanRef(issuedEnvelope.runtime_profile.environment_provider_ref)} · ${humanRef(issuedEnvelope.runtime_profile.environment_backend_kind)} · ${humanRef(issuedEnvelope.runtime_profile.environment_isolation_class)} · conformance ${humanRef(issuedEnvelope.runtime_profile.environment_conformance_ref)}.`
+            : " Execution environment provider is unavailable for this legacy envelope.";
+          route.appendChild(el("p", null, issuedEnvelope?.runtime_profile && issuedEnvelope?.execution_topology && issuedEnvelope?.evaluation_plan
+            ? `Server-issued runtime: ${humanRef(issuedEnvelope.runtime_profile.ref)} · ${humanRef(issuedEnvelope.runtime_profile.model_id)}; topology: ${humanRef(issuedEnvelope.execution_topology.ref)}; evaluation plan: ${humanRef(issuedEnvelope.evaluation_plan.ref)}.${environment} Observed staffing: ${humanRef(actual.surface)} · ${humanRef(actual.harness_id)}.`
+            : `Observed route: ${humanRef(actual.surface)} · ${humanRef(actual.model_id)} · ${humanRef(actual.harness_id)}. Server runtime/topology is withheld until an exact issued envelope is bound.`));
+          card.appendChild(route);
+
+          const outcome = el("section", "passport-activation-section");
+          outcome.setAttribute("aria-label", "Evaluation and Outcome");
+          outcome.appendChild(el("h3", null, "Evaluation & Outcome"));
+          const environmentOutcome = reliability?.environment_evidence
+            ? ` Environment session: ${humanRef(reliability.environment_evidence.session_ref)}; lease: ${reliability.environment_evidence.lease_state}; cleanup: ${reliability.environment_evidence.cleanup_state}; side effects: ${reliability.environment_evidence.side_effect_state}; operations: ${reliability.environment_evidence.operation_count}.`
+            : " Environment cleanup evidence unavailable.";
+          outcome.appendChild(el("p", null, reliability
+            ? `Grounding: ${reliability.grounding_sufficiency.state}; deterministic checks: ${reliability.deterministic_checks.length}; judge: ${reliability.model_judgement.state}; human outcome: ${reliability.human_acceptance.state}; horizon: ${reliability.outcome_horizon.state}; closure: ${(canonical?.reliability?.state || reliability.closure.state).replace(/_/g, " ")} (${(canonical?.reliability?.reasons || reliability.closure.reasons).join(", ") || "canonical authority evidence required"}).${environmentOutcome}`
+            : "No reliability receipt is available; outcome is not promoted."));
+          card.appendChild(outcome);
+
+          const learning = el("section", "passport-activation-section");
+          learning.setAttribute("aria-label", "Learning");
+          learning.appendChild(el("h3", null, "Learning"));
+          learning.appendChild(el("p", null, canonical
+            ? `Canonical learning lifecycle: ${canonical.learning.lifecycle.replace(/_/g, " ")}; candidates: ${canonical.learning.candidate_refs.map(humanRef).join(", ") || "none"}; canonical telemetry: ${canonical.telemetry.length} signal(s). All remain human-gated and unpromoted.`
+            : reliability
+              ? "Canonical learning projection is unavailable; executor receipt candidates are never used as learning state."
+            : "No learning proposal is inferred from missing evidence."));
+          card.appendChild(learning);
+        }
+        if (passport.engineering_passport) {
+          const engineering = passport.engineering_passport;
+          const panel = el("section", "passport-engineering");
+          panel.setAttribute("aria-label", "Engineering Passport lifecycle");
+          panel.appendChild(el("h3", "passport-engineering-title", `Engineering Passport · ${engineering.closure_state}`));
+          const states = engineering.slices.map((slice) => {
+            const deps = slice.dependency_refs.length ? ` · depends on ${slice.dependency_refs.map(humanRef).join(", ")}` : " · no dependencies";
+            return `${humanRef(slice.slice_ref)}: ${slice.state.replace(/_/g, " ")}${deps}`;
+          });
+          const stateList = el("ul", "passport-engineering-slices");
+          for (const state of states) stateList.appendChild(el("li", null, state));
+          panel.appendChild(stateList);
+          const deviations = engineering.operator_receipt.deviations.length
+            ? `Planned-vs-actual deviations: ${engineering.operator_receipt.deviations.map(humanRef).join(", ")}.`
+            : "Planned-vs-actual deviations: none recorded.";
+          panel.appendChild(el("p", "passport-engineering-deviations", deviations));
+          panel.appendChild(el("p", "passport-engineering-receipt", `Operator receipt: ${engineering.operator_receipt.why}. Remaining risk: ${engineering.operator_receipt.remaining_risk.map(humanRef).join(", ") || "none"}.`));
+          const closureList = el("ul", "passport-engineering-closure");
+          for (const field of ["work", "proof", "explanation", "release", "learning"]) {
+            const route = engineering.closure[field].route ? ` · route ${humanRef(engineering.closure[field].route)}` : "";
+            closureList.appendChild(el("li", null, `${humanRef(field)} disposition: ${engineering.closure[field].state.replace(/_/g, " ")}${route} — ${engineering.closure[field].note}`));
+          }
+          panel.appendChild(closureList);
+          if (engineering.stale_conflict.state !== "none") panel.appendChild(el("p", "passport-engineering-conflict", `State posture: ${engineering.stale_conflict.state} — ${engineering.stale_conflict.reason}`));
+          card.appendChild(panel);
+        }
+        const detail = el("details", "passport-detail");
+        detail.open = card.dataset.detailOpen === "true";
+        detail.addEventListener("toggle", () => { card.dataset.detailOpen = String(detail.open); });
+        detail.appendChild(el("summary", null, "Evidence, checkpoint, and handoff"));
+        const list = el("ul", "passport-detail-list");
+        for (const ref of passport.evidence_refs) list.appendChild(el("li", null, ref));
+        for (const finding of passport.eval_portfolio?.behavior_findings || []) list.appendChild(el("li", null, `Eval finding ${finding.finding_id}: ${finding.failure_mode_id} · ${finding.evidence_refs.join(", ")}`));
+        const checkpoint = passport.state.verification === "verified_success" ? "Independent verification recorded; handoff only at a verified checkpoint." : "Executor claim remains unpromoted; no verified handoff implied.";
+        list.appendChild(el("li", null, checkpoint));
+        list.appendChild(el("li", null, `Adapter: ${actual.adapter_id} ${actual.adapter_version} · native session retained as ${actual.native_session_ref}`));
+        detail.appendChild(list); card.appendChild(detail);
+      },
+    });
+  }
+
   /* --------------------------------------------------------------- health */
 
   function renderHealth(model) {
@@ -1612,13 +1866,33 @@ function boot() {
     renderWire(fresh.length > 0);
     renderAssignments(model);
     renderSessions(model);
+    renderJobPassport(model);
     renderHealth(model);
     if (fresh.length) animateArrivals(fresh, model);
   }
 
   async function poll() {
     try {
-      const payload = await fetchTurns(state.cursor, PAGE_SIZE);
+      // Loop #521: the first poll used to fetch from seq 0 (the OLDEST page),
+      // so the health strip derived its cycle-age tile from a stale window and
+      // showed red for minutes after every page load. When the cursor is still
+      // at the initial value, jump straight to the present: read the newest
+      // full page instead of the oldest one. History stays reachable through
+      // Load earlier.
+      const initialFetch = state.cursor === 0;
+      const from = initialFetch
+        ? Math.max(0, (state.latestSeqHint ?? 0) - PAGE_SIZE)
+        : state.cursor;
+      const payload = await fetchTurns(from, PAGE_SIZE);
+      if (Number.isFinite(Number(payload.latest_seq))) {
+        state.latestSeqHint = Number(payload.latest_seq);
+        if (initialFetch) {
+          // First response arrived with the present: drop any turns below the
+          // window we actually wanted so the panel never renders the old span.
+          const cutoff = Math.max(0, Number(payload.latest_seq) - PAGE_SIZE);
+          payload.turns = (payload.turns || []).filter((t) => Number(t.seq) > cutoff);
+        }
+      }
       if (payload.actor?.slug) state.viewer = String(payload.actor.slug).toLowerCase();
       if (payload.csrf_token) state.csrf = payload.csrf_token;
       $("composerInput").placeholder = `Speak into the room as ${PARTNER_LABEL[state.viewer] || "a partner"}…`;

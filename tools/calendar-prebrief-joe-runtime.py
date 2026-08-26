@@ -16,17 +16,39 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NoReturn
 from urllib.parse import unquote, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOW = "calendar-prebrief-projection-joe-daily"
 APP_NAME = "CARR Calendar Access.app"
 EX_CONFIG = 78
+LEASE_SECONDS = 300
+CHILD_REFUSAL_CLASS = "calendar_prebrief_child_refusal"
+PRE_CHILD_LEASE_CLASS = "calendar_prebrief_pre_child_lease_refusal"
+POST_CHILD_FAILURE_CLASS = "calendar_prebrief_post_child_refusal"
 
 
 class Refusal(RuntimeError):
     pass
+
+
+class RecordedJobFailure(RuntimeError):
+    """A lease-owning runtime recorded an exact phase-specific failure."""
+
+    def __init__(self, failure_class: str, state: str):
+        super().__init__(state)
+        self.failure_class = failure_class
+        self.state = state
+
+
+class FailureReceiptRejected(RuntimeError):
+    """The original phase failure survived, but its fail_job write did not."""
+
+    def __init__(self, failure_class: str, recording_error: Exception):
+        super().__init__("failure receipt rejected")
+        self.failure_class = failure_class
+        self.recording_error = recording_error
 
 
 def _dsn_login(value: str) -> str:
@@ -134,12 +156,39 @@ def schedule(dsn: str) -> dict[str, Any] | None:
 
 
 def claim(dsn: str) -> dict[str, str] | None:
-    value = _jobs_call(dsn, "select row_to_json(job) from ops.claim_calendar_prebrief_joe_live_job(%s,300) job", ("calendar-prebrief-joe-runtime",))
+    value = _jobs_call(dsn, "select row_to_json(job) from ops.claim_calendar_prebrief_joe_live_job(%s,%s) job", ("calendar-prebrief-joe-runtime", LEASE_SECONDS))
     if value is None:
         return None
     if not isinstance(value, dict) or set(value) != {"job_id", "lease", "scheduled_for"} or any(not isinstance(value[key], str) or not value[key] for key in value):
         raise Refusal("Joe claim returned malformed lease")
     return value
+
+
+def heartbeat(dsn: str, claim_value: Mapping[str, str]) -> None:
+    value = _jobs_call(dsn, "select ops.heartbeat_job(%s::uuid,%s::uuid,%s)", (claim_value["job_id"], claim_value["lease"], LEASE_SECONDS))
+    if value is not True:
+        raise Refusal("Joe calendar prebrief lease is no longer live")
+
+
+def fail_job(dsn: str, claim_value: Mapping[str, str], failure_class: str, detail: str) -> str:
+    value = _jobs_call(
+        dsn,
+        "select ops.fail_job(%s::uuid,%s::uuid,%s,%s)",
+        (claim_value["job_id"], claim_value["lease"], failure_class, detail),
+    )
+    if value not in {"retry_wait", "dead_lettered"}:
+        raise Refusal("Joe calendar prebrief failure receipt did not read back exactly")
+    return value
+
+
+def record_failure(dsn: str, claim_value: Mapping[str, str], failure_class: str, detail: str, original: Exception) -> NoReturn:
+    try:
+        state = fail_job(dsn, claim_value, failure_class, detail)
+    except Exception as recording_error:
+        # Preserve the phase failure as __cause__.  The fail_job rejection is
+        # attached separately so neither event overwrites the other.
+        raise FailureReceiptRejected(failure_class, recording_error) from original
+    raise RecordedJobFailure(failure_class, state) from original
 
 
 def complete(dsn: str, claim_value: Mapping[str, str], result: Mapping[str, Any]) -> dict[str, Any]:
@@ -173,10 +222,40 @@ def run_tick(profile: Mapping[str, str], profile_path: Path) -> dict[str, Any]:
     env = {"PATH": os.environ.get("PATH", ""), "CARR_DB_JOBS_URL": profile["CARR_DB_JOBS_URL"],
            "CARR_CALENDAR_PREBRIEF_CLAIM_COMMAND": f"{sys.executable} {Path(__file__).resolve()} --profile {profile_path} claim",
            **{key: profile[key] for key in ("CARR_CALENDAR_PREBRIEF_CHILD_PROFILE", "CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY", "CARR_CALENDAR_PREBRIEF_EVENTKIT_APP", "CARR_CALENDAR_PREBRIEF_ALLOWLIST", "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY", "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION")}}
-    got = coordinator.parent_execute(sponsor="joe", mode="live", claim_command=env["CARR_CALENDAR_PREBRIEF_CLAIM_COMMAND"], child_profile=Path(env["CARR_CALENDAR_PREBRIEF_CHILD_PROFILE"]), public_key=Path(env["CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY"]), environ=env, include_claim=True)
+    claimed: dict[str, str] | None = None
+
+    def protect_lease(value: dict[str, str]) -> None:
+        nonlocal claimed
+        claimed = dict(value)
+        try:
+            heartbeat(profile["CARR_DB_JOBS_URL"], claimed)
+        except Exception as exc:
+            record_failure(
+                profile["CARR_DB_JOBS_URL"], claimed, PRE_CHILD_LEASE_CLASS,
+                "lease protection failed before sponsor child execution", exc,
+            )
+
+    try:
+        got = coordinator.parent_execute(sponsor="joe", mode="live", claim_command=env["CARR_CALENDAR_PREBRIEF_CLAIM_COMMAND"], child_profile=Path(env["CARR_CALENDAR_PREBRIEF_CHILD_PROFILE"]), public_key=Path(env["CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY"]), environ=env, include_claim=True, after_claim=protect_lease)
+    except (RecordedJobFailure, FailureReceiptRejected):
+        raise
+    except Exception as exc:
+        if claimed is None:
+            raise
+        record_failure(
+            profile["CARR_DB_JOBS_URL"], claimed, CHILD_REFUSAL_CLASS,
+            "sponsor child refused its DB-issued calendar capture contract", exc,
+        )
     if got == {"status": "empty"}:
         return {"scheduled": int(scheduled is not None), "claimed": 0}
-    receipt = complete(profile["CARR_DB_JOBS_URL"], got["claim"], got["result"])
+    try:
+        heartbeat(profile["CARR_DB_JOBS_URL"], got["claim"])
+        receipt = complete(profile["CARR_DB_JOBS_URL"], got["claim"], got["result"])
+    except Exception as exc:
+        record_failure(
+            profile["CARR_DB_JOBS_URL"], got["claim"], POST_CHILD_FAILURE_CLASS,
+            "lease protection or completion failed after sponsor child execution", exc,
+        )
     return {"scheduled": int(scheduled is not None), "claimed": 1, "completion": receipt}
 
 
@@ -204,6 +283,12 @@ def main() -> int:
             output = run_tick(profile, args.profile)
         print(json.dumps(output, sort_keys=True))
         return 0
+    except RecordedJobFailure as exc:
+        print(json.dumps({"status": "failed", "failure_class": exc.failure_class, "state": exc.state}, sort_keys=True))
+        return 1
+    except FailureReceiptRejected as exc:
+        print(json.dumps({"status": "failed", "failure_class": exc.failure_class, "state": "failure_receipt_rejected"}, sort_keys=True))
+        return 1
     except Refusal as exc:
         print(f"calendar prebrief Joe runtime: REFUSE {exc}", file=sys.stderr)
         return EX_CONFIG

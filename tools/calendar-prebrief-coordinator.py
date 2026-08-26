@@ -22,7 +22,7 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlsplit
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -337,7 +337,7 @@ def child_execute(*, sponsor: str, mode: str, claim: Mapping[str, Any], profile:
     return {"sponsor": sponsor, "mode": mode, "attestation_id": str(attestation), "receipt_id": str(receipt)}
 
 
-def parent_execute(*, sponsor: str, mode: str, claim_command: str, child_profile: Path, public_key: Path, environ: Mapping[str, str], include_claim: bool = False) -> dict[str, Any]:
+def parent_execute(*, sponsor: str, mode: str, claim_command: str, child_profile: Path, public_key: Path, environ: Mapping[str, str], include_claim: bool = False, after_claim: Callable[[dict[str, str]], None] | None = None) -> dict[str, Any]:
     if sponsor not in SPONSORS or mode not in {"live", "canary"} or any(environ.get(key) for key in environ if (key.startswith("CARR_DB_") and key != "CARR_DB_JOBS_URL") or key in {"DATABASE_URL", "CARR_DB_WRITER_URL", "CARR_DB_OWNER_URL"}):
         raise Refusal("jobs parent requires only its scoped jobs credential")
     jobs_dsn = environ.get("CARR_DB_JOBS_URL", "")
@@ -365,6 +365,11 @@ def parent_execute(*, sponsor: str, mode: str, claim_command: str, child_profile
         claim = _claim(claimed_value)
     except Refusal as exc:
         raise Refusal("jobs claim connector returned malformed claim") from exc
+    # The runtime may renew the lease before the bounded child process starts.
+    # The callback receives the same validated, jobs-only claim the parent uses;
+    # it never crosses into the child environment or credential profile.
+    if after_claim is not None:
+        after_claim(claim)
     child_env = {key: environ[key] for key in ("PATH", "PYTHONPATH", "CARR_CALENDAR_PREBRIEF_EVENTKIT_APP", "CARR_CALENDAR_PREBRIEF_ALLOWLIST", "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY", "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION", "CARR_CALENDAR_PREBRIEF_TEST_MODE", "CARR_CALENDAR_PREBRIEF_TEST_OPEN_BIN") if environ.get(key)}
     child_env.update({"CARR_CALENDAR_PREBRIEF_CHILD_PROFILE": str(child_profile), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PUBLIC_KEY": str(public_key)})
     child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--child", "--sponsor", sponsor, "--mode", mode], input=_canonical(claim), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child_env, timeout=90, check=False)

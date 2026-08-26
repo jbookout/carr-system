@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { buildRelease } from "../src/release.js";
 
 const FIXED_NOW = () => new Date("2026-08-13T21:00:00.000Z");
+const SCHEMA_LEDGER_SHA256 = "sha256:" + "7".repeat(64);
 
 // A minimal stand-in for neon()'s tagged-template `sql` function. Routes each
 // call by matching a substring of the query text against `responses`, so
@@ -24,6 +25,12 @@ function fakeSql(responses) {
     for (const [needle, result] of responses) {
       if (q.includes(needle)) {
         if (result instanceof Error) throw result;
+        if (needle === "v_schema_ledger" && Array.isArray(result)) {
+          return result.map((row) => ({
+            ...row,
+            ledger_sha256: row.ledger_sha256 ?? SCHEMA_LEDGER_SHA256,
+          }));
+        }
         return result;
       }
     }
@@ -63,6 +70,7 @@ test("buildRelease: full shape when everything is reachable and stamped", async 
   assert.deepEqual(out.git_sha, { value: "a".repeat(40), reason: null });
   assert.equal(out.schema.highest_applied_migration, "0099_thing.sql");
   assert.equal(out.schema.applied_count, 101);
+  assert.equal(out.schema.ledger_sha256, SCHEMA_LEDGER_SHA256);
   assert.equal(out.schema.reason, null);
   // The honesty note belongs on every response, success included — the field
   // is "what the tracking table claims" even when the table is reachable.

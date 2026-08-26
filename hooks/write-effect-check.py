@@ -62,7 +62,12 @@ import time
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 STATE = os.environ.get("CARR_WRITE_EFFECT_STATE") or os.path.join(
     REPO, "out", "write-effect")
-LOG = os.path.join(REPO, "out", "hook-guard.log")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:                                    # telemetry only — never load-bearing
+    import hook_meter
+    LOG = hook_meter.guard_log_path(REPO)
+except Exception:                       # a missing meter must not change a verdict
+    LOG = os.path.join(REPO, "out", "hook-guard.log")
 
 # Archives, backups and derived trees. Not watched because nothing in them is a
 # live record, and the generation archives in particular churn on every export.

@@ -23,20 +23,48 @@
 
 set -eu
 
+# The deploy wrapper may count a typed-recovery candidate from a clean,
+# detached historical worktree.  Those worktrees deliberately have no ignored
+# node_modules input, so resolving bare ESM imports from WORKER_DIR would fail
+# even though the current wrapper checkout has the verified dependency tree
+# that Wrangler will use.  Import through a temporary symlink topology instead:
+# the historical worker remains the exact source, while Node resolves packages
+# from this checkout's dependency runtime.  --preserve-symlinks is essential;
+# without it Node follows the worker symlink back into the detached worktree
+# before resolving packages.  Nothing is written into the exact source root.
+SCRIPT_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+RUNTIME_NODE_MODULES="$SCRIPT_ROOT/mcp-server/node_modules"
+[ -d "$RUNTIME_NODE_MODULES" ] || {
+  echo "verb-count.sh: verified runtime dependencies not found at $RUNTIME_NODE_MODULES" >&2
+  exit 1
+}
+
 WORKER_DIR="${1:-}"
 if [ -z "$WORKER_DIR" ]; then
   echo "verb-count.sh: needs the worker directory as its one argument" >&2
   exit 64
 fi
+if [ ! -d "$WORKER_DIR" ]; then
+  echo "verb-count.sh: worker directory does not exist: $WORKER_DIR" >&2
+  exit 66
+fi
+WORKER_DIR="$(CDPATH= cd -- "$WORKER_DIR" && pwd)"
 if [ ! -f "$WORKER_DIR/src/tools.js" ]; then
   echo "verb-count.sh: no registry at $WORKER_DIR/src/tools.js" >&2
   exit 66
 fi
 
-COUNT="$(cd "$WORKER_DIR" && node --input-type=module -e '
-import("'"$WORKER_DIR"'/src/tools.js")
+IMPORT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/verb-count.XXXXXX")"
+trap 'rm -rf "$IMPORT_ROOT"' EXIT HUP INT TERM
+ln -s "$WORKER_DIR" "$IMPORT_ROOT/mcp-server"
+ln -s "$RUNTIME_NODE_MODULES" "$IMPORT_ROOT/node_modules"
+
+COUNT="$(node --preserve-symlinks --input-type=module -e '
+import { pathToFileURL } from "node:url";
+import(pathToFileURL(process.argv[1]).href)
   .then(m => console.log(Object.keys(m.TOOLS).length))
-  .catch(e => { console.error(e.message); process.exit(1); });' 2>&1)" || {
+  .catch(e => { console.error(e.message); process.exit(1); });' \
+  "$IMPORT_ROOT/mcp-server/src/tools.js" 2>&1)" || {
   echo "verb-count.sh: the registry did not import — $COUNT" >&2
   exit 1
 }
