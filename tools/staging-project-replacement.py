@@ -502,6 +502,15 @@ def production_overlap_count(ids: Mapping[str, Sequence[str]], conn: Any) -> int
     return total
 
 
+def read_production_overlap(production: ProviderScope,
+                            ids: Mapping[str, Sequence[str]], *, run: Run,
+                            environ: Mapping[str, str], connect: Any) -> int:
+    """Read Production through the sanctioned owner tap under a forced RO transaction."""
+    production_read = derive_dsn(production, OWNER_ROLE, run=run, environ=environ)
+    with connect(production_read.value) as conn:
+        return production_overlap_count(ids, conn)
+
+
 PREPARE_KEYS = frozenset({"schema_version", "tree_mode", "git_sha", "source_tree_oid",
     "source_tree_sha256", "source_tree_entry_count", "artifact_sha256", "config_sha256",
     "dependency_sha256", "migration_ledger", "migration_count", "migration_highest",
@@ -585,9 +594,8 @@ def prepare_candidate(source: SourceContract, operation_id: uuid.UUID, productio
     contract_id = stated.get("contract_id")
     if not contract_id or stated.get("state") not in {"prepared", "observed"}:
         raise ReplacementRefusal("prepare receipt state is invalid")
-    prod_reader = derive_dsn(production, "app_reader", run=run, environ=environ)
-    with connect(prod_reader.value) as conn:
-        overlap = production_overlap_count(ids, conn)
+    overlap = read_production_overlap(production, ids, run=run,
+                                      environ=environ, connect=connect)
     observation = observation_payload(prepared, synthetic, overlap)
     with connect(verifier_dsn) as conn, conn.cursor() as cur:
         recorded = call_json(cur, RECORD_FUNCTION, operation_id, observation); conn.commit()
@@ -675,6 +683,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except (ReplacementRefusal, OSError, IndexError) as exc:
         print(f"staging-project-replacement: REFUSED — {exc}", file=sys.stderr)
+        return 2
+    except Exception:
+        print("staging-project-replacement: REFUSED — operation failed; detail suppressed",
+              file=sys.stderr)
         return 2
 
 
