@@ -22,6 +22,7 @@ const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 
 const PROTOCOL = "2025-06-18";
+const RULE_DELIVERY_RAIL = ` RULE DELIVERY: use only exact canonical pack names from standing-context rule_delivery.pack_index. A name in packs_not_found is unknown and is NOT loaded. If observed work enters a pack absent from rule_delivery.declared_packs, call standing-context again with that canonical pack and read the result before acting. Shadow mode records drift without blocking, but does not waive this recall protocol.`;
 
 // ---------- capability profiles (2026-08-02) ----------
 //
@@ -674,7 +675,7 @@ export async function dispatch(request, env, ctx, actor) {
             "correctly; this may be a peer-tier agent, never a forced downgrade. The main seat " +
             "orchestrates, verifies and performs authorized " +
             "writes; it does not reclaim the mechanical sweep. State the executor before each phase; " +
-            "a second inline mechanical tool call is the tripwire." +
+            "a second inline mechanical tool call is the tripwire." + RULE_DELIVERY_RAIL +
             (profile === "full" ? "" : ` ACTIVE PROFILE: ${profile}.` + (PROFILE_NOTICE[profile] || "")),
         });
       case "notifications/initialized":

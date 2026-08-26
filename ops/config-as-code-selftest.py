@@ -19,6 +19,8 @@ spec = importlib.util.spec_from_file_location(
 assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+NIGHTLY_SOURCE = (Path(REPO) / "ops/scheduled-tasks/nightly-record-layer.SKILL.md").read_text(
+    encoding="utf-8")
 # The fixture below tests config reconciliation. Machine dependencies have their
 # own hermetic suite and must not be inferred from a temporary HOME.
 setattr(mod, "PREREQUISITE_CHECK", lambda _repo: [])
@@ -135,6 +137,7 @@ def main():
             f"task-{number:02d}": f"---\nname: task-{number:02d}\n---\nCARR managed {number}\n"
             for number in range(1, 17)
         }
+        primary_tasks["nightly-record-layer"] = NIGHTLY_SOURCE
         for name, body in primary_tasks.items():
             (tasks / f"{name}.SKILL.md").write_text(body, encoding="utf-8")
         original_primary = mod.IS_PRIMARY
@@ -143,9 +146,13 @@ def main():
             primary_task_install_rc = mod.cmd_install(True)
             primary_task_check_rc = mod.cmd_check()
         primary_task_rendered = all(
-            (Path(mod.TASKS_SRC) / name / "SKILL.md").read_text(encoding="utf-8") == body
+            (Path(mod.TASKS_SRC) / name / "SKILL.md").read_text(encoding="utf-8")
+            == mod.concrete(body)
             for name, body in primary_tasks.items()
         )
+        nightly_task_rendered = (
+            Path(mod.TASKS_SRC) / "nightly-record-layer" / "SKILL.md"
+        ).read_text(encoding="utf-8") == mod.concrete(NIGHTLY_SOURCE)
 
         mod.IS_PRIMARY = False
         secondary_task_source = Path(mod.TASKS_SRC)
@@ -515,12 +522,14 @@ def main():
         ("fresh primary install renders all tracked scheduled-task definitions",
          primary_task_install_rc == 0 and primary_task_rendered
          and "WRITE  scheduled task task-01" in primary_task_out.getvalue()),
+        ("nightly consumer installs as an exact concrete render of canonical source",
+         nightly_task_rendered),
         ("fresh primary scheduled-task install leaves check clean",
          primary_task_check_rc == 0),
         ("secondary dry run names quarantine work without moving active tasks",
          secondary_dry_rc == 0 and secondary_dry_preserves_active
          and "would quarantine  scheduled task task-01" in secondary_dry_output),
-        ("secondary quarantines all 16 exact managed definitions",
+        ("secondary quarantines every exact managed definition",
          secondary_quarantine_complete),
         ("secondary exact-task retry is idempotent",
          secondary_retry_rc == 0 and "QUARANTINE" not in secondary_retry_output),
