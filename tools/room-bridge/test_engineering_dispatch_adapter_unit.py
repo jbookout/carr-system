@@ -81,6 +81,27 @@ class ValidEngineeringDesk:
                 "cwd": str(ROOT), "sandbox": "workspace-write", "room_seat": None}
 
 
+def test_bridge_auth_observations_are_allowed_but_malformed_metadata_refuses():
+    for auth in (True, None):
+        class AuthStampedDesk(ValidEngineeringDesk):
+            def resolve(self, name):
+                return {**super().resolve(name), "last_auth": auth,
+                        "last_auth_at": "2026-08-25T18:00:00+00:00"}
+
+        assert adapter._dedicated_codex_desk(AuthStampedDesk())["last_auth"] is auth
+
+    for key, value in (("last_auth", "true"), ("last_auth_at", 1)):
+        class MalformedAuthDesk(ValidEngineeringDesk):
+            def resolve(self, name):
+                return {**super().resolve(name), key: value}
+
+        try:
+            adapter._dedicated_codex_desk(MalformedAuthDesk())
+        except adapter.DispatchRefusal:
+            continue
+        raise AssertionError(f"malformed {key} metadata was accepted")
+
+
 def test_success_is_fresh_and_database_capability_is_not_forwarded():
     seen = {}
 

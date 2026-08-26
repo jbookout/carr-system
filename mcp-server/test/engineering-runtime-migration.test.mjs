@@ -6,6 +6,7 @@ const migration = fs.readFileSync(new URL("../../migrations/0310_engineering_exe
 const authorityRepair = fs.readFileSync(new URL("../../migrations/0311_sponsored_engineering_executor_authority.sql", import.meta.url), "utf8");
 const controllerMigration = fs.readFileSync(new URL("../../migrations/0312_engineering_dispatch_controller.sql", import.meta.url), "utf8");
 const successorPermissionRepair = fs.readFileSync(new URL("../../migrations/0319_engineering_envelope_writer_successor.sql", import.meta.url), "utf8");
+const claimOutputRepair = fs.readFileSync(new URL("../../migrations/0323_engineering_claim_output_qualification.sql", import.meta.url), "utf8");
 const runtime = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 const mcp = fs.readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
 const registry = JSON.parse(fs.readFileSync(new URL("../../ops/config/control-plane-workflows.v1.json", import.meta.url), "utf8"));
@@ -77,6 +78,15 @@ test("0319 keeps the successor guard on the writer's append-only authority", () 
   assert.match(successorPermissionRepair, /has_table_privilege\('carr_writer', 'ops\.engineering_execution_envelope', 'update'\)/);
   assert.match(successorPermissionRepair, /carr_writer cannot create or read engineering envelopes/);
   assert.doesNotMatch(successorPermissionRepair, /grant\s+update\s+on\s+ops\.engineering_execution_envelope/i);
+});
+
+test("0323 qualifies the claim attempt output without widening its authority", () => {
+  assert.match(claimOutputRepair, /create or replace function ops\.engineering_claim_slice/);
+  assert.match(claimOutputRepair, /insert into ops\.job_attempt as claimed_attempt\(job_id,attempt,lease_owner,lease_token,state\)/);
+  assert.match(claimOutputRepair, /returning claimed_attempt\.job_id/);
+  assert.match(claimOutputRepair, /grant execute on function ops\.engineering_claim_slice\(text,integer,integer\) to carr_jobs/);
+  assert.match(claimOutputRepair, /acl\.grantee=0 and acl\.privilege_type='EXECUTE'/);
+  assert.doesNotMatch(claimOutputRepair, /grant\s+(?:all|insert|update|delete)\s+on\s+ops\.(?:job|job_attempt)/i);
 });
 
 test("the reviewed control-plane inventory carries the exact engineering job contract", () => {

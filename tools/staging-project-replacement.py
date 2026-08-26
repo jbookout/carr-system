@@ -4,7 +4,7 @@
 ``plan`` is the read-only default. ``prepare --apply`` is the only mutating
 phase: it may create one deterministic Neon project, reconstruct the exact
 merged tree, seed invented fixtures, prove G1 row-ID isolation from Production,
-and record migration 0322's immutable receipt. It never renames, updates, or
+and record the clean-staging contract's immutable receipt. It never renames, updates, or
 deletes any project. Existing staging remains untouched as rollback evidence.
 
 Provider output, row IDs, passwords, and DSNs are captured and never printed.
@@ -43,7 +43,9 @@ RELEASE_MANIFEST = REPO / "tools/release-manifest.py"
 SCHEMA = REPO / "db/schema.sql"
 ENVIRONMENTS = REPO / "ops/config/environments.json"
 METERING_POLICY = REPO / "ops/config/platform-metering.v1.json"
-FINAL_MIGRATION = "0322_clean_staging_replacement_contract.sql"
+CONTRACT_MIGRATION = "0322_clean_staging_replacement_contract.sql"
+MIGRATION_FILENAME_RE = re.compile(r"^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$")
+MIGRATION_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PRODUCTION_PROJECT_ID = "steep-field-48688294"
 NEON_ORG_ID = "org-dry-dew-75906281"
 STAGING_NAME = "carr-staging"
@@ -157,6 +159,27 @@ def candidate_name(operation_id: uuid.UUID) -> str:
     return f"carr-staging-replacement-{operation_id.hex}"
 
 
+def validate_migration_ledger(manifest: Mapping[str, Any]) -> str:
+    """Return the exact highest migration after binding the complete ledger."""
+    ledger = manifest.get("migration_ledger")
+    if not isinstance(ledger, dict) or not ledger or CONTRACT_MIGRATION not in ledger:
+        raise ReplacementRefusal("source contract lacks the replacement contract migration")
+    rows = list(ledger.items())
+    if rows != sorted(rows) or any(not isinstance(filename, str)
+            or not MIGRATION_FILENAME_RE.fullmatch(filename)
+            or not isinstance(file_sha256, str)
+            or not MIGRATION_SHA256_RE.fullmatch(file_sha256)
+            for filename, file_sha256 in rows):
+        raise ReplacementRefusal("source contract migration ledger entries are not canonical")
+    material = "".join(f"{filename}\0{file_sha256}\n" for filename, file_sha256 in rows)
+    digest = "sha256:" + hashlib.sha256(material.encode()).hexdigest()
+    if manifest.get("migration_count") != len(rows) \
+            or manifest.get("migration_highest") != rows[-1][0] \
+            or manifest.get("migration_ledger_sha256") != digest:
+        raise ReplacementRefusal("source contract migration ledger boundary is not exact")
+    return rows[-1][0]
+
+
 def load_candidate_spec() -> CandidateSpec:
     try:
         root = json.loads(ENVIRONMENTS.read_text())
@@ -192,12 +215,10 @@ def validate_source(sha: str, *, run: Run = subprocess.run) -> SourceContract:
         raise ReplacementRefusal("SHA is not reachable from origin/main")
     manifest = _json(_run([sys.executable, str(RELEASE_MANIFEST), "source-contract", "--sha", sha],
                           run=run), "source contract")
-    exact = {"git_sha": sha, "tree_mode": "full", "tree_tuple": ["mode", "type", "object", "path"],
-             "migration_highest": FINAL_MIGRATION}
+    exact = {"git_sha": sha, "tree_mode": "full", "tree_tuple": ["mode", "type", "object", "path"]}
     if not isinstance(manifest, dict) or any(manifest.get(k) != v for k, v in exact.items()):
-        raise ReplacementRefusal("source contract identity/final migration is not exact")
-    if FINAL_MIGRATION not in manifest.get("migration_ledger", {}):
-        raise ReplacementRefusal("source contract lacks final migration")
+        raise ReplacementRefusal("source contract identity is not exact")
+    validate_migration_ledger(manifest)
     for key in ("source_tree_sha256", "artifact_sha256", "config_sha256", "dependency_sha256",
                 "migration_ledger_sha256"):
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(manifest.get(key) or "")):
@@ -333,11 +354,13 @@ def reconstruct_candidate(owner: SecretDsn, *, run: Run, environ: Mapping[str, s
                   run=run, env=env, timeout=1800), "schema reconstruction")
 
 
-def apply_candidate_migrations(owner: SecretDsn, *, run: Run,
+def apply_candidate_migrations(owner: SecretDsn, source: SourceContract, *, run: Run,
                                environ: Mapping[str, str]) -> None:
     child = safe_environment(environ); child["DATABASE_URL"] = owner.value
+    highest = validate_migration_ledger(source.manifest)
     _success(_run([str(REPO / ".venv/bin/python"), str(REPO / "tools/migrate.py"), "--apply", "--yes",
-                   "--through", FINAL_MIGRATION], run=run, env=child, timeout=3600), "migration reconstruction")
+                   "--through", highest],
+                  run=run, env=child, timeout=3600), "migration reconstruction")
 
 
 def install_fixtures(owner: SecretDsn, *, run: Run, environ: Mapping[str, str]) -> None:
@@ -486,6 +509,7 @@ OBSERVATION_KEYS = frozenset({"schema_version", "git_sha", "source_tree_oid", "s
 def prepare_payload(source: SourceContract, old: ProviderScope, candidate: ProviderScope,
                     synthetic_count: int) -> dict[str, Any]:
     m = source.manifest
+    highest = validate_migration_ledger(m)
     payload = {"schema_version": "clean-staging-replacement-contract.v1", "tree_mode": "full",
         "git_sha": source.git_sha, "source_tree_oid": m["source_tree_oid"],
         "source_tree_sha256": m["source_tree_sha256"], "source_tree_entry_count": m["source_tree_entry_count"],
@@ -496,7 +520,8 @@ def prepare_payload(source: SourceContract, old: ProviderScope, candidate: Provi
         "prior_staging_project_id": old.project_id, "replacement_project_id": candidate.project_id,
         "replacement_branch_id": candidate.branch_id, "replacement_endpoint_id": candidate.endpoint_id,
         "expected_synthetic_data_count": synthetic_count, "expected_production_overlap_count": 0}
-    if set(payload) != PREPARE_KEYS or synthetic_count <= 0 or m["migration_highest"] != FINAL_MIGRATION:
+    if set(payload) != PREPARE_KEYS or synthetic_count <= 0 \
+            or m["migration_highest"] != highest:
         raise ReplacementRefusal("prepare payload is not exact")
     return payload
 
@@ -621,9 +646,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         state = candidate_reconstruction_state(owner, source, connect=psycopg.connect)
         if state == "empty":
             reconstruct_candidate(owner, run=subprocess.run, environ=os.environ)
-            apply_candidate_migrations(owner, run=subprocess.run, environ=os.environ)
+            apply_candidate_migrations(owner, source, run=subprocess.run, environ=os.environ)
         elif state == "prefix":
-            apply_candidate_migrations(owner, run=subprocess.run, environ=os.environ)
+            apply_candidate_migrations(owner, source, run=subprocess.run, environ=os.environ)
         install_fixtures(owner, run=subprocess.run, environ=os.environ)
         jobs_dsn, verifier_dsn = provision_scoped_credentials(
             owner, args.operation_id, connect=psycopg.connect)
