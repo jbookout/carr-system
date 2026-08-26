@@ -74,6 +74,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -2067,6 +2068,78 @@ def cmd_deployment(args) -> int:
 
 
 # ── release ──────────────────────────────────────────────────────────────────
+def release_candidate_manifest_refusal(args, manifest: dict) -> str | None:
+    """Return a fail-closed candidate-manifest refusal, or ``None``.
+
+    The release row's target and approval preimage must come from the same
+    verified manifest.  Keeping this check outside the database block proves a
+    malformed candidate cannot consume a writer credential or leave a row.
+    """
+    if not isinstance(manifest, dict):
+        return "release candidate manifest must be a JSON object"
+
+    manifest_target = (manifest.get("service"), manifest.get("environment"))
+    requested_target = (args.service, args.environment)
+    if manifest_target != requested_target:
+        return ("release candidate manifest service/environment must exactly "
+                f"match the requested target; manifest={manifest_target!r} "
+                f"requested={requested_target!r}")
+
+    manifest_identity = (manifest.get("provider"),
+                         manifest.get("provider_version_id"))
+    requested_identity = (args.provider, args.provider_version_id)
+    if manifest_identity != requested_identity:
+        return ("release candidate provider/version must exactly match the bound "
+                "release manifest so the approval plan hash covers the version "
+                "that can be promoted")
+
+    assurance_fields = (
+        manifest.get("performance_budget_ref"),
+        manifest.get("performance_budget_ms"),
+        manifest.get("recovery_strategy"),
+        manifest.get("rollback_plan_ref"),
+    )
+    if args.environment in ("staging", "production"):
+        if (not isinstance(assurance_fields[0], str)
+                or not assurance_fields[0].strip()
+                or isinstance(assurance_fields[1], bool)
+                or not isinstance(assurance_fields[1], int)
+                or assurance_fields[1] <= 0
+                or assurance_fields[2] not in ("rollback", "forward_fix")
+                or not isinstance(assurance_fields[3], str)
+                or not assurance_fields[3].strip()
+                or manifest.get("rollback_ready") is not True):
+            return (f"{args.environment} candidate manifest requires complete "
+                    "performance/recovery assurance and a ready rollback plan")
+
+    # Legacy flags are accepted only as exact repetitions of the manifest. They
+    # no longer supply a second, unhashed staging recovery plan.
+    if (getattr(args, "rollback_ready", False)
+            and manifest.get("rollback_ready") is not True):
+        return "--rollback-ready differs from the candidate manifest"
+    supplied_plan = getattr(args, "rollback_plan", None)
+    if supplied_plan is not None and supplied_plan != manifest.get("rollback_plan_ref"):
+        return "--rollback-plan differs from the candidate manifest"
+
+    # Verify the already-parsed object that will be inserted, not a second read
+    # of a caller-controlled path that could change between parse and verify.
+    with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix="carr-release-candidate-",
+            suffix=".json") as exact_manifest:
+        json.dump(manifest, exact_manifest, sort_keys=True, separators=(",", ":"))
+        exact_manifest.flush()
+        verified = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+             "verify", "--manifest", exact_manifest.name],
+            cwd=REPO, capture_output=True, text=True, check=False,
+        )
+    if verified.returncode != 0:
+        detail = (verified.stdout + verified.stderr).strip().splitlines()
+        summary = detail[-1][:240] if detail else "verification returned no evidence"
+        return f"release candidate manifest verification failed: {summary}"
+    return None
+
+
 def cmd_release(args) -> int:
     """Record one release candidate from a manifest built by
     tools/release-manifest.py, or approve / read one back.
@@ -2118,46 +2191,10 @@ def cmd_release(args) -> int:
         except Exception as e:                                   # noqa: BLE001
             print(f"ops-record: could not read the manifest: {e}", file=sys.stderr)
             return 2
-    if args.action == "candidate" and args.environment == "production":
-        manifest_target = (manifest.get("service"), manifest.get("environment"))
-        requested_target = (args.service, args.environment)
-        if manifest_target != requested_target:
-            print("ops-record: Production candidate manifest service/environment "
-                  "must exactly match the requested release target", file=sys.stderr)
-            return 2
-        manifest_identity = (manifest.get("provider"),
-                             manifest.get("provider_version_id"))
-        requested_identity = (args.provider, args.provider_version_id)
-        if manifest_identity != requested_identity:
-            print("ops-record: Production candidate provider/version must exactly "
-                  "match the bound release manifest so the approval plan hash "
-                  "covers the version that can be promoted", file=sys.stderr)
-            return 2
-        assurance = (manifest.get("performance_budget_ref"),
-                     manifest.get("performance_budget_ms"),
-                     manifest.get("recovery_strategy"),
-                     manifest.get("rollback_ready"),
-                     manifest.get("rollback_plan_ref"))
-        if (not isinstance(assurance[0], str) or not assurance[0].strip()
-                or isinstance(assurance[1], bool)
-                or not isinstance(assurance[1], int) or assurance[1] <= 0
-                or assurance[2] not in ("rollback", "forward_fix")
-                or assurance[3] is not True
-                or not isinstance(assurance[4], str) or not assurance[4].strip()):
-            print("ops-record: Production candidate manifest requires a positive "
-                  "performance budget/ref, recovery strategy "
-                  "(rollback or forward_fix), and ready recovery plan",
-                  file=sys.stderr)
-            return 2
-        verified = subprocess.run(
-            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
-             "verify", "--manifest", args.manifest],
-            cwd=REPO, capture_output=True, text=True, check=False)
-        if verified.returncode != 0:
-            detail = (verified.stdout + verified.stderr).strip().splitlines()
-            summary = detail[-1][:240] if detail else "verification returned no evidence"
-            print("ops-record: Production candidate manifest verification failed "
-                  f"before ledger intake: {summary}", file=sys.stderr)
+    if args.action == "candidate":
+        refusal = release_candidate_manifest_refusal(args, manifest)
+        if refusal:
+            print(f"ops-record: {refusal}", file=sys.stderr)
             return 2
 
     try:
@@ -2212,10 +2249,8 @@ def cmd_release(args) -> int:
                      # now explains it instead of surfacing a raw constraint name.
                      args.verifier, args.verifier_evidence,
                      args.test_evidence, args.security_evidence,
-                     (manifest.get("rollback_ready") if args.environment == "production"
-                      else args.rollback_ready),
-                     (manifest.get("rollback_plan_ref") if args.environment == "production"
-                      else args.rollback_plan),
+                     manifest.get("rollback_ready"),
+                     manifest.get("rollback_plan_ref"),
                      args.work_request, manifest.get("plan_hash"),
                      parse_ts(args.expires_at) if args.expires_at else None))
                 row = cur.fetchone()
@@ -2299,17 +2334,35 @@ def cmd_release(args) -> int:
                               "--plan-hash <bound-hash> --idempotency-key <uuid>",
                               file=sys.stderr)
                     else:
+                        if args.environment == "staging":
+                            build_instruction = (
+                                f"    tools/release-manifest.py build --sha {args.sha} "
+                                "--environment staging --performance-budget-ref <immutable-ref> "
+                                "--performance-budget-ms <milliseconds> "
+                                "--recovery-strategy <rollback|forward_fix> "
+                                "--rollback-plan-ref <immutable-ref> > out/release.json\n"
+                            )
+                            approval_instruction = (
+                                "    tools/ops-record.py release staging-approve --key <key> "
+                                "--environment staging --plan-hash <hash> "
+                                "--idempotency-key <uuid>"
+                            )
+                        else:
+                            build_instruction = (
+                                f"    tools/release-manifest.py build --sha {args.sha} "
+                                f"--environment {args.environment} > out/release.json\n"
+                            )
+                            approval_instruction = (
+                                "    no staging approval door exists for this non-serving "
+                                "environment"
+                            )
                         print(f"NO LIVE APPROVAL for {release_identity} in {args.environment}.\n"
-                              "  Build the manifest, record the candidate, and have Joe "
-                              "approve the plan hash it prints:\n"
-                              f"    tools/release-manifest.py build --sha {args.sha} "
-                              "> out/release.json\n"
+                              "  Build the exact-target manifest, record the candidate, "
+                              "and use that environment's governed approval door:\n"
+                              f"{build_instruction}"
                               "    tools/ops-record.py release candidate --key <key> "
-                              "--environment staging --manifest out/release.json\n"
-                              "    tools/ops-record.py release staging-approve --key <key> "
-                              "--environment staging "
-                              "--plan-hash <hash> --idempotency-key <uuid>",
-                              file=sys.stderr)
+                              f"--environment {args.environment} --manifest out/release.json\n"
+                              f"{approval_instruction}", file=sys.stderr)
                     return 3
                 key, state, expires, stored_plan, release_sha = row
                 if args.plan_hash and args.plan_hash != stored_plan:
@@ -2353,19 +2406,46 @@ def cmd_release(args) -> int:
                 # candidate overtaken before signing has none of that evidence and
                 # is not superseded in the sense this table means; it is abandoned,
                 # and its reason can name the successor in words.
-                if not args.reason or len(args.reason.strip()) < 12:
+                successor_key = (getattr(args, "superseded_by", None) or "").strip()
+                supplied_reason = (args.reason or "").strip()
+                if successor_key and supplied_reason:
+                    print("ops-record: release abandon accepts either --reason or "
+                          "--superseded-by, not both", file=sys.stderr)
+                    return 2
+                if successor_key == args.key:
+                    print("ops-record: a release cannot supersede itself", file=sys.stderr)
+                    return 2
+                if successor_key:
+                    supplied_reason = ("superseded before approval by recorded release "
+                                       f"{successor_key}")
+                if len(supplied_reason) < 12:
                     print("ops-record: release abandon needs --reason (at least a "
-                          "dozen characters). A terminal row nobody can explain is "
-                          "the thing this action exists to prevent.", file=sys.stderr)
+                          "dozen characters) or --superseded-by naming an existing "
+                          "same-target release. A terminal row nobody can explain "
+                          "is the thing this action exists to prevent.", file=sys.stderr)
                     return 2
                 cur.execute(
-                    """update ops.release
+                    """with eligible_successor as (
+                          select id, service_id, environment
+                            from ops.release
+                           where release_key = %s
+                             and state in
+                                 ('candidate','approved','deploying','verifying','complete')
+                             for share
+                        )
+                        update ops.release target
                           set state = 'abandoned', abandoned_reason = %s,
                               ended_at = now()
-                        where release_key = %s
-                          and state in ('draft','candidate','approved')
+                        where target.release_key = %s
+                          and target.state in ('draft','candidate','approved')
+                          and (%s = '' or exists (
+                                select 1 from eligible_successor successor
+                                 where successor.id <> target.id
+                                   and successor.service_id = target.service_id
+                                   and successor.environment = target.environment
+                              ))
                     returning state""",
-                    (args.reason.strip(), args.key))
+                    (successor_key, supplied_reason, args.key, successor_key))
                 row = cur.fetchone()
                 if not row:
                     cur.execute("select state from ops.release where release_key = %s",
@@ -2374,10 +2454,16 @@ def cmd_release(args) -> int:
                     if not existing:
                         print(f"ops-record: no release {args.key!r}", file=sys.stderr)
                     else:
-                        print(f"ops-record: {args.key!r} is {existing[0]} and cannot be "
-                              f"abandoned. Only a release that never shipped can be "
-                              f"ended this way; one that deployed is history.",
-                              file=sys.stderr)
+                        if successor_key:
+                            print(f"ops-record: {successor_key!r} is not an eligible "
+                                  "same-service, same-environment successor for "
+                                  f"{args.key!r}; the original release is unchanged.",
+                                  file=sys.stderr)
+                        else:
+                            print(f"ops-record: {args.key!r} is {existing[0]} and cannot be "
+                                  f"abandoned. Only a release that never shipped can be "
+                                  f"ended this way; one that deployed is history.",
+                                  file=sys.stderr)
                     return 2
                 print(f"{args.key} {row[0]}")
                 return 0
@@ -2675,6 +2761,9 @@ def main() -> int:
     rel.add_argument("--reason", help="abandon only: why this release will never "
                                       "ship. Required unless --superseded-by names "
                                       "the release that replaced it.")
+    rel.add_argument("--superseded-by", dest="superseded_by",
+                     help="abandon only: an existing same-service, same-environment "
+                          "release that replaces this unshipped candidate")
     rel.add_argument("--expires-hours", type=int, default=24,
                      help="approve/staging-approve: how long the approval stays live. An "
                           "approval that never expires is how a plan-hash check "

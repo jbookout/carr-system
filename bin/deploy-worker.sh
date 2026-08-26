@@ -43,7 +43,8 @@
 #       # upload a Production candidate without changing traffic
 #   bin/deploy-worker.sh --promote-version <cloudflare-version-id>
 #       # promote that exact approved version to 100% of Production traffic
-#   # Both Production modes also require the approval preimage inputs:
+#   # Production modes and a standalone staging release require the approval
+#   # preimage inputs:
 #       --performance-budget-ref <immutable-ref> --performance-budget-ms <ms>
 #       --recovery-strategy <rollback|forward_fix>
 #       --rollback-plan-ref <immutable-runbook-ref>
@@ -206,6 +207,26 @@ done
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 
+# One builder owns the exact source/environment/assurance preimage for every
+# release-manifest reconstruction.  A caller may supply either the complete
+# assurance group or none; the admission rules below require the complete group
+# for Production and standalone staging releases.
+build_release_manifest() {
+  BUILD_MANIFEST_SHA="$1"
+  BUILD_MANIFEST_ENVIRONMENT="$2"
+  if [ -n "$PERFORMANCE_BUDGET_REF" ]; then
+    "$PY" "$REPO/tools/release-manifest.py" build --sha "$BUILD_MANIFEST_SHA" \
+      --environment "$BUILD_MANIFEST_ENVIRONMENT" \
+      --performance-budget-ref "$PERFORMANCE_BUDGET_REF" \
+      --performance-budget-ms "$PERFORMANCE_BUDGET_MS" \
+      --recovery-strategy "$RECOVERY_STRATEGY" \
+      --rollback-plan-ref "$ROLLBACK_PLAN_REF"
+  else
+    "$PY" "$REPO/tools/release-manifest.py" build --sha "$BUILD_MANIFEST_SHA" \
+      --environment "$BUILD_MANIFEST_ENVIRONMENT"
+  fi
+}
+
 # A temporary verb-count drop is authorized only after the DB writer for the
 # exact typed recovery step has durably prepared the attempt and returned its
 # deterministic provider tag.  This is deliberately a function shared by the
@@ -318,10 +339,18 @@ fi
 cd "$REPO"
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 [ -x "$PY" ] || fail "python not found; release truth cannot be checked."
-if [ "$TARGET_ENV" = "production" ]; then
+if [ -n "$PERFORMANCE_BUDGET_REF$PERFORMANCE_BUDGET_MS$RECOVERY_STRATEGY$ROLLBACK_PLAN_REF" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] && [ -n "$PERFORMANCE_BUDGET_MS" ] \
     && [ -n "$RECOVERY_STRATEGY" ] && [ -n "$ROLLBACK_PLAN_REF" ] \
+    || fail "performance budget/ref, recovery strategy, and rollback plan ref must be supplied together."
+fi
+if [ "$TARGET_ENV" = "production" ]; then
+  [ -n "$PERFORMANCE_BUDGET_REF" ] \
     || fail "Production performance budget/ref, recovery strategy, and rollback plan ref are required; they are approval inputs, not deploy defaults."
+fi
+if [ "$TARGET_ENV" = "staging" ] && [ "$RECOVERY_STEP" = "standalone" ]; then
+  [ -n "$PERFORMANCE_BUDGET_REF" ] \
+    || fail "standalone staging release requires performance/recovery assurance; the exact inputs are approval-bound, not deploy defaults."
 fi
 
 HEAD_SHA=""
@@ -648,11 +677,7 @@ if [ "$VERSION_MODE" = "promote" ]; then
   # with every immutable dimension and the freshly computed plan hash.
   PROMOTION_SOURCE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-source-manifest.XXXXXX")"
   PROMOTION_BOUND_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-bound-manifest.XXXXXX")"
-  if ! "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-      --environment production --performance-budget-ref "$PERFORMANCE_BUDGET_REF" \
-      --performance-budget-ms "$PERFORMANCE_BUDGET_MS" \
-      --recovery-strategy "$RECOVERY_STRATEGY" \
-      --rollback-plan-ref "$ROLLBACK_PLAN_REF" > "$PROMOTION_SOURCE_MANIFEST"; then
+  if ! build_release_manifest "$HEAD_SHA" production > "$PROMOTION_SOURCE_MANIFEST"; then
     fail "approved release evidence cannot be rebuilt from git SHA $HEAD_SHA."
   fi
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
@@ -684,21 +709,14 @@ elif [ "$RECOVERY_STEP" != "standalone" ]; then
   echo "  prior release: $RECOVERY_PRIOR_RELEASE_KEY"
   echo "  recovery attempt/step: $RECOVERY_ATTEMPT_ID / $RECOVERY_STEP"
   RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-recovery-release-manifest.XXXXXX")"
-  "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-    --environment staging > "$RELEASE_MANIFEST" \
+  build_release_manifest "$HEAD_SHA" staging > "$RELEASE_MANIFEST" \
     || fail "recovery release evidence cannot be rebuilt from git SHA $HEAD_SHA."
 elif [ -f "$REPO/tools/release-manifest.py" ]; then
   echo ""
   echo "== preflight: release truth =="
   RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-release-manifest.XXXXXX")"
-  if [ "$TARGET_ENV" = "production" ]; then
-    manifest_build_args="--performance-budget-ref $PERFORMANCE_BUDGET_REF --performance-budget-ms $PERFORMANCE_BUDGET_MS --recovery-strategy $RECOVERY_STRATEGY --rollback-plan-ref $ROLLBACK_PLAN_REF"
-  else
-    manifest_build_args=""
-  fi
-  # shellcheck disable=SC2086
-  if "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-       --environment "$TARGET_ENV" $manifest_build_args > "$RELEASE_MANIFEST" 2>/dev/null; then
+  if build_release_manifest "$HEAD_SHA" "$TARGET_ENV" \
+       > "$RELEASE_MANIFEST" 2>/dev/null; then
     RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
                           --manifest "$RELEASE_MANIFEST" 2>/dev/null)"
     echo "  manifest built for ${HEAD_SHA} — plan ${RELEASE_PLAN_HASH:-unknown}"
