@@ -262,6 +262,45 @@ def expect_receipt_refusal(cur, envelope_id, lease_token, actor_id, label: str) 
     raise RuntimeError(f"{label} persisted a receipt")
 
 
+def expect_claim_argument_refusal(cur, job_id, params: tuple, label: str) -> None:
+    """Prove invalid claim arguments fail before the job or attempt can change."""
+    before_job = one(
+        cur,
+        "select state,attempt,lease_token,leased_until from ops.job where id=%s",
+        (job_id,),
+    )
+    before_attempts = one(
+        cur,
+        "select count(*) from ops.job_attempt where job_id=%s",
+        (job_id,),
+    )[0]
+    savepoint = f"claim_argument_{label.replace(' ', '_').lower()}"
+    cur.execute(f"savepoint {savepoint}")
+    try:
+        cur.execute("select * from ops.engineering_claim_slice(%s,%s,%s)", params)
+    except psycopg.Error as exc:
+        detail = str(exc)
+        cur.execute(f"rollback to savepoint {savepoint}")
+        cur.execute(f"release savepoint {savepoint}")
+        if "exactly one claim and positive lease" not in detail:
+            raise RuntimeError(f"{label} refusal was not deterministic: {detail}") from exc
+    else:
+        cur.execute(f"release savepoint {savepoint}")
+        raise RuntimeError(f"{label} was accepted")
+    after_job = one(
+        cur,
+        "select state,attempt,lease_token,leased_until from ops.job where id=%s",
+        (job_id,),
+    )
+    after_attempts = one(
+        cur,
+        "select count(*) from ops.job_attempt where job_id=%s",
+        (job_id,),
+    )[0]
+    if after_job != before_job or after_attempts != before_attempts:
+        raise RuntimeError(f"{label} changed the job or created an attempt")
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL", "") or os.environ.get("CARR_LOCAL_PG_DSN", "")
     if not dsn:
@@ -319,6 +358,10 @@ def main() -> int:
                 return fail("carr_jobs cannot read the scoped controller binding")
             if one(cur, "select has_function_privilege('carr_reader','ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure,'EXECUTE')")[0]:
                 return fail("carr_reader gained execute on the controller binding")
+            expect_claim_argument_refusal(
+                cur, job_id, ("engineering-null-limit", None, 1800), "NULL limit")
+            expect_claim_argument_refusal(
+                cur, job_id, ("engineering-null-lease", 1, None), "NULL lease")
             cur.execute("savepoint multi_claim_refusal")
             try:
                 cur.execute("select * from ops.engineering_claim_slice(%s,2,1800)",

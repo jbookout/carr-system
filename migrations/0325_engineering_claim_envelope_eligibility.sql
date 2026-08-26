@@ -116,7 +116,8 @@ create or replace function ops.engineering_claim_slice(
 language plpgsql security definer set search_path=ops,public,pg_temp
 as $$
 begin
-  if btrim(coalesce(p_worker,''))='' or p_limit<>1 or p_lease_seconds<1 then
+  if btrim(coalesce(p_worker,''))='' or p_limit is distinct from 1
+     or p_lease_seconds is null or p_lease_seconds<1 then
     raise exception 'worker, exactly one claim and positive lease are required';
   end if;
   perform ops.reap_expired_jobs();

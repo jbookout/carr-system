@@ -105,7 +105,8 @@ test("0325 refuses stale Engineering envelopes before a lease is created", () =>
   assert.match(claimEligibilityRepair, /\(e\.envelope->>'expires_at'\)::timestamptz=e\.expires_at/);
   assert.match(claimEligibilityRepair, /j\.lease_token is not null/);
   assert.match(claimEligibilityRepair, /j\.leased_until>statement_timestamp\(\)/);
-  assert.match(claimEligibilityRepair, /p_limit<>1/);
+  assert.match(claimEligibilityRepair, /p_limit is distinct from 1/);
+  assert.match(claimEligibilityRepair, /p_lease_seconds is null or p_lease_seconds<1/);
   assert.match(claimEligibilityRepair, /order by e\.slice_plan_id,e\.slice_ref/);
   assert.match(claimEligibilityRepair, /j\.lease_token=p_lease_token/);
   assert.match(claimEligibilityRepair, /engineering_controller_binding\(uuid,uuid,uuid\)/);
