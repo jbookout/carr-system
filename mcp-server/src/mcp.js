@@ -12,7 +12,8 @@
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { neon, Pool } from "@neondatabase/serverless";
-import { TOOLS, ToolError, executeRegisteredTool, auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
+import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
+  auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
 import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
@@ -132,28 +133,12 @@ export const PROFILES = {
   // that actor. That is the server-side lock: the token cannot be asked for
   // more than it was provisioned for, no matter what the request says.
   //
-  // THE WRITE SET IS EXACTLY THE VERBS THE SUITE REPLAYS UNDER A FROZEN
-  // IDEMPOTENCY KEY, never a verb it would have to mint a fresh key for:
-  //   - log-activity: three fixtures — the ORDER 18 addendum write probe
-  //     (smoke-write-probe-permanent), the ORDER 34 auto-edge probe
-  //     (smoke-links-probe-permanent), the ORDER 36 analysis probe
-  //     (smoke-analysis-probe-permanent).
-  //   - set-next-action + complete-action: the ORDER 19 completion-path pair
-  //     on the AMA Law Office fixture (smoke-ball-probe-permanent /
-  //     smoke-complete-probe-permanent).
-  // Every one of those keys already exists in `tool_call` from years of runs
-  // under a human actor, and withEnvelope() in tools.js keys its replay
-  // lookup on idempotency_key + request hash alone, never on the calling
-  // actor — so a probe call against any of them can only ever replay the
-  // stored response, never insert a second row. No other write verb is safe
-  // to hand this token: the 0066 marketing negative-answer probes vary their
-  // idempotency key on purpose (a refusal stores no row, so editing them
-  // never causes key_reuse), which means a probe call against them would be a
-  // LIVE write attempt, not a replay — exactly what this profile exists to
-  // rule out. Those checks self-skip instead: they are gated behind a
-  // tools/list capability check, and tools/list is itself profile-filtered,
-  // so a probe-authenticated caller never even sees those verbs are there.
-  probe: new Set(["log-activity", "set-next-action", "complete-action"]),
+  // SIEP-11 removed the historical cross-actor replay exception. A frozen
+  // idempotency key is not a capability: every replay is now bound to the
+  // exact operation and server-derived principal. Smoke reads remain useful;
+  // mutation probes must use a separately enrolled, operation-bound identity
+  // once SIEP-17/21 provide one. Until then this machine door is read-only.
+  probe: new Set(),
 
   // REVIEWER (Automatic Review Council, Codex lane, 2026-08-06). The write set
   // is EXACTLY `record-finding` — nothing else, ever. Like `probe`, this
@@ -264,9 +249,9 @@ const PROFILE_NOTICE = {
     "\n\n<notice>This session runs on the READ profile: no write verb is available. This is " +
     "intentional. Do not try to work around it; report what you would have written.</notice>",
   probe:
-    "\n\n<notice>This session runs on the PROBE profile: reads, plus exactly the three write " +
-    "verbs the smoke suite replays under a frozen idempotency key (log-activity, set-next-action, " +
-    "complete-action). Every other write verb refuses with not_in_profile. This profile is locked " +
+    "\n\n<notice>This session runs on the PROBE profile: reads only. Frozen idempotency keys are " +
+    "not capabilities and cannot replay another principal's mutation receipt. Every write verb refuses " +
+    "with not_in_profile. This profile is locked " +
     "server-side by a PROBE_TOKENS bearer, not by ?profile=, and cannot be widened by this token " +
     "under any request. This is the smoke-probe machine actor, never a human seat.</notice>",
   reviewer:
@@ -444,6 +429,11 @@ export async function callTool(env, actor, name, args, profile = "full") {
   // executeRegisteredTool repeats this same pure gate for composite dispatches
   // that bypass callTool, so no registered handler gets a different boundary.
   assertNoCallerAuthorityFields(args);
+  const tool = TOOLS[name];
+  if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  // The generic call-verb delegator is itself a reviewed ingress. Validate its
+  // immutable outer contract before parsing or recursing into the inner tool.
+  await assertRegisteredToolInput(name, tool, args || {});
   // call-verb: the deploy-gap passthrough (Joe, 2026-08-08: "theres got to be
   // a way to fix the need for having to reconnect the connector to ship
   // things"). Connectors cache tools/list at connect time, so a freshly
@@ -486,8 +476,9 @@ export async function callTool(env, actor, name, args, profile = "full") {
         hint: "call-verb takes {verb, args} where args is the inner verb's own argument object" });
     return callTool(env, actor, inner, innerArgs, profile);
   }
-  const tool = TOOLS[name];
-  if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  // The pure generated-manifest check above ran before any reader/writer
+  // credential was opened. executeRegisteredTool repeats it for direct
+  // composite dispatches and any in-process contract drift.
   // ENFORCED AT CALL TIME, not just filtered out of tools/list. Removing a verb
   // from the list is a hint; a model that has seen the full list in an earlier
   // turn, or guesses a name, would otherwise still reach it.

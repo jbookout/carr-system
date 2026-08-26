@@ -40,7 +40,8 @@ const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe",
   correlation_id: "11111111-2222-3333-4444-555555555555" };
 const dell = { ...joe, id: "10000000-0000-0000-0000-000000000003", slug: "dell", display: "Dell" };
 const agent = { id: "10000000-0000-0000-0000-000000000009", slug: "codex",
-  display: "Codex", human: false, via: "oauth-google", sponsoring_human_slug: "joe" };
+  display: "Codex", human: false, via: "oauth-google", sponsoring_human_slug: "joe",
+  native_agent_verified: true };
 const probe = { id: "10000000-0000-0000-0000-000000000008", slug: "smoke-probe",
   display: "probe", human: false, probe: true, via: "probe-token" };
 const localMachine = { id: "10000000-0000-0000-0000-000000000007", slug: "joe-local",

@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import {
   slugForEmail,
   agentSlugForClient,
+  verifiedAgentSlugForClient,
   propsForSlug,
   actorFromProps,
   isKnownActor,
@@ -73,6 +74,14 @@ test("agentSlugForClient: missing/unusual input degrades to null, never throws",
   assert.equal(agentSlugForClient(null), null);
   assert.equal(agentSlugForClient(""), null);
   assert.equal(agentSlugForClient(42), null);
+});
+
+test("self-declared client_name is attribution only; exact server client-id binding is authority", () => {
+  const bindings = JSON.stringify({ "client-codex-verified": "codex" });
+  assert.equal(verifiedAgentSlugForClient("client-codex-verified", "codex", bindings), "codex");
+  assert.equal(verifiedAgentSlugForClient("attacker-dynamic-client", "codex", bindings), null);
+  assert.equal(verifiedAgentSlugForClient("client-codex-verified", "claude", bindings), null);
+  assert.equal(verifiedAgentSlugForClient("client-codex-verified", "codex", "not-json"), null);
 });
 
 // ---------- isKnownActor / propsForSlug: codex/grok are now real actors ----------

@@ -210,7 +210,7 @@ test("caller delivery labels are closed out and the registry snapshot uses the s
     const db = { query: async () => { throw new Error("database must not be called"); } };
     const error = await refused(() => executeRegisteredTool(db, JOE, "propose-ready-plan",
       { ...structuredClone(PROPOSE), [field]: field === "packs" ? ["engineering-git"] : "forged" }));
-    assert.ok(["invalid_ready_plan_fields", "caller_authority_field_forbidden"].includes(error.error), field);
+    assert.ok(["unregistered_operation_fields", "caller_authority_field_forbidden"].includes(error.error), field);
   }
   const db = new PlanFake();
   await executeRegisteredTool(db, JOE, "propose-ready-plan", structuredClone(PROPOSE));

@@ -112,6 +112,26 @@ export function agentSlugForClient(clientName) {
   return AGENT_CLIENT_NAMES[clientName.trim().toLowerCase()] || null;
 }
 
+/**
+ * A self-declared OAuth client_name is attribution only. Native-agent
+ * authority requires an exact client-id -> actor binding held in server
+ * configuration. Unknown, malformed, or mismatched bindings refuse.
+ *
+ * SIEP-21 will replace this bootstrap binding with enrolled workload identity;
+ * until then absence is deliberately non-authorizing.
+ */
+export function verifiedAgentSlugForClient(clientId, attributedSlug, rawBindings) {
+  if (typeof clientId !== "string" || !clientId ||
+      typeof attributedSlug !== "string" || !attributedSlug ||
+      typeof rawBindings !== "string" || !rawBindings) return null;
+  let bindings;
+  try { bindings = JSON.parse(rawBindings); }
+  catch { return null; }
+  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) return null;
+  const bound = bindings[clientId];
+  return (bound === attributedSlug && (bound === "codex" || bound === "claude")) ? bound : null;
+}
+
 export function isKnownActor(slug) {
   return typeof slug === "string" && Object.prototype.hasOwnProperty.call(DISPLAY, slug);
 }
@@ -156,6 +176,7 @@ export function actorFromProps(props) {
   return { slug: props.slug, display: DISPLAY[props.slug], human,
            via: props.via || null, client_id: props.client_id || null,
            sponsoring_human_slug,
+           ...(props.native_agent_verified === true ? { native_agent_verified: true } : {}),
            // Compatibility alias for existing internal readers. New code must
            // use sponsoring_human_slug so runtime and sponsor never blur.
            human_slug: sponsoring_human_slug,

@@ -5,8 +5,8 @@ import { authorityDsnForActor, callTool } from "../src/mcp.js";
 
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe", human: true, via: "test" };
 const dell = { id: "10000000-0000-0000-0000-000000000003", slug: "dell", display: "Dell", human: true, via: "test" };
-const codexForJoe = { id: "10000000-0000-0000-0000-000000000004", slug: "codex", display: "Codex", human: false, sponsoring_human_slug: "joe", via: "oauth-agent" };
-const claudeForDell = { id: "10000000-0000-0000-0000-000000000005", slug: "claude", display: "Claude", human: false, sponsoring_human_slug: "dell", via: "oauth-agent" };
+const codexForJoe = { id: "10000000-0000-0000-0000-000000000004", slug: "codex", display: "Codex", human: false, sponsoring_human_slug: "joe", native_agent_verified: true, via: "oauth-agent" };
+const claudeForDell = { id: "10000000-0000-0000-0000-000000000005", slug: "claude", display: "Claude", human: false, sponsoring_human_slug: "dell", native_agent_verified: true, via: "oauth-agent" };
 
 class AcceptanceAuthorityFake {
   constructor(sessionSlug) {
@@ -75,11 +75,14 @@ test("partners, sponsored native agents, and the local machine doors cross the p
   // ADDED 2026-08-26 (Joe's ruling, decision dc57f62d): the `./run.sh call`
   // doors. Their sponsor is server-derived through LOCAL_SPONSOR, never
   // asserted by the Mac, which is why admitting them is safe.
-  assert.equal(canExercisePartnerAuthority({ slug: "joe-local", human: false, sponsoring_human_slug: "joe" }), true);
-  assert.equal(canExercisePartnerAuthority({ slug: "dell-local", human: false, sponsoring_human_slug: "dell" }), true);
+  assert.equal(canExercisePartnerAuthority({ slug: "joe-local", human: false,
+    sponsoring_human_slug: "joe", native_agent_verified: true }), true);
+  assert.equal(canExercisePartnerAuthority({ slug: "dell-local", human: false,
+    sponsoring_human_slug: "dell", native_agent_verified: true }), true);
   // STILL REFUSED, and these are the ones that matter: a slug with no sponsor
   // at all, and a sponsored slug that is not an admitted door. The ruling
   // removed a human-only gate; it did not make the boundary meaningless.
+  assert.equal(canExercisePartnerAuthority({ ...codexForJoe, native_agent_verified: false }), false);
   assert.equal(canExercisePartnerAuthority({ slug: "codex", human: false }), false);
   assert.equal(canExercisePartnerAuthority({ slug: "grok", human: false, sponsoring_human_slug: "joe" }), false);
   assert.equal(canExercisePartnerAuthority({ slug: "joe-local", human: false }), false);
