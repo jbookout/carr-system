@@ -14,8 +14,10 @@ sql=(REPO/"migrations/0317_atomic_rule_delivery_cutover.sql").read_text()
 checks={
  "exact 38 reviewed proposal ids":len(cutover.curation_ids())==38,
  "human reviewer is checked":"p.status='approved' and a.kind='human'" in py,
- "seven-day eligibility is checked":"shadow_eligible(identity)" in py and "eligibility[\"eligible\"]" in py,
+ "seven-day eligibility is checked":"shadow_eligible(eligibility_module, ledger_rows, identity)" in py and "eligibility[\"eligible\"]" in py,
  "live policy identity binds eligibility":"current_identity(REPO, row)" in py,
+ "ledger lock spans atomic flip":"with locked_read(" in py and "ops.set_rule_delivery_mode" in py,
+ "policy identity is rebound before write":"where singleton for update" in py and "final_identity" in py,
  "production is pinned":"steep-field-48688294" in sh and "connection-string production" in sh,
  "dry run is default":"--apply" in sh and "APPLY=0" in sh,
  "direct policy update is guarded":"rule_delivery_policy_cutover_only" in sql,

@@ -12,8 +12,10 @@ highest for anything that can refuse other work).
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -215,6 +217,29 @@ map_digest = gate.file_sha256(REPO / "ops/config/rule-enforcement-map.json")
 check("shadow source identity is a sha256", len(source_digest) == 64, source_digest)
 check("reviewed map identity is a sha256", len(map_digest) == 64, map_digest)
 
+# Arbitrary exception detail (including credentials) is never persisted.
+with tempfile.TemporaryDirectory() as directory:
+    transcript = Path(directory) / "transcript.jsonl"
+    secret = "postgresql://user:SUPER-SECRET@example.invalid/db"  # ci-secret-scan: allow
+    transcript.write_text("{not-json " + secret + "\n", encoding="utf-8")
+    old_log, old_stdin = gate.LOG, sys.stdin
+    gate.LOG = str(Path(directory) / "shadow.jsonl")
+    sys.stdin = io.StringIO(json.dumps({"transcript_path": str(transcript),
+                                        "session_id": "secret-test"}))
+    try:
+        gate.main()
+    finally:
+        gate.LOG, sys.stdin = old_log, old_stdin
+    persisted = Path(directory, "shadow.jsonl").read_text()
+    error_row = json.loads(persisted)
+    check("hook exception detail is redacted", secret not in persisted, persisted)
+    check("hook error row retains exact v2 shape",
+          gate.make_error_observation(
+              session=error_row["session"], error=error_row["error"],
+              detail=error_row["detail"], map_digest=error_row["map_digest"],
+              source_digest=error_row["source_digest"],
+              at=gate.stamp(error_row)) == error_row, str(error_row))
+
 # ── a trigger that ends in punctuation still matches ────────────────────────
 xcom = run([user("pull the metrics from x.com for last week"),
             assistant_tool("Bash", {"command": "grok x search"})])
@@ -226,4 +251,4 @@ if FAILURES:
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-pack-drift-gate-selftest: 26 cases passed")
+print("rule-pack-drift-gate-selftest: 28 cases passed")

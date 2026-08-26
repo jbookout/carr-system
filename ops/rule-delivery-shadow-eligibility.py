@@ -12,7 +12,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.rule_delivery_shadow import (  # noqa:E402
     can_start_epoch, current_identity, finding, inspect, make_disposition,
-    make_epoch, observation_id, require_identity, scoped, stamp,
+    make_epoch, make_error_observation, make_observation, observation_id,
+    require_identity, scoped, stamp,
 )
 
 DEFAULT_LOG = REPO / "out" / "rule-delivery-shadow.jsonl"
@@ -54,6 +55,10 @@ def evaluate(rows: list[dict], now: datetime | None = None,
 
     state = inspect(rows)
     reasons.extend(state["errors"])
+    for index, row in enumerate(rows):
+        seen = stamp(row) if isinstance(row, dict) else None
+        if seen is not None and seen > now:
+            reasons.append(f"future ledger timestamp at row {index + 1}")
     if not state["epochs"]:
         result = _base(reasons + ["no valid shadow epoch"])
         result["legacy_findings"] = sum(

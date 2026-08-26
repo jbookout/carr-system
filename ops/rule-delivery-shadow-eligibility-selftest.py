@@ -30,14 +30,19 @@ def ts(hours_ago: int) -> datetime:
 
 
 def row(hours: int, **changes) -> dict:
-    value = {"ts": ts(hours).strftime("%Y-%m-%dT%H:%M:%SZ"),
-             "hook": "rule-pack-drift-gate", "session": f"s-{hours}",
-             "mode": "shadow", "loaded": ["engineering-git"],
-             "would_omit_count": 150, "missed_rules": [],
-             "map_digest": IDENTITY["map_digest"],
-             "source_digest": IDENTITY["source_digest"]}
-    value.update(changes)
-    return value
+    error = changes.pop("error", None)
+    if error is not None:
+        return eligibility.make_error_observation(
+            session=f"s-{hours}", error=error, detail="fixture error",
+            map_digest=IDENTITY["map_digest"],
+            source_digest=IDENTITY["source_digest"], at=ts(hours))
+    result = {"mode": "shadow", "needed": ["engineering-git"],
+              "loaded": ["engineering-git"], "missing": [], "triggers": {},
+              "would_omit_count": 150, "missed_rules": []}
+    result.update(changes)
+    return eligibility.make_observation(
+        session=f"s-{hours}", map_digest=IDENTITY["map_digest"],
+        source_digest=IDENTITY["source_digest"], result=result, at=ts(hours))
 
 
 def epoch(hours: int, identity: dict = IDENTITY, **changes) -> dict:
@@ -92,7 +97,9 @@ fixed_disp = disposition(fixed_miss, 119, "remediated")
 fixed = evaluate([epoch(170), row(169), fixed_miss, fixed_disp, row(0)])
 check("remediated finding requires a post-remedy epoch", not fixed["eligible"], fixed)
 check("restart reason is explicit", any("new epoch" in r for r in fixed["reasons"]), fixed)
-restarted = evaluate([epoch(340), row(300), fixed_miss, fixed_disp,
+older_fixed = row(240, missed_rules=["cafebabe"])
+older_fixed_disp = disposition(older_fixed, 239, "remediated")
+restarted = evaluate([epoch(340), row(300), older_fixed, older_fixed_disp,
                       epoch(170), row(169), row(144), row(120), row(96), row(72),
                       row(48), row(24), row(0)])
 check("fresh seven days after remedy can qualify", restarted["eligible"], restarted)
@@ -120,6 +127,35 @@ bad = evaluate([epoch(170), row(169), event, malformed, row(0)])
 check("extra disposition key fails closed", not bad["eligible"]
       and any("malformed" in r for r in bad["reasons"]), bad)
 
+legacy_after_epoch = {"ts": ts(120).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "mode": "shadow", "loaded": ["engineering-git"],
+                      "would_omit_count": 1, "missed_rules": []}
+bad = evaluate([epoch(170), row(169), legacy_after_epoch, row(0)])
+check("legacy observation after epoch fails closed", not bad["eligible"]
+      and any("legacy observation" in r for r in bad["reasons"]), bad)
+extra_observation = {**row(120), "surprise": True}
+bad = evaluate([epoch(170), row(169), extra_observation, row(0)])
+check("post-epoch observation extra key fails closed", not bad["eligible"]
+      and any("malformed observation" in r for r in bad["reasons"]), bad)
+coerced = {**row(120), "would_omit_count": "150"}
+coerced["event_id"] = eligibility.observation_id(coerced)
+bad = evaluate([epoch(170), row(169), coerced, row(0)])
+check("post-epoch count coercion fails closed", not bad["eligible"]
+      and any("malformed observation" in r for r in bad["reasons"]), bad)
+future_observation = row(-1)
+bad = evaluate([epoch(170), row(169), future_observation])
+check("future observation gives no elapsed-time credit", not bad["eligible"]
+      and any("future ledger timestamp" in r for r in bad["reasons"]), bad)
+future_epoch = epoch(-1)
+bad = evaluate([future_epoch])
+check("future epoch fails closed", not bad["eligible"]
+      and any("future ledger timestamp" in r for r in bad["reasons"]), bad)
+past_finding = row(120, missed_rules=["deadbeef"])
+future_disposition = disposition(past_finding, -1)
+bad = evaluate([epoch(170), row(169), past_finding, future_disposition, row(0)])
+check("future disposition fails closed", not bad["eligible"]
+      and any("future ledger timestamp" in r for r in bad["reasons"]), bad)
+
 missing_identity = evaluate([epoch(170), row(169), row(0)], None)
 check("absent current identity fails closed", not missing_identity["eligible"], missing_identity)
 mismatch = evaluate([epoch(170), row(169), row(0)], OTHER_SOURCE)
@@ -137,4 +173,4 @@ if FAILURES:
     for failure in FAILURES:
         print("  " + failure)
     raise SystemExit(1)
-print("rule-delivery-shadow-eligibility-selftest: 18 cases passed")
+print("rule-delivery-shadow-eligibility-selftest: 24 cases passed")

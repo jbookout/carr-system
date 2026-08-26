@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import sys
@@ -13,49 +12,32 @@ from urllib.parse import unquote, urlsplit
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.rule_delivery_shadow import (  # noqa:E402
-    can_start_epoch, current_identity, finding, inspect, make_disposition, make_epoch,
+    append_locked, can_start_epoch, current_identity, finding, inspect, locked_read,
+    make_disposition, make_epoch, read_jsonl_handle, validate_epoch_append,
 )
 
 DEFAULT_LOG = REPO / "out/rule-delivery-shadow.jsonl"
 
 
-def read_locked(handle) -> tuple[list[dict], int]:
-    handle.seek(0)
-    rows: list[dict] = []
-    bad = 0
-    for line in handle:
-        try:
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                raise ValueError
-            rows.append(row)
-        except ValueError:
-            bad += 1
-    return rows, bad
+class LedgerRefusal(RuntimeError):
+    """A fixed, non-secret-bearing refusal code safe for stderr."""
+
+
+def refuse(code: str) -> None:
+    raise LedgerRefusal(code)
 
 
 def append(path: Path, build) -> dict:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        rows, bad = read_locked(handle)
-        if bad:
-            raise RuntimeError(f"refusing append: {bad} unreadable telemetry line(s)")
-        row = build(rows)
-        handle.seek(0, os.SEEK_END)
-        handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-        return row
+    return append_locked(path, build)
 
 
 def routine_dsn() -> str:
     value = os.environ.get("CARR_DB_JOBS_URL", "").strip()
     if not value:
-        raise RuntimeError("CARR_DB_JOBS_URL is required to bind an epoch to live policy")
+        refuse("jobs-credential-required")
     login = unquote(urlsplit(value).username or "").strip().lower()
     if login in {"carr_writer", "carr_owner", "owner", "writer", "postgres"}:
-        raise RuntimeError("refusing owner/writer credential; use the carr_jobs reader")
+        refuse("least-privilege-jobs-credential-required")
     return value
 
 
@@ -67,27 +49,33 @@ def live_identity() -> dict:
         cur.execute("select session_user,current_user")
         role = cur.fetchone()
         if not role or {str(value) for value in role} != {"carr_jobs"}:
-            raise RuntimeError(f"not a provisioned carr_jobs identity: {role}")
+            refuse("jobs-role-verification-failed")
         cur.execute("""select mode,changed_by,reason,changed_at
                          from ops.rule_delivery_policy where singleton""")
         policy = cur.fetchone()
-        identity = current_identity(REPO, policy)
+        identity = epoch_identity(policy)
         conn.rollback()
         return identity
+
+
+def epoch_identity(policy) -> dict:
+    if not policy or policy[0] != "shadow":
+        refuse("live-policy-is-not-shadow")
+    return current_identity(REPO, policy)
 
 
 def add_disposition(path: Path, args) -> dict:
     def build(rows: list[dict]) -> dict:
         state = inspect(rows)
         if state["errors"]:
-            raise RuntimeError("; ".join(state["errors"]))
+            refuse("ledger-validation-failed")
         observed = state["observations"].get(args.event_id)
         if observed is None:
-            raise RuntimeError("event-id is not an immutable observation in this log")
+            refuse("unknown-observation-event-id")
         if not finding(observed[1]):
-            raise RuntimeError("event-id is not a miss/error finding")
+            refuse("observation-is-not-a-finding")
         if args.event_id in state["dispositions"]:
-            raise RuntimeError("event-id already has a disposition")
+            refuse("duplicate-disposition")
         return make_disposition(
             args.event_id, args.disposition, owner=args.owner,
             remedy_ref=args.remedy_ref, evidence_ref=args.evidence_ref,
@@ -101,9 +89,11 @@ def start_epoch(path: Path, args) -> dict:
     def build(rows: list[dict]) -> dict:
         allowed, reason = can_start_epoch(rows, identity)
         if not allowed:
-            raise RuntimeError(f"epoch refused: {reason}")
-        return make_epoch(identity, owner=args.owner, reason=args.reason,
-                          remedy_ref=args.remedy_ref, rollback_ref=args.rollback_ref)
+            refuse("epoch-precondition-failed")
+        epoch = make_epoch(identity, owner=args.owner, reason=args.reason,
+                           remedy_ref=args.remedy_ref, rollback_ref=args.rollback_ref)
+        validate_epoch_append(rows, epoch)
+        return epoch
     return append(path, build)
 
 
@@ -111,12 +101,12 @@ def list_findings(path: Path) -> list[dict]:
     if not path.exists():
         return []
     with path.open(encoding="utf-8") as handle:
-        rows, bad = read_locked(handle)
+        rows, bad = read_jsonl_handle(handle)
     if bad:
-        raise RuntimeError(f"{bad} unreadable telemetry line(s)")
+        refuse("unreadable-ledger")
     state = inspect(rows)
     if state["errors"]:
-        raise RuntimeError("; ".join(state["errors"]))
+        refuse("ledger-validation-failed")
     result = []
     for event_id, (_index, row) in state["observations"].items():
         if finding(row):
@@ -160,8 +150,16 @@ def main() -> int:
             result = start_epoch(args.log, args)
         print(json.dumps(result, sort_keys=True, default=str))
         return 0
-    except (OSError, RuntimeError, ValueError) as exc:
+    except LedgerRefusal as exc:
         print(f"rule-delivery-shadow-ledger: REFUSED — {exc}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("rule-delivery-shadow-ledger: REFUSED — local-evidence-io-failed",
+              file=sys.stderr)
+        return 1
+    except Exception:
+        print("rule-delivery-shadow-ledger: REFUSED — database-or-authority-check-failed",
+              file=sys.stderr)
         return 1
 
 
