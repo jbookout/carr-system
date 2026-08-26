@@ -132,9 +132,20 @@ function sourcePlanRow(facts, source, ToolError) {
   return row;
 }
 
+function planMatchesCurrentSource(plan, source) {
+  return plan.work_request.id === source.work.id &&
+    plan.work_request.state_version === Number(source.work.version) &&
+    plan.work_request.canonical_record_digest === source.work.canonical_record_digest &&
+    plan.accepted_plan_revision.id === source.plan.plan_ref &&
+    plan.accepted_plan_revision.revision === Number(source.plan.revision) &&
+    plan.accepted_plan_revision.digest === source.plan.digest;
+}
+
 function sourcePlan(facts, source, ToolError) {
   const row = sourcePlanRow(facts, source, ToolError);
-  return requirePlan(row.plan, ToolError);
+  const plan = requirePlan(row.plan, ToolError);
+  if (!planMatchesCurrentSource(plan, source)) error(ToolError, { error: "engineering_slice_plan_currentness_mismatch" });
+  return plan;
 }
 
 function sliceFor(plan, sliceRef, ToolError) {
@@ -359,15 +370,20 @@ function latestReceiptForSlice(facts, source, plan, sliceRef, ToolError) {
   const slicePlan = sourcePlanRow(facts, source, ToolError);
   const slice = plan.slices.find(item => item?.slice_ref === sliceRef);
   if (slicePlan.plan?.plan_digest !== plan.plan_digest || typeof slicePlan.id !== "string" || !slice) return null;
-  const envelopes = new Map(canonicalEnvelopeRows(facts).map(row => [row.id, row]));
   const workRequestId = source.work.id.replace(/^wr:/, "");
-  // Selection is deliberately relational only.  A newer malformed receipt
-  // generation must fence an older valid pass rather than being skipped.
+  const envelopes = canonicalEnvelopeRows(facts);
+  const lineage = envelopes.filter(envelope => envelope.work_request_id === workRequestId &&
+    envelope.slice_plan_id === slicePlan.id && envelope.slice_ref === sliceRef);
+  const leaves = lineage.filter(envelope => !envelopes.some(successor =>
+    successor.supersedes_envelope_id === envelope.id));
+  // A receipt belongs to the one unsuperseded lineage leaf or it cannot carry
+  // closure/dependency authority. Missing-receipt successors and malformed
+  // forks therefore fence an older reviewed pass immediately.
+  if (leaves.length !== 1) return null;
+  const leaf = leaves[0];
   const matches = receiptLedgerRows(facts).filter(row => {
-    const envelope = envelopes.get(row.envelope_id);
     return row.work_request_id === workRequestId && row.slice_ref === sliceRef &&
-      envelope?.id === row.envelope_id && envelope.work_request_id === workRequestId &&
-      envelope.slice_plan_id === slicePlan.id && envelope.slice_ref === sliceRef;
+      row.envelope_id === leaf.id;
   });
   return matches.sort(compareCanonicalGeneration).at(-1) || null;
 }
@@ -545,7 +561,8 @@ export function validateReceiptBinding(receipt, envelope, slice, actor, ToolErro
 
 export function closureProjection(facts, ToolError) {
   const source = sourceParts(facts.source, ToolError);
-  const plan = sourcePlan(facts, source, ToolError);
+  const plan = requirePlan(sourcePlanRow(facts, source, ToolError).plan, ToolError);
+  const planCurrent = planMatchesCurrentSource(plan, source);
   // Facts deliberately retain their canonical ledger wrappers.  Flattening a
   // receipt loses its immutable receipt_id and lets an unrelated review with a
   // coincident attempt label satisfy a later generation.
@@ -567,8 +584,8 @@ export function closureProjection(facts, ToolError) {
   const states = plan.slices.map(slice => {
     const receiptRow = latest.get(slice.slice_ref) || null;
     const receipt = receiptRows.find(row => row.id === receiptRow?.id)?.receipt || null;
-    const reviewRow = exactPassedReviewForReceipt(facts, source, receiptRow, slice.slice_ref);
-    const dependenciesVerified = (slice.dependency_refs || []).every(ref =>
+    const reviewRow = planCurrent ? exactPassedReviewForReceipt(facts, source, receiptRow, slice.slice_ref) : null;
+    const dependenciesVerified = planCurrent && (slice.dependency_refs || []).every(ref =>
       Boolean(exactPassedReviewForReceipt(facts, source, latest.get(ref), ref)));
     const state = !receiptRow ? (dependenciesVerified ? "eligible" : "blocked")
       : reviewRow ? "verified_complete"
@@ -577,14 +594,14 @@ export function closureProjection(facts, ToolError) {
       planned_check_refs: (slice.planned_checks || []).map(check => check.check_ref), deviation_refs: (receipt?.deviations || []).map(deviation => typeof deviation === "string" ? deviation : deviation.deviation_ref).filter(Boolean),
       manual_qa_required: slice.manual_qa_required, release_requirement: slice.release_requirement };
   });
-  const complete = states.every(row => row.state === "verified_complete");
+  const complete = planCurrent && states.every(row => row.state === "verified_complete");
   const evidence = receiptRows.flatMap(row => row.receipt?.evidence_refs || []).filter(item => item && typeof item === "object");
   const unresolved = states.filter(row => row.state !== "verified_complete").map(row => row.slice_ref);
   const disposition = (state, note) => ({ state, evidence_refs: evidence, note });
   const projection = {
     schema_version: "engineering-passport.v1",
-    work_request: { id: source.work.id, state_version: Number(source.work.version), canonical_record_digest: source.work.canonical_record_digest },
-    accepted_plan_revision: { id: source.plan.plan_ref, revision: Number(source.plan.revision), digest: source.plan.digest },
+    work_request: plan.work_request,
+    accepted_plan_revision: plan.accepted_plan_revision,
     plan_digest: plan.plan_digest,
     slice_plan: plan,
     execution_envelopes: envelopes.map(row => row.envelope || row),
@@ -601,7 +618,8 @@ export function closureProjection(facts, ToolError) {
       learning: { state: "unresolved", route: null, evidence_refs: evidence, note: "learning remains a proposal/disposition seam" },
     },
     closure_state: complete ? "complete" : "blocked",
-    stale_conflict: { state: "none", reason: null },
+    stale_conflict: planCurrent ? { state: "none", reason: null } :
+      { state: "stale", reason: "current Work Request or accepted plan no longer matches the registered slice plan" },
   };
   projection.projection_digest = canonicalDigest(projection);
   return projection;
@@ -643,7 +661,11 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
     const priorEnvelopeId = uuid(priorEnvelope.id, "prior_envelope.id", ToolError);
     const priorJobId = uuid(priorEnvelope.job_id, "prior_envelope.job_id", ToolError);
     const priorBinding = (await c.query(
-      "select id, job_id, work_request_id, accepted_plan_id, slice_plan_id, slice_ref, agent_session_id, envelope from ops.engineering_execution_envelope where id=$1::uuid and job_id=$2::uuid",
+      `select e.id, e.job_id, e.work_request_id, e.accepted_plan_id, e.slice_plan_id,
+              e.slice_ref, e.agent_session_id, e.envelope, j.state as job_state
+         from ops.engineering_execution_envelope e
+         join ops.job j on j.id=e.job_id
+        where e.id=$1::uuid and e.job_id=$2::uuid`,
       [priorEnvelopeId, priorJobId],
     )).rows[0];
     if (!priorBinding || priorBinding.slice_ref !== sliceRef ||
@@ -674,9 +696,11 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
         priorSession.source_commit_sha !== ENGINEERING_SESSION_SOURCE)
       error(ToolError, { error: "engineering_session_conflict", envelope_id: priorEnvelopeId });
     const currentness = await c.query("select ops.engineering_envelope_currentness($1::uuid,$2::uuid) as currentness", [priorEnvelope.id, priorEnvelope.job_id]);
-    if (currentness.rows[0]?.currentness?.eligible === true && currentness.rows[0]?.currentness?.dispatch_runway_sufficient === true)
+    const priorJobReplayable = ["queued", "retry_wait", "running"].includes(priorBinding.job_state);
+    if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true &&
+        currentness.rows[0]?.currentness?.dispatch_runway_sufficient === true)
       return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
-    if (currentness.rows[0]?.currentness?.eligible === true)
+    if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true)
       error(ToolError, { error: "engineering_envelope_insufficient_runway", envelope_id: priorEnvelope.id });
   }
 
@@ -764,8 +788,8 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
       continue;
     }
     const bindingResult = await c.query(
-      "select ops.engineering_controller_binding($1::uuid,$2::uuid) as binding",
-      [envelopeRow.id, job.job_id],
+      "select ops.engineering_controller_binding($1::uuid,$2::uuid,$3::uuid) as binding",
+      [envelopeRow.id, job.job_id, job.lease_token],
     );
     const binding = bindingResult.rows[0]?.binding;
     if (!binding || typeof binding !== "object") {
@@ -796,7 +820,7 @@ export async function submitEngineeringReceipt(c, claimed, receipt, actor, ToolE
   validateReceiptBinding(receipt, { ...envelopeRow.envelope, envelope_digest: envelopeRow.envelope_digest }, { ...slice, plan_digest: receipt.plan_digest }, actor, ToolError);
   const receiptDigest = canonicalDigest(receipt);
   const inserted = await c.query(
-    "select * from ops.engineering_record_slice_receipt($1::uuid,$2::uuid,$3::jsonb,$4::text,$5::uuid)",
+    "select * from ops.engineering_finalize_slice_receipt($1::uuid,$2::uuid,$3::jsonb,$4::text,$5::uuid)",
     [envelopeRow.id, claimed.lease_token, JSON.stringify(receipt), receiptDigest, actor.id]);
   if (!inserted.rows.length) error(ToolError, { error: "engineering_attempt_or_lease_mismatch" });
   return { ok: receipt.outcome === "claimed_complete", receipt_id: inserted.rows[0].id,
@@ -822,12 +846,15 @@ function controllerPlan(claim, ToolError) {
   if (binding.envelope_id !== claim.envelope_id || binding.envelope_digest !== claim.envelope_digest
       || binding.slice_ref !== slice.slice_ref || binding.plan_digest !== plan.plan_digest)
     error(ToolError, { error: "engineering_controller_binding_mismatch" });
-  return { plan, slice };
+  if (canonicalInstant(binding.job_lease_expires_at) !== binding.job_lease_expires_at ||
+      !hasDispatchRunway(binding.job_lease_expires_at, 930))
+    error(ToolError, { error: "engineering_controller_job_lease_runway_invalid" });
+  return { plan, slice, jobLeaseExpiresAt: binding.job_lease_expires_at };
 }
 
 async function failEngineeringClaim(c, claim, failureClass, detail) {
   const failure = await c.query(
-    "select ops.fail_job($1::uuid,$2::uuid,$3::text,$4::text) as state",
+    "select ops.engineering_fail_claim($1::uuid,$2::uuid,$3::text,$4::text) as state",
     [claim.job_id, claim.lease_token, failureClass, String(detail || "engineering controller failure").slice(0, 1000)],
   );
   return { job_id: claim.job_id, state: failure.rows[0]?.state || "failure_unreadable",
@@ -863,10 +890,11 @@ export async function runEngineeringWorker({ c, worker, desk, dispatchEnvelope, 
     try {
       if (claim.controller_error) error(ToolError, { error: claim.controller_error });
       const actor = controllerActor(claim, ToolError);
-      const { plan, slice } = controllerPlan(claim, ToolError);
+      const { plan, slice, jobLeaseExpiresAt } = controllerPlan(claim, ToolError);
       const task = { ...(claim.payload || {}), work_request: plan.work_request.id,
         job_ref: `job:${claim.job_id}`,
-        attempt_id: `attempt:${claim.attempt}`, engineering_plan: plan, engineering_slice: slice };
+        attempt_id: `attempt:${claim.attempt}`, claim_lease_expires_at: jobLeaseExpiresAt,
+        engineering_plan: plan, engineering_slice: slice };
       const receipt = await runCodexSlice({ dispatchEnvelope, desk, envelope: claim.envelope, task });
       if (!receipt || typeof receipt !== "object") throw new Error("Codex worker returned no typed receipt");
       persisted = await submitEngineeringReceipt(c, claim, receipt, actor, ToolError);

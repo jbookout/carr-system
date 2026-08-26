@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
 import uuid
@@ -24,6 +26,29 @@ def one(cur, query: str, params: tuple = ()):
     if row is None:
         raise RuntimeError("required row was not returned")
     return row
+
+
+def canonical_json(value):
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            json.dumps(key, ensure_ascii=False, separators=(",", ":")) + ":" + canonical_json(value[key])
+            for key in sorted(value)
+        ) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(canonical_json(item) for item in value) + "]"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def canonical_digest(value) -> str:
+    return "sha256:" + hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
 def refusal(cur, query: str, params: tuple, fragment: str) -> None:
@@ -210,6 +235,23 @@ def main() -> int:
                 (section_id, joe_id, Jsonb({"text": "SIEP B0 evidence fixture"}), "a" * 64),
             )[0]
             plan_digest = "sha256:" + "d" * 64
+            receipt_specs = {
+                "source": {"status": "pass", "operation": "source", "commit_sha": "a" * 40},
+                "tests": {"status": "pass", "operation": "tests", "result_digest": "sha256:" + "b" * 64},
+                "readback": {"status": "pass", "operation": "readback", "target_ref": "safe:local-pg:siep00"},
+                "rollback": {"status": "pass", "operation": "rollback", "recovery_ref": "safe:rollback:siep00"},
+                "independent_review": {"status": "pass", "operation": "independent_review",
+                                       "reviewed_artifact_digest": "sha256:" + "c" * 64},
+            }
+            plan_slices = [{
+                "declared_component_refs": [f"component:siep00:{kind}"],
+                "declared_resource_refs": [f"resource:siep00:{kind}"],
+                "planned_checks": [{
+                    "check_ref": f"check:siep00:{kind}",
+                    "evidence_requirement": "metadata_only_sufficient",
+                }],
+                "slice_ref": f"slice:siep00:{kind}",
+            } for kind in receipt_specs]
             plan_id = one(
                 cur,
                 """insert into ops.sourced_work_request_plan
@@ -228,7 +270,7 @@ def main() -> int:
                      (work_request_id,accepted_plan_id,accepted_plan_hash,work_request_version,plan_digest,plan,idempotency_key)
                      values (%s,%s,%s,5,%s,%s,%s) returning id""",
                 (wr00, plan_id, "sha256:" + "c" * 64, plan_digest,
-                 Jsonb({"plan_digest": plan_digest, "slices": []}), uuid.uuid4()),
+                 Jsonb({"plan_digest": plan_digest, "slices": plan_slices}), uuid.uuid4()),
             )[0]
             capability_session_id = one(
                 cur,
@@ -237,14 +279,6 @@ def main() -> int:
                      values (%s,%s,%s,%s,'siep-b0-gate','slice:siep-b0') returning id""",
                 (wr00, codex_id, joe_id, "e" * 40),
             )[0]
-            receipt_specs = {
-                "source": {"status": "pass", "operation": "source", "commit_sha": "a" * 40},
-                "tests": {"status": "pass", "operation": "tests", "result_digest": "sha256:" + "b" * 64},
-                "readback": {"status": "pass", "operation": "readback", "target_ref": "safe:local-pg:siep00"},
-                "rollback": {"status": "pass", "operation": "rollback", "recovery_ref": "safe:rollback:siep00"},
-                "independent_review": {"status": "pass", "operation": "independent_review",
-                                       "reviewed_artifact_digest": "sha256:" + "c" * 64},
-            }
             evidence: dict[str, tuple[uuid.UUID, str, str]] = {}
             evidence_jobs: dict[str, uuid.UUID] = {}
             for evidence_kind, values in receipt_specs.items():
@@ -262,19 +296,30 @@ def main() -> int:
                 )[0]
                 slice_ref = f"slice:siep00:{evidence_kind}"
                 envelope_digest = "sha256:" + uuid.uuid4().hex * 2
-                envelope_id = one(
+                envelope_id = uuid.uuid4()
+                envelope = {
+                    "agent_session": {"id": f"session:{capability_session_id}"},
+                    "envelope_id": f"env:{envelope_id}",
+                    "request": {"job_ref": f"job:{job_id}"},
+                    "server_binding": {
+                        "adapter": {"adapter_id": "adapter:codex-desktop"},
+                        "identity": {"agent_principal_id": "agent:codex"},
+                    },
+                    "work_request_id": f"wr:{wr00}",
+                    "state_binding": {"state_version": 5,
+                                      "canonical_record_digest": "sha256:" + "9" * 64},
+                }
+                one(
                     cur,
                     """insert into ops.engineering_execution_envelope
-                         (job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,
+                         (id,job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,
                           state_version,canonical_record_digest,envelope_digest,envelope,issued_at,expires_at)
-                         values (%s,%s,%s,%s,%s,%s,5,%s,%s,%s,now()-interval '1 minute',now()+interval '1 hour')
+                         values (%s,%s,%s,%s,%s,%s,%s,5,%s,%s,%s,now()-interval '1 minute',now()+interval '1 hour')
                          returning id""",
-                    (job_id, wr00, plan_id, slice_plan_id, slice_ref, capability_session_id,
+                    (envelope_id, job_id, wr00, plan_id, slice_plan_id, slice_ref, capability_session_id,
                      "sha256:" + "9" * 64, envelope_digest,
-                     Jsonb({"work_request_id": f"wr:{wr00}",
-                            "state_binding": {"state_version": 5,
-                                              "canonical_record_digest": "sha256:" + "9" * 64}})),
-                )[0]
+                     Jsonb(envelope)),
+                )
                 job_attempt_id = one(
                     cur,
                     """insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state,ended_at)
@@ -282,6 +327,37 @@ def main() -> int:
                     (job_id, "joe-authority-review" if evidence_kind == "independent_review" else "siep-b0-gate",
                      uuid.uuid4()),
                 )[0]
+                typed_evidence = {
+                    "content_digest": "sha256:" + "f" * 64,
+                    "redaction_class": "metadata_only",
+                    "ref": f"evidence:siep00:{evidence_kind}",
+                }
+                receipt_payload = {
+                    "actual_component_refs": [f"component:siep00:{evidence_kind}"],
+                    "actual_resource_refs": [f"resource:siep00:{evidence_kind}"],
+                    "artifact_refs": [f"artifact:siep00:{evidence_kind}"],
+                    "attribution": {"actor_ref": "agent:codex", "adapter_ref": "adapter:codex-desktop",
+                                    "session_ref": f"session:{capability_session_id}"},
+                    "attempt_id": "attempt:1",
+                    "checks": [{"check_ref": f"check:siep00:{evidence_kind}",
+                                "evidence_refs": [typed_evidence], "state": "passed"}],
+                    "deviations": [],
+                    "envelope_digest": envelope_digest,
+                    "evidence_refs": [typed_evidence],
+                    "executor_claim": {"claim_state": "executor_claim", "claimed_at": "2026-08-26T00:00:00Z",
+                                       "claimed_by": "codex"},
+                    "independent_verification_required": True,
+                    "outcome": "claimed_complete",
+                    "plan_digest": plan_digest,
+                    "planned_component_refs": [f"component:siep00:{evidence_kind}"],
+                    "planned_resource_refs": [f"resource:siep00:{evidence_kind}"],
+                    "reset_reconstruction": {"fresh_session": True, "inherited_transcript_used": False,
+                                             "reconstruction_free": True, "remediation_action": None},
+                    "schema_version": "engineering-slice-receipt.v1",
+                    "slice_ref": slice_ref,
+                    "source_evidence": {"branch_ref": "branch:siep00", "evidence_refs": [typed_evidence],
+                                        "source_sha": "e" * 40, "worktree_ref": "worktree:siep00"},
+                }
                 engineering_receipt_id = one(
                     cur,
                     """insert into ops.engineering_slice_receipt
@@ -289,16 +365,21 @@ def main() -> int:
                           executor_actor_id,receipt_digest,outcome,receipt)
                          values (%s,%s,%s,%s,'attempt:1',%s,%s,'claimed_complete',%s) returning id""",
                     (job_attempt_id, envelope_id, wr00, slice_ref, codex_id,
-                     "sha256:" + uuid.uuid4().hex * 2,
-                     Jsonb({"attempt_id": "attempt:1", "outcome": "claimed_complete"})),
+                     canonical_digest(receipt_payload), Jsonb(receipt_payload)),
                 )[0]
+                review_evidence = {**typed_evidence, "ref": f"evidence:siep00-review:{evidence_kind}"}
+                reviewer_fact = {
+                    "attempt_id": "attempt:1", "evidence_refs": [review_evidence], "is_independent": True,
+                    "resolved_deviation_refs": [], "reviewed_deviation_refs": [], "reviewer_ref": "joe",
+                    "session_ref": "session:siep00-review", "slice_ref": slice_ref, "state": "passed",
+                }
                 cur.execute(
                     """insert into ops.engineering_reviewer_fact
                          (receipt_id,work_request_id,slice_ref,reviewer_actor_id,reviewer_session_ref,
                           state,fact,idempotency_key)
                          values (%s,%s,%s,%s,'session:siep00-review','passed',%s,%s)""",
                     (engineering_receipt_id, wr00, slice_ref, joe_id,
-                     Jsonb({"reviewed_artifact_digest": envelope_digest}), uuid.uuid4()),
+                     Jsonb(reviewer_fact), uuid.uuid4()),
                 )
                 receipt_id = one(
                     cur,

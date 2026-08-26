@@ -111,10 +111,10 @@ function receiptRow(id, envelope_id, slice_ref, outcome, created_at, attempt_id 
   };
 }
 
-function envelopeRow(id, slice_ref, created_at) {
+function envelopeRow(id, slice_ref, created_at, supersedes_envelope_id = null) {
   const job_id = id.replace(/-/g, "").slice(0, 32);
   const envelope_digest = `sha256:${"e".repeat(64)}`;
-  return { id, job_id, agent_session_id: id, envelope_digest, work_request_id: source.work.id.replace(/^wr:/, ""), slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref, created_at,
+  return { id, job_id, agent_session_id: id, envelope_digest, work_request_id: source.work.id.replace(/^wr:/, ""), slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref, created_at, issued_at: created_at, supersedes_envelope_id,
     envelope: { envelope_id: `env:${id}`, request: { job_ref: `job:${job_id}` }, agent_session: { id: `session:${id}` },
       server_binding: { identity: { agent_principal_id: "agent:codex" }, adapter: { adapter_id: "adapter:codex-desktop" } } } };
 }
@@ -223,9 +223,9 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
     calls.push(sql);
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [fakeClaim] };
     if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: fakeClaim.envelope_id, job_id: fakeClaim.job_id, work_request_id: "11111111-1111-4111-8111-111111111111", issued_at: fakeClaim.envelope.issued_at, expires_at: fakeClaim.envelope.expires_at, agent_session_id: "99999999-9999-4999-8999-999999999999", agent_session_lease_expires_at: fakeClaim.envelope.agent_session.lease_expires_at, envelope: fakeClaim.envelope, envelope_digest: `sha256:${"a".repeat(64)}`, slice_ref: "slice:one" }] };
-    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: fakeClaim.envelope_id, envelope_digest: fakeClaim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: fakeClaim.envelope_id, envelope_digest: fakeClaim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug }, job_lease_expires_at: fakeClaim.envelope.expires_at } }] };
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts: passportFacts(typed) }] };
-    if (sql.includes("engineering_record_slice_receipt")) return { rows: [{ id: "receipt:one" }] };
+    if (sql.includes("engineering_finalize_slice_receipt")) return { rows: [{ id: "receipt:one" }] };
     return { rows: [] };
   } };
   const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: fakeClaim.envelope_digest, attempt_id: "attempt:1", slice_ref: "slice:one", plan_digest: typed.plan_digest, attribution: {}, planned_resource_refs: [], actual_resource_refs: [], planned_component_refs: [], actual_component_refs: [], checks: [{ check_ref: "check:one" }], artifact_refs: [], evidence_refs: [], deviations: [], source_evidence: {}, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false }, executor_claim: { claimed_by: "codex" }, independent_verification_required: true, outcome: "claimed_complete" };
@@ -234,12 +234,13 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
   assert.deepEqual(calls.find(row => row.options)?.options, { fresh: true });
   assert.equal(calls.find(row => row.options)?.task.engineering_plan.plan_digest, typed.plan_digest);
   assert.equal(calls.find(row => row.options)?.task.work_request, typed.work_request.id);
+  assert.equal(calls.find(row => row.options)?.task.claim_lease_expires_at, fakeClaim.envelope.expires_at);
   assert.ok(!calls.some(sql => typeof sql === "string" && /from ops\.work_request/i.test(sql)));
   assert.equal(calls.filter(sql => typeof sql === "string" && /ops\.(?:complete_job|fail_job)/.test(sql)).length, 0,
     "runtime must leave post-receipt job finalization to the transactional database seam");
 });
 
-test("a persisted receipt survives controller readback failure without a compensating fail_job", async () => {
+test("an atomically finalized receipt survives controller readback failure without a compensating scoped failure", async () => {
   const typed = controllerPlan();
   const claim = { definition_key: "engineering-slice", job_id: "66666666-6666-4666-8666-666666666666", attempt: 1, lease_token: "77777777-7777-4777-8777-777777777777", envelope_id: "88888888-8888-4888-8888-888888888888", envelope: currentClaimEnvelope(), envelope_digest: `sha256:${"a".repeat(64)}`, payload: { work_request: "WR-301", slice_ref: "slice:one", plan_digest: typed.plan_digest } };
   const calls = [];
@@ -248,14 +249,14 @@ test("a persisted receipt survives controller readback failure without a compens
     calls.push(sql);
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
     if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: claim.envelope_id, job_id: claim.job_id, work_request_id: "11111111-1111-4111-8111-111111111111", issued_at: claim.envelope.issued_at, expires_at: claim.envelope.expires_at, agent_session_id: "99999999-9999-4999-8999-999999999999", agent_session_lease_expires_at: claim.envelope.agent_session.lease_expires_at, envelope: claim.envelope, envelope_digest: claim.envelope_digest, slice_ref: "slice:one" }] };
-    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug }, job_lease_expires_at: claim.envelope.expires_at } }] };
     if (sql.includes("work_request w")) return { rows: [{ ref: "WR-301" }] };
     if (sql.includes("engineering_passport_facts")) {
       if (receiptPersisted) throw new Error("readback database unavailable");
       return { rows: [{ facts: { source: { work_request: source.work, accepted_plan: source.plan }, slice_plans: [{ accepted_plan_id: source.plan.record_id, accepted_plan_hash: source.plan.digest, plan: typed }], envelopes: [], receipts: [], reviewer_facts: [] } }] };
     }
-    if (sql.includes("engineering_record_slice_receipt")) { receiptPersisted = true; return { rows: [{ id: "receipt:one" }] }; }
-    if (sql.includes("ops.fail_job")) return { rows: [{ state: "retry_wait" }] };
+    if (sql.includes("engineering_finalize_slice_receipt")) { receiptPersisted = true; return { rows: [{ id: "receipt:one" }] }; }
+    if (sql.includes("ops.engineering_fail_claim")) return { rows: [{ state: "retry_wait" }] };
     return { rows: [] };
   } };
   const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: claim.envelope_digest, attempt_id: "attempt:1", slice_ref: "slice:one", plan_digest: typed.plan_digest, attribution: {}, planned_resource_refs: [], actual_resource_refs: [], planned_component_refs: [], actual_component_refs: [], checks: [{ check_ref: "check:one" }], artifact_refs: [], evidence_refs: [], deviations: [], source_evidence: {}, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false }, executor_claim: { claimed_by: "codex" }, independent_verification_required: true, outcome: "claimed_complete" };
@@ -263,7 +264,7 @@ test("a persisted receipt survives controller readback failure without a compens
     dispatchEnvelope: async () => receipt });
   assert.equal(result.results[0].ok, true);
   assert.deepEqual(result.results[0].operator_readback, { state: "unavailable", reason: "readback_failed" });
-  assert.equal(calls.filter(sql => typeof sql === "string" && sql.includes("ops.fail_job")).length, 0);
+  assert.equal(calls.filter(sql => typeof sql === "string" && sql.includes("ops.engineering_fail_claim")).length, 0);
 });
 
 test("a failed cleanup lease is reported as cleanup_deferred without redispatch", async () => {
@@ -275,8 +276,8 @@ test("a failed cleanup lease is reported as cleanup_deferred without redispatch"
     calls.push(sql);
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
     if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: claim.envelope_id, job_id: claim.job_id, work_request_id: "11111111-1111-4111-8111-111111111111", issued_at: claim.envelope.issued_at, expires_at: claim.envelope.expires_at, agent_session_id: "99999999-9999-4999-8999-999999999999", agent_session_lease_expires_at: claim.envelope.agent_session.lease_expires_at, envelope: claim.envelope, envelope_digest: claim.envelope_digest }] };
-    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
-    if (sql.includes("ops.fail_job")) throw new Error("lease already lost");
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug }, job_lease_expires_at: claim.envelope.expires_at } }] };
+    if (sql.includes("ops.engineering_fail_claim")) throw new Error("lease already lost");
     return { rows: [] };
   } };
   const result = await runEngineeringWorker({ c, worker: "engineering-worker", desk: "engineering-codex", ToolError: Error,
@@ -295,8 +296,8 @@ test("a controller dispatch failure records the canonical retry receipt without 
     calls.push(sql);
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
     if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: claim.envelope_id, job_id: claim.job_id, work_request_id: "11111111-1111-4111-8111-111111111111", issued_at: claim.envelope.issued_at, expires_at: claim.envelope.expires_at, agent_session_id: "99999999-9999-4999-8999-999999999999", agent_session_lease_expires_at: claim.envelope.agent_session.lease_expires_at, envelope: claim.envelope, envelope_digest: claim.envelope_digest }] };
-    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
-    if (sql.includes("ops.fail_job")) return { rows: [{ state: "retry_wait" }] };
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug }, job_lease_expires_at: claim.envelope.expires_at } }] };
+    if (sql.includes("ops.engineering_fail_claim")) return { rows: [{ state: "retry_wait" }] };
     return { rows: [] };
   } };
   let dispatched = 0;
@@ -305,7 +306,7 @@ test("a controller dispatch failure records the canonical retry receipt without 
   assert.equal(dispatched, 1);
   assert.equal(result.completed, 0);
   assert.deepEqual(result.results[0], { job_id: claim.job_id, state: "retry_wait", failure_class: "engineering_dispatch_failed" });
-  assert.equal(calls.filter(sql => typeof sql === "string" && sql.includes("ops.fail_job")).length, 1);
+  assert.equal(calls.filter(sql => typeof sql === "string" && sql.includes("ops.engineering_fail_claim")).length, 1);
 });
 
 test("the controller fails closed without launching Codex when post-claim currentness is invalid", async () => {
@@ -317,14 +318,14 @@ test("the controller fails closed without launching Codex when post-claim curren
     calls.push(sql);
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
     if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: claim.envelope_id, agent_session_id: "99999999-9999-4999-8999-999999999999", agent_session_lease_expires_at: "2000-01-01T00:00:00Z", envelope, envelope_digest: claim.envelope_digest }] };
-    if (sql.includes("ops.fail_job")) return { rows: [{ state: "retry_wait" }] };
+    if (sql.includes("ops.engineering_fail_claim")) return { rows: [{ state: "retry_wait" }] };
     return { rows: [] };
   } };
   let launched = 0;
   const result = await runEngineeringWorker({ c, worker: "engineering-worker", desk: "engineering-codex", ToolError: Error, dispatchEnvelope: async () => { launched += 1; return {}; } });
   assert.equal(launched, 0);
   assert.equal(result.completed, 0);
-  assert.equal(calls.filter(sql => typeof sql === "string" && sql.includes("ops.fail_job")).length, 1);
+  assert.equal(calls.filter(sql => typeof sql === "string" && sql.includes("ops.engineering_fail_claim")).length, 1);
 });
 
 test("the controller chooses the newest immutable successor envelope for an idempotent job", async () => {
@@ -337,8 +338,8 @@ test("the controller chooses the newest immutable successor envelope for an idem
       envelopeQuery = sql;
       return { rows: [{ id: claim.envelope_id, job_id: claim.job_id, work_request_id: "11111111-1111-4111-8111-111111111111", issued_at: claim.envelope.issued_at, expires_at: claim.envelope.expires_at, agent_session_id: "99999999-9999-4999-8999-999999999999", agent_session_lease_expires_at: claim.envelope.agent_session.lease_expires_at, envelope: claim.envelope, envelope_digest: claim.envelope_digest }] };
     }
-    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
-    if (sql.includes("ops.fail_job")) return { rows: [{ state: "retry_wait" }] };
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug }, job_lease_expires_at: claim.envelope.expires_at } }] };
+    if (sql.includes("ops.engineering_fail_claim")) return { rows: [{ state: "retry_wait" }] };
     return { rows: [] };
   } };
   await runEngineeringWorker({ c, worker: "engineering-worker", desk: "engineering-codex", ToolError: Error,
@@ -349,7 +350,7 @@ test("the controller chooses the newest immutable successor envelope for an idem
 test("dependency admission binds the pass to the newest exact receipt and does not open a write path on refusal", async () => {
   const plan = typedEngineeringPlan([engineeringSlice("slice:one", 1), engineeringSlice("slice:two", 2, ["slice:one"])]);
   const oldEnvelope = envelopeRow("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "slice:one", "2026-08-26T00:00:01Z");
-  const newEnvelope = envelopeRow("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "slice:one", "2026-08-26T00:00:02Z");
+  const newEnvelope = envelopeRow("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "slice:one", "2026-08-26T00:00:02Z", oldEnvelope.id);
   const oldReceipt = bindReceiptLineage(receiptRow("cccccccc-cccc-4ccc-8ccc-cccccccccccc", oldEnvelope.id, "slice:one", "failed", "2026-08-26T00:00:03Z"), plan, oldEnvelope);
   const newReceipt = bindReceiptLineage(receiptRow("dddddddd-dddd-4ddd-8ddd-dddddddddddd", newEnvelope.id, "slice:one", "claimed_complete", "2026-08-26T00:00:04Z"), plan, newEnvelope);
   const facts = passportFacts(plan, {
@@ -391,8 +392,8 @@ test("dependency admission binds the pass to the newest exact receipt and does n
 test("closure projection is generation-aware: exact review completes, unreviewed successor blocks, later failure reopens", () => {
   const plan = typedEngineeringPlan([engineeringSlice("slice:one", 1)]);
   const e1 = envelopeRow("11111111-1111-4111-8111-111111111111", "slice:one", "2026-08-26T00:00:01Z");
-  const e2 = envelopeRow("22222222-2222-4222-8222-222222222222", "slice:one", "2026-08-26T00:00:03Z");
-  const e3 = envelopeRow("33333333-3333-4333-8333-333333333333", "slice:one", "2026-08-26T00:00:05Z");
+  const e2 = envelopeRow("22222222-2222-4222-8222-222222222222", "slice:one", "2026-08-26T00:00:03Z", e1.id);
+  const e3 = envelopeRow("33333333-3333-4333-8333-333333333333", "slice:one", "2026-08-26T00:00:05Z", e2.id);
   const failed = bindReceiptLineage(receiptRow("44444444-4444-4444-8444-444444444444", e1.id, "slice:one", "failed", "2026-08-26T00:00:02Z"), plan, e1);
   const success = bindReceiptLineage(receiptRow("55555555-5555-4555-8555-555555555555", e2.id, "slice:one", "claimed_complete", "2026-08-26T00:00:04Z"), plan, e2);
   const laterFailed = bindReceiptLineage(receiptRow("66666666-6666-4666-8666-666666666666", e3.id, "slice:one", "failed", "2026-08-26T00:00:06Z"), plan, e3);
@@ -405,17 +406,33 @@ test("closure projection is generation-aware: exact review completes, unreviewed
   assert.deepEqual(verified.receipts, [failed.receipt, success.receipt, laterFailed.receipt]);
   assert.deepEqual(verified.reviewer_facts, [oldPass.fact, exactPass.fact]);
 
-  const unreviewed = closureProjection({ ...base, receipts: [failed, success], reviewer_facts: [oldPass] }, Error);
+  const throughSuccess = passportFacts(plan, { envelopes: [e1, e2], receipts: [failed, success], reviewer_facts: [oldPass] });
+  const unreviewed = closureProjection(throughSuccess, Error);
   assert.equal(unreviewed.slices[0].state, "claimed");
   assert.equal(unreviewed.closure_state, "blocked");
   assert.deepEqual(unreviewed.receipts, [failed.receipt, success.receipt]);
   assert.deepEqual(unreviewed.reviewer_facts, [oldPass.fact]);
 
-  const exact = closureProjection({ ...base, receipts: [failed, success], reviewer_facts: [oldPass, exactPass] }, Error);
+  const exact = closureProjection({ ...throughSuccess, reviewer_facts: [oldPass, exactPass] }, Error);
   assert.equal(exact.slices[0].state, "verified_complete");
   assert.equal(exact.closure_state, "complete");
   assert.deepEqual(exact.receipts, [failed.receipt, success.receipt]);
   assert.deepEqual(exact.reviewer_facts, [oldPass.fact, exactPass.fact]);
+
+  const staleFacts = structuredClone({ ...throughSuccess, reviewer_facts: [oldPass, exactPass] });
+  staleFacts.source.work_request.version += 1;
+  staleFacts.source.work_request.canonical_record_digest = `sha256:${"f".repeat(64)}`;
+  const stale = closureProjection(staleFacts, Error);
+  assert.deepEqual(stale.work_request, plan.work_request, "a stale projection must remain bound to its registered plan");
+  assert.equal(stale.slices[0].state, "claimed");
+  assert.equal(stale.closure_state, "blocked");
+  assert.equal(stale.closure.release.state, "unresolved");
+  assert.equal(stale.stale_conflict.state, "stale");
+  assert.match(stale.stale_conflict.reason, /no longer matches/);
+
+  const noReceiptSuccessor = closureProjection({ ...base, receipts: [failed, success], reviewer_facts: [oldPass, exactPass] }, Error);
+  assert.equal(noReceiptSuccessor.slices[0].state, "eligible", "an unsuperseded leaf without a receipt must fence an older reviewed pass");
+  assert.equal(noReceiptSuccessor.closure_state, "blocked");
 });
 
 test("dependency preflight and closure fail closed on malformed latest receipt or reviewer lineage", async () => {
@@ -472,7 +489,7 @@ test("dependency preflight and closure fail closed on malformed latest receipt o
 test("malformed newer relational receipt cannot fall back to an older verified generation", async () => {
   const plan = typedEngineeringPlan([engineeringSlice("slice:one", 1), engineeringSlice("slice:two", 2, ["slice:one"])]);
   const oldEnvelope = envelopeRow("11111111-1111-4111-8111-111111111111", "slice:one", "2026-08-26T00:00:01Z");
-  const newEnvelope = envelopeRow("22222222-2222-4222-8222-222222222222", "slice:one", "2026-08-26T00:00:03Z");
+  const newEnvelope = envelopeRow("22222222-2222-4222-8222-222222222222", "slice:one", "2026-08-26T00:00:03Z", oldEnvelope.id);
   const oldReceipt = bindReceiptLineage(receiptRow("33333333-3333-4333-8333-333333333333", oldEnvelope.id, "slice:one", "claimed_complete", "2026-08-26T00:00:02Z"), plan, oldEnvelope);
   const malformedNewReceipt = bindReceiptLineage(receiptRow("44444444-4444-4444-8444-444444444444", newEnvelope.id, "slice:one", "claimed_complete", "2026-08-26T00:00:04Z"), plan, newEnvelope);
   malformedNewReceipt.receipt.attribution.session_ref = "session:wrong";
@@ -542,7 +559,7 @@ test("successful admission persists its event through the injected writer", asyn
   assert.equal(events[0][2], "admit-engineering-slice");
 });
 
-test("admission replaces a stale read-only envelope with a new immutable generation", async () => {
+test("admission replaces a stale read-only envelope whose prior job is terminal with a new immutable generation", async () => {
   const item = {
     slice_ref: "slice:one", ordinal: 1, objective: "Do the bounded work", definition_of_done: "A typed receipt exists",
     dependency_refs: [], declared_resource_refs: [], declared_component_refs: [], declared_plan_step_refs: [],
@@ -578,9 +595,9 @@ test("admission replaces a stale read-only envelope with a new immutable generat
   const lockOrder = [];
   const c = { query: async (sql, params = []) => {
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
-    if (sql.includes("select id, job_id, work_request_id, accepted_plan_id, slice_plan_id, slice_ref, agent_session_id, envelope")) {
+    if (sql.includes("from ops.engineering_execution_envelope e")) {
       lockOrder.push("prior-binding");
-      return { rows: [{ id: priorId, job_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", work_request_id: source.work.id.replace(/^wr:/, ""), accepted_plan_id: source.plan.record_id, slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref: item.slice_ref, agent_session_id: priorSession, envelope: legacy }] };
+      return { rows: [{ id: priorId, job_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", work_request_id: source.work.id.replace(/^wr:/, ""), accepted_plan_id: source.plan.record_id, slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref: item.slice_ref, agent_session_id: priorSession, envelope: legacy, job_state: "dead_lettered" }] };
     }
     if (sql.includes("pg_advisory_xact_lock")) { lockOrder.push("lineage-advisory"); return { rows: [] }; }
     if (sql.includes("where s.id=$1::uuid for update of s")) {
@@ -650,8 +667,8 @@ test("admission rejects a stale read-only envelope bound to a verification sessi
   const c = { query: async (sql, params = []) => {
     calls.push(sql);
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
-    if (sql.includes("select id, job_id, work_request_id, accepted_plan_id, slice_plan_id, slice_ref, agent_session_id, envelope"))
-      return { rows: [{ id: priorId, job_id: priorJob, work_request_id: source.work.id.replace(/^wr:/, ""), accepted_plan_id: source.plan.record_id, slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref: item.slice_ref, agent_session_id: priorSession, envelope: legacy }] };
+    if (sql.includes("from ops.engineering_execution_envelope e"))
+      return { rows: [{ id: priorId, job_id: priorJob, work_request_id: source.work.id.replace(/^wr:/, ""), accepted_plan_id: source.plan.record_id, slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref: item.slice_ref, agent_session_id: priorSession, envelope: legacy, job_state: "dead_lettered" }] };
     if (sql.includes("where s.id=$1::uuid for update of s")) {
       provenanceParams = params;
       return { rows: [{ id: priorSession, work_request_id: source.work.id.replace(/^wr:/, ""), executor_actor_id: actor.id,

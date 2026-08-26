@@ -196,7 +196,7 @@ def receipt(cur, fixture, claim, outcome):
     envelope_id, codex_id = fixture[1], fixture[3]
     payload = receipt_payload(cur, fixture, claim, outcome)
     cur.execute(
-        "select * from ops.engineering_record_slice_receipt(%s::uuid,%s::uuid,%s::jsonb,%s::text,%s::uuid)",
+        "select * from ops.engineering_finalize_slice_receipt(%s::uuid,%s::uuid,%s::jsonb,%s::text,%s::uuid)",
         (envelope_id, claim[1], Jsonb(payload), canonical_digest(payload), codex_id),
     )
     return one(cur, "select id from ops.engineering_slice_receipt where envelope_id=%s", (envelope_id,))[0]
@@ -214,7 +214,7 @@ def refused_receipt(cur, fixture, claim, mutate=None, digest=AUTO_DIGEST):
         digest = canonical_digest(payload)
     cur.execute("savepoint engineering_receipt_refusal")
     try:
-        cur.execute("select * from ops.engineering_record_slice_receipt(%s::uuid,%s::uuid,%s::jsonb,%s::text,%s::uuid)",
+        cur.execute("select * from ops.engineering_finalize_slice_receipt(%s::uuid,%s::uuid,%s::jsonb,%s::text,%s::uuid)",
                     (envelope_id, claim[1], Jsonb(payload), digest, codex_id))
     except psycopg.Error as exc:
         if not str(exc).strip():
@@ -419,30 +419,44 @@ def assert_static_contract():
         path.read_text() for path in (ROOT / "migrations").glob("*_engineering*.sql")
     )
     runtime = (ROOT / "mcp-server/src/engineering-runtime.js").read_text()
-    body = migration[migration.index("create or replace function ops.engineering_record_slice_receipt"):]
-    positions = [
-        body.index("pg_advisory_xact_lock"),
-        body.index("from ops.capability_agent_session where id=e.agent_session_id for update"),
-        body.index("select * into j from ops.job"),
-        body.index("select * into a from ops.job_attempt"),
-        body.index("v_checked_at := clock_timestamp()"),
-        body.index("v_append_at := clock_timestamp()"),
-        body.index("insert into ops.engineering_slice_receipt"),
-        body.index("perform ops.complete_job"),
-        body.index("perform ops.fail_job"),
-        body.index("update ops.capability_agent_session"),
+    raw_body = migration[migration.index("create or replace function ops.engineering_record_slice_receipt"):
+                         migration.index("create or replace function ops.engineering_finalize_slice_receipt")]
+    raw_positions = [
+        raw_body.index("pg_advisory_xact_lock"),
+        raw_body.index("from ops.capability_agent_session where id=e.agent_session_id for update"),
+        raw_body.index("select * into j from ops.job"),
+        raw_body.index("select * into a from ops.job_attempt"),
+        raw_body.index("v_checked_at := clock_timestamp()"),
+        raw_body.index("v_append_at := clock_timestamp()"),
+        raw_body.index("insert into ops.engineering_slice_receipt"),
     ]
-    if positions != sorted(positions):
-        raise RuntimeError("receipt seam lost global lineage -> session -> job -> attempt -> clock -> append -> session retirement ordering")
-    if body.count("clock_timestamp()") < 2:
+    if raw_positions != sorted(raw_positions):
+        raise RuntimeError("raw receipt validator lost global lineage -> session -> job -> attempt -> clock -> append ordering")
+    if raw_body.count("clock_timestamp()") < 2:
         raise RuntimeError("receipt seam must sample clock_timestamp after locks and again before append")
-    if body.index("v_append_at := clock_timestamp()") < body.index("engineering receipt typed contract is invalid"):
+    if raw_body.index("v_append_at := clock_timestamp()") < raw_body.index("engineering receipt typed contract is invalid"):
         raise RuntimeError("receipt seam samples append currentness before typed validation")
-    retirement = body.index("update ops.capability_agent_session")
-    if body.index("set state='cancelled'", retirement) < retirement:
-        raise RuntimeError("receipt seam lost exact session cancellation after job finalization")
-    if body.rfind("if receipt_outcome='claimed_complete' then", 0, retirement) < body.index("end if;", body.index("perform ops.fail_job")):
-        raise RuntimeError("receipt seam retires the exact session outside the claimed_complete branch")
+    finalizer = migration[migration.index("create or replace function ops.engineering_finalize_slice_receipt"):
+                          migration.index("create or replace function ops.engineering_fail_claim")]
+    if "ops.complete_job(" in finalizer or "ops.fail_job(" in finalizer:
+        raise RuntimeError("atomic Engineering finalizer calls a newly fenced generic terminal door")
+    success = finalizer[finalizer.index("if row.outcome='claimed_complete' then"):finalizer.index("else")]
+    success_positions = [
+        success.index("update ops.job_attempt"),
+        success.index("update ops.job set state='succeeded'"),
+        success.index("insert into ops.job_receipt"),
+        success.index("update ops.capability_agent_session"),
+    ]
+    if success_positions != sorted(success_positions) or "set state='cancelled'" not in success:
+        raise RuntimeError("claimed-complete finalization lost attempt -> job -> receipt -> exact-session retirement ordering")
+    noncomplete = finalizer[finalizer.index("else"):finalizer.rindex("end if;")]
+    noncomplete_positions = [
+        noncomplete.index("update ops.job_attempt"),
+        noncomplete.index("update ops.job set state=terminal_state"),
+        noncomplete.index("insert into ops.job_receipt"),
+    ]
+    if noncomplete_positions != sorted(noncomplete_positions) or "update ops.capability_agent_session" in noncomplete:
+        raise RuntimeError("non-complete receipt path changed ordering or retired the reusable session")
     if not re.search(r"p_generation\s+is\s+null", migration, re.I):
         raise RuntimeError("enqueue seam does not reject a null generation")
     if not re.search(r"jsonb_typeof\(p_receipt->'deviations'\)\s+is\s+distinct\s+from\s+'array'", migration, re.I):
@@ -458,12 +472,12 @@ def assert_static_contract():
         raise RuntimeError("runtime still owns post-receipt job finalization")
     if not re.search(r"(?:v\.receipt_id\s*=\s*r\.id|review\.receipt_id\s*=\s*receipt\.id)", engineering_migrations, re.I):
         raise RuntimeError("dependent admission does not bind reviewer receipt_id to the exact receipt row")
-    if not re.search(r"(?:order\s+by\s+r\.created_at\s+desc\s*,\s*r\.id\s+desc[\s\S]{0,160}limit\s+1|newer_receipt\.created_at\s*,\s*newer_receipt\.id\)\s*>\s*\(receipt\.created_at\s*,\s*receipt\.id\))", engineering_migrations, re.I):
-        raise RuntimeError("database passport projection does not select the latest receipt generation")
+    if not re.search(r"successor\.supersedes_envelope_id\s*=\s*envelope\.id[\s\S]*successor\.supersedes_envelope_id\s*=\s*leaf\.id", engineering_migrations, re.I):
+        raise RuntimeError("database dependency admission does not require one unsuperseded envelope leaf")
     if not re.search(r"create\s+(?:or\s+replace\s+)?function\s+ops\.[A-Za-z0-9_]*(?:review|reviewer|fact)[A-Za-z0-9_]*|create\s+trigger\s+[A-Za-z0-9_]*(?:review|reviewer|fact)[A-Za-z0-9_]*", engineering_migrations, re.I):
         raise RuntimeError("reviewer facts lack a database trigger/guard")
-    if "latestReceiptForSlice" not in runtime or ".sort(compareCanonicalGeneration).at(-1)" not in runtime:
-        raise RuntimeError("runtime projection/admission does not use latest immutable receipt semantics")
+    if "latestReceiptForSlice" not in runtime or "leaves.length !== 1" not in runtime or "successor.supersedes_envelope_id === envelope.id" not in runtime:
+        raise RuntimeError("runtime projection/admission does not require one unsuperseded envelope leaf")
     if "row.receipt_id === receiptRow.id" not in runtime:
         raise RuntimeError("runtime reviewer admission does not pin the exact receipt identifier")
 
@@ -923,6 +937,8 @@ def main():
             duplicate_deviation = fixture(cur, slice_refs=(duplicate_deviation_a_ref, duplicate_deviation_b_ref), slice_dependencies={duplicate_deviation_b_ref: [duplicate_deviation_a_ref]})
             retry = fixture(cur)
             dead = fixture(cur)
+            scoped_retry = fixture(cur)
+            scoped_dead = fixture(cur)
             stale = fixture(cur)
             hold_admission = fixture(cur)
             hold_reverse = fixture(cur)
@@ -962,6 +978,7 @@ def main():
                 (fixture(cur), lambda payload: None),  # explicit valid but mismatched receipt digest
             ]
             cur.execute("update ops.job set max_attempts=1 where id=%s", (dead[0],))
+            cur.execute("update ops.job set max_attempts=1 where id=%s", (scoped_dead[0],))
             # 0325 cast this authority flag directly to boolean while deciding
             # whether a live predecessor could be superseded.  The malformed
             # historical row must now be treated as ineligible and replaced,
@@ -974,7 +991,7 @@ def main():
             reset_role(cur)
         conn.commit()  # committed fixtures are required for the peer connections below
 
-        isolation_ids = [good[0], dag_a[0], lineage_a[0], weak_missing[0], weak_malformed[0], malformed_deviation[0], malformed_envelope[0], duplicate_deviation[0], retry[0], dead[0], stale[0], hold_admission[0], hold_reverse[0], hold_successor[0], malformed_read_only[0], malformed_read_only_successor[0]] + [row[0][0] for row in negative_fixtures]
+        isolation_ids = [good[0], dag_a[0], lineage_a[0], weak_missing[0], weak_malformed[0], malformed_deviation[0], malformed_envelope[0], duplicate_deviation[0], retry[0], dead[0], scoped_retry[0], scoped_dead[0], stale[0], hold_admission[0], hold_reverse[0], hold_successor[0], malformed_read_only[0], malformed_read_only_successor[0]] + [row[0][0] for row in negative_fixtures]
         with conn.cursor() as cur:
             if one(cur, "select supersedes_envelope_id from ops.engineering_execution_envelope where id=%s", (malformed_read_only_successor[1],))[0] != malformed_read_only[1]:
                 raise RuntimeError("malformed read_only predecessor was not superseded by the exact successor")
@@ -989,6 +1006,8 @@ def main():
         duplicate_deviation_claim = claim_one(conn, duplicate_deviation[0], "engineering-controller-duplicate-deviation", isolation_ids)
         retry_claim = claim_one(conn, retry[0], "engineering-controller-receipt-retry", isolation_ids)
         dead_claim = claim_one(conn, dead[0], "engineering-controller-receipt-dead", isolation_ids)
+        scoped_retry_claim = claim_one(conn, scoped_retry[0], "engineering-controller-scoped-retry", isolation_ids)
+        scoped_dead_claim = claim_one(conn, scoped_dead[0], "engineering-controller-scoped-dead", isolation_ids)
         stale_claim = claim_one(conn, stale[0], "engineering-controller-receipt-stale", isolation_ids)
         hold_claim = claim_one(conn, hold_admission[0], "engineering-controller-lock-admission", isolation_ids)
         reverse_claim = claim_one(conn, hold_reverse[0], "engineering-controller-lock-reverse", isolation_ids)
@@ -1015,6 +1034,22 @@ def main():
                 refused_receipt(cur, fixture_row, negative_claims[index], mutate, receipt_digest)
                 reset_role(cur)
             conn.commit()
+
+        with conn.cursor() as cur:
+            work_request_id = one(cur, "select work_request_id from ops.engineering_execution_envelope where id=%s", (good[1],))[0]
+            cur.execute("savepoint engineering_work_request_reservation")
+            try:
+                cur.execute("update ops.work_request set title=title||' stale' where id=%s", (work_request_id,))
+            except psycopg.Error as exc:
+                if "reserved by a live Engineering claim" not in str(exc):
+                    raise RuntimeError(f"live Engineering Work Request reservation returned the wrong refusal: {exc}") from exc
+                cur.execute("rollback to savepoint engineering_work_request_reservation")
+                cur.execute("release savepoint engineering_work_request_reservation")
+            else:
+                cur.execute("rollback to savepoint engineering_work_request_reservation")
+                cur.execute("release savepoint engineering_work_request_reservation")
+                raise RuntimeError("live Engineering claim did not reserve Work Request currentness")
+        conn.commit()
 
         with conn.cursor() as cur:
             set_jobs(cur)
@@ -1057,15 +1092,48 @@ def main():
             conn.commit()
             with conn.cursor() as cur:
                 if one(cur, "select state from ops.job where id=%s", (fixture_row[0],))[0] != expected_state:
-                    raise RuntimeError(f"noncomplete receipt did not call fail_job into {expected_state}")
+                    raise RuntimeError(f"noncomplete receipt did not finalize atomically into {expected_state}")
                 if one(cur, "select count(*) from ops.engineering_slice_receipt where envelope_id=%s", (fixture_row[1],))[0] != 1:
                     raise RuntimeError("noncomplete receipt was not appended exactly once")
                 if one(cur, "select state from ops.capability_agent_session where id=%s", (fixture_row[2],))[0] not in ("claimed", "in_progress"):
                     raise RuntimeError("noncomplete receipt incorrectly retired its exact server session")
 
+        retry_success_claim = claim_one(conn, retry[0], "engineering-controller-receipt-retry-success", isolation_ids)
+        with conn.cursor() as cur:
+            set_jobs(cur)
+            receipt(cur, retry, retry_success_claim, "claimed_complete")
+            reset_role(cur)
+        conn.commit()
+        with conn.cursor() as cur:
+            if one(cur, "select state from ops.job where id=%s", (retry[0],))[0] != "succeeded":
+                raise RuntimeError("noncomplete Engineering attempt could not retry to success")
+            if one(cur, "select count(*) from ops.engineering_slice_receipt where envelope_id=%s", (retry[1],))[0] != 2:
+                raise RuntimeError("retry-to-success did not preserve both immutable typed receipts")
+            if one(cur, "select state from ops.capability_agent_session where id=%s", (retry[2],))[0] != "cancelled":
+                raise RuntimeError("retry-to-success did not retire the exact session only after success")
+
+        for fixture_row, claim_row, expected_state in (
+                (scoped_retry, scoped_retry_claim, "retry_wait"),
+                (scoped_dead, scoped_dead_claim, "dead_lettered")):
+            with conn.cursor() as cur:
+                set_jobs(cur)
+                state = one(cur, "select ops.engineering_fail_claim(%s,%s,'engineering_adapter_failed','scoped gate failure')",
+                            (fixture_row[0], claim_row[1]))[0]
+                reset_role(cur)
+            conn.commit()
+            with conn.cursor() as cur:
+                if state != expected_state or one(cur, "select state from ops.job where id=%s", (fixture_row[0],))[0] != expected_state:
+                    raise RuntimeError(f"scoped Engineering failure did not transition into {expected_state}")
+                if one(cur, "select count(*) from ops.engineering_slice_receipt where envelope_id=%s", (fixture_row[1],))[0] != 0:
+                    raise RuntimeError("receipt-less scoped failure appended a typed Engineering receipt")
+                if one(cur, "select state from ops.capability_agent_session where id=%s", (fixture_row[2],))[0] not in ("claimed", "in_progress"):
+                    raise RuntimeError("receipt-less scoped failure retired the reusable session")
+                if one(cur, "select count(*) from ops.job_receipt where job_id=%s", (fixture_row[0],))[0] != 1:
+                    raise RuntimeError("receipt-less scoped failure did not append one canonical job receipt")
+
         with conn.cursor() as cur:
             complete_receipt_id = one(cur, "select id from ops.engineering_slice_receipt where envelope_id=%s", (good[1],))[0]
-            failed_receipt_id = one(cur, "select id from ops.engineering_slice_receipt where envelope_id=%s", (retry[1],))[0]
+            failed_receipt_id = one(cur, "select id from ops.engineering_slice_receipt where envelope_id=%s and outcome='failed'", (retry[1],))[0]
             assert_reviewer_fact_guards(cur, good, retry, complete_receipt_id, failed_receipt_id)
             assert_weak_receipt_review_refused(cur, weak_missing, weak_missing_claim, lambda payload: payload.pop("attribution"), "reviewer missing receipt attribution")
             assert_weak_receipt_review_refused(cur, weak_malformed, weak_malformed_claim, lambda payload: payload["attribution"].__setitem__("session_ref", "session:wrong"), "reviewer malformed receipt session")
@@ -1088,6 +1156,27 @@ def main():
             lineage_successor = insert_successor(cur, lineage_a, cancel_prior=True)
         conn.commit()
         lineage_successor_claim = claim_one(conn, lineage_successor[0], "engineering-controller-lineage-successor", isolation_ids + [lineage_successor[0]])
+        with conn.cursor() as cur:
+            work_ref = one(cur, "select ref from ops.work_request where id=(select work_request_id from ops.engineering_execution_envelope where id=%s)", (lineage_successor[1],))[0]
+            cur.execute("set local role carr_writer")
+            cur.execute("savepoint lineage_no_receipt_refusal")
+            try:
+                cur.execute("select * from ops.engineering_enqueue_slice_job(%s,%s,%s,%s,%s)",
+                            (work_ref, lineage_b_ref, lineage_a[4], f"lineage-before-successor-receipt:{uuid.uuid4()}", 1))
+            except psycopg.Error as exc:
+                if "depend" not in str(exc).lower() and "verified" not in str(exc).lower():
+                    raise RuntimeError(f"no-receipt same-slice successor returned the wrong refusal: {exc}") from exc
+                cur.execute("rollback to savepoint lineage_no_receipt_refusal")
+                cur.execute("release savepoint lineage_no_receipt_refusal")
+            else:
+                cur.execute("rollback to savepoint lineage_no_receipt_refusal")
+                cur.execute("release savepoint lineage_no_receipt_refusal")
+                raise RuntimeError("dependent B was admitted from a successor without a receipt")
+            cur.execute("reset role")
+        conn.commit()
+
+        # Once the leaf has a claimed-complete receipt it must still remain
+        # closed until an exact independent review is bound to that receipt.
         with conn.cursor() as cur:
             set_jobs(cur)
             lineage_successor_receipt_id = receipt(cur, lineage_successor, lineage_successor_claim, "claimed_complete")

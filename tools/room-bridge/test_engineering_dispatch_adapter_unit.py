@@ -92,6 +92,7 @@ def request() -> dict:
     return {"desk": "engineering-codex", "envelope": copy.deepcopy(ENVELOPE), "executor_slug": "codex",
             "task": {"work_request": PLAN["work_request"]["id"], "slice_ref": "slice:a", "plan_digest": PLAN["plan_digest"],
                      "job_ref": ENVELOPE["request"]["job_ref"], "attempt_id": "attempt:1",
+                     "claim_lease_expires_at": ENVELOPE["expires_at"],
                      "generation": 1,
                      "engineering_plan": copy.deepcopy(PLAN),
                      "engineering_slice": copy.deepcopy(first)}}
@@ -183,6 +184,10 @@ def test_authority_runway_refuses_expired_near_expiry_or_mismatched_session_befo
     near["envelope"]["expires_at"] = canonical_second(datetime.now(timezone.utc) + timedelta(seconds=929))
     near["envelope"]["agent_session"]["lease_expires_at"] = near["envelope"]["expires_at"]
     cases.append(near)
+    near_job = request()
+    near_job["task"]["claim_lease_expires_at"] = canonical_second(datetime.now(timezone.utc) + timedelta(seconds=929))
+    cases.append(near_job)
+
     mismatched = request()
     mismatched["envelope"]["agent_session"]["lease_expires_at"] = canonical_second(datetime.now(timezone.utc) + timedelta(minutes=21))
     cases.append(mismatched)
@@ -204,6 +209,7 @@ def test_authority_runway_accepts_a_canonical_packet_with_at_least_930_seconds()
     expiry = canonical_second(datetime.now(timezone.utc) + timedelta(seconds=931))
     good["envelope"]["expires_at"] = expiry
     good["envelope"]["agent_session"]["lease_expires_at"] = expiry
+    good["task"]["claim_lease_expires_at"] = expiry
     seen = {"called": False}
 
     def fake_dispatch(*_args, **_kwargs):

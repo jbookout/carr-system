@@ -38,6 +38,34 @@ create trigger capability_agent_session_lease_immutable_before_write
   before update on ops.capability_agent_session for each row
   execute function ops.capability_agent_session_lease_immutable();
 
+-- Once an Engineering claim is live, the Work Request fields that define its
+-- canonical digest are reserved until the scoped claim succeeds, fails, or
+-- expires. This closes the database-binding to adapter-launch race.
+create or replace function ops.engineering_work_request_currentness_guard()
+returns trigger language plpgsql security definer
+set search_path=pg_catalog,ops,public
+as $$
+begin
+  if (new.ref,new.state,new.version,new.title,new.desired_outcome,new.acceptance_criteria)
+       is distinct from
+     (old.ref,old.state,old.version,old.title,old.desired_outcome,old.acceptance_criteria)
+     and exists (
+       select 1 from ops.engineering_execution_envelope e
+       join ops.job j on j.id=e.job_id
+       where e.work_request_id=old.id
+         and j.definition_key='engineering-slice' and j.definition_version=1
+         and j.state='running' and j.leased_until>=clock_timestamp()
+     ) then
+    raise exception 'Work Request currentness is reserved by a live Engineering claim';
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists engineering_work_request_currentness_guard_before_update on ops.work_request;
+create trigger engineering_work_request_currentness_guard_before_update
+  before update on ops.work_request for each row
+  execute function ops.engineering_work_request_currentness_guard();
+
 -- This is a read-only, server-derived explanation surface.  It deliberately
 -- does not alter a queued job merely because a replacement can still arrive.
 create or replace function ops.engineering_envelope_currentness(
@@ -72,7 +100,8 @@ as $$
       exists(select 1 from ops.engineering_execution_envelope successor
                where successor.supersedes_envelope_id=c.id) as has_successor,
       exists(select 1 from ops.engineering_slice_receipt receipt
-               where receipt.envelope_id=c.id) as has_receipt
+               where receipt.envelope_id=c.id
+                 and receipt.outcome='claimed_complete') as has_receipt
     from candidate c
   )
   select jsonb_build_object(
@@ -183,36 +212,109 @@ create or replace function ops.engineering_claim_slice(
 ) returns table(job_id uuid,lease_token uuid,definition_key text,definition_version integer,payload jsonb,execution_kind text,execution_contract jsonb,attempt integer,timeout_seconds integer,mode text)
 language plpgsql security definer set search_path=ops,public,pg_temp
 as $$
+declare v_job_id uuid; v_envelope_id uuid; v_slice_plan_id uuid; v_slice_ref text;
+        v_work_request_id uuid;
+        v_currentness jsonb;
+        v_claim_at timestamptz;
+        v_runway_sufficient boolean;
 begin
   if btrim(coalesce(p_worker,''))='' or p_limit is distinct from 1 then raise exception 'worker and exactly one claim are required'; end if;
   if p_lease_seconds is distinct from 960 then raise exception 'engineering controller lease must be 960 seconds'; end if;
   perform ops.reap_expired_jobs();
   perform ops.engineering_retire_permanently_ineligible_jobs();
-  return query with candidate as (
-    select j.id from ops.job j join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
-      join ops.engineering_execution_envelope e on e.job_id=j.id
-      join ops.capability_agent_session s on s.id=e.agent_session_id
-     where d.enabled and j.definition_key='engineering-slice' and j.definition_version=1
-       and j.state in ('queued','retry_wait') and j.next_attempt_at<=now() and j.attempt<j.max_attempts
-       and ops.engineering_envelope_is_executable(e.id,j.id)
-       and e.expires_at>=statement_timestamp()+interval '960 seconds'
-       and s.lease_expires_at>=statement_timestamp()+interval '960 seconds'
-     order by j.scheduled_for,j.created_at for update of j,d skip locked limit p_limit
-  ), claimed as (
-    update ops.job j set state='running',attempt=j.attempt+1,lease_owner=p_worker,lease_token=gen_random_uuid(),leased_until=now()+make_interval(secs=>p_lease_seconds),started_at=coalesce(j.started_at,now()),updated_at=now()
-    from candidate c where j.id=c.id returning j.*
+  -- First lock only the queue row selected by the stable predicate.  Acquire
+  -- the one lineage lock afterwards, then re-read currentness under that lock;
+  -- this avoids unordered multi-lineage advisory locks while closing the
+  -- successor/session race before the lease is written.
+  select j.id,e.id,e.slice_plan_id,e.slice_ref,e.work_request_id
+    into v_job_id,v_envelope_id,v_slice_plan_id,v_slice_ref,v_work_request_id
+    from ops.job j
+    join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
+    join ops.engineering_execution_envelope e on e.job_id=j.id
+   where d.enabled and j.definition_key='engineering-slice' and j.definition_version=1
+     and j.state in ('queued','retry_wait') and j.next_attempt_at<=now()
+     and j.attempt<j.max_attempts
+     and ops.engineering_envelope_is_executable(e.id,j.id)
+     and coalesce((ops.engineering_envelope_currentness(e.id,j.id)
+                    ->>'dispatch_runway_sufficient')::boolean,false)
+   order by j.scheduled_for,j.created_at
+   for update of j,d skip locked limit 1;
+  if not found then return; end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:'||v_slice_plan_id::text||':'||v_slice_ref,0));
+  perform 1 from ops.work_request where id=v_work_request_id for share;
+  if not found then return; end if;
+  v_claim_at:=clock_timestamp();
+  v_currentness:=ops.engineering_envelope_currentness(v_envelope_id,v_job_id);
+  select e.expires_at>=v_claim_at+make_interval(secs=>p_lease_seconds)
+         and s.lease_expires_at is not null
+         and s.lease_expires_at>=v_claim_at+make_interval(secs=>p_lease_seconds)
+    into v_runway_sufficient
+    from ops.engineering_execution_envelope e
+    join ops.capability_agent_session s on s.id=e.agent_session_id
+   where e.id=v_envelope_id and e.job_id=v_job_id;
+  if coalesce((v_currentness->>'eligible')::boolean,false) is not true
+     or coalesce(v_runway_sufficient,false) is not true then
+    return;
+  end if;
+  return query with claimed as (
+    update ops.job j set state='running',attempt=j.attempt+1,lease_owner=p_worker,
+      lease_token=gen_random_uuid(),leased_until=v_claim_at+make_interval(secs=>p_lease_seconds),
+      started_at=coalesce(j.started_at,v_claim_at),updated_at=v_claim_at
+    where j.id=v_job_id and j.state in ('queued','retry_wait')
+    returning j.*
   ), attempts as (
     insert into ops.job_attempt as claimed_attempt(job_id,attempt,lease_owner,lease_token,state)
     select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c returning claimed_attempt.job_id
   ) select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode from claimed c join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version join attempts a on a.job_id=c.id;
 end $$;
 
-create or replace function ops.engineering_controller_binding(p_envelope_id uuid,p_job_id uuid)
-returns jsonb language plpgsql stable security definer set search_path=pg_catalog,ops,public
+drop function if exists ops.engineering_controller_binding(uuid,uuid);
+
+create or replace function ops.engineering_controller_binding(
+  p_envelope_id uuid,p_job_id uuid,p_lease_token uuid
+)
+returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
 as $$
+declare binding jsonb;
+        lineage_plan uuid;
+        lineage_slice text;
+        lineage_work_request uuid;
+        v_binding_at timestamptz;
 begin
-  if not ops.engineering_envelope_is_executable(p_envelope_id,p_job_id) then return null; end if;
-  return (select jsonb_build_object('envelope_id',e.id::text,'envelope_digest',e.envelope_digest,'slice_ref',e.slice_ref,'plan_digest',sp.plan_digest,'slice_plan',sp.plan,'executor_actor',jsonb_build_object('id',a.id::text,'slug',a.slug),'agent_session_id',s.id::text,'agent_session_lease_expires_at',to_char(s.lease_expires_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')) from ops.engineering_execution_envelope e join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id join ops.capability_agent_session s on s.id=e.agent_session_id join public.actor a on a.id=s.executor_actor_id where e.id=p_envelope_id and e.job_id=p_job_id);
+  if p_lease_token is null then
+    return null;
+  end if;
+  select e.slice_plan_id,e.slice_ref,e.work_request_id
+    into lineage_plan,lineage_slice,lineage_work_request
+    from ops.engineering_execution_envelope e
+   where e.id=p_envelope_id and e.job_id=p_job_id;
+  if not found then return null; end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:'||lineage_plan::text||':'||lineage_slice,0));
+  perform 1 from ops.work_request where id=lineage_work_request for share;
+  if not found then return null; end if;
+  v_binding_at:=clock_timestamp();
+  if not ops.engineering_envelope_is_executable(p_envelope_id,p_job_id) then
+    return null;
+  end if;
+  select jsonb_build_object(
+    'envelope_id',e.id::text,'envelope_digest',e.envelope_digest,
+    'slice_ref',e.slice_ref,'plan_digest',sp.plan_digest,'slice_plan',sp.plan,
+    'executor_actor',jsonb_build_object('id',a.id::text,'slug',a.slug),
+    'agent_session_id',s.id::text,
+    'agent_session_lease_expires_at',to_char(s.lease_expires_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+    'job_lease_expires_at',to_char(j.leased_until at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')
+  ) into binding
+    from ops.engineering_execution_envelope e
+    join ops.job j on j.id=e.job_id
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+    join ops.capability_agent_session s on s.id=e.agent_session_id
+    join public.actor a on a.id=s.executor_actor_id
+   where e.id=p_envelope_id and e.job_id=p_job_id
+     and j.state='running' and j.lease_token=p_lease_token
+     and j.leased_until>=v_binding_at+interval '930 seconds';
+  return binding;
 end $$;
 
 -- These are intentionally private predicate helpers for the SECURITY DEFINER
@@ -309,6 +411,8 @@ begin
   end if;
   perform pg_advisory_xact_lock(hashtextextended('engineering-envelope:' || e.slice_plan_id::text || ':' || e.slice_ref,0));
   select * into e from ops.engineering_execution_envelope where id=p_envelope_id for key share;
+  perform 1 from ops.work_request where id=e.work_request_id for share;
+  if not found then raise exception 'engineering Work Request is not current'; end if;
   select * into s from ops.capability_agent_session where id=e.agent_session_id for update;
   if not found then raise exception 'engineering agent session is not current'; end if;
   session_executor := s.executor_actor_id;
@@ -578,30 +682,124 @@ begin
      or (s.state is distinct from 'claimed' and s.state is distinct from 'in_progress') then
     raise exception 'engineering claim, envelope, or agent-session lease is not current at receipt append';
   end if;
-  insert into ops.engineering_slice_receipt(job_attempt_id,envelope_id,work_request_id,slice_ref,attempt_id,executor_actor_id,receipt_digest,outcome,receipt) values(a.id,e.id,e.work_request_id,e.slice_ref,p_receipt->>'attempt_id',session_executor,p_receipt_digest,p_receipt->>'outcome',p_receipt) returning * into row;
-  if p_receipt->>'outcome'='claimed_complete' then
-    perform ops.complete_job(j.id,p_lease_token,jsonb_build_object('engineering_receipt_id',row.id,'receipt_digest',p_receipt_digest),'engineering:'||row.id::text);
-  else
-    perform ops.fail_job(j.id,p_lease_token,'engineering_'||(p_receipt->>'outcome'),'typed engineering receipt reported non-complete outcome');
+  if not ops.engineering_envelope_is_executable(e.id,e.job_id) then
+    raise exception 'engineering envelope is no longer executable at receipt append';
   end if;
-  -- A successfully completed Engineering dispatch session is exact-slice and
-  -- single-use.  The capability-session lifecycle cannot call this
-  -- evidence-free session completed (that state requires a prepared candidate
-  -- and verification), so retire the exact locked binding through its
-  -- permitted terminal path and release the request-wide slot for the next DAG
-  -- slice.  Noncomplete receipts deliberately retain the live exact session:
-  -- same-slice successor admission must validate and retire that predecessor
-  -- itself before issuing replacement authority.
-  if receipt_outcome='claimed_complete' then
+  insert into ops.engineering_slice_receipt(job_attempt_id,envelope_id,work_request_id,slice_ref,attempt_id,executor_actor_id,receipt_digest,outcome,receipt) values(a.id,e.id,e.work_request_id,e.slice_ref,p_receipt->>'attempt_id',session_executor,p_receipt_digest,p_receipt->>'outcome',p_receipt) returning * into row;
+  return row;
+end $$;
+
+-- The controller may not append immutable evidence in one transaction and
+-- transition the queue lease in another.  This is the sole typed runtime
+-- door: a refused transition rolls back the receipt insert as well.
+create or replace function ops.engineering_finalize_slice_receipt(
+  p_envelope_id uuid,p_lease_token uuid,p_receipt jsonb,
+  p_receipt_digest text,p_executor_actor_id uuid
+) returns ops.engineering_slice_receipt
+language plpgsql security definer set search_path=pg_catalog,ops,public
+as $$
+declare e ops.engineering_execution_envelope%rowtype;
+        row ops.engineering_slice_receipt%rowtype;
+        j ops.job%rowtype;
+        terminal_state text;
+        transitioned integer;
+        v_transition_at timestamptz;
+begin
+  select * into e from ops.engineering_execution_envelope where id=p_envelope_id;
+  if not found then raise exception 'engineering envelope not found'; end if;
+  select * into row from ops.engineering_record_slice_receipt(
+    p_envelope_id,p_lease_token,p_receipt,p_receipt_digest,p_executor_actor_id);
+  select * into j from ops.job where id=e.job_id for update;
+  v_transition_at:=clock_timestamp();
+  if not found or j.definition_key<>'engineering-slice' or j.state<>'running'
+     or j.lease_token<>p_lease_token or j.leased_until<=v_transition_at then
+    raise exception 'engineering job does not hold this live scoped lease';
+  end if;
+  if row.outcome='claimed_complete' then
+    update ops.job_attempt set state='succeeded',ended_at=v_transition_at
+     where id=row.job_attempt_id and job_id=j.id and attempt=j.attempt
+       and lease_token=p_lease_token and state='running';
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering completion attempt is not current'; end if;
+    update ops.job set state='succeeded',ended_at=v_transition_at,
+           lease_owner=null,lease_token=null,leased_until=null,updated_at=v_transition_at
+     where id=j.id and state='running' and lease_token=p_lease_token;
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering completion did not transition the claimed job'; end if;
+    insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,'completion','engineering:'||row.id::text,
+           jsonb_build_object('engineering_receipt_id',row.id,'receipt_digest',p_receipt_digest));
     update ops.capability_agent_session
-       set state='cancelled', cancelled_at=v_append_at, version=version+1
-     where id=s.id and work_request_id=e.work_request_id
+       set state='cancelled',cancelled_at=v_transition_at,version=version+1
+     where id=e.agent_session_id and work_request_id=e.work_request_id
        and state in ('claimed','in_progress');
-    if not found then
-      raise exception 'engineering agent session could not be atomically retired';
-    end if;
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering agent session could not be atomically retired'; end if;
+  else
+    terminal_state:=case when j.attempt<j.max_attempts then 'retry_wait' else 'dead_lettered' end;
+    update ops.job_attempt set state='failed',ended_at=v_transition_at,
+           failure_class='engineering_'||row.outcome,
+           detail='typed engineering receipt reported non-complete outcome'
+     where id=row.job_attempt_id and job_id=j.id and attempt=j.attempt
+       and lease_token=p_lease_token and state='running';
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering failure attempt is not current'; end if;
+    update ops.job set state=terminal_state,
+           next_attempt_at=case when terminal_state='retry_wait'
+             then v_transition_at+make_interval(secs=>ops.retry_delay_seconds(j)) else next_attempt_at end,
+           ended_at=case when terminal_state='dead_lettered' then v_transition_at else null end,
+           last_failure_class='engineering_'||row.outcome,
+           last_failure_detail='typed engineering receipt reported non-complete outcome',
+           lease_owner=null,lease_token=null,leased_until=null,updated_at=v_transition_at
+     where id=j.id and state='running' and lease_token=p_lease_token;
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering failure did not transition the claimed job'; end if;
+    insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,case when terminal_state='dead_lettered' then 'dead_letter' else 'failure' end,
+           concat('engineering-failure:',j.id,':',j.attempt),
+           jsonb_build_object('failure_class','engineering_'||row.outcome,
+             'detail','typed engineering receipt reported non-complete outcome','next_state',terminal_state));
   end if;
   return row;
+end $$;
+
+-- Adapter/controller failures have no valid typed slice receipt.  They still
+-- require a scoped, lease-bound retry/dead-letter door; generic fail_job is
+-- fenced from Engineering rows below.
+create or replace function ops.engineering_fail_claim(
+  p_job_id uuid,p_lease_token uuid,p_failure_class text,p_detail text
+) returns text
+language plpgsql security definer set search_path=pg_catalog,ops,public
+as $$
+declare j ops.job%rowtype; next_state text; transitioned integer; v_now timestamptz;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  v_now:=clock_timestamp();
+  if not found or j.definition_key<>'engineering-slice' or j.state<>'running'
+     or j.lease_token<>p_lease_token or j.leased_until<=v_now then
+    raise exception 'engineering job does not hold this live scoped lease';
+  end if;
+  next_state:=case when j.attempt<j.max_attempts then 'retry_wait' else 'dead_lettered' end;
+  update ops.job_attempt set state='failed',ended_at=v_now,
+         failure_class=p_failure_class,detail=left(coalesce(p_detail,''),1000)
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token and state='running';
+  get diagnostics transitioned=row_count;
+  if transitioned<>1 then raise exception 'engineering failure attempt is not current'; end if;
+  update ops.job set state=next_state,
+         next_attempt_at=case when next_state='retry_wait'
+           then v_now+make_interval(secs=>ops.retry_delay_seconds(j)) else next_attempt_at end,
+         ended_at=case when next_state='dead_lettered' then v_now else null end,
+         last_failure_class=p_failure_class,last_failure_detail=left(coalesce(p_detail,''),1000),
+         lease_owner=null,lease_token=null,leased_until=null,updated_at=v_now
+   where id=j.id and state='running' and lease_token=p_lease_token;
+  get diagnostics transitioned=row_count;
+  if transitioned<>1 then raise exception 'engineering failure did not transition the claimed job'; end if;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+  values(j.id,j.attempt,case when next_state='dead_lettered' then 'dead_letter' else 'failure' end,
+         concat('engineering-failure:',j.id,':',j.attempt),
+         jsonb_build_object('failure_class',p_failure_class,
+           'detail',left(coalesce(p_detail,''),1000),'next_state',next_state));
+  return next_state;
 end $$;
 
 -- The Passport read keeps reviewer ledger wrappers internal while exposing
@@ -1292,14 +1490,18 @@ begin
                   or deviation->'plan_revision_required' is distinct from 'false'::jsonb
             )
             and not exists (
-              select 1
-                from ops.engineering_slice_receipt newer_receipt
-                join ops.engineering_execution_envelope newer_envelope
-                  on newer_envelope.id=newer_receipt.envelope_id
-                 and newer_envelope.slice_plan_id=slice_plan.id
-               where newer_receipt.slice_ref=receipt.slice_ref
-                 and (newer_receipt.created_at,newer_receipt.id)>
-                     (receipt.created_at,receipt.id)
+              select 1 from ops.engineering_execution_envelope successor
+               where successor.supersedes_envelope_id=envelope.id
+            )
+            and 1=(
+              select count(*)
+                from ops.engineering_execution_envelope leaf
+               where leaf.slice_plan_id=slice_plan.id
+                 and leaf.slice_ref=receipt.slice_ref
+                 and not exists (
+                   select 1 from ops.engineering_execution_envelope successor
+                    where successor.supersedes_envelope_id=leaf.id
+                 )
             )
        )
   ) then
@@ -1351,24 +1553,330 @@ begin
   return new;
 end $$;
 
--- Retire 0325 compatibility surfaces.  The 0326 receipt function already
--- finalizes atomically; its runtime uses the current two-argument binding.
-revoke all on function ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid),
-  ops.engineering_controller_binding(uuid,uuid,uuid),
-  ops.engineering_envelope_is_executable(uuid,uuid,integer)
+-- Shared queue claim and heartbeat doors preserve their established behavior
+-- for every other definition.  Engineering authority is narrower and must
+-- enter through engineering_claim_slice with its immutable envelope checks.
+create or replace function ops.claim_job(
+  p_worker text,p_limit integer default 1,p_lease_seconds integer default 300
+) returns table (
+  job_id uuid,lease_token uuid,definition_key text,definition_version integer,
+  payload jsonb,execution_kind text,execution_contract jsonb,
+  attempt integer,timeout_seconds integer,mode text
+) language plpgsql security definer set search_path=ops,public,pg_temp as $$
+begin
+  if btrim(coalesce(p_worker,''))='' or p_limit<1 or p_lease_seconds<1 then
+    raise exception 'worker, positive limit and positive lease are required';
+  end if;
+  perform ops.reap_expired_jobs();
+  return query
+  with candidate as (
+    select j.id from ops.job j join ops.job_definition d
+      on d.key=j.definition_key and d.version=j.definition_version
+     where d.enabled and j.state in ('queued','retry_wait') and j.next_attempt_at<=now()
+       and j.definition_key<>'engineering-slice'
+       and not (j.definition_key='calendar-prebrief-projection-joe-daily' and j.definition_version=1)
+     order by j.scheduled_for,j.created_at for update of j,d skip locked limit p_limit
+  ), claimed as (
+    update ops.job j set state='running',attempt=j.attempt+1,lease_owner=p_worker,
+      lease_token=gen_random_uuid(),leased_until=now()+make_interval(secs=>p_lease_seconds),
+      started_at=coalesce(j.started_at,now()),updated_at=now()
+      from candidate c where j.id=c.id returning j.*
+  ), attempts(claimed_job_id) as (
+    insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
+    select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
+    returning ops.job_attempt.job_id
+  )
+  select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
+         d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
+    from claimed c join ops.job_definition d
+      on d.key=c.definition_key and d.version=c.definition_version
+    join attempts a on a.claimed_job_id=c.id;
+end $$;
+
+create or replace function ops.claim_job_mode(
+  p_worker text,p_mode text,p_limit integer default 1,p_lease_seconds integer default 300
+) returns table (
+  job_id uuid,lease_token uuid,definition_key text,definition_version integer,
+  payload jsonb,execution_kind text,execution_contract jsonb,
+  attempt integer,timeout_seconds integer,mode text
+) language plpgsql security definer set search_path=ops,public,pg_temp as $$
+begin
+  if btrim(coalesce(p_worker,''))='' or p_mode not in ('shadow','canary','live','replay')
+     or p_limit<1 or p_lease_seconds<1 then
+    raise exception 'worker, valid mode, positive limit and positive lease are required';
+  end if;
+  perform ops.reap_expired_jobs();
+  return query
+  with candidate as (
+    select j.id from ops.job j join ops.job_definition d
+      on d.key=j.definition_key and d.version=j.definition_version
+     where d.enabled and j.state in ('queued','retry_wait') and j.next_attempt_at<=now()
+       and j.mode=p_mode and j.definition_key<>'engineering-slice'
+       and not (j.definition_key='calendar-prebrief-projection-joe-daily' and j.definition_version=1)
+     order by j.scheduled_for,j.created_at for update of j,d skip locked limit p_limit
+  ), claimed as (
+    update ops.job j set state='running',attempt=j.attempt+1,lease_owner=p_worker,
+      lease_token=gen_random_uuid(),leased_until=now()+make_interval(secs=>p_lease_seconds),
+      started_at=coalesce(j.started_at,now()),updated_at=now()
+      from candidate c where j.id=c.id returning j.*
+  ), attempts(claimed_job_id) as (
+    insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
+    select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
+    returning ops.job_attempt.job_id
+  )
+  select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
+         d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
+    from claimed c join ops.job_definition d
+      on d.key=c.definition_key and d.version=c.definition_version
+    join attempts a on a.claimed_job_id=c.id;
+end $$;
+
+create or replace function ops.heartbeat_job(
+  p_job_id uuid,p_lease_token uuid,p_lease_seconds integer default 300
+) returns boolean
+language plpgsql security definer set search_path=ops,public,pg_temp
+as $$
+declare j ops.job%rowtype; n integer;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if found and j.definition_key='engineering-slice' then
+    raise exception 'engineering jobs require scoped controller functions';
+  end if;
+  update ops.job set leased_until=now()+make_interval(secs=>p_lease_seconds),updated_at=now()
+   where id=p_job_id and state='running' and lease_token=p_lease_token
+     and leased_until>=now();
+  get diagnostics n=row_count;
+  return n=1;
+end $$;
+
+-- Generic terminal doors retain their established behavior for every other
+-- definition.  Engineering jobs finalize only through the scoped receipt door,
+-- or fail through engineering_fail_claim when no typed receipt can exist.
+create or replace function ops.complete_job(
+  p_job_id uuid,p_lease_token uuid,p_evidence jsonb,p_receipt_ref text
+) returns boolean
+language plpgsql security definer set search_path=ops,public,pg_temp
+as $$
+declare j ops.job%rowtype;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if found and j.definition_key='engineering-slice' then
+    raise exception 'engineering jobs require scoped controller functions';
+  end if;
+  if not found or j.state <> 'running' or j.lease_token <> p_lease_token
+     or j.leased_until < now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  update ops.job_attempt set state='succeeded',ended_at=now()
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  update ops.job set state='succeeded',ended_at=now(),lease_owner=null,
+         lease_token=null,leased_until=null,updated_at=now() where id=j.id;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,'completion',p_receipt_ref,coalesce(p_evidence,'{}'::jsonb));
+  return true;
+end $$;
+
+create or replace function ops.fail_job(
+  p_job_id uuid,p_lease_token uuid,p_failure_class text,p_detail text
+) returns text
+language plpgsql security definer set search_path=ops,public,pg_temp
+as $$
+declare j ops.job%rowtype; next_state text;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if found and j.definition_key='engineering-slice' then
+    raise exception 'engineering jobs require scoped controller functions';
+  end if;
+  if not found or j.state <> 'running' or j.lease_token <> p_lease_token
+     or j.leased_until < now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  next_state := case when j.attempt < j.max_attempts then 'retry_wait' else 'dead_lettered' end;
+  update ops.job_attempt set state='failed',ended_at=now(),
+         failure_class=p_failure_class,detail=p_detail
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  update ops.job set state=next_state,
+         next_attempt_at=case when next_state='retry_wait'
+                              then now()+make_interval(secs=>ops.retry_delay_seconds(j))
+                              else next_attempt_at end,
+         ended_at=case when next_state='dead_lettered' then now() else null end,
+         last_failure_class=p_failure_class,last_failure_detail=p_detail,
+         lease_owner=null,lease_token=null,leased_until=null,updated_at=now()
+   where id=j.id;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,case when next_state='dead_lettered' then 'dead_letter' else 'failure' end,
+           concat('failure:',j.id,':',j.attempt),
+           jsonb_build_object('failure_class',p_failure_class,'detail',p_detail,'next_state',next_state));
+  return next_state;
+end $$;
+
+create or replace function ops.timeout_job(
+  p_job_id uuid,p_lease_token uuid,p_detail text
+) returns text
+language plpgsql security definer set search_path=ops,public,pg_temp
+as $$
+declare j ops.job%rowtype; next_state text;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if found and j.definition_key='engineering-slice' then
+    raise exception 'engineering jobs require scoped controller functions';
+  end if;
+  if not found or j.state <> 'running' or j.lease_token <> p_lease_token
+     or j.leased_until < now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  next_state := case when j.attempt < j.max_attempts then 'retry_wait' else 'dead_lettered' end;
+  update ops.job_attempt set state='timed_out',ended_at=now(),
+         failure_class='execution_timeout',detail=p_detail
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  update ops.job set state=next_state,
+         next_attempt_at=case when next_state='retry_wait'
+                              then now()+make_interval(secs=>ops.retry_delay_seconds(j))
+                              else next_attempt_at end,
+         ended_at=case when next_state='dead_lettered' then now() else null end,
+         last_failure_class='execution_timeout',last_failure_detail=p_detail,
+         lease_owner=null,lease_token=null,leased_until=null,updated_at=now()
+   where id=j.id;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,case when next_state='dead_lettered' then 'dead_letter' else 'timeout' end,
+           concat('timeout:',j.id,':',j.attempt),
+           jsonb_build_object('failure_class','execution_timeout','detail',p_detail,'next_state',next_state));
+  return next_state;
+end $$;
+
+-- Retire obsolete overloads without touching the current three-argument
+-- controller binding or the atomic scoped finalizer created above.
+revoke all on function ops.engineering_envelope_is_executable(uuid,uuid,integer)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
-drop function if exists ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid);
-drop function if exists ops.engineering_controller_binding(uuid,uuid,uuid);
 drop function if exists ops.engineering_envelope_is_executable(uuid,uuid,integer);
 
-revoke all on function ops.engineering_envelope_currentness(uuid,uuid),ops.engineering_envelope_is_executable(uuid,uuid),ops.engineering_retire_permanently_ineligible_jobs() from public,carr_reader,carr_writer,carr_jobs,carr_authority;
-revoke all on function ops.engineering_safe_timestamptz(text),ops.capability_agent_session_lease_immutable() from public,carr_reader,carr_writer,carr_jobs,carr_authority;
-revoke all on function ops.engineering_receipt_exact_object(jsonb,text[]),ops.engineering_receipt_identifier_array(jsonb),ops.engineering_receipt_identifier_sets_equal(jsonb,jsonb),ops.engineering_receipt_evidence_array(jsonb) from public,carr_reader,carr_writer,carr_jobs,carr_authority;
-revoke all on function ops.guard_engineering_reviewer_fact_insert() from public,carr_reader,carr_writer,carr_jobs,carr_authority;
-revoke all on function ops.engineering_enqueue_slice_job(text,text,text,text,integer) from public,carr_reader,carr_jobs,carr_authority;
-grant execute on function ops.engineering_enqueue_slice_job(text,text,text,text,integer) to carr_writer;
-revoke all on function ops.engineering_claim_slice(text,integer,integer),ops.engineering_controller_binding(uuid,uuid),ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid) from public;
-grant execute on function ops.engineering_claim_slice(text,integer,integer),ops.engineering_controller_binding(uuid,uuid),ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid) to carr_jobs;
-grant execute on function ops.engineering_envelope_currentness(uuid,uuid) to carr_reader,carr_writer;
+revoke all on function ops.engineering_envelope_currentness(uuid,uuid),
+  ops.engineering_envelope_is_executable(uuid,uuid),
+  ops.engineering_retire_permanently_ineligible_jobs()
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.engineering_safe_timestamptz(text),
+  ops.capability_agent_session_lease_immutable(),
+  ops.engineering_work_request_currentness_guard()
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.engineering_receipt_exact_object(jsonb,text[]),
+  ops.engineering_receipt_identifier_array(jsonb),
+  ops.engineering_receipt_identifier_sets_equal(jsonb,jsonb),
+  ops.engineering_receipt_evidence_array(jsonb)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.guard_engineering_reviewer_fact_insert(),
+  ops.guard_engineering_envelope_supersession(),
+  ops.guard_engineering_session_terminalization()
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.engineering_enqueue_slice_job(text,text,text,text,integer)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+grant execute on function ops.engineering_enqueue_slice_job(text,text,text,text,integer)
+  to carr_writer;
+
+revoke all on function ops.engineering_claim_slice(text,integer,integer),
+  ops.engineering_controller_binding(uuid,uuid,uuid),
+  ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid),
+  ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid),
+  ops.engineering_fail_claim(uuid,uuid,text,text)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+grant execute on function ops.engineering_claim_slice(text,integer,integer),
+  ops.engineering_controller_binding(uuid,uuid,uuid),
+  ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid),
+  ops.engineering_fail_claim(uuid,uuid,text,text)
+  to carr_jobs;
+grant execute on function ops.engineering_envelope_currentness(uuid,uuid)
+  to carr_reader,carr_writer;
+
+do $$
+declare fn text;
+begin
+  if to_regprocedure('ops.engineering_controller_binding(uuid,uuid)') is not null
+     or to_regprocedure('ops.engineering_envelope_is_executable(uuid,uuid,integer)') is not null then
+    raise exception '0326 FAILED: obsolete Engineering overload remains executable';
+  end if;
+  if (select count(*) from pg_proc where pronamespace='ops'::regnamespace
+        and proname='engineering_controller_binding')<>1
+     or to_regprocedure('ops.engineering_controller_binding(uuid,uuid,uuid)') is null
+     or (select count(*) from pg_proc where pronamespace='ops'::regnamespace
+          and proname='engineering_envelope_is_executable')<>1
+     or to_regprocedure('ops.engineering_envelope_is_executable(uuid,uuid)') is null then
+    raise exception '0326 FAILED: Engineering overload catalog is not exact';
+  end if;
+
+  for fn in select unnest(array[
+    'ops.engineering_envelope_is_executable(uuid,uuid)',
+    'ops.engineering_retire_permanently_ineligible_jobs()',
+    'ops.engineering_safe_timestamptz(text)',
+    'ops.capability_agent_session_lease_immutable()',
+    'ops.engineering_receipt_exact_object(jsonb,text[])',
+    'ops.engineering_receipt_identifier_array(jsonb)',
+    'ops.engineering_work_request_currentness_guard()',
+    'ops.engineering_receipt_identifier_sets_equal(jsonb,jsonb)',
+    'ops.engineering_receipt_evidence_array(jsonb)',
+    'ops.guard_engineering_reviewer_fact_insert()',
+    'ops.guard_engineering_envelope_supersession()',
+    'ops.guard_engineering_session_terminalization()',
+    'ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid)'])
+  loop
+    if exists (
+         select 1 from pg_proc p
+         cross join lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+          where p.oid=fn::regprocedure and acl.grantee=0 and acl.privilege_type='EXECUTE')
+       or has_function_privilege('carr_reader',fn::regprocedure,'EXECUTE')
+       or has_function_privilege('carr_writer',fn::regprocedure,'EXECUTE')
+       or has_function_privilege('carr_jobs',fn::regprocedure,'EXECUTE')
+       or has_function_privilege('carr_authority',fn::regprocedure,'EXECUTE') then
+      raise exception '0326 FAILED: private Engineering function is executable by a runtime role: %',fn;
+    end if;
+  end loop;
+
+  for fn in select unnest(array[
+    'ops.engineering_claim_slice(text,integer,integer)',
+    'ops.engineering_controller_binding(uuid,uuid,uuid)',
+    'ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid)',
+    'ops.engineering_fail_claim(uuid,uuid,text,text)'])
+  loop
+    if exists (
+         select 1 from pg_proc p
+         cross join lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+          where p.oid=fn::regprocedure and acl.grantee=0 and acl.privilege_type='EXECUTE')
+       or has_function_privilege('carr_reader',fn::regprocedure,'EXECUTE')
+       or has_function_privilege('carr_writer',fn::regprocedure,'EXECUTE')
+       or has_function_privilege('carr_authority',fn::regprocedure,'EXECUTE')
+       or not has_function_privilege('carr_jobs',fn::regprocedure,'EXECUTE') then
+      raise exception '0326 FAILED: scoped Engineering controller ACL is widened or incomplete: %',fn;
+    end if;
+  end loop;
+
+  if exists (
+       select 1 from pg_proc p
+       cross join lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+        where p.oid='ops.engineering_envelope_currentness(uuid,uuid)'::regprocedure
+          and acl.grantee=0 and acl.privilege_type='EXECUTE')
+     or not has_function_privilege('carr_reader',
+          'ops.engineering_envelope_currentness(uuid,uuid)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_writer',
+          'ops.engineering_envelope_currentness(uuid,uuid)'::regprocedure,'EXECUTE')
+     or has_function_privilege('carr_jobs',
+          'ops.engineering_envelope_currentness(uuid,uuid)'::regprocedure,'EXECUTE')
+     or has_function_privilege('carr_authority',
+          'ops.engineering_envelope_currentness(uuid,uuid)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_jobs',
+          'ops.claim_job(text,integer,integer)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_jobs',
+          'ops.claim_job_mode(text,text,integer,integer)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_jobs',
+          'ops.heartbeat_job(uuid,uuid,integer)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_jobs',
+          'ops.complete_job(uuid,uuid,jsonb,text)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_jobs',
+          'ops.fail_job(uuid,uuid,text,text)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_jobs',
+          'ops.timeout_job(uuid,uuid,text)'::regprocedure,'EXECUTE')
+     or has_table_privilege('carr_jobs','ops.work_request','SELECT')
+     or has_table_privilege('carr_jobs','ops.job','UPDATE')
+     or has_table_privilege('carr_jobs','ops.job_attempt','INSERT') then
+    raise exception '0326 FAILED: Engineering controller least-privilege boundary widened or is incomplete';
+  end if;
+end $$;
 
 commit;

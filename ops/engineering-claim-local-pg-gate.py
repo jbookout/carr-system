@@ -417,6 +417,106 @@ def expect_multi_limit_refusal(cur, job_id):
     raise RuntimeError("engineering claim accepted p_limit=2")
 
 
+def generic_fixture(cur, label: str, schedule_offset: int, *, mode: str = "shadow", max_attempts: int = 2):
+    """Create one isolated non-Engineering row for the shared queue-door positives."""
+    definition_key, definition_version = one(
+        cur,
+        """select key,version from ops.job_definition
+             where enabled and key<>'engineering-slice'
+               and not (key='calendar-prebrief-projection-joe-daily' and version=1)
+             order by key,version limit 1""",
+    )
+    return one(
+        cur,
+        """insert into ops.job
+             (definition_key,definition_version,idempotency_key,scheduled_for,max_attempts,
+              timeout_seconds,mode,payload)
+             values (%s,%s,%s,clock_timestamp()-interval '1 hour'+%s*interval '1 microsecond',
+                     %s,300,%s,'{}'::jsonb)
+             returning id""",
+        (definition_key, definition_version, f"engineering-generic-gate:{label}:{uuid.uuid4()}",
+         schedule_offset, max_attempts, mode),
+    )[0]
+
+
+def expect_engineering_generic_terminal_refusals(cur, job_id, lease_token):
+    """Every shared terminal door must refuse Engineering before any mutation."""
+    reset_role_snapshot = one(
+        cur,
+        """select j.state,j.attempt,j.lease_owner,j.lease_token,j.leased_until,
+                  (select count(*) from ops.job_receipt r where r.job_id=j.id),
+                  (select jsonb_agg(jsonb_build_array(a.state,a.ended_at,a.failure_class,a.detail)
+                                    order by a.attempt) from ops.job_attempt a where a.job_id=j.id)
+             from ops.job j where j.id=%s""",
+        (job_id,),
+    )
+    set_local_role(cur, RUNTIME_ROLE)
+    calls = (
+        ("heartbeat_job", "select ops.heartbeat_job(%s,%s,300)", (job_id, lease_token)),
+        ("complete_job", "select ops.complete_job(%s,%s,'{}'::jsonb,'gate:forbidden')", (job_id, lease_token)),
+        ("fail_job", "select ops.fail_job(%s,%s,'gate_forbidden','must refuse')", (job_id, lease_token)),
+        ("timeout_job", "select ops.timeout_job(%s,%s,'must refuse')", (job_id, lease_token)),
+    )
+    for name, sql, params in calls:
+        cur.execute(f"savepoint engineering_generic_{name}")
+        try:
+            cur.execute(sql, params)
+        except psycopg.Error as exc:
+            detail = str(exc).lower()
+            cur.execute(f"rollback to savepoint engineering_generic_{name}")
+            cur.execute(f"release savepoint engineering_generic_{name}")
+            if "engineering jobs require scoped controller functions" not in detail:
+                raise RuntimeError(f"generic {name} returned the wrong Engineering refusal: {exc}") from exc
+        else:
+            cur.execute(f"rollback to savepoint engineering_generic_{name}")
+            cur.execute(f"release savepoint engineering_generic_{name}")
+            raise RuntimeError(f"generic {name} accepted an Engineering lease")
+    cur.execute("reset role")
+    if one(
+        cur,
+        """select j.state,j.attempt,j.lease_owner,j.lease_token,j.leased_until,
+                  (select count(*) from ops.job_receipt r where r.job_id=j.id),
+                  (select jsonb_agg(jsonb_build_array(a.state,a.ended_at,a.failure_class,a.detail)
+                                    order by a.attempt) from ops.job_attempt a where a.job_id=j.id)
+             from ops.job j where j.id=%s""",
+        (job_id,),
+    ) != reset_role_snapshot:
+        raise RuntimeError("a generic terminal refusal mutated the Engineering job, attempt, or receipt ledger")
+
+
+def prove_generic_non_engineering_paths(cur):
+    """The additive fences must preserve the existing shared queue behavior."""
+    cur.execute(
+        """update ops.job set next_attempt_at=now()+interval '1 day'
+             where definition_key<>'engineering-slice' and state in ('queued','retry_wait')"""
+    )
+    complete_id = generic_fixture(cur, "complete", 1)
+    mode_id = generic_fixture(cur, "mode-fail", 2, mode="replay", max_attempts=1)
+    timeout_id = generic_fixture(cur, "timeout", 3, max_attempts=1)
+    set_local_role(cur, RUNTIME_ROLE)
+    complete_claim = one(cur, "select job_id,lease_token from ops.claim_job(%s,1,300)",
+                         ("engineering-generic-complete",))
+    if complete_claim[0] != complete_id:
+        raise RuntimeError("generic claim_job did not preserve the non-Engineering path")
+    if one(cur, "select ops.heartbeat_job(%s,%s,300)", complete_claim)[0] is not True:
+        raise RuntimeError("generic heartbeat did not preserve the non-Engineering path")
+    if one(cur, "select ops.complete_job(%s,%s,'{}'::jsonb,'gate:generic-complete')", complete_claim)[0] is not True:
+        raise RuntimeError("generic completion did not preserve the non-Engineering path")
+    mode_claim = one(cur, "select job_id,lease_token from ops.claim_job_mode(%s,'replay',1,300)",
+                     ("engineering-generic-mode",))
+    if mode_claim[0] != mode_id:
+        raise RuntimeError("generic claim_job_mode did not preserve the non-Engineering path")
+    if one(cur, "select ops.fail_job(%s,%s,'gate_failure','expected generic failure')", mode_claim)[0] != "dead_lettered":
+        raise RuntimeError("generic fail_job did not preserve the non-Engineering path")
+    timeout_claim = one(cur, "select job_id,lease_token from ops.claim_job(%s,1,300)",
+                        ("engineering-generic-timeout",))
+    if timeout_claim[0] != timeout_id:
+        raise RuntimeError("generic timeout fixture was not claimed")
+    if one(cur, "select ops.timeout_job(%s,%s,'expected generic timeout')", timeout_claim)[0] != "dead_lettered":
+        raise RuntimeError("generic timeout_job did not preserve the non-Engineering path")
+    cur.execute("reset role")
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL", "") or os.environ.get("CARR_LOCAL_PG_DSN", "")
     if not dsn:
@@ -507,9 +607,18 @@ def main() -> int:
                 return fail(f"fresh currentness fixture was rejected: {currentness}")
             expected_lease = one(cur, "select to_char(lease_expires_at at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') from ops.capability_agent_session where id=%s", (session_id,))[0]
             private_functions = [
+                "ops.engineering_envelope_is_executable(uuid,uuid)",
                 "ops.engineering_safe_timestamptz(text)",
                 "ops.capability_agent_session_lease_immutable()",
                 "ops.engineering_retire_permanently_ineligible_jobs()",
+                "ops.engineering_receipt_exact_object(jsonb,text[])",
+                "ops.engineering_receipt_identifier_array(jsonb)",
+                "ops.engineering_receipt_identifier_sets_equal(jsonb,jsonb)",
+                "ops.engineering_receipt_evidence_array(jsonb)",
+                "ops.guard_engineering_reviewer_fact_insert()",
+                "ops.guard_engineering_envelope_supersession()",
+                "ops.guard_engineering_session_terminalization()",
+                "ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid)",
             ]
             for role in ("public", "carr_reader", "carr_writer", "carr_jobs", "carr_authority"):
                 for function in private_functions:
@@ -521,6 +630,30 @@ def main() -> int:
             for role in ("carr_reader", "carr_writer"):
                 if not one(cur, "select has_function_privilege(%s,'ops.engineering_envelope_currentness(uuid,uuid)'::regprocedure,'EXECUTE')", (role,))[0]:
                     return fail(f"engineering_envelope_currentness is unavailable to intended reader role {role}")
+            if one(cur, "select to_regprocedure('ops.engineering_controller_binding(uuid,uuid)')")[0] is not None:
+                return fail("obsolete two-argument controller binding still exists")
+            if one(cur, "select to_regprocedure('ops.engineering_envelope_is_executable(uuid,uuid,integer)')")[0] is not None:
+                return fail("obsolete three-argument executable predicate still exists")
+            if one(cur, "select count(*) from pg_proc where pronamespace='ops'::regnamespace and proname='engineering_controller_binding'")[0] != 1:
+                return fail("controller binding overload catalog is not exact")
+            if one(cur, "select count(*) from pg_proc where pronamespace='ops'::regnamespace and proname='engineering_envelope_is_executable'")[0] != 1:
+                return fail("executable predicate overload catalog is not exact")
+            scoped_functions = [
+                "ops.engineering_claim_slice(text,integer,integer)",
+                "ops.engineering_controller_binding(uuid,uuid,uuid)",
+                "ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid)",
+                "ops.engineering_fail_claim(uuid,uuid,text,text)",
+            ]
+            for function in scoped_functions:
+                for role in ("public", "carr_reader", "carr_writer", "carr_authority"):
+                    if one(cur, "select has_function_privilege(%s,%s::regprocedure,'EXECUTE')", (role, function))[0]:
+                        return fail(f"{function} is directly executable by forbidden role {role}")
+                if not one(cur, "select has_function_privilege('carr_jobs',%s::regprocedure,'EXECUTE')", (function,))[0]:
+                    return fail(f"{function} is unavailable to carr_jobs")
+            cur.execute(
+                """update ops.job set next_attempt_at=now()+interval '1 day'
+                     where definition_key<>'engineering-slice' and state in ('queued','retry_wait')"""
+            )
             set_local_role(cur, RUNTIME_ROLE)
             if one(cur, "select has_table_privilege(current_user,'ops.job','UPDATE')")[0]:
                 return fail("carr_jobs gained direct UPDATE on ops.job")
@@ -528,8 +661,12 @@ def main() -> int:
                 return fail("carr_jobs gained direct INSERT on ops.job_attempt")
             if not one(cur, "select has_function_privilege(current_user,'ops.engineering_claim_slice(text,integer,integer)'::regprocedure,'EXECUTE')")[0]:
                 return fail("carr_jobs cannot execute the scoped Engineering claim")
-            if not one(cur, "select has_function_privilege(current_user,'ops.engineering_controller_binding(uuid,uuid)'::regprocedure,'EXECUTE')")[0]:
+            if not one(cur, "select has_function_privilege(current_user,'ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure,'EXECUTE')")[0]:
                 return fail("carr_jobs cannot read the scoped controller binding")
+            if cur.execute("select * from ops.claim_job(%s,1,300)", ("engineering-generic-negative",)).fetchall():
+                return fail("generic claim_job consumed an Engineering job")
+            if cur.execute("select * from ops.claim_job_mode(%s,'shadow',1,300)", ("engineering-generic-mode-negative",)).fetchall():
+                return fail("generic claim_job_mode consumed an Engineering job")
             expect_lower_claim_lease_refusal(cur)
             expect_multi_limit_refusal(cur, job_id)
 
@@ -543,32 +680,57 @@ def main() -> int:
             if one(cur, "select state,attempt,lease_owner,lease_token=%s,leased_until>now() from ops.job where id=%s", (claimed[1], job_id)) != (
                     "running", 1, "engineering-claim-local-acceptance", True, True):
                 return fail("claim did not persist one exact running job lease")
+            if not one(cur, "select leased_until>=clock_timestamp()+interval '958 seconds' from ops.job where id=%s", (job_id,))[0]:
+                return fail("claim lease was not anchored to the post-lock clock with the full 960-second runway")
             if one(cur, "select count(*),min(state),min(lease_owner),bool_and(lease_token=%s) from ops.job_attempt where job_id=%s", (claimed[1], job_id)) != (
                     1, "running", "engineering-claim-local-acceptance", True):
                 return fail("claim did not persist one exact running attempt")
+            cur.execute("reset role")
+            expect_engineering_generic_terminal_refusals(cur, job_id, claimed[1])
+            set_local_role(cur, RUNTIME_ROLE)
+            if one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                   (envelope_id, job_id, uuid.uuid4()))[0] is not None:
+                return fail("controller binding accepted the wrong lease token")
+            expected_job_lease = one(cur, "select to_char(leased_until at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') from ops.job where id=%s",
+                                     (job_id,))[0]
+            binding = one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                          (envelope_id, job_id, claimed[1]))[0]
+            if binding is None:
+                return fail("controller binding refused the fresh exact claim")
+            if binding.get("envelope_id") != str(envelope_id) or binding.get("envelope_digest") != envelope_digest \
+                    or binding.get("slice_ref") != slice_ref or binding.get("plan_digest") != plan_digest \
+                    or binding.get("executor_actor") != {"id": str(codex_id), "slug": "codex"} \
+                    or binding.get("agent_session_id") != str(session_id) or binding.get("agent_session_lease_expires_at") != expected_lease \
+                    or binding.get("job_lease_expires_at") != expected_job_lease:
+                return fail("controller binding did not remain exact after claim")
             predecessor_state = one(cur, "select state,last_failure_class from ops.job where id=%s", (predecessor_job,))
             if predecessor_state != ("dead_lettered", "engineering_superseded_predecessor"):
                 return fail(f"superseded predecessor was not retired audibly: {predecessor_state}")
             dead_letter = one(cur, "select kind,evidence->>'reason' from ops.job_receipt where job_id=%s order by id desc limit 1", (predecessor_job,))
             if dead_letter != ("dead_letter", "engineering_superseded_predecessor"):
                 return fail(f"superseded predecessor lacks its dead-letter receipt: {dead_letter}")
-            successor_claimed = one(
-                cur,
+            successor_claimed = cur.execute(
                 "select job_id,lease_token from ops.engineering_claim_slice(%s,1,960)",
                 ("engineering-claim-local-successor",),
-            )
+            ).fetchone()
+            if successor_claimed is None:
+                successor_currentness = one(
+                    cur, "select ops.engineering_envelope_currentness(%s,%s)",
+                    (successor_envelope, successor_job),
+                )[0]
+                successor_job_state = one(
+                    cur, "select state,attempt,max_attempts,next_attempt_at<=now() from ops.job where id=%s",
+                    (successor_job,),
+                )
+                return fail(f"fresh successor had no claim candidate: currentness={successor_currentness}, job={successor_job_state}")
             if successor_claimed[0] != successor_job or not isinstance(successor_claimed[1], uuid.UUID):
                 return fail(f"fresh successor was not claimable after predecessor retirement: {successor_claimed[0]}")
             if one(cur, "select state,attempt from ops.job where id=%s", (successor_job,)) != ("running", 1):
                 return fail("fresh successor did not persist its running claim")
             if one(cur, "select count(*) from ops.job where id=any(%s) and state='queued' and attempt=0", (invalid_jobs,))[0] != len(invalid_jobs):
                 return fail("invalid or low-runway rows were consumed after the valid claims")
-            binding = one(cur, "select ops.engineering_controller_binding(%s,%s)", (envelope_id, job_id))[0]
-            if binding.get("envelope_id") != str(envelope_id) or binding.get("envelope_digest") != envelope_digest \
-                    or binding.get("slice_ref") != slice_ref or binding.get("plan_digest") != plan_digest \
-                    or binding.get("executor_actor") != {"id": str(codex_id), "slug": "codex"} \
-                    or binding.get("agent_session_id") != str(session_id) or binding.get("agent_session_lease_expires_at") != expected_lease:
-                return fail("controller binding did not remain exact after claim")
+            cur.execute("reset role")
+            prove_generic_non_engineering_paths(cur)
     except Exception as exc:  # noqa: BLE001 - DB gates report exact refusal details
         return fail(str(exc))
     print("engineering claim local acceptance passed: scoped lease, attempt, and binding are exact and rollback-only")

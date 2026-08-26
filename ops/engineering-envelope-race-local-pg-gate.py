@@ -9,6 +9,7 @@ import importlib.util
 import os
 import sys
 import threading
+import uuid
 from pathlib import Path
 
 import psycopg
@@ -40,12 +41,20 @@ def main() -> int:
     try:
         with psycopg.connect(dsn) as setup, setup.cursor() as cur:
             gate.grant_settable_runtime_roles(cur, RUNTIME_ROLE)
+            cur.execute(
+                """update ops.job set next_attempt_at=now()+interval '1 day'
+                     where definition_key='engineering-slice' and state in ('queued','retry_wait')"""
+            )
             job_id, envelope_id, session_id, _, _, _, _ = gate.fixture(cur)
             gate.set_local_role(cur, RUNTIME_ROLE)
             claimed = gate.one(cur, "select job_id,lease_token from ops.engineering_claim_slice(%s,1,960)",
                                ("engineering-envelope-race",))
             if claimed[0] != job_id:
                 return fail("fresh race fixture was not claimed")
+            lease_token = claimed[1]
+            if gate.one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                        (envelope_id, job_id, uuid.uuid4()))[0] is not None:
+                return fail("controller binding accepted a non-claim lease token")
             setup.commit()
 
         binding_ready = threading.Event()
@@ -58,8 +67,8 @@ def main() -> int:
             try:
                 with psycopg.connect(dsn) as conn, conn.cursor() as cur:
                     gate.set_local_role(cur, RUNTIME_ROLE)
-                    binding = gate.one(cur, "select ops.engineering_controller_binding(%s,%s)",
-                                       (envelope_id, job_id))[0]
+                    binding = gate.one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                                       (envelope_id, job_id, lease_token))[0]
                     if binding is None:
                         currentness = gate.one(cur, "select ops.engineering_envelope_currentness(%s,%s)",
                                                (envelope_id, job_id))[0]
