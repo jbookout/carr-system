@@ -138,6 +138,20 @@ owner_scope = ctl.ProviderScope("candidate", ctl.candidate_name(operation_id), "
 owner = ctl.SecretDsn(owner_scope,
     "postgresql://neondb_owner:secret@ep-candidate.neon.tech/neondb")  # ci-secret-scan: allow
 connect_for = lambda cursor: (lambda _dsn: StateConnection(cursor))
+
+# Registry bootstrap is an owner operation; the routine jobs credential must
+# never be mislabeled as its DATABASE_URL or leak into the child environment.
+sync_calls: list[tuple[list[str], dict[str, str]]] = []
+def capture_sync(args, **kwargs):
+    sync_calls.append((args, kwargs["env"]))
+    return subprocess.CompletedProcess(args, 0, "{}", "")
+ctl.sync_control_plane(owner, run=capture_sync, environ={"PATH": "/bin"})
+assert len(sync_calls) == 2
+assert sync_calls[0][0][-1] == "sync"
+assert sync_calls[0][1]["DATABASE_URL"] == owner.value
+assert "CARR_DB_JOBS_URL" not in sync_calls[0][1]
+assert sync_calls[1][1]["DATABASE_URL"] == owner.value
+
 assert ctl.candidate_reconstruction_state(
     owner, source, connect=connect_for(StateCursor([], table_count=0))) == "empty"
 assert ctl.candidate_reconstruction_state(

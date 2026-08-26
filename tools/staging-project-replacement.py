@@ -380,12 +380,12 @@ def install_fixtures(owner: SecretDsn, *, run: Run, environ: Mapping[str, str]) 
                   run=run, env=fixture, timeout=300), "staging fixtures")
 
 
-def sync_control_plane(owner: SecretDsn, jobs_dsn: str, *, run: Run,
+def sync_control_plane(owner: SecretDsn, *, run: Run,
                        environ: Mapping[str, str]) -> None:
-    jobs_env = safe_environment(environ)
-    jobs_env["CARR_DB_JOBS_URL"] = jobs_dsn
+    bootstrap_env = safe_environment(environ)
+    bootstrap_env["DATABASE_URL"] = owner.value
     _success(_run([str(REPO / ".venv/bin/python"), str(REPO / "tools/control-plane.py"), "sync"],
-                  run=run, env=jobs_env, timeout=900), "control-plane sync")
+                  run=run, env=bootstrap_env, timeout=900), "control-plane sync")
     readback_env = safe_environment(environ)
     readback_env["DATABASE_URL"] = owner.value
     _success(_run([str(REPO / ".venv/bin/python"), str(REPO / "ops/control-plane-registry-gate.py")],
@@ -660,7 +660,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         install_fixtures(owner, run=subprocess.run, environ=os.environ)
         jobs_dsn, verifier_dsn = provision_scoped_credentials(
             owner, args.operation_id, connect=psycopg.connect)
-        sync_control_plane(owner, jobs_dsn, run=subprocess.run, environ=os.environ)
+        sync_control_plane(owner, run=subprocess.run, environ=os.environ)
         receipt = prepare_candidate(source, args.operation_id, production, old, candidate, owner,
                                     jobs_dsn, verifier_dsn, connect=psycopg.connect,
                                     run=subprocess.run, environ=os.environ)
