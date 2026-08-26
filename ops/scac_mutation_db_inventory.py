@@ -8,8 +8,14 @@ from typing import Any
 
 
 SECDEF_EXECUTE_SQL = r"""
-with runtime_roles as (
-  select oid,rolname from pg_roles where rolname ~ '^carr_' and rolname<>'carr_ci'
+with recursive connected(oid) as (
+  select oid from pg_roles where rolname ~ '^carr_' and rolname<>'carr_ci'
+  union
+  select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid
+  join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end
+  where other.rolname<>'carr_ci' and not other.rolsuper
+), runtime_roles as (
+  select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper
 ), functions as (
   select p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,
          p.prosecdef,p.prokind,p.provolatile,p.proparallel,p.proconfig,p.proacl,p.proowner
@@ -33,8 +39,14 @@ order by nspname,proname,args,coalesce(r.rolname,'public')
 """
 
 RELATION_DML_SQL = r"""
-with runtime_roles as (
-  select oid,rolname from pg_roles where rolname ~ '^carr_' and rolname<>'carr_ci'
+with recursive connected(oid) as (
+  select oid from pg_roles where rolname ~ '^carr_' and rolname<>'carr_ci'
+  union
+  select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid
+  join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end
+  where other.rolname<>'carr_ci' and not other.rolsuper
+), runtime_roles as (
+  select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper
 ), capabilities as (
   select n.nspname,c.relname,c.relkind,acl.grantee,acl.privilege_type,acl.is_grantable
     from pg_class c join pg_namespace n on n.oid=c.relnamespace
@@ -52,8 +64,14 @@ order by nspname,relname,coalesce(r.rolname,'public'),lower(privilege_type)
 """
 
 COLUMN_DML_SQL = r"""
-with runtime_roles as (
-  select oid,rolname from pg_roles where rolname ~ '^carr_' and rolname<>'carr_ci'
+with recursive connected(oid) as (
+  select oid from pg_roles where rolname ~ '^carr_' and rolname<>'carr_ci'
+  union
+  select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid
+  join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end
+  where other.rolname<>'carr_ci' and not other.rolsuper
+), runtime_roles as (
+  select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper
 ), capabilities as (
   select n.nspname,c.relname,c.relkind,a.attname,acl.grantee,acl.privilege_type,acl.is_grantable
     from pg_attribute a join pg_class c on c.oid=a.attrelid
@@ -84,6 +102,51 @@ select jsonb_build_object(
 from ops.job_definition order by key,version
 """
 
+# Role membership changes effective DB authority without changing relation or
+# function ACL rows.  Project the complete connected component rooted at CARR
+# roles, including role options for every reachable member/bundle.
+ROLE_AUTHORITY_SQL = r"""
+with recursive connected(oid) as (
+  select oid from pg_roles where rolname ~ '^carr_' and rolname<>'carr_ci'
+  union
+  select other.oid
+    from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid
+    join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end
+   where other.rolname<>'carr_ci'
+), role_rows as (
+  select 'db-role:'||r.rolname ingress_key,
+    jsonb_build_object('ingress_key','db-role:'||r.rolname,'row_kind','role',
+      'role',r.rolname,'login',r.rolcanlogin,'inherit',r.rolinherit,
+      'superuser',r.rolsuper,'create_role',r.rolcreaterole,'create_db',r.rolcreatedb,
+      'replication',r.rolreplication,'bypass_rls',r.rolbypassrls) row
+    from pg_roles r where r.oid in(select oid from connected)
+), membership_rows as (
+  select 'db-role-membership:'||role.rolname||':'||member.rolname ingress_key,
+    jsonb_build_object('ingress_key','db-role-membership:'||role.rolname||':'||member.rolname,
+      'row_kind','membership','role',role.rolname,'member',member.rolname,
+      'admin_option',m.admin_option,'inherit_option',m.inherit_option,'set_option',m.set_option) row
+    from pg_auth_members m join pg_roles role on role.oid=m.roleid
+    join pg_roles member on member.oid=m.member
+   where m.roleid in(select oid from connected) and m.member in(select oid from connected)
+), ownership_rows as (
+  select 'db-function-owner:'||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||owner.rolname ingress_key,
+    jsonb_build_object('ingress_key','db-function-owner:'||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||owner.rolname,
+      'row_kind','function_owner','signature',n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')','owner',owner.rolname) row
+    from pg_proc p join pg_namespace n on n.oid=p.pronamespace join pg_roles owner on owner.oid=p.proowner
+   where n.nspname not in ('pg_catalog','information_schema') and p.prokind in ('f','p')
+     and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner'
+  union all
+  select 'db-relation-owner:'||n.nspname||'.'||c.relname||':'||owner.rolname,
+    jsonb_build_object('ingress_key','db-relation-owner:'||n.nspname||'.'||c.relname||':'||owner.rolname,
+      'row_kind','relation_owner','relation',n.nspname||'.'||c.relname,'relation_kind',c.relkind,'owner',owner.rolname)
+    from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_roles owner on owner.oid=c.relowner
+   where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')
+     and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner'
+)
+select row from (select * from role_rows union all select * from membership_rows union all select * from ownership_rows) facts
+order by ingress_key
+"""
+
 QUERIES = {
     "secdef_execute": SECDEF_EXECUTE_SQL,
     "relation_dml": RELATION_DML_SQL,
@@ -112,3 +175,8 @@ def summarize(projection: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
         key=lambda row: row["ingress_key"],
     )
     return {"categories": categories, "combined": {"count": len(combined_rows), "digest": digest(combined_rows)}}
+
+
+def project_role_authority(cur: Any) -> dict[str, Any]:
+    rows = [row[0] for row in cur.execute(ROLE_AUTHORITY_SQL)]
+    return {"count": len(rows), "digest": digest(rows), "rows": rows}

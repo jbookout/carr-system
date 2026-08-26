@@ -402,6 +402,9 @@ def main() -> int:
                 # A local superuser can bypass row triggers; deliberately do so
                 # only inside this rollback-only acceptance to prove replay is
                 # not fooled by a corrupted tombstone it did not create.
+                # SIEP-12's transaction-coalesced epoch observer is deferred;
+                # settle its pending rule events before this owner-only DDL.
+                cur.execute("set constraints all immediate")
                 cur.execute("savepoint altered_retirement_replay")
                 cur.execute("alter table rule disable trigger rule_activation_requires_admission")
                 try:

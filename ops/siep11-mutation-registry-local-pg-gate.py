@@ -56,6 +56,7 @@ def validate_launchd_authority_refs(
              from ops.scac_mutation_registry_entry e
              cross join lateral jsonb_array_elements_text(e.contract->'physical_authority_refs') ref(value)
             where e.ingress_kind='workflow_entrypoint'
+              and e.registry_version='scac-mutation-registry.v1'
               and e.contract ? 'physical_authority_refs'
             order by e.ingress_key,ref.value"""
     ).fetchall()
@@ -112,23 +113,43 @@ def main() -> int:
         )
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             catalog = summarize(project(cur))
-            if catalog != EXPECTED_CATALOG:
+            successor = cur.execute(
+                "select catalog_projection from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v2'"
+            ).fetchone()
+            expected_categories = EXPECTED_CATALOG["categories"] if successor is None else {
+                "secdef_execute": successor[0]["secdef_execute"],
+                "relation_dml": successor[0]["relation_dml"],
+                "column_dml": successor[0]["column_dml"],
+                "job_definitions": EXPECTED_CATALOG["categories"]["job_definitions"],
+            }
+            if catalog["categories"] != expected_categories:
                 raise RuntimeError(f"fresh DB mutation catalog drifted: {catalog!r}")
             version = cur.execute(
                 """select registry_digest,entry_count,mcp_default_deny_source_guarded,
                           db_metadata_authority,runtime_projection_authorizing,
                           non_mcp_default_deny_operational,atomic_database_mediation_operational,
                           direct_database_grant_cutover,production_enforcement_active
-                     from ops.scac_mutation_registry_version"""
+                     from ops.scac_mutation_registry_version
+                    where registry_version='scac-mutation-registry.v1'"""
             ).fetchone()
             digest = version[0]
+            runtime_version = "scac-mutation-registry.v2" if successor is not None else "scac-mutation-registry.v1"
+            runtime_digest = cur.execute(
+                "select registry_digest from ops.scac_mutation_registry_version where registry_version=%s",
+                (runtime_version,),
+            ).fetchone()[0]
+            historical = cur.execute(
+                "select ops.scac_mutation_registration(%s,%s)", (digest, "mcp-tool:add-loop")
+            ).fetchone()[0]
+            if historical.get("registered") is not True or historical.get("registry_version") != "scac-mutation-registry.v1":
+                raise RuntimeError("owner-only historical v1 audit lookup is unavailable")
             if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71:
                 raise RuntimeError(f"malformed sealed registry digest {digest!r}")
             if version[1:] != (1230, True, True, False, False, False, False, False):
                 raise RuntimeError(f"unexpected sealed registry version {version!r}")
 
             counts = dict(cur.execute(
-                "select ingress_kind,count(*) from ops.scac_mutation_registry_entry group by ingress_kind"
+                "select ingress_kind,count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v1' group by ingress_kind"
             ))
             if counts != {"mcp_tool": 185, "script_entrypoint": 452,
                           "worker_route": 6, "worker_sidewrite": 3,
@@ -138,9 +159,10 @@ def main() -> int:
                 raise RuntimeError(f"unexpected ingress census {counts!r}")
             if cur.execute(
                 """select count(*) from ops.scac_mutation_registry_entry
-                    where contract->>'owner_package'<>'11'
+                    where registry_version='scac-mutation-registry.v1'
+                      and (contract->>'owner_package'<>'11'
                        or (contract->>'classification_authorizing')::boolean
-                       or entry_digest !~ '^sha256:[0-9a-f]{64}$'"""
+                       or entry_digest !~ '^sha256:[0-9a-f]{64}$')"""
             ).fetchone()[0]:
                 raise RuntimeError("registry contains authority-expanding or malformed rows")
 
@@ -224,25 +246,27 @@ def main() -> int:
             for role in ("carr_reader", "carr_writer", "carr_jobs", "carr_authority"):
                 set_local_role(cur, role)
                 answer = cur.execute(
-                    "select ops.scac_mutation_registration(%s,%s)",
-                    (digest, "mcp-tool:add-loop"),
+                    "select ops.scac_mutation_registration_v2(%s,%s)",
+                    (runtime_digest, "mcp-tool:add-loop"),
                 ).fetchone()[0]
                 if answer.get("registered") is not True or answer.get("atomic_database_mediation_operational") is not False:
                     raise RuntimeError(f"{role} did not receive bounded safe registry readback")
                 unknown = cur.execute(
-                    "select ops.scac_mutation_registration(%s,%s)",
-                    (digest, "mcp-tool:not-reviewed"),
+                    "select ops.scac_mutation_registration_v2(%s,%s)",
+                    (runtime_digest, "mcp-tool:not-reviewed"),
                 ).fetchone()[0]
                 mismatch = cur.execute(
-                    "select ops.scac_mutation_registration(%s,%s)",
+                    "select ops.scac_mutation_registration_v2(%s,%s)",
                     ("sha256:" + "0" * 64, "mcp-tool:add-loop"),
                 ).fetchone()[0]
                 if unknown != {"reason": "unknown_ingress", "registered": False,
-                               "registry_digest": digest, "registry_version": "scac-mutation-registry.v1"}:
+                               "registry_digest": runtime_digest, "registry_version": runtime_version}:
                     raise RuntimeError(f"{role} unknown ingress did not fail closed: {unknown!r}")
                 if mismatch.get("registered") is not False or mismatch.get("reason") != "digest_mismatch":
                     raise RuntimeError(f"{role} digest mismatch did not fail closed: {mismatch!r}")
                 refusal(cur, "select count(*) from ops.scac_mutation_registry_entry", (), "permission denied")
+                refusal(cur, "select ops.scac_mutation_registration(%s,%s)",
+                        (digest, "mcp-tool:add-loop"), "permission denied")
                 refusal(cur, "insert into ops.scac_mutation_registry_entry(registry_version,ingress_key,ingress_kind,effect_class,source_locator,entry_digest,contract) values ('scac-mutation-registry.v1','mcp-tool:forged','mcp_tool','record_mutation','forged','sha256:'||repeat('0',64),'{}')", (), "permission denied")
                 cur.execute("reset role")
 
@@ -274,7 +298,7 @@ def main() -> int:
                 "select ops.scac_mutation_registration(%s,%s)", (digest, "mcp-tool:add-loop")
             ).fetchone()[0]
             if corrupt.get("registered") is not False or corrupt.get("reason") != "registry_corrupt":
-                raise RuntimeError(f"tampered registry did not fail closed: {corrupt!r}")
+                raise RuntimeError(f"tampered historical v1 registry did not fail closed: {corrupt!r}")
             cur.execute("rollback to savepoint registry_corruption_probe")
             cur.execute("release savepoint registry_corruption_probe")
 
@@ -290,7 +314,7 @@ def main() -> int:
                 "select ops.scac_mutation_registration(%s,%s)", (digest, "mcp-tool:add-loop")
             ).fetchone()[0]
             if same_cardinality.get("registered") is not False or same_cardinality.get("reason") != "registry_corrupt":
-                raise RuntimeError(f"same-cardinality contract tamper did not fail closed: {same_cardinality!r}")
+                raise RuntimeError(f"same-cardinality historical v1 tamper did not fail closed: {same_cardinality!r}")
             cur.execute("rollback to savepoint registry_same_cardinality_probe")
             cur.execute("release savepoint registry_same_cardinality_probe")
     except Exception as exc:  # noqa: BLE001 - concise CI surface

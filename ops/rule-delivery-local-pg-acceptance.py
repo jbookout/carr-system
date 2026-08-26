@@ -117,6 +117,17 @@ def main() -> int:
         # the tags install, select and refuse. Production's triggers are untouched;
         # this statement needs table ownership, which no application role holds.
         cur.execute("alter table rule disable trigger user")
+        # This older acceptance deliberately creates inconsistent delivery
+        # states across separate autocommit connections so it can test the
+        # backfill's refusals. SIEP-12 correctly rejects those states. Suspend
+        # only its observers on this throwaway fixture; SIEP-12's own rollback-
+        # only gate exercises the observers and their fail-closed semantics.
+        for table, trigger in (
+            ("ops.rule_pack", "scac_epoch_rule_pack"),
+            ("ops.rule_load_layer", "scac_epoch_rule_load_layer"),
+            ("ops.rule_delivery_policy", "scac_epoch_rule_delivery_policy"),
+        ):
+            cur.execute(f"alter table {table} disable trigger {trigger}")
         cur.execute("delete from ops.rule_load_layer")
         cur.execute("delete from ops.rule_pack")
         cur.execute("delete from rule where statement like 'delivery acceptance %'")
@@ -375,6 +386,14 @@ def main() -> int:
         cur.execute("select mode from ops.rule_delivery_policy")
         check("a refused cutover leaves policy in shadow", one(cur)[0] == "shadow")
         cur.execute("alter table rule enable trigger user")
+        for table, trigger in (
+            ("ops.rule_pack", "scac_epoch_rule_pack"),
+            ("ops.rule_load_layer", "scac_epoch_rule_load_layer"),
+            ("ops.rule_delivery_policy", "scac_epoch_rule_delivery_policy"),
+        ):
+            cur.execute(f"alter table {table} enable trigger {trigger}")
+        cur.execute("""update ops.rule_pack set updated_at=updated_at
+                        where pack=(select min(pack) from ops.rule_pack)""")
 
     if FAILURES:
         print("rule-delivery-acceptance: FAIL", file=sys.stderr)

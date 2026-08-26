@@ -136,6 +136,20 @@ def test_source_enforces_the_contract() -> None:
           "a broad handler here would turn this table into skip-on-failure")
     check("the two documented timeout handlers still fail the run",
           "LockNotAvailable" in loop and "QueryCanceled" in loop and loop.count("fail(") >= 2)
+    check("0339 and later migrations reject their own transaction control",
+          migrate.OUTER_TRANSACTION_MIGRATION == "0339_"
+          and all(migrate.contains_transaction_control(statement) for statement in (
+              "begin;", "begin transaction;", " COMMIT;", "commit work;",
+              "start transaction;", "rollback;", "rollback work;", "end;",
+              "select 1; commit; select 2;", "commit; select 1;",
+              "begin; select 1;", "rollback transaction;", "/*x*/ commit;",
+              "commit and chain;", "commit work and no chain;",
+              "rollback and chain;", "abort;", "abort work;",
+              "prepare transaction 'x';", "commit prepared 'x';"))
+          and not any(migrate.contains_transaction_control(statement) for statement in (
+              "-- begin;\nselect 1;", "select 'commit;';", 'select "rollback";',
+              "do $$ begin perform 1; end $$;", "/* commit; */ select 1;")),
+          "an internal commit would expose schema before its ledger-bound epoch")
 
 
 def main() -> int:

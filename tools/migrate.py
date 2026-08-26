@@ -108,6 +108,87 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # and mcp-server/src/release.js store and display the string without extracting
 # a number from it, so widening here cannot desync a second reader.
 NAME_RE = re.compile(r"^\d{4}[a-z]?_[a-z0-9_]+\.sql$")
+OUTER_TRANSACTION_MIGRATION = "0339_"
+TRANSACTION_CONTROL_RE = re.compile(
+    r"(?is)^\s*(?:(?:begin|commit|end|rollback|abort)\b|"
+    r"(?:start|prepare)\s+transaction\b)"
+)
+
+
+def contains_transaction_control(sql: str) -> bool:
+    """Detect top-level SQL transaction statements, ignoring quoted bodies.
+
+    Migrations contain PL/pgSQL ``begin``/``end`` inside dollar-quoted bodies;
+    those are not transaction control.  Conversely, psycopg accepts several
+    top-level statements on one line, so a line-oriented regex is unsafe.
+    This small lexer splits only on top-level semicolons after removing SQL
+    comments and quoted strings/identifiers.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    i = 0
+    block_depth = 0
+    quote: str | None = None
+    dollar_tag: str | None = None
+    while i < len(sql):
+        if dollar_tag is not None:
+            if sql.startswith(dollar_tag, i):
+                i += len(dollar_tag)
+                dollar_tag = None
+            else:
+                i += 1
+            continue
+        if block_depth:
+            if sql.startswith("/*", i):
+                block_depth += 1
+                i += 2
+            elif sql.startswith("*/", i):
+                block_depth -= 1
+                i += 2
+            else:
+                i += 1
+            continue
+        if quote is not None:
+            if sql[i] == quote:
+                if i + 1 < len(sql) and sql[i + 1] == quote:
+                    i += 2
+                else:
+                    quote = None
+                    i += 1
+            else:
+                i += 1
+            continue
+        if sql.startswith("--", i):
+            newline = sql.find("\n", i + 2)
+            i = len(sql) if newline < 0 else newline + 1
+            current.append(" ")
+            continue
+        if sql.startswith("/*", i):
+            block_depth = 1
+            i += 2
+            current.append(" ")
+            continue
+        if sql[i] in ("'", '"'):
+            quote = sql[i]
+            i += 1
+            current.append(" ")
+            continue
+        if sql[i] == "$":
+            match = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", sql[i:])
+            if match:
+                dollar_tag = match.group(0)
+                i += len(dollar_tag)
+                current.append(" ")
+                continue
+        if sql[i] == ";":
+            statements.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(sql[i])
+        i += 1
+    statements.append("".join(current))
+    return any(TRANSACTION_CONTROL_RE.match(statement) for statement in statements)
 
 # ── DDL TIMEOUTS (added 2026-08-02, cold-session audit) ──────────────────────
 # WHY. Migrations are applied by hand against production Neon while a Cloudflare
@@ -168,6 +249,15 @@ def load_migrations() -> list[tuple[str, str, str]]:
             if not NAME_RE.match(p.name):
                 fail(f"bad migration filename (want NNNN_name.sql): {p.name}")
             sql = p.read_text()
+            # SIEP-12 makes the migration file, its immutable ledger row, the
+            # sealed mutation-registry successor, and the resulting policy
+            # epoch one transaction. An internal COMMIT would expose schema
+            # with the old epoch before the runner records the file hash.
+            if p.name >= OUTER_TRANSACTION_MIGRATION and contains_transaction_control(sql):
+                fail(
+                    f"{p.name} contains explicit transaction control; migrations from "
+                    f"{OUTER_TRANSACTION_MIGRATION} onward must use the runner's single transaction"
+                )
             out.append((p.name, sql, hashlib.sha256(sql.encode()).hexdigest()))
     if not out:
         fail("no .sql files in migrations/")
