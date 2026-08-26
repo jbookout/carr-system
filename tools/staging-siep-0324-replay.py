@@ -86,9 +86,30 @@ def main() -> None:
         cur.execute(
             "select count(*) from pg_tables where schemaname='ops' and tablename like %s",
             ("siep_%",))
-        if one(cur)[0] != 0:
-            fail("marker failed: SIEP tables already present while 0324 is unrecorded; "
-                 "reconcile by hand, not with this tool")
+        siep_tables = one(cur)[0]
+        if siep_tables != 0:
+            # 0324 wraps itself in begin;...commit;, so a replay attempt that was
+            # rolled back from outside still committed the whole migration — the
+            # exact "physically applied but unrecorded" state tools/ledger-repair.py
+            # exists for. Verify the migration's own effects, then record only.
+            cur.execute("select count(*) from ops.siep_package_contract")
+            packages = one(cur)[0]
+            cur.execute("select count(*) from ops.siep_program_dependency")
+            edges = one(cur)[0]
+            if packages != 40 or edges != 88:
+                fail(f"marker failed: SIEP tables present but effects do not verify "
+                     f"({packages} packages, {edges} edges) — reconcile by hand")
+            print(f"{MIGRATION.name}: physically applied (40 packages, 88 edges), "
+                  "ledger row missing — recording only")
+            if not apply:
+                print("dry run — pass --apply to record the ledger row")
+                return
+            cur.execute(
+                "insert into schema_migrations (filename, sha256) values (%s, %s)",
+                (MIGRATION.name, digest))
+            conn.commit()
+            print(f"committed — {MIGRATION.name} recorded as applied (sha256 {digest[:12]}…)")
+            return
 
         print(f"{MIGRATION.name}: genuinely absent (ledger hole confirmed, 0 SIEP tables)")
 
