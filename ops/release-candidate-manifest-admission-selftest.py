@@ -112,6 +112,18 @@ def main() -> int:
                 check(f"4. {environment} refuses a different manifest target",
                       isinstance(refusal, str) and "service/environment" in refusal)
 
+            for environment in ("local", "rehearsal"):
+                nonserving = dict(staging)
+                nonserving["environment"] = environment
+                nonserving_path = tmp / f"{environment}.json"
+                nonserving_path.write_text(json.dumps(nonserving), encoding="utf-8")
+                refusal = validator(
+                    args_for(environment, nonserving_path), nonserving
+                )
+                check(f"4a. exact {environment} target still runs manifest verification",
+                      isinstance(refusal, str)
+                      and "manifest verification failed" in refusal)
+
             missing_assurance = dict(staging)
             for field in (
                 "performance_budget_ref", "performance_budget_ms",
@@ -124,6 +136,14 @@ def main() -> int:
             refusal = validator(args_for("staging", missing_path), missing_assurance)
             check("5. staging candidate assurance is mandatory and approval-bound",
                   isinstance(refusal, str) and "assurance" in refusal.lower())
+
+            refusal = validator(
+                args_for("staging", staging_path,
+                         rollback_plan="runbook:caller-supplied-different-plan"),
+                staging,
+            )
+            check("5a. caller rollback fields cannot replace the hashed manifest plan",
+                  isinstance(refusal, str) and "differs" in refusal)
 
         # Reproduce the real defect: a production-default manifest passed to a
         # staging candidate must refuse before the database connection opens.
@@ -155,6 +175,13 @@ def main() -> int:
           and "for share" in record_source
           and "successor.service_id = target.service_id" in record_source
           and "successor.environment = target.environment" in record_source)
+    candidate_insert = record_source[record_source.index("insert into ops.release"):]
+    candidate_insert = candidate_insert[:candidate_insert.index("row = cur.fetchone()")]
+    check("10. persisted rollback evidence comes from the verified manifest",
+          'manifest.get("rollback_ready")' in candidate_insert
+          and 'manifest.get("rollback_plan_ref")' in candidate_insert
+          and "else args.rollback_ready" not in candidate_insert
+          and "else args.rollback_plan" not in candidate_insert)
 
     if FAILURES:
         print(f"release-candidate-manifest-admission-selftest: {len(FAILURES)} FAILED")
