@@ -113,9 +113,9 @@ def _dedicated_codex_desk(registry: desks.Registry) -> dict:
     spec = _desk_spec()
     allowed_fields = {
         "name", "kind", "model", "effort", "cwd", "sandbox", "room_seat", "thread_id", "registered_at",
-        # These two are bridge-owned liveness observations, never execution
-        # choices.  They are allowed to change without widening the desk.
-        "last_seen", "last_live",
+        # These are bridge-owned liveness/auth observations, never execution
+        # choices. They are allowed to change without widening the desk.
+        "last_seen", "last_live", "last_auth", "last_auth_at",
     }
     if set(entry) - allowed_fields:
         raise DispatchRefusal("dedicated Engineering desk has an unapproved execution field")
@@ -126,7 +126,9 @@ def _dedicated_codex_desk(registry: desks.Registry) -> dict:
     if (entry.get("thread_id") is not None and not isinstance(entry["thread_id"], str)) or (
             "registered_at" in entry and not isinstance(entry["registered_at"], str)) or (
             "last_seen" in entry and not isinstance(entry["last_seen"], str)) or (
-            "last_live" in entry and not isinstance(entry["last_live"], bool)):
+            "last_live" in entry and not isinstance(entry["last_live"], bool)) or (
+            "last_auth" in entry and entry["last_auth"] is not None and not isinstance(entry["last_auth"], bool)) or (
+            "last_auth_at" in entry and not isinstance(entry["last_auth_at"], str)):
         raise DispatchRefusal("dedicated Engineering desk metadata is invalid")
     return entry
 
