@@ -291,7 +291,7 @@ def run_local_ci(
                     else:
                         print("local-db-ci: atomic rule-delivery cutover acceptance passed")
                 if exit_code == 0:
-                    engineering_claim_script = repo / "ops/engineering-claim-local-pg-acceptance.py"
+                    engineering_claim_script = repo / "ops/engineering-claim-local-pg-gate.py"
                     engineering_claim = command_runner.run(
                         [acceptance_python, engineering_claim_script],
                         env=acceptance_env,

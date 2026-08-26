@@ -24,7 +24,7 @@ RUNTIME_ROLE = "carr_jobs"
 
 
 def fail(message: str) -> int:
-    print(f"engineering-claim-local-pg-acceptance: FAIL — {message}", file=sys.stderr)
+    print(f"engineering-claim-local-pg-gate: FAIL — {message}", file=sys.stderr)
     return 1
 
 

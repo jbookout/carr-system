@@ -125,7 +125,7 @@ check(
 )
 check(
     "scoped engineering claim runs after the authority acceptances",
-    events[7][-1].endswith("ops/engineering-claim-local-pg-acceptance.py"),
+    events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 check(
     "authority acceptance receives only the local disposable DSN",
@@ -159,7 +159,7 @@ check(
 )
 check(
     "strict lane also proves the scoped engineering claim",
-    events[7][-1].endswith("ops/engineering-claim-local-pg-acceptance.py"),
+    events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 
 
