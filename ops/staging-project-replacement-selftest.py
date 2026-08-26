@@ -11,7 +11,7 @@ import subprocess
 import sys
 import types
 import uuid
-from contextlib import contextmanager, redirect_stderr
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +58,14 @@ assert ctl.CONTRACT_MIGRATION == "0322_clean_staging_replacement_contract.sql"
 assert (ROOT / "migrations" / ctl.CONTRACT_MIGRATION).is_file()
 assert "clean-staging-replacement-contract.v1" in sql_source
 assert "clean-staging-replacement-observation.v1" in sql_source
+db_gate_source = (ROOT / "ops/staging-replacement-project-local-pg-gate.py").read_text()
+assert "prepare is not exact-replay idempotent" in db_gate_source
+assert "changed preparation replay was accepted" in db_gate_source
+prepare_block = controller_source[
+    controller_source.index("def prepare_candidate("):
+    controller_source.index("def parse_args(")]
+assert prepare_block.index("read_production_overlap") < \
+       prepare_block.index("call_json(cur, PREPARE_FUNCTION")
 
 
 # Full operation UUID and source-controlled provider profile.
@@ -348,6 +356,60 @@ del missing_contract["migration_ledger"][ctl.CONTRACT_MIGRATION]
 refuses(lambda: ctl.validate_migration_ledger(missing_contract), "lacks")
 
 
+# All fallible read-only evidence is complete before the append-only prepare
+# write. The DB gate above separately proves exact replay and changed-source refusal.
+phase_events = []
+saved_phase_functions = {name: getattr(ctl, name) for name in (
+    "exact_ledger", "client_row_ids", "prepare_payload", "read_production_overlap",
+    "observation_payload", "call_json", "validate_receipt_readback")}
+phase_operation_id = uuid.UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+phase_receipt_id = uuid.UUID("12345678-1234-4234-8234-123456789abc")
+class PhaseCursor:
+    def __enter__(self): return self
+    def __exit__(self, *unused): return False
+class PhaseConnection:
+    def __enter__(self): return self
+    def __exit__(self, *unused): return False
+    def cursor(self): return PhaseCursor()
+    def commit(self): phase_events.append("commit")
+def phase_call(_cur, function, _operation, _payload=None):
+    if function == ctl.PREPARE_FUNCTION:
+        phase_events.append("prepare_write")
+        return {"state": "prepared", "contract_id": "contract"}
+    if function == ctl.RECORD_FUNCTION:
+        phase_events.append("record_write")
+        return {"state": "observed", "contract_id": "contract",
+                "receipt_id": str(phase_receipt_id),
+                "evidence_ref": "ops.staging-replacement-project:sha256:" + "d"*64}
+    phase_events.append("receipt_read")
+    return {}
+def phase_overlap(*_args, **_kwargs):
+    phase_events.append("overlap")
+    return 0
+def phase_observation(*_args, **_kwargs):
+    phase_events.append("observation")
+    return {"observed": True}
+try:
+    ctl.exact_ledger = lambda _cur: {key: future_manifest[key] for key in (
+        "migration_ledger", "migration_count", "migration_highest", "migration_ledger_sha256")}
+    ctl.client_row_ids = lambda _conn: {
+        table: (("1",) if table == "party" else ()) for table in ctl.CLIENT_TABLES}
+    ctl.prepare_payload = lambda *_args, **_kwargs: {"prepared": True}
+    ctl.read_production_overlap = phase_overlap
+    ctl.observation_payload = phase_observation
+    ctl.call_json = phase_call
+    ctl.validate_receipt_readback = lambda *_args, **_kwargs: phase_events.append("validated")
+    phase_result = ctl.prepare_candidate(
+        future_source, phase_operation_id, production_scope, prior_scope, owner_scope,
+        owner, "jobs-dsn", "verifier-dsn", connect=lambda _dsn: PhaseConnection(),
+        run=lambda *_args, **_kwargs: None, environ={})
+    assert phase_events.index("overlap") < phase_events.index("prepare_write")
+    assert phase_events.index("observation") < phase_events.index("prepare_write")
+    assert phase_result["receipt_id"] == str(phase_receipt_id)
+finally:
+    for name, value in saved_phase_functions.items(): setattr(ctl, name, value)
+
+
 # Same-operation credential retries serialize before touching pending files or roles.
 saved_psycopg = ctl.psycopg
 saved_psycopg_module = sys.modules.get("psycopg")
@@ -430,5 +492,86 @@ except SystemExit:
     pass
 else:
     raise AssertionError("prepare without explicit apply was accepted")
+
+
+# A successor receipt reuses the exact existing candidate and can never create
+# a second project under the new receipt idempotency key.
+receipt_operation_id = uuid.UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+candidate_operation_id = uuid.UUID("11111111-2222-4333-8444-555555555555")
+saved = {name: getattr(ctl, name) for name in (
+    "validate_source", "load_candidate_spec", "resolve_existing_scopes", "create_candidate",
+    "validate_candidate_spec", "derive_dsn", "candidate_reconstruction_state",
+    "install_fixtures", "provision_scoped_credentials", "sync_control_plane",
+    "prepare_candidate", "prove_provider_preservation")}
+saved_psycopg = ctl.psycopg
+resolved_operations: list[uuid.UUID] = []
+create_calls: list[uuid.UUID] = []
+try:
+    ctl.validate_source = lambda _sha: ctl.SourceContract("a"*40, {})
+    ctl.load_candidate_spec = lambda: ctl.CandidateSpec(
+        18, "aws-us-east-1", ctl.Decimal("0.25"), ctl.Decimal("8"))
+    prod = ctl.ProviderScope(ctl.PRODUCTION_PROJECT_ID, "production", "br-p", "ep-p",
+                             "ep-p.neon.tech")
+    old = ctl.ProviderScope("old", "carr-staging", "br-o", "ep-o", "ep-o.neon.tech")
+    candidate = ctl.ProviderScope("candidate", ctl.candidate_name(candidate_operation_id),
+                                  "br-c", "ep-c", "ep-c.neon.tech")
+    def resolve_successor(operation, **_kwargs):
+        resolved_operations.append(operation)
+        return prod, old, candidate
+    ctl.resolve_existing_scopes = resolve_successor
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = ctl.main(["plan", "--sha", "a"*40,
+            "--operation-id", str(receipt_operation_id),
+            "--candidate-operation-id", str(candidate_operation_id)])
+    planned = json.loads(stdout.getvalue())
+    assert rc == 0 and resolved_operations == [candidate_operation_id]
+    assert planned["receipt_operation_id"] == str(receipt_operation_id)
+    assert planned["candidate_operation_id"] == str(candidate_operation_id)
+    assert planned["candidate_exists"] is True
+    assert planned["standing_project_create_count"] == 0
+    ctl.resolve_existing_scopes = lambda *_args, **_kwargs: (prod, old, None)
+    ctl.create_candidate = lambda operation, *_args, **_kwargs: create_calls.append(operation)
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        rc = ctl.main(["plan", "--sha", "a"*40,
+            "--operation-id", str(receipt_operation_id),
+            "--candidate-operation-id", str(candidate_operation_id)])
+    assert rc == 2 and "candidate does not exist" in stderr.getvalue()
+    assert create_calls == []
+    prepare_routing: list[object] = []
+    ctl.resolve_existing_scopes = resolve_successor
+    ctl.validate_candidate_spec = lambda *_args, **_kwargs: None
+    ctl.derive_dsn = lambda *_args, **_kwargs: owner
+    ctl.candidate_reconstruction_state = lambda *_args, **_kwargs: "reconstructed"
+    ctl.install_fixtures = lambda *_args, **_kwargs: prepare_routing.append("fixtures")
+    def provision_for_candidate(_owner, operation, **_kwargs):
+        prepare_routing.append(("credentials", operation))
+        return "jobs-dsn", "verifier-dsn"
+    ctl.provision_scoped_credentials = provision_for_candidate
+    ctl.sync_control_plane = lambda *_args, **_kwargs: prepare_routing.append("sync")
+    def prepare_for_receipt(_source, operation, *_args, **_kwargs):
+        prepare_routing.append(("receipt", operation))
+        return {"receipt_id": str(uuid.uuid4()), "evidence_ref": "evidence"}
+    ctl.prepare_candidate = prepare_for_receipt
+    ctl.prove_provider_preservation = lambda operation, *_args, **_kwargs: \
+        prepare_routing.append(("preservation", operation))
+    ctl.create_candidate = lambda operation, *_args, **_kwargs: \
+        (_ for _ in ()).throw(AssertionError(f"unexpected create {operation}"))
+    ctl.psycopg = types.SimpleNamespace(connect=lambda *_args, **_kwargs: None)
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        rc = ctl.main(["prepare", "--apply", "--local-checks-green",
+            "--sha", "a"*40, "--operation-id", str(receipt_operation_id),
+            "--candidate-operation-id", str(candidate_operation_id)])
+    completed = json.loads(stdout.getvalue())
+    assert rc == 0 and completed["receipt_operation_id"] == str(receipt_operation_id)
+    assert completed["candidate_operation_id"] == str(candidate_operation_id)
+    assert ("credentials", candidate_operation_id) in prepare_routing
+    assert ("preservation", candidate_operation_id) in prepare_routing
+    assert ("receipt", receipt_operation_id) in prepare_routing
+finally:
+    for name, value in saved.items(): setattr(ctl, name, value)
+    ctl.psycopg = saved_psycopg
 
 print("staging-project-replacement-selftest: PASS")
