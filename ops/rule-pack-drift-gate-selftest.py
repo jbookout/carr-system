@@ -537,6 +537,24 @@ module_mutation = run([codex_tool(
     + "});")])
 check("dynamic module mutation cannot spoof inert serialization",
       "engineering-git" in module_mutation["needed"], str(module_mutation))
+for label, mutation, call in (
+    ("module __dict__", "json.__dict__['dumps'] = subprocess.run",
+     "json.dumps([receipt['source_evidence']['source_sha'], 'status'])"),
+    ("validator __dict__",
+     "jsonschema.Draft202012Validator.__dict__['validate'] = subprocess.run",
+     "jsonschema.Draft202012Validator.validate("
+     "[receipt['source_evidence']['source_sha'], 'status'])"),
+    ("callable attribute", "json.dumps.__code__ = subprocess.run.__code__",
+     "json.dumps([receipt['source_evidence']['source_sha'], 'status'])"),
+):
+    import_line = "import jsonschema, subprocess" if "validator" in label \
+        else "import json, subprocess"
+    target_mutation = run([codex_tool(
+        "exec", "const r = await tools.exec_command({cmd: "
+        + json.dumps(import_line + "\n" + mutation + "\nreceipt = "
+                     + repr(executable_receipt) + "\n" + call) + "});")])
+    check(f"pre-receipt {label} mutation cannot spoof inert calls",
+          "engineering-git" in target_mutation["needed"], str(target_mutation))
 
 # Compact replay of the immutable source behind event 10529812. It preserves
 # the two relevant custom-tool shapes: a validated receipt literal and the

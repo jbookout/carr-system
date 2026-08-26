@@ -510,15 +510,20 @@ def _pure_name_target(node):
     return False
 
 
-def _exact_receipt_digest_stub(target, value, receipt_name):
-    """One captured validator stub; it returns data and cannot execute it."""
-    if (_call_name(target) != "ep.base.execution_envelope_digest"
-            or not isinstance(value, ast.Lambda) or len(value.args.args) != 1):
+def _exact_validator_stub(target, value, receipt_name):
+    """The three captured data-only validator stubs, bytecode-free by AST."""
+    if not isinstance(value, ast.Lambda):
         return False
+    path = _call_name(target)
+    args = [item.arg for item in value.args.args]
     body = value.body
-    return (isinstance(body, ast.Subscript)
-            and isinstance(body.value, ast.Name) and body.value.id == receipt_name
-            and isinstance(body.slice, ast.Constant)
+    if path == "ep.base.validate_execution_envelope":
+        return args == ["x"] and isinstance(body, ast.Name) and body.id == "x"
+    if path == "ep._validate_plan_envelope_binding":
+        return args == ["p", "e"] and isinstance(body, ast.Constant) and body.value is None
+    return (path == "ep.base.execution_envelope_digest" and args == ["x"]
+            and isinstance(body, ast.Subscript) and isinstance(body.value, ast.Name)
+            and body.value.id == receipt_name and isinstance(body.slice, ast.Constant)
             and body.slice.value == "envelope_digest")
 
 
@@ -579,6 +584,16 @@ def _inert_call_allowlist(tree):
 def _receipt_use_is_inert(tree, assignment, receipt_name):
     """Refuse normalization if receipt-derived data reaches executable code."""
     allowed = _inert_call_allowlist(tree)
+    for statement in tree.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = statement.targets if isinstance(statement, ast.Assign) \
+            else [statement.target]
+        value = statement.value
+        for target in targets:
+            if (not _pure_name_target(target)
+                    and not _exact_validator_stub(target, value, receipt_name)):
+                return False
     for call in (item for item in ast.walk(tree) if isinstance(item, ast.Call)):
         name = _call_name(call.func)
         if name not in allowed:
@@ -615,7 +630,7 @@ def _receipt_use_is_inert(tree, assignment, receipt_name):
                     else [statement.target]
                 if any(not _pure_name_target(target) for target in targets):
                     if (len(targets) == 1
-                            and _exact_receipt_digest_stub(
+                            and _exact_validator_stub(
                                 targets[0], value, receipt_name)):
                         continue
                     return False
