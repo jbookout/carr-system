@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Rollback-only proof that carr_jobs can claim one exact Engineering slice.
 
 The fixture uses the real SECURITY DEFINER claim and controller-binding
