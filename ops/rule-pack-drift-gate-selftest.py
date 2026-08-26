@@ -58,6 +58,17 @@ def standing_context_result(mode: str, declared: list[str], omit: list[str]) -> 
          "content": [{"type": "text", "text": json.dumps(body)}]}]}}
 
 
+def codex_standing_context_result(mode: str, declared: list[str], omit: list[str]) -> dict:
+    """The real Codex JSONL wrapper captured from an mcp_tool_call_end event."""
+    body = {"ok": True, "rule_delivery": {"mode": mode,
+                                          "enforcing": mode == "enforced",
+                                          "declared_packs": declared,
+                                          "would_omit": omit}}
+    return {"type": "event_msg", "payload": {"type": "mcp_tool_call_end",
+            "result": {"Ok": {"content": [
+                {"type": "text", "text": json.dumps(body)}]}}}}
+
+
 def run(records):
     return gate.evaluate(records, TRIGGERS, MEMBERS)
 
@@ -181,6 +192,23 @@ check("a bare lookup call does not unload the pack already loaded",
       reloaded["loaded"] == ["engineering-git"], str(reloaded["loaded"]))
 check("and so it reports nothing missing", reloaded["missing"] == [], str(reloaded))
 
+# ── Codex's real MCP result wrapper is part of the delivery contract ─────────
+codex = run([
+    user("take a worktree and land the migration"),
+    {"type": "event_msg", "payload": {"type": "mcp_tool_call_begin",
+      "server": "carr", "tool": "standing_context",
+      "arguments": {"packs": ["engineering-git"]}}},
+    codex_standing_context_result("shadow", ["engineering-git"], ["424ba0cc"]),
+    {"type": "event_msg", "payload": {"type": "custom_tool_call",
+      "name": "exec_command", "arguments": {"cmd": "git worktree add ../x"}}},
+])
+check("Codex mcp_tool_call_end yields the declared pack",
+      codex["loaded"] == ["engineering-git"], str(codex))
+check("Codex mcp_tool_call_end yields the scoped omission count",
+      codex["would_omit_count"] == 1, str(codex))
+check("Codex transcript fixture has no false drift",
+      codex["missing"] == [], str(codex))
+
 # ── a trigger that ends in punctuation still matches ────────────────────────
 xcom = run([user("pull the metrics from x.com for last week"),
             assistant_tool("Bash", {"command": "grok x search"})])
@@ -192,4 +220,4 @@ if FAILURES:
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-pack-drift-gate-selftest: 21 cases passed")
+print("rule-pack-drift-gate-selftest: 24 cases passed")
