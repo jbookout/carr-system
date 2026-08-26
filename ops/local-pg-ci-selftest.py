@@ -128,6 +128,10 @@ check(
     events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 check(
+    "Engineering terminalization race runs after the scoped claim",
+    events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+)
+check(
     "authority acceptance receives only the local disposable DSN",
     child_envs[5].get("CARR_LOCAL_PG_DSN")
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci"
@@ -160,6 +164,10 @@ check(
 check(
     "strict lane also proves the scoped engineering claim",
     events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+)
+check(
+    "strict lane also proves the Engineering terminalization race",
+    events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
 )
 
 

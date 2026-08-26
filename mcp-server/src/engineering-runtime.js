@@ -21,6 +21,14 @@ export const ENGINEERING_REPOSITORY_ACTIONS = Object.freeze([
   "repository:push-branch",
   "repository:open-pr",
 ]);
+const ENGINEERING_CLAIM_LEASE_SECONDS = 1_800;
+const ENGINEERING_DISPATCH_STARTUP_MARGIN_SECONDS = 60;
+const ENGINEERING_ADMISSION_TO_CLAIM_BUDGET_SECONDS = 300;
+const ENGINEERING_DISPATCH_STARTUP_MARGIN_MS = ENGINEERING_DISPATCH_STARTUP_MARGIN_SECONDS * 1_000;
+const ENGINEERING_ENVELOPE_TTL_MS = (
+  ENGINEERING_CLAIM_LEASE_SECONDS + ENGINEERING_DISPATCH_STARTUP_MARGIN_SECONDS +
+  ENGINEERING_ADMISSION_TO_CLAIM_BUDGET_SECONDS
+) * 1_000;
 
 const canonicalize = value => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -151,7 +159,11 @@ function nowIso() { return new Date().toISOString().replace(/\.\d{3}Z$/, "Z"); }
 
 function isCurrentRepositoryWriteEnvelope(row) {
   const envelope = row?.envelope;
-  return Boolean(envelope && Date.parse(envelope.expires_at) > Date.now() &&
+  const packetExpiry = Date.parse(envelope?.expires_at);
+  const databaseExpiry = Date.parse(row?.expires_at);
+  return Boolean(envelope && Number.isFinite(packetExpiry) && Number.isFinite(databaseExpiry) &&
+    packetExpiry === databaseExpiry &&
+    databaseExpiry > Date.now() + ENGINEERING_DISPATCH_STARTUP_MARGIN_MS &&
     envelope.server_binding?.authority?.read_only === false &&
     envelope.server_binding?.authority?.capability_profile === "capability:engineering-repository-write" &&
     JSON.stringify(envelope.request?.allowed_actions) === JSON.stringify(ENGINEERING_REPOSITORY_ACTIONS));
@@ -159,7 +171,7 @@ function isCurrentRepositoryWriteEnvelope(row) {
 
 export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, actor, replacesEnvelope = null }) {
   const issue = nowIso();
-  const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const expiry = new Date(Date.now() + ENGINEERING_ENVELOPE_TTL_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
   const resources = slice.declared_resource_refs || [];
   const envelope = {
     schema_version: "execution-envelope.v1",
@@ -358,7 +370,8 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
 }
 
 export async function claimEngineeringSlice(c, worker, limit = 1) {
-  const claimed = await c.query("select * from ops.engineering_claim_slice($1::text,$2::integer,1800)", [worker, limit]);
+  const claimed = await c.query("select * from ops.engineering_claim_slice($1::text,$2::integer,$3::integer)",
+    [worker, limit, ENGINEERING_CLAIM_LEASE_SECONDS]);
   const rows = [];
   for (const job of claimed.rows) {
     // Sponsored-authority recovery may create an immutable successor envelope

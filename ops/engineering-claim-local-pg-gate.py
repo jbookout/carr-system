@@ -42,11 +42,14 @@ def sha(char: str) -> str:
 
 
 def fixture(cur, *, expired: bool = False, read_only: bool = False,
-            session_state: str = "claimed", expires_in_seconds: float | None = None):
+            session_state: str = "claimed", expires_in_seconds: float | None = None,
+            packet_expiry_mode: str = "exact", executor_slug: str = "codex",
+            executor_kind: str = "automation"):
     token = uuid.uuid4().hex
     work_ref = f"WR-ENGINEERING-CLAIM-{token}"
     joe_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
-    codex_id = one(cur, "select id from actor where slug='codex' and active and kind='automation'")[0]
+    codex_id = one(cur, "select id from actor where slug=%s and active and kind=%s",
+                   (executor_slug, executor_kind))[0]
     document_id = one(
         cur,
         """insert into doctrine_document(slug,title,content_class,visibility,created_by)
@@ -167,6 +170,14 @@ def fixture(cur, *, expired: bool = False, read_only: bool = False,
             "adapter": {"surface": "codex_desktop"},
         },
     }
+    if packet_expiry_mode == "missing":
+        del envelope["expires_at"]
+    elif packet_expiry_mode == "invalid":
+        envelope["expires_at"] = "not-a-timestamp"
+    elif packet_expiry_mode == "mismatch":
+        envelope["expires_at"] = (clock + timedelta(hours=2)).isoformat()
+    elif packet_expiry_mode != "exact":
+        raise RuntimeError(f"unknown packet expiry fixture mode: {packet_expiry_mode}")
     envelope_id = one(
         cur,
         """insert into ops.engineering_execution_envelope
@@ -225,10 +236,10 @@ def supersede_fixture(cur, prior_job_id, prior_envelope_id):
              (job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,
               state_version,canonical_record_digest,envelope_digest,envelope,issued_at,expires_at,
               supersedes_envelope_id,supersession_reason)
-             values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),now()+interval '1 hour',%s,'fixture replacement')
+             values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),%s::timestamptz,%s,'fixture replacement')
              returning id""",
         (successor_job_id, row[0], row[1], row[2], row[3], successor_session_id, *row[5:7], "sha256:" + uuid.uuid4().hex * 2,
-         Jsonb(successor_envelope), prior_envelope_id),
+         Jsonb(successor_envelope), successor_envelope["expires_at"], prior_envelope_id),
     )[0]
     return successor_job_id, successor_envelope_id
 
@@ -259,7 +270,8 @@ def main() -> int:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             grant_settable_runtime_roles(cur, RUNTIME_ROLE)
             job_id, envelope_id, session_id, codex_id, plan_digest, slice_ref, envelope_digest = fixture(
-                cur, expires_in_seconds=5)
+                cur, expires_in_seconds=2160)
+            near_expiry_job_id, _, _, _, _, _, _ = fixture(cur, expires_in_seconds=90)
             superseded_job_id, superseded_envelope_id, _, _, _, _, _ = fixture(cur, expired=True)
             successor_job_id, successor_envelope_id = supersede_fixture(
                 cur, superseded_job_id, superseded_envelope_id)
@@ -267,8 +279,26 @@ def main() -> int:
                 fixture(cur, read_only=True)[0],
                 fixture(cur, session_state="cancelled")[0],
                 fixture(cur, session_state="completed")[0],
-                superseded_job_id,
+                fixture(cur, packet_expiry_mode="missing")[0],
+                fixture(cur, packet_expiry_mode="invalid")[0],
+                fixture(cur, packet_expiry_mode="mismatch")[0],
+                fixture(cur, executor_slug="joe", executor_kind="human")[0],
+                superseded_job_id, near_expiry_job_id,
             ]
+            post_claim_expired_job_id, post_claim_expired_envelope_id, _, _, _, _, _ = fixture(
+                cur, expired=True)
+            post_claim_expired_lease = uuid.uuid4()
+            cur.execute(
+                """update ops.job set state='running',attempt=1,lease_owner='expired-after-claim',
+                          lease_token=%s,leased_until=now()+interval '5 minutes',started_at=now(),updated_at=now()
+                     where id=%s""",
+                (post_claim_expired_lease, post_claim_expired_job_id),
+            )
+            cur.execute(
+                """insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
+                     values (%s,1,'expired-after-claim',%s,'running')""",
+                (post_claim_expired_job_id, post_claim_expired_lease),
+            )
             terminal_job_id, terminal_envelope_id, terminal_session_id, _, _, _, _ = fixture(cur)
             if not one(cur, "select ops.engineering_envelope_is_executable(%s,%s)",
                        (successor_envelope_id, successor_job_id))[0]:
@@ -287,10 +317,22 @@ def main() -> int:
                 return fail("carr_jobs cannot execute the scoped Engineering claim")
             if not one(cur, "select has_function_privilege(current_user,'ops.engineering_controller_binding(uuid,uuid)'::regprocedure,'EXECUTE')")[0]:
                 return fail("carr_jobs cannot read the scoped controller binding")
+            cur.execute("savepoint multi_claim_refusal")
+            try:
+                cur.execute("select * from ops.engineering_claim_slice(%s,2,1800)",
+                            ("engineering-multi-claim-refusal",))
+            except psycopg.Error as exc:
+                detail = str(exc)
+                cur.execute("rollback to savepoint multi_claim_refusal")
+                cur.execute("release savepoint multi_claim_refusal")
+                if "exactly one claim" not in detail:
+                    raise RuntimeError(f"multi-claim refusal was not deterministic: {detail}") from exc
+            else:
+                raise RuntimeError("multi-candidate Engineering claim was accepted")
 
             claimed = one(
                 cur,
-                "select job_id,lease_token,definition_key,attempt from ops.engineering_claim_slice(%s,1,300)",
+                "select job_id,lease_token,definition_key,attempt from ops.engineering_claim_slice(%s,1,1800)",
                 ("engineering-claim-local-acceptance",),
             )
             if claimed[0] != job_id or not isinstance(claimed[1], uuid.UUID) or claimed[2:] != ("engineering-slice", 1):
@@ -322,13 +364,38 @@ def main() -> int:
             )
             if successor_claimed[0] != successor_job_id or not isinstance(successor_claimed[1], uuid.UUID):
                 return fail(f"the current successor was not claimed after its stale predecessor was refused: got {successor_claimed[0]}")
+            cur.execute("reset role")
+            expired_lease_job_id, expired_lease_envelope_id, _, expired_lease_actor_id, _, _, _ = fixture(cur)
+            expired_lease_token = uuid.uuid4()
+            cur.execute(
+                """update ops.job set state='running',attempt=1,lease_owner='expired-lease',
+                          lease_token=%s,leased_until=now()-interval '1 second',started_at=now(),updated_at=now()
+                     where id=%s""",
+                (expired_lease_token, expired_lease_job_id),
+            )
+            cur.execute(
+                """insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
+                     values (%s,1,'expired-lease',%s,'running')""",
+                (expired_lease_job_id, expired_lease_token),
+            )
+            set_local_role(cur, RUNTIME_ROLE)
             expect_receipt_refusal(cur, superseded_envelope_id, uuid.uuid4(), codex_id,
                                    "superseded-envelope receipt")
-            cur.execute("select pg_sleep(5.1)")
-            if one(cur, "select ops.engineering_controller_binding(%s,%s)", (envelope_id, job_id))[0] is not None:
+            # Model a lease whose immutable envelope has since expired: both
+            # binding and receipt persistence must repeat the shared predicate.
+            if one(cur, "select ops.engineering_controller_binding(%s,%s)",
+                   (post_claim_expired_envelope_id, post_claim_expired_job_id))[0] is not None:
                 return fail("an envelope that expired after claim retained its controller binding")
-            expect_receipt_refusal(cur, envelope_id, claimed[1], codex_id,
+            expect_receipt_refusal(cur, post_claim_expired_envelope_id, post_claim_expired_lease, codex_id,
                                    "expiry-after-claim receipt")
+            if one(cur, "select state,lease_token is not null,leased_until<statement_timestamp() from ops.job where id=%s",
+                   (expired_lease_job_id,)) != ("running", True, True):
+                return fail("expired-lease fixture did not persist an expired running lease")
+            if one(cur, "select ops.engineering_controller_binding(%s,%s)",
+                   (expired_lease_envelope_id, expired_lease_job_id))[0] is not None:
+                return fail("an expired lease retained its controller binding")
+            expect_receipt_refusal(cur, expired_lease_envelope_id, expired_lease_token,
+                                   expired_lease_actor_id, "expired-lease receipt")
             terminal_claimed = one(
                 cur,
                 "select job_id,lease_token from ops.engineering_claim_slice(%s,1,300)",
@@ -337,6 +404,18 @@ def main() -> int:
             if terminal_claimed[0] != terminal_job_id or not isinstance(terminal_claimed[1], uuid.UUID):
                 return fail("fresh terminal-race fixture was not claimable")
             cur.execute("reset role")
+            cur.execute("savepoint terminalization_live_lease")
+            try:
+                cur.execute("update ops.capability_agent_session set state='cancelled',cancelled_at=now() where id=%s", (terminal_session_id,))
+            except psycopg.Error as exc:
+                detail = str(exc)
+                cur.execute("rollback to savepoint terminalization_live_lease")
+                cur.execute("release savepoint terminalization_live_lease")
+                if "engineering session terminalization deferred while its dispatch lease is live" not in detail:
+                    raise RuntimeError(f"live-lease terminalization returned the wrong refusal: {detail}") from exc
+            else:
+                raise RuntimeError("live Engineering lease permitted session terminalization")
+            cur.execute("update ops.job set state='failed',ended_at=now(),lease_token=null,leased_until=null where id=%s", (terminal_job_id,))
             cur.execute("update ops.capability_agent_session set state='cancelled',cancelled_at=now() where id=%s", (terminal_session_id,))
             set_local_role(cur, RUNTIME_ROLE)
             if one(cur, "select ops.engineering_controller_binding(%s,%s)", (terminal_envelope_id, terminal_job_id))[0] is not None:

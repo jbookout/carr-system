@@ -134,7 +134,7 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
   const c = { query: async (sql) => {
     calls.push(sql);
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [fakeClaim] };
-    if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: fakeClaim.envelope_id, work_request_id: "11111111-1111-4111-8111-111111111111", envelope: fakeClaim.envelope, envelope_digest: `sha256:${"a".repeat(64)}`, slice_ref: "slice:one" }] };
+    if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: fakeClaim.envelope_id, work_request_id: "11111111-1111-4111-8111-111111111111", envelope: fakeClaim.envelope, expires_at: fakeClaim.envelope.expires_at, envelope_digest: `sha256:${"a".repeat(64)}`, slice_ref: "slice:one" }] };
     if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: fakeClaim.envelope_id, envelope_digest: fakeClaim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts: { source: { work_request: source.work, accepted_plan: source.plan }, slice_plans: [{ accepted_plan_id: source.plan.record_id, accepted_plan_hash: source.plan.digest, plan: typed }] } }] };
     if (sql.includes("engineering_record_slice_receipt")) return { rows: [{ id: "receipt:one" }] };
@@ -148,13 +148,13 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
   assert.ok(!calls.some(sql => typeof sql === "string" && /from ops\.work_request/i.test(sql)));
 });
 
-test("the controller refuses a non-executable envelope before dispatch", async () => {
+test("the controller refuses an envelope whose packet expiry disagrees with the database before dispatch", async () => {
   const typed = controllerPlan();
   const claim = { definition_key: "engineering-slice", job_id: "66666666-6666-4666-8666-666666666666", attempt: 1, lease_token: "77777777-7777-4777-8777-777777777777", payload: { work_request: "WR-301", slice_ref: "slice:one", plan_digest: typed.plan_digest } };
-  const expired = { expires_at: "2026-08-25T00:00:00Z", server_binding: { authority: { read_only: true } } };
+  const expired = { ...executableEnvelope(), expires_at: "2026-08-25T00:00:00Z" };
   const c = { query: async sql => {
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
-    if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: "88888888-8888-4888-8888-888888888888", envelope: expired, envelope_digest: `sha256:${"a".repeat(64)}` }] };
+    if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: "88888888-8888-4888-8888-888888888888", envelope: expired, expires_at: "2999-01-01T00:00:00Z", envelope_digest: `sha256:${"a".repeat(64)}` }] };
     if (sql.includes("ops.fail_job")) return { rows: [{ state: "retry_wait" }] };
     return { rows: [] };
   } };
@@ -172,7 +172,7 @@ test("a controller dispatch failure records the canonical retry receipt without 
   const c = { query: async (sql) => {
     calls.push(sql);
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
-    if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: claim.envelope_id, envelope: claim.envelope, envelope_digest: claim.envelope_digest }] };
+    if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: claim.envelope_id, envelope: claim.envelope, expires_at: claim.envelope.expires_at, envelope_digest: claim.envelope_digest }] };
     if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
     if (sql.includes("ops.fail_job")) return { rows: [{ state: "retry_wait" }] };
     return { rows: [] };
@@ -189,8 +189,8 @@ test("a controller dispatch failure records the canonical retry receipt without 
 test("the controller deterministically selects a newest successor and never dispatches its stale predecessor", async () => {
   const typed = controllerPlan();
   const claim = { definition_key: "engineering-slice", job_id: "66666666-6666-4666-8666-666666666666", attempt: 1, lease_token: "77777777-7777-4777-8777-777777777777", envelope_id: "88888888-8888-4888-8888-888888888888", envelope_digest: `sha256:${"a".repeat(64)}`, envelope: executableEnvelope(), payload: { work_request: "WR-301", slice_ref: "slice:one", plan_digest: typed.plan_digest } };
-  const predecessor = { id: "88888888-8888-4888-8888-888888888888", envelope: { expires_at: "2026-08-25T00:00:00Z", server_binding: { authority: { read_only: true } } }, envelope_digest: `sha256:${"b".repeat(64)}` };
-  const successor = { id: "99999999-9999-4999-8999-999999999999", envelope: executableEnvelope(), envelope_digest: `sha256:${"c".repeat(64)}` };
+  const predecessor = { id: "88888888-8888-4888-8888-888888888888", envelope: { expires_at: "2026-08-25T00:00:00Z", server_binding: { authority: { read_only: true } } }, expires_at: "2026-08-25T00:00:00Z", envelope_digest: `sha256:${"b".repeat(64)}` };
+  const successor = { id: "99999999-9999-4999-8999-999999999999", envelope: executableEnvelope(), expires_at: "2999-01-01T00:00:00Z", envelope_digest: `sha256:${"c".repeat(64)}` };
   let envelopeQuery = "";
   const c = { query: async (sql) => {
     if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
@@ -241,13 +241,17 @@ test("successful admission persists its event through the injected writer", asyn
   const jobId = "55555555-5555-4555-8555-555555555555";
   const envelopeId = "66666666-6666-4666-8666-666666666666";
   const calls = [];
-  const c = { query: async (sql) => {
+  let insertParams;
+  const c = { query: async (sql, params = []) => {
     calls.push(sql);
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
     if (sql.includes("capability_agent_session")) return { rows: [{ id: sessionId, executor_actor_id: actor.id, state: "active" }] };
     if (sql.includes("from actor")) return { rows: [{ id: actor.id, slug: actor.slug }] };
     if (sql.includes("engineering_enqueue_slice_job")) return { rows: [{ id: jobId }] };
-    if (sql.includes("insert into ops.engineering_execution_envelope")) return { rows: [{ id: envelopeId }] };
+    if (sql.includes("insert into ops.engineering_execution_envelope")) {
+      insertParams = params;
+      return { rows: [{ id: envelopeId }] };
+    }
     return { rows: [] };
   } };
   const events = [];
@@ -259,6 +263,11 @@ test("successful admission persists its event through the injected writer", asyn
   assert.equal(result.envelope_id, envelopeId);
   assert.equal(events.length, 1);
   assert.equal(events[0][2], "admit-engineering-slice");
+  const admitted = JSON.parse(insertParams[8]);
+  const remaining = Date.parse(admitted.expires_at) - Date.parse(admitted.issued_at);
+  assert.ok(remaining >= (1_800 + 60 + 300) * 1_000 - 1_000,
+    "admitted envelope must cover the production claim lease, startup margin, and bounded admission-to-claim budget");
+  assert.equal(insertParams[10], admitted.expires_at);
 });
 
 test("admission replaces a stale read-only envelope with a new immutable generation", async () => {

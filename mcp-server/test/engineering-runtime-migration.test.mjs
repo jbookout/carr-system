@@ -92,15 +92,27 @@ test("0323 qualifies the claim attempt output without widening its authority", (
 
 test("0325 refuses stale Engineering envelopes before a lease is created", () => {
   assert.match(claimEligibilityRepair, /engineering_admission_source\(w\.ref\)/);
-  assert.match(claimEligibilityRepair, /e\.expires_at>statement_timestamp\(\)/);
+  assert.match(claimEligibilityRepair, /p_minimum_remaining_seconds integer default 60/);
+  assert.match(claimEligibilityRepair, /e\.expires_at>statement_timestamp\(\)\+make_interval\(secs=>p_minimum_remaining_seconds\)/);
+  assert.match(claimEligibilityRepair, /ops\.engineering_envelope_is_executable\(e\.id,j\.id,p_lease_seconds\+60\)/);
   assert.match(claimEligibilityRepair, /read_only'='false'/);
   assert.match(claimEligibilityRepair, /successor\.supersedes_envelope_id=e\.id/);
   assert.match(claimEligibilityRepair, /sp\.work_request_version=e\.state_version/);
   assert.match(claimEligibilityRepair, /j\.payload->>'generation'/);
   assert.match(claimEligibilityRepair, /s\.state not in \('completed','cancelled'\)/);
+  assert.match(claimEligibilityRepair, /a\.active and a\.kind='automation' and a\.slug='codex'/);
+  assert.match(claimEligibilityRepair, /pg_input_is_valid\(e\.envelope->>'expires_at','timestamp with time zone'\)/);
+  assert.match(claimEligibilityRepair, /\(e\.envelope->>'expires_at'\)::timestamptz=e\.expires_at/);
+  assert.match(claimEligibilityRepair, /j\.lease_token is not null/);
+  assert.match(claimEligibilityRepair, /j\.leased_until>statement_timestamp\(\)/);
+  assert.match(claimEligibilityRepair, /p_limit<>1/);
+  assert.match(claimEligibilityRepair, /order by e\.slice_plan_id,e\.slice_ref/);
+  assert.match(claimEligibilityRepair, /j\.lease_token=p_lease_token/);
   assert.match(claimEligibilityRepair, /j\.mode='shadow'/);
   assert.equal((claimEligibilityRepair.match(/engineering_envelope_is_executable\(/g) || []).length >= 4, true);
   assert.match(claimEligibilityRepair, /leased engineering envelope cannot be superseded/);
+  assert.match(claimEligibilityRepair, /engineering session terminalization deferred while its dispatch lease is live/);
+  assert.match(claimEligibilityRepair, /engineering_session_terminalization_guard/);
   assert.match(claimEligibilityRepair, /has_table_privilege\('carr_jobs','ops\.work_request','SELECT'\)/);
   assert.match(claimEligibilityRepair, /capability:engineering-repository-write/);
   assert.match(claimEligibilityRepair, /codex_desktop/);

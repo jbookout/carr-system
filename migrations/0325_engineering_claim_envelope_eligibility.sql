@@ -9,7 +9,7 @@
 begin;
 
 create or replace function ops.engineering_envelope_is_executable(
-  p_envelope_id uuid, p_job_id uuid
+  p_envelope_id uuid, p_job_id uuid, p_minimum_remaining_seconds integer default 60
 ) returns boolean
 language plpgsql volatile security definer
 set search_path=pg_catalog,ops,public
@@ -17,6 +17,7 @@ as $$
 declare lineage_plan uuid;
         lineage_slice text;
 begin
+  if p_minimum_remaining_seconds < 0 then return false; end if;
   select e.slice_plan_id,e.slice_ref into lineage_plan,lineage_slice
     from ops.engineering_execution_envelope e
    where e.id=p_envelope_id and e.job_id=p_job_id;
@@ -31,6 +32,7 @@ begin
       join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
       join ops.work_request w on w.id=e.work_request_id
       join ops.capability_agent_session s on s.id=e.agent_session_id
+      join public.actor a on a.id=s.executor_actor_id
       cross join lateral (select ops.engineering_admission_source(w.ref) as source) current_source
      where e.id=p_envelope_id and j.id=p_job_id
        and d.enabled and j.definition_key='engineering-slice'
@@ -50,7 +52,17 @@ begin
        and sp.work_request_version=e.state_version
        and s.work_request_id=e.work_request_id
        and s.state not in ('completed','cancelled')
-       and e.expires_at>statement_timestamp()
+       and a.active and a.kind='automation' and a.slug='codex'
+       -- The packet's expiry is caller-controlled JSON.  Parse it only through
+       -- PostgreSQL's non-throwing validator, then bind it exactly to the
+       -- immutable expiry column before any lease or attempt can be created.
+       and case when pg_input_is_valid(e.envelope->>'expires_at','timestamp with time zone')
+                then (e.envelope->>'expires_at')::timestamptz=e.expires_at
+                else false end
+       and e.expires_at>statement_timestamp()+make_interval(secs=>p_minimum_remaining_seconds)
+       and (j.state<>'running' or (j.lease_token is not null
+            and j.leased_until>statement_timestamp()
+            and e.expires_at>j.leased_until+make_interval(secs=>p_minimum_remaining_seconds)))
        and e.envelope->'server_binding'->'authority'->>'read_only'='false'
        and e.envelope->'server_binding'->'authority'->>'capability_profile'=
            'capability:engineering-repository-write'
@@ -74,8 +86,8 @@ create or replace function ops.engineering_claim_slice(
 language plpgsql security definer set search_path=ops,public,pg_temp
 as $$
 begin
-  if btrim(coalesce(p_worker,''))='' or p_limit<1 or p_lease_seconds<1 then
-    raise exception 'worker, positive limit and positive lease are required';
+  if btrim(coalesce(p_worker,''))='' or p_limit<>1 or p_lease_seconds<1 then
+    raise exception 'worker, exactly one claim and positive lease are required';
   end if;
   perform ops.reap_expired_jobs();
   return query
@@ -87,7 +99,7 @@ begin
      where d.enabled and j.definition_key='engineering-slice'
        and j.definition_version=1 and j.state in ('queued','retry_wait')
        and j.next_attempt_at<=now() and j.attempt<j.max_attempts
-       and ops.engineering_envelope_is_executable(e.id,j.id)
+       and ops.engineering_envelope_is_executable(e.id,j.id,p_lease_seconds+60)
      order by j.scheduled_for,j.created_at
      for update of j,d skip locked limit p_limit
   ), claimed as (
@@ -107,6 +119,43 @@ begin
       on d.key=c.definition_key and d.version=c.definition_version
     join attempts a on a.job_id=c.id;
 end $$;
+
+-- Session terminalization must serialize with the same lineage lock used by
+-- the executable predicate.  Once a controller has a live lease, cancellation
+-- or completion is deferred rather than creating a binding-to-launch gap.
+create or replace function ops.guard_engineering_session_terminalization()
+returns trigger language plpgsql set search_path=pg_catalog,ops,public
+as $$
+declare lineage record;
+begin
+  if new.state not in ('completed','cancelled') or new.state=old.state then
+    return new;
+  end if;
+  for lineage in
+    select distinct e.slice_plan_id,e.slice_ref
+     from ops.engineering_execution_envelope e
+     where e.agent_session_id=old.id
+     order by e.slice_plan_id,e.slice_ref
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(
+      'engineering-envelope:' || lineage.slice_plan_id::text || ':' || lineage.slice_ref,0));
+    if exists (
+      select 1 from ops.engineering_execution_envelope e
+      join ops.job j on j.id=e.job_id
+       where e.agent_session_id=old.id and e.slice_plan_id=lineage.slice_plan_id
+         and e.slice_ref=lineage.slice_ref and j.state='running'
+         and j.lease_token is not null and j.leased_until>statement_timestamp()
+    ) then
+      raise exception 'engineering session terminalization deferred while its dispatch lease is live';
+    end if;
+  end loop;
+  return new;
+end $$;
+
+drop trigger if exists engineering_session_terminalization_guard on ops.capability_agent_session;
+create trigger engineering_session_terminalization_guard
+before update of state on ops.capability_agent_session
+for each row execute function ops.guard_engineering_session_terminalization();
 
 create or replace function ops.engineering_controller_binding(
   p_envelope_id uuid,p_job_id uuid
@@ -154,7 +203,9 @@ begin
   select attempt_row.* into a from ops.job_attempt attempt_row
     join ops.job j on j.id=attempt_row.job_id
    where attempt_row.job_id=e.job_id and attempt_row.attempt=j.attempt
-     and attempt_row.lease_token=p_lease_token and attempt_row.state='running' for update;
+     and attempt_row.lease_token=p_lease_token and attempt_row.state='running'
+     and j.state='running' and j.lease_token=p_lease_token
+     and j.leased_until>statement_timestamp() for update;
   if not found then raise exception 'engineering claim or lease is not current'; end if;
   if p_receipt->>'envelope_digest'<>e.envelope_digest
      or p_receipt->>'slice_ref'<>e.slice_ref
@@ -212,7 +263,7 @@ begin
   return new;
 end $$;
 
-revoke all on function ops.engineering_envelope_is_executable(uuid,uuid)
+revoke all on function ops.engineering_envelope_is_executable(uuid,uuid,integer)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.engineering_claim_slice(text,integer,integer) from public;
 revoke all on function ops.engineering_controller_binding(uuid,uuid) from public;
@@ -224,7 +275,7 @@ grant execute on function ops.engineering_claim_slice(text,integer,integer),
 do $$
 begin
   if has_function_privilege('carr_jobs',
-       'ops.engineering_envelope_is_executable(uuid,uuid)'::regprocedure,'EXECUTE')
+       'ops.engineering_envelope_is_executable(uuid,uuid,integer)'::regprocedure,'EXECUTE')
      or not has_function_privilege('carr_jobs',
        'ops.engineering_claim_slice(text,integer,integer)'::regprocedure,'EXECUTE')
      or not has_function_privilege('carr_jobs',
