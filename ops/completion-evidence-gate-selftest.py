@@ -613,6 +613,22 @@ def real_hook_case(kind, non_carr=False):
         os.unlink(path)
 
 
+def checkout_scope_is_clone_name_independent():
+    """The running hook owns its checkout even when its clone has an opaque name."""
+    original_repo = mod.REPO
+    opaque_repo = "/private/tmp/carr-verifier-opaque"
+    try:
+        mod.REPO = opaque_repo
+        root = mod.payload_is_carr({"cwd": opaque_repo}, [])
+        nested = mod.payload_is_carr({"cwd": opaque_repo + "/hooks"}, [])
+        sibling = not mod.payload_is_carr({"cwd": opaque_repo + "-other"}, [])
+    finally:
+        mod.REPO = original_repo
+    ok = root and nested and sibling
+    print(f"{'PASS' if ok else 'FAIL'}  checkout scope is independent of clone basename")
+    return ok
+
+
 def latch_cases():
     """One intervention per claim-set per turn, with a stable finding identity.
 
@@ -817,6 +833,7 @@ def main():
     non_carr = not real_hook_case("claude", non_carr=True)
     outcomes.append(non_carr)
     print(f"{'PASS' if non_carr else 'FAIL'}  non-CARR cwd is out of scope")
+    outcomes.append(checkout_scope_is_clone_name_independent())
     for name, recs, expected, reason_part in CLAUSE_CASES + DUAL_CASES:
         got, reason = mod.evaluate(recs)
         ok = got == expected and (not expected or reason_part in reason)
