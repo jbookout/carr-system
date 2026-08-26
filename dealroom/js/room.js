@@ -788,6 +788,10 @@ function boot() {
   const isCompact = () => window.innerWidth <= 720;
   const rings = () => (isCompact() ? RINGS_TIGHT : RINGS_WIDE);
 
+  // The named leads of the sky. Everything else is a moon Doc summoned.
+  const LEAD_SEATS = new Set(["doc", "claude", "codex"]);
+  const isLeadSeat = (seat) => LEAD_SEATS.has(String(seat || "").toLowerCase());
+
   function ringPoint(hemisphere, ring, index, total) {
     // Left hemisphere sweeps 120°→240°, right sweeps −60°→60°; each node sits
     // on its own slice so nothing collides however many arrive.
@@ -910,6 +914,32 @@ function boot() {
       buckets[`${hemisphere}:${node.ring}`].push({ ...node, hemisphere });
     }
 
+    // Hierarchy of the sky (Joe's 2026-08-25 ruling, finding 8d0c56a8): Doc,
+    // Claude and Codex are the named leads — full discs on the rings, wired to
+    // the center. Everyone Doc summons is a MOON: a smaller satellite on a
+    // tight private orbit around DOC'S NODE, never a second peer ring on the
+    // wire and no connector of its own. If Doc is not on the stage the moons
+    // fall back to their ring slot, still small.
+    const points = new Map();
+    for (const [key, list] of Object.entries(buckets)) {
+      const [hemisphere, ring] = key.split(":");
+      list.forEach((node, index) => {
+        points.set(node.id, ringPoint(hemisphere, rings()[ring], index, list.length));
+      });
+    }
+    const docNode = nodes.find((n) => String(n.seat).toLowerCase() === "doc");
+    if (docNode && points.has(docNode.id)) {
+      const origin = points.get(docNode.id);
+      const moons = nodes.filter((n) => !isLeadSeat(n.seat));
+      const radius = isCompact() ? 36 : 54;
+      moons.forEach((node, index) => {
+        // Full-circle spread starting at noon so a lone moon sits above Doc,
+        // not buried on the horizon line.
+        const angle = ((-90 + 360 * ((index + 1) / (moons.length + 1))) * Math.PI) / 180;
+        points.set(node.id, { x: origin.x + radius * Math.cos(angle), y: origin.y + radius * Math.sin(angle) });
+      });
+    }
+
     const groups = {
       inner: { connectors: svg("g", { class: "stage-ring-depth stage-ring-inner" }), nodes: svg("g", { class: "stage-ring-depth stage-ring-inner" }) },
       outer: { connectors: svg("g", { class: "stage-ring-depth stage-ring-outer" }), nodes: svg("g", { class: "stage-ring-depth stage-ring-outer" }) },
@@ -917,13 +947,18 @@ function boot() {
 
     for (const [key, list] of Object.entries(buckets)) {
       const [hemisphere, ring] = key.split(":");
-      list.forEach((node, index) => {
-        const point = ringPoint(hemisphere, rings()[ring], index, list.length);
-        const path = svg("path", { class: `stage-connector${ring === "outer" ? " is-outer" : ""}`,
-          d: connectorPath(point), "data-node": node.id });
-        groups[ring].connectors.appendChild(path);
-        groups[ring].nodes.appendChild(nodeElement(node, point));
-        nodeIndex.set(node.id, { node, point, path });
+      list.forEach((node) => {
+        const point = points.get(node.id);
+        if (!isLeadSeat(node.seat)) {
+          // A moon orbits Doc, not the wire — no connector to the center.
+          groups[ring].nodes.appendChild(nodeElement(node, point));
+        } else {
+          const path = svg("path", { class: `stage-connector${ring === "outer" ? " is-outer" : ""}`,
+            d: connectorPath(point), "data-node": node.id });
+          groups[ring].connectors.appendChild(path);
+          groups[ring].nodes.appendChild(nodeElement(node, point));
+        }
+        nodeIndex.set(node.id, { node, point, path: null });
       });
     }
     connectors.append(groups.inner.connectors, groups.outer.connectors);
@@ -939,24 +974,27 @@ function boot() {
     drift.style.setProperty("--drift-period", `${45 + (hash % 31)}s`);
     drift.style.setProperty("--drift-delay", `-${hash % 40}s`);
 
-    const group = svg("g", { class: `stage-node${node.ring === "outer" ? " is-outer" : ""}`,
+    const group = svg("g", { class: `stage-node${node.ring === "outer" ? " is-outer" : ""}${isLeadSeat(node.seat) ? "" : " is-moon"}`,
       tabindex: "0", role: "button", "data-node": node.id });
     group.style.setProperty("--node-seat", seatColor(node.seat));
     group.style.setProperty("--node-halo", partnerHalo(node.partner));
 
-    group.appendChild(svg("circle", { class: "stage-node-pulse", r: 22, "data-state": node.state }));
-    group.appendChild(svg("circle", { class: "stage-node-disc", r: 17 }));
+    // Moons are satellites, not peers: smaller pulse and disc than the lead
+    // trio (r=22/17). Same state-driven pulse behaviour, one class down.
+    const moon = !isLeadSeat(node.seat);
+    group.appendChild(svg("circle", { class: "stage-node-pulse", r: moon ? 13 : 22, "data-state": node.state }));
+    group.appendChild(svg("circle", { class: "stage-node-disc", r: moon ? 9 : 17 }));
     if (node.worker) {
       group.appendChild(svg("rect", { class: "stage-node-worker", x: -5, y: -5, width: 10, height: 10, rx: 1 }));
     } else {
       // The full seat name, not an initial: claude and codex were both a "C",
       // and a picture that needs prior knowledge to disambiguate is not a
       // picture (Joe's tweak-round ruling, 2026-08-22).
-      const glyph = svg("text", { class: "stage-node-glyph stage-node-name", y: 1 });
+      const glyph = svg("text", { class: `stage-node-glyph stage-node-name${moon ? " stage-node-name-moon" : ""}`, y: moon ? 2.5 : 1 });
       glyph.textContent = String(node.seat || "?").slice(0, 7).toLowerCase();
       group.appendChild(glyph);
     }
-    group.appendChild(svg("circle", { class: "stage-node-badge", cx: 14, cy: -13, r: 4 }));
+    group.appendChild(svg("circle", { class: "stage-node-badge", cx: moon ? 8 : 14, cy: moon ? -8 : -13, r: moon ? 3 : 4 }));
     if (node.auth === false) {
       const badge = svg("text", { class: "stage-node-glyph", y: 30 });
       badge.textContent = "⛓";
@@ -1025,7 +1063,10 @@ function boot() {
     if (running >= 3) return;
     cometCounts.set(nodeId, running + 1);
 
+    // Moons have no center connector to ride. Their delivery lands as a lit
+    // badge on the satellite itself, never as a wire that no longer exists.
     const path = entry.path;
+    if (!path) { litBadge(nodeId); return; }
     const length = path.getTotalLength();
     const layer = $("stageComets");
     const comet = svg("g", { class: `comet${arc ? " is-arc" : ""}` });
