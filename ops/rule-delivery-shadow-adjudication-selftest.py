@@ -55,6 +55,18 @@ def digest(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= HEX
 
 
+def pinned_file_prefix(raw: bytes, expected_sha256: str) -> tuple[bytes, int]:
+    """Bind the once-complete transcript while allowing later JSONL appends."""
+    assert digest(expected_sha256)
+    lines = raw.splitlines(keepends=True)
+    running = hashlib.sha256()
+    for line_count, line in enumerate(lines, 1):
+        running.update(line)
+        if running.hexdigest() == expected_sha256:
+            return b"".join(lines[:line_count]), len(lines) - line_count
+    raise AssertionError("transcript is shorter than or changed within its pinned prefix")
+
+
 def verify_legacy_ledger(raw: bytes, *, prefix_rows: int, prefix_sha256: str,
                          expected: dict[str, tuple[str, str]],
                          require_evidence: bool = False) -> bool:
@@ -236,6 +248,24 @@ with tempfile.TemporaryDirectory() as directory:
             ledger.rmdir()
             ledger.parent.rmdir()
 
+# Transcript files are append-only session logs too. A source session may keep
+# running after adjudication pins its then-complete bytes; later rows are lawful,
+# but no byte in the pinned prefix may move.
+transcript_fixture = b'{"row":1}\n{"row":2}\n'
+transcript_digest = hashlib.sha256(transcript_fixture).hexdigest()
+prefix, appended = pinned_file_prefix(
+    transcript_fixture + b'{"row":3}\n', transcript_digest)
+assert prefix == transcript_fixture and appended == 1
+for bad_transcript in (
+        transcript_fixture.splitlines(keepends=True)[0],
+        transcript_fixture.replace(b'"row":1', b'"row":9', 1)):
+    try:
+        pinned_file_prefix(bad_transcript, transcript_digest)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("short or rewritten transcript prefix was accepted")
+
 verified_transcripts = 0
 missing_transcripts = []
 for event in events:
@@ -245,9 +275,10 @@ for event in events:
         missing_transcripts.append(transcript["path"])
         continue
     raw = path.read_bytes()
-    assert hashlib.sha256(raw).hexdigest() == transcript["sha256"]
-    lines = raw.splitlines(keepends=True)
+    pinned_raw, _appended_lines = pinned_file_prefix(raw, transcript["sha256"])
+    lines = pinned_raw.splitlines(keepends=True)
     excerpt = transcript["excerpt"]
+    assert excerpt["end_line"] <= len(lines), "excerpt falls outside pinned transcript"
     selected = b"".join(lines[excerpt["start_line"] - 1:excerpt["end_line"]])
     assert hashlib.sha256(selected).hexdigest() == excerpt["sha256"]
     verified_transcripts += 1
