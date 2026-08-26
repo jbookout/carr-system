@@ -68,6 +68,7 @@ meant to be run through tools/db-tap.py.
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -341,6 +342,154 @@ def prepare_staging_forward_fix_rehearsal(cur, args) -> dict:
     return row[0]
 
 
+def bounded_forward_fix_contract(path: str, expected_sha: str) -> dict:
+    """Read one bounded staging contract and re-verify it from git objects."""
+    raw = json.loads(_read_bounded_regular_file(path))
+    if not isinstance(raw, dict):
+        raise ValueError("bounded forward-fix contract is not an object")
+    source = raw.get("source")
+    target = raw.get("target_prefix")
+    selected = raw.get("selected_migrations")
+    held_back = raw.get("held_back_migrations")
+    if (raw.get("purpose") != "program5-forward-fix-staging-prefix"
+            or raw.get("environment") != "staging"
+            or raw.get("production_deploy_authorized") is not False
+            or not isinstance(source, dict) or source.get("git_sha") != expected_sha
+            or not isinstance(target, dict) or not isinstance(selected, list)
+            or not isinstance(held_back, list)):
+        raise ValueError("bounded forward-fix contract does not bind this staging source")
+    checked = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+         "verify-staging-forward-fix-prefix", "--contract", path],
+        cwd=REPO, text=True, capture_output=True, check=False)
+    if checked.returncode != 0:
+        raise ValueError("bounded forward-fix contract immutable verification failed")
+    return raw
+
+
+def full_tree_forward_fix_manifest(path: str, expected_sha: str) -> dict:
+    """Verify the original 0315 full-tree source identity from immutable git."""
+    raw = json.loads(_read_bounded_regular_file(path))
+    if not isinstance(raw, dict):
+        raise ValueError("full-tree forward-fix manifest is not an object")
+    if (raw.get("git_sha") != expected_sha or raw.get("environment") != "staging"
+            or not isinstance(raw.get("schema_highest_migration"), str)
+            or _exact_int(raw.get("schema_applied_count"), "full-tree schema applied count", minimum=1) < 1
+            or not isinstance(raw.get("schema_ledger_sha256"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", raw["schema_ledger_sha256"])):
+        raise ValueError("full-tree forward-fix manifest does not bind this staging source")
+    checked = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+         "verify", "--manifest", path],
+        cwd=REPO, text=True, capture_output=True, check=False)
+    if checked.returncode != 0:
+        raise ValueError("full-tree forward-fix manifest immutable verification failed")
+    return raw
+
+
+def _load_repo_module(name: str, path: Path):
+    """Load one sanctioned repo helper without adding its directory to PATH."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load sanctioned helper {path.name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _ledger_identity(rows: list[tuple[str, str]]) -> tuple[int, str, str]:
+    """The release-manifest filename/NUL/hash/LF identity, without a DB write."""
+    if not rows:
+        raise ValueError("replacement staging schema ledger is empty")
+    if any((not isinstance(filename, str) or not re.fullmatch(r"[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql", filename)
+            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest))
+           for filename, digest in rows):
+        raise ValueError("replacement staging schema ledger has an invalid row")
+    if len({filename for filename, _digest in rows}) != len(rows):
+        raise ValueError("replacement staging schema ledger has duplicate filenames")
+    if rows != sorted(rows, key=lambda row: row[0]):
+        raise ValueError("replacement staging schema ledger is not ordered by filename")
+    material = "".join(f"{filename}\0{digest}\n" for filename, digest in rows).encode()
+    return len(rows), rows[-1][0], "sha256:" + hashlib.sha256(material).hexdigest()
+
+
+def replacement_staging_bounded_prefix_readback(
+        contract: dict, *, dsn_factory=None, connect_factory=None) -> dict[str, Any]:
+    """Read the *replacement staging* ledger as app_reader before any claim.
+
+    The durable control-plane prepare routine has useful DB-derived facts, but
+    it deliberately connects as ``carr_jobs``.  That cannot prove which schema
+    a newly rebuilt isolated-staging Worker will serve.  This separate,
+    non-mutating read is therefore tied to db-tap's final app_reader profile:
+    provider-resolved endpoint + pinned URI + exact connected identity.  It
+    accepts no caller-authored ledger assertion and never prints the DSN.
+    """
+    target = contract.get("target_prefix")
+    held_back = contract.get("held_back_migrations")
+    if not isinstance(target, dict) or not isinstance(held_back, list):
+        raise ValueError("bounded forward-fix contract has no typed target prefix")
+    held_names = [item.get("filename") for item in held_back if isinstance(item, dict)]
+    if held_names != ["0316_rule_delivery_audit_counts.sql", "0317_atomic_rule_delivery_cutover.sql"]:
+        raise ValueError("bounded forward-fix contract has an invalid held-back suffix")
+
+    if dsn_factory is None:
+        db_tap = _load_repo_module("program5_staging_reader_db_tap", REPO / "tools" / "db-tap.py")
+        # db-tap's app_reader route re-resolves the reviewed staging endpoint
+        # and refuses anything except the final, private app_reader credential.
+        dsn_factory = lambda: db_tap.dsn(project="staging", role_name="app_reader")
+    if connect_factory is None:
+        try:
+            import psycopg
+        except ImportError as exc:
+            raise RuntimeError("staging app_reader preflight requires psycopg") from exc
+        connect_factory = lambda value: psycopg.connect(value, autocommit=True)
+
+    # Do not cache or expose this value. db-tap itself validates the provider
+    # target and the 0600 final credential immediately before returning it.
+    reader_dsn = dsn_factory()
+    with connect_factory(reader_dsn) as conn, conn.cursor() as cur:
+        cur.execute("select session_user,current_user,current_database(),inet_server_port()")
+        identity = cur.fetchone()
+        if identity != ("app_reader", "app_reader", "neondb", 5432):
+            raise ValueError("replacement staging reader session is not the exact app_reader target")
+        # 0315 deliberately grants this view—not schema_migrations itself—to
+        # carr_reader. The raw identity rows stay in this process so errors can
+        # name a mismatch class without leaking a DSN.
+        cur.execute("select filename,sha256 from public.v_schema_ledger order by filename collate \"C\"")
+        rows = list(cur.fetchall())
+
+    count, highest, ledger = _ledger_identity(rows)
+    if any(filename in held_names for filename, _digest in rows):
+        raise ValueError("replacement staging schema has a held-back migration applied")
+    if (count != target.get("applied_count")
+            or highest != target.get("highest_migration")
+            or ledger != target.get("ledger_sha256")):
+        raise ValueError("replacement staging schema is not the exact bounded 0315a prefix")
+    return {
+        "session_user": "app_reader",
+        "database": "neondb",
+        "schema_applied_count": count,
+        "schema_highest_migration": highest,
+        "schema_ledger_sha256": ledger,
+        "held_back_absent": True,
+    }
+
+
+def prepare_bounded_forward_fix_contract(cur, args, contract: dict) -> dict:
+    held_back = [item["filename"] for item in contract["held_back_migrations"]]
+    held_back_sha256 = [item["sha256"] for item in contract["held_back_migrations"]]
+    cur.execute("""select ops.prepare_staging_forward_fix_bounded_contract(
+      %s::uuid,%s::text[],%s::text[])""",
+                (args.idempotency_key, held_back, held_back_sha256))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("bounded forward-fix contract writer returned no durable state")
+    if row[0].get("contract_sha256") != contract.get("contract_sha256"):
+        raise ValueError("database-derived bounded forward-fix contract digest differs from immutable source contract")
+    return row[0]
+
+
 def claim_staging_forward_fix_rehearsal(cur, idempotency_key: str) -> dict:
     cur.execute("select ops.claim_staging_forward_fix_rehearsal(%s::uuid)", (idempotency_key,))
     row = cur.fetchone()
@@ -349,8 +498,9 @@ def claim_staging_forward_fix_rehearsal(cur, idempotency_key: str) -> dict:
     return row[0]
 
 
-def record_staging_forward_fix_rehearsal(cur, args, projection: dict) -> dict:
-    cur.execute("""select ops.record_staging_forward_fix_rehearsal(
+def record_staging_bounded_forward_fix_rehearsal(cur, args, projection: dict) -> dict:
+    """Write only the 0315a staging-prefix receipt, never the 0315 full-tree path."""
+    cur.execute("""select ops.record_staging_bounded_forward_fix_rehearsal(
       %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s,%s)""",
                 (args.idempotency_key, projection["provider_version_id"], projection["provider_tag"],
                  projection["verb_count"], projection["schema_highest_migration"],
@@ -359,6 +509,20 @@ def record_staging_forward_fix_rehearsal(cur, args, projection: dict) -> dict:
     row = cur.fetchone()
     if not row or not isinstance(row[0], dict):
         raise RuntimeError("forward-fix rehearsal result writer returned no durable state")
+    return row[0]
+
+
+def record_staging_full_forward_fix_rehearsal(cur, args, projection: dict) -> dict:
+    """Use frozen 0315 recorder for the exact full-tree staging evidence path."""
+    cur.execute("""select ops.record_staging_forward_fix_rehearsal(
+      %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s,%s)""",
+                (args.idempotency_key, projection["provider_version_id"], projection["provider_tag"],
+                 projection["verb_count"], projection["schema_highest_migration"],
+                 projection["schema_applied_count"], projection["schema_ledger_sha256"],
+                 projection["doctrine_generation"], projection["program6_actions_enabled"]))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("full-tree forward-fix rehearsal result writer returned no durable state")
     return row[0]
 
 
@@ -1813,59 +1977,86 @@ def cmd_staging_restore_only(args) -> int:
 
 
 def cmd_staging_forward_fix(args) -> int:
-    """The sole staging controller for an approval-eligible forward-fix proof."""
+    """Controller for mutually exclusive 0315 full-tree or 0315a bounded proof."""
     try:
         args.idempotency_key = str(uuid.UUID(args.idempotency_key))
+        bounded_mode = bool(args.bounded_contract)
+        if args.action != "claim" and bounded_mode == bool(args.manifest):
+            raise ValueError("forward-fix requires exactly one of --manifest (0315 full tree) or --bounded-contract (0315a staging prefix)")
         if args.action == "prepare":
             if not args.release_key or not args.git_sha:
                 raise ValueError("forward-fix prepare is missing exact release inputs")
             args.correlation = correlation_of(args.correlation)
+            if bounded_mode:
+                contract = bounded_forward_fix_contract(args.bounded_contract, args.git_sha)
+            else:
+                full_tree_forward_fix_manifest(args.manifest, args.git_sha)
             with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
                 result = prepare_staging_forward_fix_rehearsal(cur, args)
+                if bounded_mode:
+                    prepare_bounded_forward_fix_contract(cur, args, contract)
         elif args.action == "claim":
             with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
                 result = claim_staging_forward_fix_rehearsal(cur, args.idempotency_key)
         else:
             if (not args.git_sha or not args.expected_provider_tag or not args.expected_program6_actions
-                    or not args.staging_readback_file or not args.provider_versions_file or not args.manifest):
-                raise ValueError("forward-fix result requires manifest, readback, provider versions, and exact identity")
+                    or not args.staging_readback_file or not args.provider_versions_file):
+                raise ValueError("forward-fix result requires readback, provider versions, and exact identity")
             projection = staging_readback_projection(args.staging_readback_file, args.git_sha,
                                                      args.expected_provider_tag,
                                                      args.expected_program6_actions)
             staging_provider_version(args.provider_versions_file, args.expected_provider_tag,
                                      projection["provider_version_id"])
-            manifest = json.loads(_read_bounded_regular_file(args.manifest))
-            if not isinstance(manifest, dict):
-                raise ValueError("forward-fix manifest is not an object")
-            for key, observed in (("git_sha", projection["git_sha"]),
-                                  ("schema_highest_migration", projection["schema_highest_migration"]),
-                                  ("schema_applied_count", projection["schema_applied_count"]),
-                                  ("schema_ledger_sha256", projection["schema_ledger_sha256"])):
-                if manifest.get(key) != observed:
-                    raise ValueError("forward-fix readback does not match the exact candidate manifest")
-            migration_set = manifest.get("migration_set")
-            if (not isinstance(migration_set, list) or not migration_set
-                    or any(not isinstance(item, str) or not re.fullmatch(r"[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql", item)
-                           for item in migration_set)):
-                raise ValueError("forward-fix manifest lacks its exact migration set")
-            if manifest.get("program6_actions") != {"enabled": args.expected_program6_actions == "enabled",
-                                                    "posture": args.expected_program6_actions}:
-                raise ValueError("forward-fix manifest Program 6 posture is not exact")
+            if bounded_mode:
+                contract = bounded_forward_fix_contract(args.bounded_contract, args.git_sha)
+                target = contract["target_prefix"]
+                if (projection["schema_highest_migration"] != target["highest_migration"]
+                        or projection["schema_applied_count"] != target["applied_count"]
+                        or projection["schema_ledger_sha256"] != target["ledger_sha256"]):
+                    raise ValueError("forward-fix readback does not match the exact bounded staging prefix")
+            else:
+                manifest = full_tree_forward_fix_manifest(args.manifest, args.git_sha)
+                if (projection["schema_highest_migration"] != manifest["schema_highest_migration"]
+                        or projection["schema_applied_count"] != manifest["schema_applied_count"]
+                        or projection["schema_ledger_sha256"] != manifest["schema_ledger_sha256"]):
+                    raise ValueError("forward-fix readback does not match the exact full-tree manifest")
             with connect("forward_fix_verifier") as conn, conn.transaction(), conn.cursor() as cur:
-                declared = forward_fix_rehearsal_declaration(cur, args.idempotency_key)
-                manifest_set_hash = "sha256:" + hashlib.sha256(
-                    json.dumps(migration_set, separators=(",", ":")).encode()).hexdigest()
-                if (declared["expected_provider_tag"] != args.expected_provider_tag
-                        or declared["declared_migration_set_sha256"] != manifest_set_hash
-                        or declared["declared_migration_count"] != len(migration_set)):
-                    raise ValueError("forward-fix manifest does not match the immutable candidate migration boundary")
-                result = record_staging_forward_fix_rehearsal(cur, args, projection)
+                result = (record_staging_bounded_forward_fix_rehearsal(cur, args, projection)
+                          if bounded_mode else record_staging_full_forward_fix_rehearsal(cur, args, projection))
     except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"ops-record: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001
         print("ops-record: could not persist forward-fix rehearsal: "
               f"{str(exc).splitlines()[0][:240]}", file=sys.stderr)
+        return 1
+    if args.field:
+        value = result.get(args.field)
+        print("" if value is None else ("true" if value is True else "false" if value is False else value))
+    else:
+        print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def cmd_staging_forward_fix_prefix_read(args) -> int:
+    """Read-only app_reader gate for a clean replacement staging database."""
+    try:
+        contract = bounded_forward_fix_contract(args.bounded_contract, args.git_sha)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    try:
+        result = replacement_staging_bounded_prefix_readback(contract)
+    except Exception as exc:  # noqa: BLE001
+        # Database/provider drivers sometimes include a connection URI in their
+        # own diagnostics. Keep their message out of the operator transcript;
+        # a normalized exception *type* still distinguishes retryable plumbing
+        # failures without treating untrusted exception text as telemetry.
+        kind = type(exc).__name__
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", kind):
+            kind = "Exception"
+        print("ops-record: replacement staging app_reader preflight could not complete "
+              f"({kind})", file=sys.stderr)
         return 1
     if args.field:
         value = result.get(args.field)
@@ -2731,11 +2922,19 @@ def main() -> int:
     sff.add_argument("--staging-readback-file")
     sff.add_argument("--provider-versions-file")
     sff.add_argument("--manifest")
+    sff.add_argument("--bounded-contract")
     sff.add_argument("--expected-provider-tag")
     sff.add_argument("--expected-program6-actions", choices=["enabled", "disabled"])
     sff.add_argument("--field", choices=["forward_fix_rehearsal_attempt_id", "state", "mutation_claimed",
                                             "mutation_allowed", "expected_provider_tag", "result_ref",
                                             "bundle_id", "recovery_run_id"])
+
+    sffp = sub.add_parser("staging-forward-fix-prefix-read",
+                          help="read-only app_reader proof of the replacement staging 0315a prefix")
+    sffp.add_argument("--git-sha", required=True)
+    sffp.add_argument("--bounded-contract", required=True)
+    sffp.add_argument("--field", choices=["schema_applied_count", "schema_highest_migration",
+                                             "schema_ledger_sha256", "held_back_absent"])
 
     srv = sub.add_parser("staging-readback-verify",
                          help="verify one bounded staging /release file without writing")
@@ -2789,6 +2988,7 @@ def main() -> int:
         "staging-attempt": cmd_staging_attempt,
         "staging-restore-only": cmd_staging_restore_only,
         "staging-forward-fix": cmd_staging_forward_fix,
+        "staging-forward-fix-prefix-read": cmd_staging_forward_fix_prefix_read,
         "staging-readback-verify": cmd_staging_readback_verify,
         "staging-provider-version": cmd_staging_provider_version,
         "assess": cmd_assess,

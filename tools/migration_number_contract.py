@@ -45,6 +45,13 @@ FROZEN_COLLISIONS: dict[str, tuple[str, ...]] = {
         "0169_hermes_pilot_actor.sql",
         "0169_program5_release_binding.sql",
     ),
+    # Program 5's bounded staging-only forward-fix interstitial is deliberately
+    # adjacent to the already-merged 0315 contract.  The pair is immutable:
+    # no third 0315 suffix is an allocation escape hatch.
+    "0315": (
+        "0315_program5_forward_fix_rehearsal.sql",
+        "0315a_program5_bounded_forward_fix_rehearsal.sql",
+    ),
 }
 
 # These twelve filenames were applied to isolated Control Plane staging before
@@ -118,7 +125,9 @@ def validate_migration_names(
         present_names = set(materialized)
         for slot, frozen in FROZEN_COLLISIONS.items():
             present = tuple(name for name in frozen if name in present_names)
-            if present != frozen:
+            if present != frozen and not (
+                allow_frozen_subset and set(present).issubset(frozen)
+            ):
                 raise MigrationNumberError(
                     f"frozen collision {slot} changed: expected {', '.join(frozen)}; "
                     f"found {', '.join(present) if present else 'none'}"

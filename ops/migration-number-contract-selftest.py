@@ -37,6 +37,10 @@ FROZEN_0169 = (
     "0169_hermes_pilot_actor.sql",
     "0169_program5_release_binding.sql",
 )
+FROZEN_0315 = (
+    "0315_program5_forward_fix_rehearsal.sql",
+    "0315a_program5_bounded_forward_fix_rehearsal.sql",
+)
 EXPECTED_LEGACY_ALIASES = {
     "0134_control_plane_admission.sql": "0148_control_plane_admission.sql",
     "0135_control_plane_jobs.sql": "0149_control_plane_jobs.sql",
@@ -70,6 +74,7 @@ def main() -> int:
     report = collision_report(actual)
     assert report == FROZEN_COLLISIONS, report
     assert report["0169"] == FROZEN_0169
+    assert report["0315"] == FROZEN_0315
     assert LEGACY_APPLIED_ALIASES == EXPECTED_LEGACY_ALIASES
 
     refuses(("0171_alpha.sql", "0171_beta.sql"), "unregistered collision 0171")
@@ -77,6 +82,7 @@ def main() -> int:
     refuses(FROZEN_0169[:2], "frozen collision 0169 changed")
     refuses(FROZEN_0169 + ("0169_fourth.sql",), "frozen collision 0169 changed")
     refuses(FROZEN_0169 + ("0169a_escape.sql",), "frozen collision 0169 changed")
+    refuses(FROZEN_0315 + ("0315b_escape.sql",), "frozen collision 0315 changed")
     missing_frozen = tuple(name for name in actual if name != "0074_deal_city_lane.sql")
     try:
         validate_migration_names(missing_frozen, require_frozen=True)

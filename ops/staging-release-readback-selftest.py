@@ -147,7 +147,7 @@ raise SystemExit(0)
             + f"EXPECTED_PROGRAM6_ACTIONS={expected}\nTARGET_ENV=staging\n"
             + f"HEAD_SHA={'a' * 40}\nRELEASE_KEY=current\nSTAGING_RECEIPT_KEY=11111111-2222-4333-8444-555555555555\n"
             + f"RECOVERY_STEP={step}\nCARR_CORRELATION_ID=33333333-3333-4333-8333-333333333333\n"
-            + recovery + f"RELEASE_MANIFEST={receipt}\nrecord_staging_receipt_file {receipt}\n", encoding="utf-8")
+            + recovery + f"RELEASE_MANIFEST={receipt}\nBOUNDED_FORWARD_FIX_CONTRACT={receipt}\nrecord_staging_receipt_file {receipt}\n", encoding="utf-8")
         script.chmod(0o755)
         env = {**os.environ, "CALL_LOG": str(log), "REFUSE": "1" if refuse else "0", "TMPDIR": str(tmp)}
         done = subprocess.run(["sh", str(script)], capture_output=True, text=True, env=env)
@@ -415,7 +415,7 @@ for step in ("standalone", "current_before", "forward_fix"):
     elif step == "forward_fix":
         forward_calls = [call for call in calls if "staging-forward-fix" in call]
         assert len(forward_calls) == 1 and "result" in forward_calls[0], calls
-        assert "--manifest" in forward_calls[0] and "--provider-versions-file" in forward_calls[0]
+        assert "--bounded-contract" in forward_calls[0] and "--provider-versions-file" in forward_calls[0]
     else:
         assert deployment_calls[0][deployment_calls[0].index("--recovery-step") + 1] == step
         assert "--recovery-attempt-id" in deployment_calls[0]
@@ -483,7 +483,8 @@ class Cursor:
             self._row = ({"status": "succeeded",
                           "result_ref": "ops.staging-restore-only:" + "d" * 64,
                 "replayed": False},)
-        elif "ops.record_staging_forward_fix_rehearsal" in compact:
+        elif ("ops.record_staging_bounded_forward_fix_rehearsal" in compact
+              or "ops.record_staging_forward_fix_rehearsal" in compact):
             self._row = ({"result_ref": "ops.staging-forward-fix-readback:sha256:" + "d" * 64,
                           "replayed": False},)
         elif "ops.read_staging_forward_fix_rehearsal_declaration" in compact:
@@ -564,7 +565,7 @@ class FakeForwardConnection:
 
 # Exercise the controller itself with no database or provider: it accepts a
 # verified bounded /release projection + independently captured versions list,
-# then derives the record values from those files and the candidate manifest.
+# then derives the record values from those files and a verified bounded contract.
 with tempfile.TemporaryDirectory() as tmp:
     raw = Path(tmp)
     forward_tag = "carr-staging-forward-fix-" + "a" * 32
@@ -576,31 +577,63 @@ with tempfile.TemporaryDirectory() as tmp:
     versions_file.write_text(json.dumps([{
         "id": version_id, "annotations": {"workers/tag": forward_tag},
     }]), encoding="utf-8")
-    manifest_file = raw / "manifest.json"
-    manifest_file.write_text(json.dumps({
-        "git_sha": sha,
-        "schema_highest_migration": forward_payload["schema"]["highest_applied_migration"],
-        "schema_applied_count": forward_payload["schema"]["applied_count"],
-        "schema_ledger_sha256": forward_payload["schema"]["ledger_sha256"],
-        "migration_set": ["0315_program5_forward_fix_rehearsal.sql"],
-        "program6_actions": {"enabled": True, "posture": "enabled"},
-    }), encoding="utf-8")
+    contract_file = raw / "bounded-contract.json"
+    contract_file.write_text("{}", encoding="utf-8")
+    bounded_contract = {
+        "target_prefix": {
+            "highest_migration": forward_payload["schema"]["highest_applied_migration"],
+            "applied_count": forward_payload["schema"]["applied_count"],
+            "ledger_sha256": forward_payload["schema"]["ledger_sha256"],
+        },
+    }
     forward_cur = Cursor()
     forward_cur.forward_tag = forward_tag
     previous_connect = mod.connect
+    previous_contract = mod.bounded_forward_fix_contract
+    previous_full_manifest = mod.full_tree_forward_fix_manifest
     mod.connect = lambda role: FakeForwardConnection(forward_cur)
+    mod.bounded_forward_fix_contract = lambda _path, _sha: bounded_contract
     try:
         forward_args = types.SimpleNamespace(
             action="result", idempotency_key=str(uuid.uuid4()), git_sha=sha,
             expected_provider_tag=forward_tag, expected_program6_actions="enabled",
             staging_readback_file=str(release_file), provider_versions_file=str(versions_file),
-            manifest=str(manifest_file), field=None,
+            manifest=None, bounded_contract=str(contract_file), field=None,
         )
         assert mod.cmd_staging_forward_fix(forward_args) == 0
     finally:
         mod.connect = previous_connect
-    assert any("ops.read_staging_forward_fix_rehearsal_declaration" in call[0] for call in forward_cur.calls)
-    assert "ops.record_staging_forward_fix_rehearsal" in forward_cur.calls[-1][0]
+        mod.bounded_forward_fix_contract = previous_contract
+    assert "ops.record_staging_bounded_forward_fix_rehearsal" in forward_cur.calls[-1][0]
+
+    # The frozen 0315 full-tree path is mutually exclusive with 0315a. It
+    # still verifies an immutable manifest and invokes its original recorder.
+    full_manifest = {
+        "git_sha": sha, "environment": "staging",
+        "schema_highest_migration": forward_payload["schema"]["highest_applied_migration"],
+        "schema_applied_count": forward_payload["schema"]["applied_count"],
+        "schema_ledger_sha256": forward_payload["schema"]["ledger_sha256"],
+    }
+    full_cur = Cursor()
+    full_cur.forward_tag = forward_tag
+    mod.connect = lambda role: FakeForwardConnection(full_cur)
+    mod.full_tree_forward_fix_manifest = lambda _path, _sha: full_manifest
+    try:
+        full_args = types.SimpleNamespace(
+            action="result", idempotency_key=str(uuid.uuid4()), git_sha=sha,
+            expected_provider_tag=forward_tag, expected_program6_actions="enabled",
+            staging_readback_file=str(release_file), provider_versions_file=str(versions_file),
+            manifest=str(contract_file), bounded_contract=None, field=None,
+        )
+        assert mod.cmd_staging_forward_fix(full_args) == 0
+        assert "ops.record_staging_forward_fix_rehearsal" in full_cur.calls[-1][0]
+        for neither, both in ((None, None), (str(contract_file), str(contract_file))):
+            invalid = types.SimpleNamespace(**{**full_args.__dict__, "manifest": neither,
+                                                "bounded_contract": both})
+            assert mod.cmd_staging_forward_fix(invalid) == 2
+    finally:
+        mod.connect = previous_connect
+        mod.full_tree_forward_fix_manifest = previous_full_manifest
 
 # The recovery UUID remains exactly the origin/main five-group UUID grammar;
 # forward-fix does not weaken the rollback operator input parser.
@@ -755,17 +788,15 @@ assert claimed_rc == 64 and "already claimed" in claimed_stderr, claimed_stderr
 assert claimed_deploy == "", claimed_deploy
 
 # The forward-fix controller accepts only bounded files, independently binds
-# /release to the exact provider version listing, and derives its migration
-# boundary and Program 6 posture from the candidate manifest—not shell scalars.
+# /release to the exact provider version listing, and derives its staging
+# boundary from an immutable bounded contract—not shell scalars.
 for marker in (
     'def cmd_staging_forward_fix',
     'staging_readback_projection(args.staging_readback_file',
     'staging_provider_version(args.provider_versions_file',
-    'forward_fix_rehearsal_declaration',
-    'ops.read_staging_forward_fix_rehearsal_declaration',
-    'manifest_set_hash',
-    'forward-fix manifest does not match the immutable candidate migration boundary',
-    'forward-fix manifest Program 6 posture is not exact',
+    'bounded_forward_fix_contract(args.bounded_contract',
+    'bounded forward-fix contract immutable verification failed',
+    'forward-fix readback does not match the exact bounded staging prefix',
 ):
     assert marker in ops_source, marker
 

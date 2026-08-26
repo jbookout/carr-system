@@ -114,6 +114,9 @@ RECOVERY_ATTEMPT_ID=""
 RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
 STAGING_RECEIPT_KEY=""
+BOUNDED_FORWARD_FIX_CONTRACT=""
+RELEASE_MANIFEST=""
+PRECOUNT_FORWARD_FIX_MANIFEST=""
 EXACT_SOURCE_ROOT=""
 EXACT_RUNTIME_LINK=""
 # Filled only from the exact immutable release manifest after preflight.
@@ -127,6 +130,9 @@ EXPECTED_PROGRAM6_ACTIONS=""
 cleanup_ephemeral() {
   if [ -n "${STAGING_RECEIPT:-}" ] && [ -e "$STAGING_RECEIPT" ]; then
     rm -f "$STAGING_RECEIPT"
+  fi
+  if [ -n "${PRECOUNT_FORWARD_FIX_MANIFEST:-}" ] && [ -e "$PRECOUNT_FORWARD_FIX_MANIFEST" ]; then
+    rm -f "$PRECOUNT_FORWARD_FIX_MANIFEST"
   fi
   if [ -n "${EXACT_RUNTIME_LINK:-}" ] && [ -L "$EXACT_RUNTIME_LINK" ] \
       && [ "$(readlink "$EXACT_RUNTIME_LINK")" = "$REPO/mcp-server/node_modules" ]; then
@@ -182,6 +188,9 @@ while [ "$#" -gt 0 ]; do
     --staging-receipt-idempotency-key)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --staging-receipt-idempotency-key needs a UUID" >&2; exit 64; }
       STAGING_RECEIPT_KEY="$2"; shift ;;
+    --bounded-forward-fix-contract)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --bounded-forward-fix-contract needs a file" >&2; exit 64; }
+      BOUNDED_FORWARD_FIX_CONTRACT="$2"; shift ;;
     --internal-exact-source-root)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --internal-exact-source-root needs a path" >&2; exit 64; }
       [ -z "$EXACT_SOURCE_ROOT" ] || { echo "deploy-worker: --internal-exact-source-root may appear once" >&2; exit 64; }
@@ -238,11 +247,30 @@ prepare_typed_recovery_shrink() {
         || fail "the typed restore-only repair was not durably prepared; verb shrink is refused."
       ;;
     forward_fix)
-      TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-forward-fix prepare \
-        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
-        --git-sha "$HEAD_SHA" --correlation "$STAGING_RECEIPT_KEY" \
-        --field expected_provider_tag)" \
-        || fail "the typed forward-fix rehearsal was not durably prepared; deploy is refused."
+      if [ -n "$BOUNDED_FORWARD_FIX_CONTRACT" ]; then
+        [ -f "$BOUNDED_FORWARD_FIX_CONTRACT" ] \
+          || fail "the bounded forward-fix contract file is absent."
+        TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-forward-fix prepare \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+          --git-sha "$HEAD_SHA" --correlation "$STAGING_RECEIPT_KEY" \
+          --bounded-contract "$BOUNDED_FORWARD_FIX_CONTRACT" \
+          --field expected_provider_tag)" \
+          || fail "the typed bounded forward-fix rehearsal was not durably prepared; deploy is refused."
+      else
+        if [ -z "${RELEASE_MANIFEST:-}" ] || [ ! -s "$RELEASE_MANIFEST" ]; then
+          PRECOUNT_FORWARD_FIX_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-forward-fix-manifest.XXXXXX")" \
+            || fail "could not allocate the original forward-fix manifest."
+          "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
+            --environment staging > "$PRECOUNT_FORWARD_FIX_MANIFEST" \
+            || fail "the original 0315 forward-fix source manifest could not be rebuilt."
+          RELEASE_MANIFEST="$PRECOUNT_FORWARD_FIX_MANIFEST"
+        fi
+        TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-forward-fix prepare \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+          --git-sha "$HEAD_SHA" --correlation "$STAGING_RECEIPT_KEY" \
+          --manifest "$RELEASE_MANIFEST" --field expected_provider_tag)" \
+          || fail "the typed original forward-fix rehearsal was not durably prepared; deploy is refused."
+      fi
       ;;
     *) fail "standalone deploys cannot authorize verb shrink." ;;
   esac
@@ -849,6 +877,18 @@ else
     fi
     export CARR_CORRELATION_ID
 
+    # A Program 5 bounded forward-fix has a deliberately split identity: the
+    # full source tree contains 0316/0317, while the clean replacement staging
+    # database must stop exactly at 0315a.  Read the actual target with the
+    # final least-privilege app_reader *before* even claiming the provider
+    # mutation.  The control-plane carr_jobs prepare is not a substitute for
+    # this target proof, and this call accepts no supplied ledger assertion.
+    if [ "$RECOVERY_STEP" = "forward_fix" ] && [ -n "$BOUNDED_FORWARD_FIX_CONTRACT" ]; then
+      "$PY" "$REPO/tools/ops-record.py" staging-forward-fix-prefix-read \
+        --git-sha "$HEAD_SHA" --bounded-contract "$BOUNDED_FORWARD_FIX_CONTRACT" >/dev/null \
+        || fail "replacement staging database is not the exact clean bounded 0315a prefix."
+    fi
+
     staging_attempt() {
       attempt_action="$1"; shift
       if [ "$RECOVERY_STEP" = "restore_only" ]; then
@@ -858,9 +898,16 @@ else
           --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --git-sha "$HEAD_SHA" \
           --correlation "$CARR_CORRELATION_ID" "$@"
       elif [ "$RECOVERY_STEP" = "forward_fix" ]; then
-        "$PY" "$REPO/tools/ops-record.py" staging-forward-fix "$attempt_action" \
+        set -- staging-forward-fix "$attempt_action" \
           --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
-          --git-sha "$HEAD_SHA" --correlation "$CARR_CORRELATION_ID" "$@"
+          --git-sha "$HEAD_SHA" --correlation "$CARR_CORRELATION_ID" \
+          "$@"
+        if [ -n "$BOUNDED_FORWARD_FIX_CONTRACT" ]; then
+          set -- "$@" --bounded-contract "$BOUNDED_FORWARD_FIX_CONTRACT"
+        else
+          set -- "$@" --manifest "$RELEASE_MANIFEST"
+        fi
+        "$PY" "$REPO/tools/ops-record.py" "$@"
       elif [ "$RECOVERY_STEP" = "standalone" ]; then
         "$PY" "$REPO/tools/ops-record.py" staging-attempt "$attempt_action" \
           --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
@@ -928,11 +975,16 @@ else
         provider_versions="$(mktemp "${TMPDIR:-/tmp}/carr-staging-forward-fix-versions.XXXXXX")" || return 1
         chmod 600 "$provider_versions"
         "$WRANGLER" versions list --env "$TARGET_ENV" --json > "$provider_versions" 2>/dev/null || { rm -f "$provider_versions"; return 1; }
-        "$PY" "$REPO/tools/ops-record.py" staging-forward-fix result \
+        set -- staging-forward-fix result \
           --idempotency-key "$STAGING_RECEIPT_KEY" --git-sha "$HEAD_SHA" \
           --expected-provider-tag "$DEPLOY_TAG" --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
-          --manifest "$RELEASE_MANIFEST" --staging-readback-file "$receipt_file" \
-          --provider-versions-file "$provider_versions"
+          --staging-readback-file "$receipt_file" --provider-versions-file "$provider_versions"
+        if [ -n "$BOUNDED_FORWARD_FIX_CONTRACT" ]; then
+          set -- "$@" --bounded-contract "$BOUNDED_FORWARD_FIX_CONTRACT"
+        else
+          set -- "$@" --manifest "$RELEASE_MANIFEST"
+        fi
+        "$PY" "$REPO/tools/ops-record.py" "$@"
         result_rc=$?
         rm -f "$provider_versions"
         return "$result_rc"

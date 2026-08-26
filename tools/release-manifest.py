@@ -27,6 +27,9 @@ whether a release may ship. It computes evidence and compares evidence.
             any mismatch. THIS IS THE ACCEPTANCE TEST for the rebuild clause.
   bind-provider  Record the immutable provider version returned after upload,
             recompute the approval-plan hash, and print the updated manifest.
+  staging-forward-fix-prefix  Build the staging-only, bounded source/prefix
+            contract for a migration-bearing forward-fix rehearsal.
+  verify-staging-forward-fix-prefix  Rebuild that contract from immutable git.
   program6-posture  Print the exact reviewed Program 6 posture in a manifest.
   plan-hash Hash the fields an approver actually reads, so a changed plan is
             detectable by the database trigger that voids stale approvals.
@@ -49,6 +52,7 @@ import subprocess
 import sys
 import tarfile
 import tomllib
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -105,6 +109,7 @@ RECOVERY_STRATEGIES = (
 REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{2,200}$")
 MIGRATION_FILENAME_RE = re.compile(r"^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$")
 MIGRATION_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SCHEMA_LEDGER_COPY = (
     "COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;"
 )
@@ -356,6 +361,136 @@ def schema_ledger_identity(
     return len(rows), rows[-1][0], digest
 
 
+def bounded_forward_fix_contract(manifest: dict, through: str,
+                                 held_back: list[str],
+                                 candidate_provider_version_id: str) -> dict:
+    """Build the staging-only source/prefix binding for Program 5 forward-fix.
+
+    A normal release manifest remains the exact *Production* full-tree identity.
+    This separate object names a contiguous staging prefix without changing that
+    truth.  It is deliberately unusable as a Production deployment manifest.
+    """
+    if manifest.get("environment") != "production":
+        raise ValueError("bounded forward-fix source manifest must be production-shaped")
+    source_sha = manifest.get("git_sha")
+    artifact_digest = manifest.get("artifact_digest")
+    if (not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha)
+            or not isinstance(artifact_digest, str) or not SHA256_REF_RE.fullmatch(artifact_digest)):
+        raise ValueError("bounded forward-fix source manifest identity is invalid")
+    try:
+        provider_uuid = str(uuid.UUID(candidate_provider_version_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("bounded forward-fix candidate provider version is invalid") from exc
+    if provider_uuid != candidate_provider_version_id:
+        raise ValueError("bounded forward-fix candidate provider version is not canonical")
+    if (manifest.get("provider") != "cloudflare-workers"
+            or manifest.get("provider_version_id") != provider_uuid):
+        raise ValueError("bounded forward-fix provider version must match the immutable source manifest")
+
+    rows = migration_tree_ledger(source_sha)
+    names = [filename for filename, _ in rows]
+    if through not in names:
+        raise ValueError("bounded forward-fix boundary must be an exact source migration filename")
+    boundary = names.index(through)
+    prefix_rows = rows[:boundary + 1]
+    if [filename for filename, _ in prefix_rows[-2:]] != [
+            "0315_program5_forward_fix_rehearsal.sql",
+            "0315a_program5_bounded_forward_fix_rehearsal.sql"]:
+        raise ValueError("bounded forward-fix boundary must be the exact adjacent 0315/0315a pair")
+    selected_rows = prefix_rows[-2:]
+    actual_held_back = names[boundary + 1:]
+    if held_back != actual_held_back:
+        raise ValueError("bounded forward-fix held-back migrations must be the exact ordered source suffix")
+    if not selected_rows or not actual_held_back:
+        raise ValueError("bounded forward-fix contract requires both selected prefix and held-back suffix")
+    prefix_count, prefix_highest, prefix_digest = schema_ledger_identity(prefix_rows)
+    full_count, full_highest, full_digest = schema_ledger_identity(rows)
+    for key, value in (("schema_applied_count", full_count),
+                       ("schema_highest_migration", full_highest),
+                       ("schema_ledger_sha256", full_digest)):
+        if manifest.get(key) != value:
+            raise ValueError("bounded forward-fix source manifest does not bind the exact full migration tree")
+
+    def rows_with_ordinals(items: list[tuple[str, str]], start: int) -> list[dict]:
+        return [
+            {"ordinal": start + offset, "filename": filename, "sha256": digest}
+            for offset, (filename, digest) in enumerate(items)
+        ]
+
+    contract = {
+        "contract_version": 1,
+        "purpose": "program5-forward-fix-staging-prefix",
+        "environment": "staging",
+        "production_deploy_authorized": False,
+        "plan_ref": "runbooks/program5-forward-fix-staging-rebuild.md#bounded-prefix-contract",
+        "source": {
+            "git_sha": source_sha,
+            "artifact_digest": artifact_digest,
+            "artifact_file_count": manifest.get("artifact_file_count"),
+            "candidate_provider": "cloudflare-workers",
+            "candidate_provider_version_id": provider_uuid,
+            "full_schema_highest_migration": full_highest,
+            "full_schema_applied_count": full_count,
+            "full_schema_ledger_sha256": full_digest,
+        },
+        "target_prefix": {
+            "through": through,
+            "highest_migration": prefix_highest,
+            "applied_count": prefix_count,
+            "ledger_sha256": prefix_digest,
+        },
+        "selected_migrations": rows_with_ordinals(selected_rows, boundary),
+        "selected_migrations_sha256": schema_ledger_identity(selected_rows)[2],
+        "held_back_migrations": rows_with_ordinals(rows[boundary + 1:], boundary + 2),
+        "held_back_migrations_sha256": schema_ledger_identity(rows[boundary + 1:])[2],
+    }
+    # This is deliberately not a JSON serializer hash: PostgreSQL jsonb's
+    # presentation order is not Python's. The DB routine derives these same
+    # fixed fields and joins them with the same LF-only preimage.
+    preimage = "\n".join((
+        contract["purpose"], contract["environment"], "false", source_sha,
+        artifact_digest, provider_uuid, full_digest,
+        prefix_highest, str(prefix_count), prefix_digest,
+        ",".join(item["filename"] for item in contract["selected_migrations"]),
+        ",".join(str(item["ordinal"]) for item in contract["selected_migrations"]),
+        contract["selected_migrations_sha256"],
+        ",".join(item["filename"] for item in contract["held_back_migrations"]),
+        ",".join(str(item["ordinal"]) for item in contract["held_back_migrations"]),
+        contract["held_back_migrations_sha256"],
+    )).encode()
+    contract["contract_sha256"] = "sha256:" + hashlib.sha256(preimage).hexdigest()
+    return contract
+
+
+def verify_bounded_forward_fix_contract(contract: dict) -> None:
+    """Rebuild and compare a typed staging-prefix contract from immutable git."""
+    if not isinstance(contract, dict):
+        raise ValueError("bounded forward-fix contract is not an object")
+    source = contract.get("source")
+    target = contract.get("target_prefix")
+    held = contract.get("held_back_migrations")
+    if (contract.get("contract_version") != 1
+            or contract.get("purpose") != "program5-forward-fix-staging-prefix"
+            or contract.get("environment") != "staging"
+            or contract.get("production_deploy_authorized") is not False
+            or not isinstance(source, dict) or not isinstance(target, dict)
+            or not isinstance(held, list)):
+        raise ValueError("bounded forward-fix contract shape is invalid")
+    source_sha = source.get("git_sha")
+    through = target.get("through")
+    provider_version = source.get("candidate_provider_version_id")
+    if not isinstance(source_sha, str) or not isinstance(through, str) or not isinstance(provider_version, str):
+        raise ValueError("bounded forward-fix contract identity is invalid")
+    # Rebuild from the object store rather than trust serialised member rows.
+    rebuilt_manifest = bind_provider(
+        build(source_sha, "carr-mcp", "production"), "cloudflare-workers", provider_version)
+    rebuilt = bounded_forward_fix_contract(rebuilt_manifest, through,
+                                           [item.get("filename") for item in held if isinstance(item, dict)],
+                                           provider_version)
+    if contract != rebuilt:
+        raise ValueError("bounded forward-fix contract digest or immutable source contents differ")
+
+
 def performance_contract(budget_ref: object, budget_ms: object,
                          recovery_strategy: object,
                          rollback_plan_ref: object = None
@@ -599,6 +734,19 @@ def main() -> int:
     pp = sub.add_parser("program6-posture", help="print the manifest-bound Program 6 posture")
     pp.add_argument("--manifest", required=True)
 
+    sfp = sub.add_parser("staging-forward-fix-prefix",
+                         help="build a staging-only Program 5 bounded prefix contract")
+    sfp.add_argument("--manifest", required=True)
+    sfp.add_argument("--through", required=True,
+                     help="exact selected migration boundary")
+    sfp.add_argument("--held-back", action="append", required=True,
+                     help="every later source migration, in exact source order")
+    sfp.add_argument("--candidate-provider-version-id", required=True)
+
+    vsfp = sub.add_parser("verify-staging-forward-fix-prefix",
+                          help="rebuild a staging-only bounded prefix contract")
+    vsfp.add_argument("--contract", required=True)
+
     args = p.parse_args()
 
     if args.cmd == "build":
@@ -606,6 +754,16 @@ def main() -> int:
             build(args.sha, args.service, args.environment, args.since,
                   args.performance_budget_ref, args.performance_budget_ms,
                   args.recovery_strategy, args.rollback_plan_ref), indent=2))
+        return 0
+
+    if args.cmd == "verify-staging-forward-fix-prefix":
+        try:
+            contract = json.loads(Path(args.contract).read_text())
+            verify_bounded_forward_fix_contract(contract)
+        except (ValueError, json.JSONDecodeError, OSError) as exc:
+            print(f"release-manifest: {exc}", file=sys.stderr)
+            return 1
+        print("verify: exact staging-only bounded forward-fix contract.")
         return 0
 
     manifest = json.loads(Path(args.manifest).read_text())
@@ -622,6 +780,15 @@ def main() -> int:
     if args.cmd == "program6-posture":
         try:
             print(manifest_program6_posture(manifest))
+        except ValueError as exc:
+            print(f"release-manifest: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "staging-forward-fix-prefix":
+        try:
+            print(json.dumps(bounded_forward_fix_contract(
+                manifest, args.through, args.held_back,
+                args.candidate_provider_version_id), indent=2))
         except ValueError as exc:
             print(f"release-manifest: {exc}", file=sys.stderr)
             return 1

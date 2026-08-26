@@ -943,6 +943,33 @@ check_migration() {
     return
   fi
 
+  # PREFIX COMPATIBILITY GATES run before the committed snapshot is loaded.
+  # They answer a different question from the ordinary db-gates below: can the
+  # real migration runner and Worker establish a deliberately held boundary on
+  # a physically empty disposable database? PostgreSQL roles are cluster-wide,
+  # so replaying that history in a sibling database after db/schema.sql has
+  # created the roles would produce false duplicate-role failures. Each prefix
+  # gate therefore owns the initially empty exact carr_ci target and MUST
+  # restore that same target in a finally path before this function continues.
+  # The gate itself structurally requires CARR_CI_DATABASE_URL == DATABASE_URL,
+  # loopback, and the exact carr_ci user/database; there is no live-DSN mode.
+  local prefix_gate_failures="" prefix_gate_count=0
+  for g in ops/*-gate.py; do
+    [ -f "$g" ] || continue
+    if grep -q '^# ci: db-prefix-gate' "$g"; then
+      prefix_gate_count=$((prefix_gate_count+1))
+      if ! CARR_CI_DATABASE_URL="$dsn" DATABASE_URL="$dsn" \
+           run_quiet "$LOGDIR/db-prefix-gate-$(basename "$g").log" "$PY" "$g"; then
+        prefix_gate_failures="$prefix_gate_failures $(basename "$g")"
+        tail -20 "$LOGDIR/db-prefix-gate-$(basename "$g").log" >&2
+      fi
+    fi
+  done
+  if [ -n "$prefix_gate_failures" ]; then
+    bad migration "clean-prefix database compatibility gate(s) failed:$prefix_gate_failures"
+    return
+  fi
+
   if ! PGOPTIONS='--client-min-messages=warning' run_quiet "$LOGDIR/migration-load.log" \
        "$psql_bin" -v ON_ERROR_STOP=1 -q -d "$dsn" -f db/schema.sql; then
     tail -25 "$LOGDIR/migration-load.log" >&2
@@ -1096,6 +1123,11 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
           db_gate_failures="$db_gate_failures $(basename "$g")"
           tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
         fi
+      elif grep -q '^# ci: db-prefix-gate' "$g"; then
+        # Already ran on the physically empty target above and recreated it.
+        # Running it here would destroy the snapshot substrate and would turn
+        # its held-prefix proof into an ordinary post-migration DB gate.
+        :
       elif grep -qE "$dsn_read" "$g"; then
         # A gate that reads a DSN and carries no marker really is unrun, and
         # this is now a FAILURE rather than a line in the margin. The whole
@@ -1123,7 +1155,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
       return
     fi
 
-    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate program(s) pass (each program reports its own assertions)"
+    ok migration "$prefix_gate_count clean-prefix compatibility gate program(s) pass; committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate program(s) pass (each program reports its own assertions)"
   else
     tail -15 "$LOGDIR/migration-grants.log" >&2
     bad migration "the app roles' grants did not survive into the built database"

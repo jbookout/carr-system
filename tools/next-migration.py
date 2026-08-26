@@ -189,7 +189,12 @@ def main():
               "local trees and may collide with something already merged.", file=sys.stderr)
     else:
         try:
-            validate_migration_names(remote_names, require_frozen=True)
+            # A freshly allocated, explicitly frozen interstitial can exist in
+            # this isolated tree before its paired filename reaches main.  The
+            # caller's own tree must still contain the exact pair; main is only
+            # a reservation/read surface at this point.
+            validate_migration_names(remote_names, require_frozen=True,
+                                     allow_frozen_subset=True)
         except MigrationNumberError as exc:
             try:
                 validate_migration_names(current_names, require_frozen=True)

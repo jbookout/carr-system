@@ -85,6 +85,13 @@ above the highest four-digit claim across `origin/main` and every local worktree
 The rule going forward is therefore simple: preserve the frozen history and use
 the allocator immediately before creating every new migration.
 
+The only post-history exception is the reviewed Program 5 interstitial pair:
+`0315_program5_forward_fix_rehearsal.sql` and
+`0315a_program5_bounded_forward_fix_rehearsal.sql`.  `0315a` binds a
+staging-only prefix rehearsal to its complete source tree while holding the
+separate `0316`/`0317` suffix back.  It is a frozen exact pair, not a general
+letter-suffix allocation policy; any third `0315*` filename is refused.
+
 ### Exact pre-renumber ledger aliases
 
 Isolated Control Plane staging also contains twelve filenames from an early

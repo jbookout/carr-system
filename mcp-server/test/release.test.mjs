@@ -78,6 +78,30 @@ test("buildRelease: full shape when everything is reachable and stamped", async 
   assert.deepEqual(out.doctrine_generation, { value: 42, reason: null });
 });
 
+// The Program 5 bounded staging rehearsal deliberately serves a clean
+// replacement database through 0315a while the immutable Worker source tree
+// also contains held-back 0316/0317. /release reads only the generic schema
+// ledger/doctrine contracts, so it must remain truthful at that safe prefix.
+test("buildRelease: a clean 0315a staging ledger needs no 0316/0317 runtime object", async () => {
+  const sql = fakeSql([
+    ["v_schema_ledger", [{
+      applied_count: 251,
+      highest_applied_migration: "0315a_program5_bounded_forward_fix_rehearsal.sql",
+      ledger_sha256: "sha256:" + "5".repeat(64),
+    }]],
+    ["doctrine_meta", [{ generation: 170 }]],
+  ]);
+  const out = await buildRelease({
+    env: { GIT_SHA: "c".repeat(40) }, sql, verbCount: 211, now: FIXED_NOW,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.schema.highest_applied_migration,
+    "0315a_program5_bounded_forward_fix_rehearsal.sql");
+  assert.equal(out.schema.applied_count, 251);
+  assert.equal(out.schema.ledger_sha256, "sha256:" + "5".repeat(64));
+  assert.equal(out.schema.reason, null);
+});
+
 test("buildRelease: missing Cloudflare version metadata is explicit and never falls back to git SHA", async () => {
   const sql = fakeSql([
     ["v_schema_ledger", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
