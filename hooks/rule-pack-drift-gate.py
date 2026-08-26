@@ -62,7 +62,17 @@ MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 LOG = os.path.join(REPO, "out", "rule-delivery-shadow.jsonl")
 CARR_PATH_MARKERS = ("/carr-system/", "/carr-system", "my drive/carr ai")
 SYNTHETIC_PREFIXES = ("The following is the Codex agent history", "<environment_context>",
-                      "<app-context>", "<skills_instructions>", "<permissions instructions>")
+                      "<app-context>", "<skills_instructions>", "<permissions instructions>",
+                      "<task-notification>", "<scheduled-task")
+SCHEDULED_TASK_PREAMBLE = (
+    "This is an automated run of a scheduled task. The user is not present "
+    "to answer questions. For implementation details, execute autonomously "
+    "without asking clarifying questions — make reasonable choices and note "
+    "them in your output. \"write\" actions (e.g. MCP tools that send, post, "
+    "create, update, or delete), only take them if the task file asks for that "
+    "specific action. When in doubt, producing a report of what you found is "
+    "the correct output."
+)
 
 
 def load_packs():
@@ -127,7 +137,7 @@ def genuine_user_task(record):
     role, value = role_and_text(record)
     if role not in {"user", "human"} or not value.strip():
         return ""
-    if value.lstrip().startswith(SYNTHETIC_PREFIXES):
+    if synthetic_turn_boundary(record):
         return ""
     message = record.get("message") if isinstance(record.get("message"), dict) else record
     content = message.get("content")
@@ -137,11 +147,79 @@ def genuine_user_task(record):
     return value
 
 
+def synthetic_turn_boundary(record):
+    role, value = role_and_text(record)
+    if role not in {"user", "human"} or not value.strip():
+        return False
+    head = value.lstrip()
+    if head.startswith("<task-notification>"):
+        origin = record.get("origin")
+        return isinstance(origin, dict) and origin.get("kind") == "task-notification"
+    if head.startswith("<scheduled-task"):
+        return bool(scheduled_workflow_packs(record))
+    return head.startswith(SYNTHETIC_PREFIXES)
+
+
+def suppress_static_text(record):
+    """Only provenance-authenticated or exact source-owned wrappers are static."""
+    role, value = role_and_text(record)
+    if role not in {"user", "human"} or not value.strip():
+        return False
+    head = value.lstrip()
+    if head.startswith("<task-notification>"):
+        origin = record.get("origin")
+        return isinstance(origin, dict) and origin.get("kind") == "task-notification"
+    return head.startswith("<scheduled-task") and bool(scheduled_workflow_packs(record))
+
+
 def current_turn(records):
     for index in range(len(records) - 1, -1, -1):
-        if genuine_user_task(records[index]):
+        if genuine_user_task(records[index]) or synthetic_turn_boundary(records[index]):
             return records[index:]
     return records
+
+
+def scheduled_workflow_packs(record):
+    """Packs from an exact source-owned scheduled-task wrapper, else none.
+
+    The scheduler omits YAML frontmatter and prepends one fixed paragraph.  We
+    compare the complete rendered body before honoring its declaration: a user
+    cannot paste the marker into arbitrary instructions to suppress lexical
+    drift detection, and a changed installed task fails closed to ordinary text
+    scanning until config-as-code restores source parity.
+    """
+    role, value = role_and_text(record)
+    if role not in {"user", "human"} or not value.lstrip().startswith("<scheduled-task"):
+        return []
+    matched = re.fullmatch(
+        r'<scheduled-task name="([a-z0-9-]+)" file="([^"]+)">\n(.*)</scheduled-task>',
+        value.strip(), re.S)
+    if not matched:
+        return []
+    name, installed_path, inner = matched.groups()
+    if not installed_path.endswith(f"/.claude/scheduled-tasks/{name}/SKILL.md"):
+        return []
+    source = Path(REPO) / "ops" / "scheduled-tasks" / f"{name}.SKILL.md"
+    if not source.is_file():
+        return []
+    portable = source.read_text(encoding="utf-8")
+    pieces = portable.split("---\n", 2)
+    if len(pieces) != 3:
+        return []
+    body = pieces[2].lstrip().replace("{{REPO}}", REPO)
+    if inner != f"{SCHEDULED_TASK_PREAMBLE}\n\n{body}":
+        return []
+    workflow = re.search(r"^RULE-DELIVERY WORKFLOW: ([a-z0-9-]+)$", body, re.M)
+    packs = re.search(r"^RULE-DELIVERY PACKS: ([a-z0-9,-]+)$", body, re.M)
+    if not workflow or workflow.group(1) != name or not packs:
+        return []
+    declared = packs.group(1).split(",")
+    catalog = json.loads(Path(MAP).read_text(encoding="utf-8")).get("rule_packs", {})
+    if (not declared or any(not pack for pack in declared)
+            or len(set(declared)) != len(declared)
+            or any(pack not in catalog for pack in declared)):
+        return []
+    return declared
 
 
 def delivery_state(records):
@@ -174,8 +252,11 @@ def _find_delivery(value):
     if isinstance(value, dict):
         block = value.get("rule_delivery")
         if isinstance(block, dict) and "mode" in block:
+            not_found = {str(p).strip().lower()
+                         for p in block.get("packs_not_found", []) or []}
             return (block.get("mode"),
-                    [str(p) for p in block.get("declared_packs", []) or []],
+                    [str(p) for p in block.get("declared_packs", []) or []
+                     if str(p).strip().lower() not in not_found],
                     [str(r) for r in block.get("would_omit", []) or []])
         for item in value.values():
             found = _find_delivery(item)
@@ -214,6 +295,8 @@ def work_text(record):
         parts.append(serialized(payload))
     message = record.get("message") if isinstance(record.get("message"), dict) else record
     role = message.get("role") or record.get("type")
+    if role in {"user", "human"} and suppress_static_text(record):
+        return ""
     content = message.get("content")
     if isinstance(content, str):
         if role in {"user", "human", "assistant"}:
@@ -239,6 +322,10 @@ def observed_packs(turn, triggers):
         found = sorted({m.group(0).lower() for m in pattern.finditer(text)})
         if found:
             hits[name] = found[:6]
+    for record in turn:
+        for name in scheduled_workflow_packs(record):
+            if name in triggers:
+                hits.setdefault(name, ["workflow-contract"])
     return hits
 
 

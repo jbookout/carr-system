@@ -31,6 +31,7 @@ WINDOW_SOURCE_PATHS = (
     "ops/config/rule-delivery-activation-overlay.v1.json",
     "ops/config-as-code.py",
     "ops/config/rule-enforcement-map.json",
+    "ops/scheduled-tasks/nightly-record-layer.SKILL.md",
     "ops/rule-delivery-cutover.py",
     "ops/rule-delivery-shadow-eligibility.py",
     "ops/rule-delivery-shadow-ledger.py",
