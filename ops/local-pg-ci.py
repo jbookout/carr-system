@@ -291,6 +291,23 @@ def run_local_ci(
                     else:
                         print("local-db-ci: atomic rule-delivery cutover acceptance passed")
                 if exit_code == 0:
+                    engineering_claim_script = repo / "ops/engineering-claim-local-pg-gate.py"
+                    engineering_claim = command_runner.run(
+                        [acceptance_python, engineering_claim_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if engineering_claim.returncode:
+                        print(
+                            f"local-db-ci: engineering claim acceptance failed: "
+                            f"{_failure_detail(engineering_claim)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = engineering_claim.returncode
+                    else:
+                        print("local-db-ci: scoped engineering claim acceptance passed")
+                if exit_code == 0:
                     canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
                     canary = command_runner.run(
                         [acceptance_python, canary_script],
