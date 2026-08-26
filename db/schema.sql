@@ -2451,6 +2451,29 @@ end $$;
 
 
 --
+-- Name: classify_sourced_work_request_build(text, integer, text, jsonb, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.classify_sourced_work_request_build(p_work_request text, p_base_version integer, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) RETURNS TABLE(work_request_id uuid, ref text, tier text, reasons jsonb, shape_disposition text, shape_ready boolean)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+declare
+  w ops.work_request%rowtype;
+  classification jsonb;
+begin
+  select x.* into w from ops.work_request x
+   where x.ref = p_work_request and x.state = 'triaged' and x.version = p_base_version
+     and x.capture_idempotency_key is not null and x.organization_tenant_id = 'carr-internal';
+  if not found then return; end if;
+  classification := ops.heavy_build_classification(w.id, p_scope_summary, p_dependency_refs, p_caps);
+  return query select w.id, w.ref, classification->>'tier', classification->'reasons',
+    classification->>'shape_disposition', (classification->>'shape_ready')::boolean;
+end;
+$$;
+
+
+--
 -- Name: clear_recovered_incident(text, integer); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -4480,6 +4503,162 @@ begin
   get diagnostics n=row_count;
   return n=1;
 end $$;
+
+
+--
+-- Name: heavy_build_admission_rows_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_admission_rows_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+begin
+  raise exception 'heavy-build admission and review receipts are append-only';
+end;
+$$;
+
+
+--
+-- Name: heavy_build_classification(uuid, text, jsonb, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_classification(p_work_request_id uuid, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+declare
+  w ops.work_request%rowtype;
+  signal_text text;
+  reasons jsonb := '[]'::jsonb;
+  criteria_count integer;
+  dependency_count integer;
+  step_count integer;
+  shape_ready boolean;
+begin
+  select x.* into w from ops.work_request x where x.id = p_work_request_id;
+  if not found then return null; end if;
+  if jsonb_typeof(coalesce(p_dependency_refs, '[]'::jsonb)) is distinct from 'array'
+     or jsonb_typeof(coalesce(p_caps, '{}'::jsonb)) is distinct from 'object' then
+    raise exception 'heavy-build classification requires typed dependency refs and caps';
+  end if;
+
+  signal_text := lower(concat_ws(' ', w.title, w.desired_outcome,
+    coalesce(w.acceptance_criteria::text, ''), coalesce(p_scope_summary, '')));
+  criteria_count := case when jsonb_typeof(w.acceptance_criteria) = 'array' then jsonb_array_length(w.acceptance_criteria) else 0 end;
+  dependency_count := jsonb_array_length(coalesce(p_dependency_refs, '[]'::jsonb));
+  step_count := case when coalesce(p_caps->>'max_steps','') ~ '^[0-9]+$' then (p_caps->>'max_steps')::integer else 0 end;
+
+  if signal_text ~ '\m(heavy[ -]build|first[ -]of[ -](its|the)[ -]kind|first[ -]of[ -]kind)\M' then
+    reasons := reasons || jsonb_build_array('signal:first_of_kind_or_explicit_heavy');
+  end if;
+  if signal_text ~ '\m(build|create|extend|implement|ship|design)\M.{0,80}\m(new |complete |governed )?(capability|system|platform|engine|service|workflow|kernel)\M' then
+    reasons := reasons || jsonb_build_array('signal:new_capability');
+  end if;
+  if signal_text ~ '\m(architecture|architectural|system design|multi[ -]surface|end[ -]to[ -]end)\M' then
+    reasons := reasons || jsonb_build_array('signal:architecture_or_multi_surface');
+  end if;
+  if signal_text ~ '\m(migration|schema|deploy|deployment|rebuild|refactor|integration)\M' then
+    reasons := reasons || jsonb_build_array('signal:structural_change');
+  end if;
+  if signal_text ~ '\m(agent learning|memory kernel|learning system|memory engine)\M' then
+    reasons := reasons || jsonb_build_array('signal:agent_learning');
+  end if;
+  if criteria_count >= 5 then reasons := reasons || jsonb_build_array('scale:acceptance_criteria'); end if;
+  if dependency_count >= 3 then reasons := reasons || jsonb_build_array('scale:dependency_refs'); end if;
+  if step_count >= 5 then reasons := reasons || jsonb_build_array('scale:max_steps'); end if;
+
+  shape_ready := w.shape_disposition = 'required'
+    and exists (
+      select 1 from ops.work_shape_revision sr
+       where sr.work_request_id = w.id and sr.work_request_version = w.version
+         and sr.version = (select max(current_sr.version) from ops.work_shape_revision current_sr where current_sr.work_request_id = w.id)
+    );
+  return jsonb_build_object(
+    'tier', case when jsonb_array_length(reasons) > 0 then 'heavy' else 'standard' end,
+    'reasons', reasons,
+    'shape_disposition', w.shape_disposition,
+    'shape_ready', shape_ready,
+    'acceptance_criteria_count', criteria_count,
+    'dependency_ref_count', dependency_count,
+    'max_steps', step_count
+  );
+end;
+$_$;
+
+
+--
+-- Name: heavy_build_digest(jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_digest(p_preimage jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select 'sha256:' || encode(public.digest(p_preimage::text, 'sha256'), 'hex');
+$$;
+
+
+--
+-- Name: heavy_build_jsonb_has_exact_keys(jsonb, text[]); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_jsonb_has_exact_keys(p_document jsonb, p_keys text[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select jsonb_typeof(p_document) = 'object'
+     and (select array_agg(k order by k) from jsonb_object_keys(p_document) k)
+         is not distinct from
+         (select array_agg(k order by k) from unnest(p_keys) k);
+$$;
+
+
+--
+-- Name: heavy_build_ready_plan_gate(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_ready_plan_gate() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+declare
+  p ops.sourced_work_request_plan%rowtype;
+  a ops.heavy_build_admission_revision%rowtype;
+  r ops.heavy_build_plan_review%rowtype;
+  classification jsonb;
+  heavy boolean;
+  admission_found boolean;
+begin
+  if old.state = 'triaged' and new.state = 'ready' and old.capture_idempotency_key is not null then
+    select plan.* into p
+      from ops.sourced_work_request_plan_acceptance_receipt acceptance
+      join ops.sourced_work_request_plan plan on plan.id=acceptance.plan_id
+     where acceptance.work_request_id=old.id and acceptance.base_version=old.version and acceptance.result_version=new.version
+     order by acceptance.accepted_at desc limit 1;
+    if not found then return new; end if;
+    classification := ops.heavy_build_classification(old.id,p.scope_summary,p.dependency_refs,p.caps);
+    select x.* into a from ops.heavy_build_admission_revision x where x.plan_id=p.id order by x.version desc limit 1;
+    admission_found := found;
+    heavy := classification->>'tier'='heavy' or admission_found;
+    if heavy then
+      if new.shape_disposition is distinct from 'required'
+         or not exists (select 1 from ops.work_shape_revision sr where sr.work_request_id=old.id and sr.work_request_version=old.version
+                         and sr.version=(select max(current_sr.version) from ops.work_shape_revision current_sr where current_sr.work_request_id=old.id)) then
+        raise exception 'heavy build plan requires a current evidence-backed Work Shape';
+      end if;
+      if a.id is null then
+        raise exception 'heavy build plan requires a typed research and master-plan admission receipt';
+      end if;
+      select x.* into r from ops.heavy_build_plan_review x where x.admission_id=a.id order by x.version desc limit 1;
+      if r.id is null or r.verdict <> 'pass' then
+        raise exception 'heavy build plan requires a fresh passing independent review';
+      end if;
+    end if;
+  end if;
+  return new;
+end;
+$$;
 
 
 --
@@ -7183,6 +7362,189 @@ end $$;
 
 
 --
+-- Name: record_sourced_heavy_build_admission(uuid, text, integer, jsonb, jsonb, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) RETURNS TABLE(work_request_id uuid, ref text, plan_id uuid, plan_ref text, admission_ref text, admission_hash text, tier text, classifier_reasons jsonb, builder_session_ref text, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+declare
+  w ops.work_request%rowtype;
+  p ops.sourced_work_request_plan%rowtype;
+  a ops.heavy_build_admission_revision%rowtype;
+  actor public.actor%rowtype;
+  classification jsonb;
+  expected_reasons jsonb;
+  research jsonb;
+  master_plan jsonb;
+  field text;
+  minimum integer;
+  next_version integer;
+  preimage jsonb;
+  digest text;
+begin
+  if p_plan_id is null or coalesce(p_work_request,'') !~ '^WR-[0-9]{1,12}$'
+     or p_base_version is null or p_base_version < 1 or p_idempotency_key is null
+     or p_proposed_by_actor_id is null or jsonb_typeof(p_classifier_reasons) is distinct from 'array'
+     or jsonb_array_length(p_classifier_reasons) = 0
+     or not ops.heavy_build_jsonb_has_exact_keys(p_contract, array['builder_session_ref','master_plan','research_manifest'])
+     or coalesce(p_contract->>'builder_session_ref','') !~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$' then
+    raise exception 'heavy build admission requires exact plan, Work Request version, classifier reasons, typed contract, actor, and idempotency key';
+  end if;
+
+  research := p_contract->'research_manifest';
+  master_plan := p_contract->'master_plan';
+  if not ops.heavy_build_jsonb_has_exact_keys(research,
+       array['conclusion','current_baseline','failure_modes','maintained_repositories','practitioner_evidence','primary_sources','unresolved_contradictions'])
+     or char_length(btrim(coalesce(research->>'conclusion',''))) not between 20 and 1000
+     or jsonb_typeof(research->'unresolved_contradictions') is distinct from 'array'
+     or jsonb_array_length(research->'unresolved_contradictions') > 12
+     or exists (select 1 from jsonb_array_elements(research->'unresolved_contradictions') item
+                 where jsonb_typeof(item) <> 'string' or char_length(btrim(item #>> '{}')) not between 10 and 500) then
+    raise exception 'heavy build research manifest is incomplete';
+  end if;
+
+  foreach field in array array['primary_sources','maintained_repositories','practitioner_evidence','current_baseline','failure_modes'] loop
+    minimum := case when field = 'maintained_repositories' then 2 else 1 end;
+    if jsonb_typeof(research->field) is distinct from 'array'
+       or jsonb_array_length(research->field) not between minimum and 12 then
+      raise exception 'heavy build research class % requires % to 12 evidence items', field, minimum;
+    end if;
+  end loop;
+
+  if exists (
+    select 1
+      from (values
+        ('primary_sources','primary_source'),
+        ('maintained_repositories','maintained_repository'),
+        ('practitioner_evidence','practitioner_evidence'),
+        ('current_baseline','current_baseline'),
+        ('failure_modes','failure_mode')
+      ) expected(field_name, class_name)
+      cross join lateral jsonb_array_elements(research->expected.field_name) item
+     where not ops.heavy_build_jsonb_has_exact_keys(item, array['content_digest','finding','locator','observed_at','source_class','source_ref'])
+        or coalesce(item->>'source_ref','') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
+        or item->>'source_class' is distinct from expected.class_name
+        or coalesce(item->>'locator','') !~ '^https://'
+        or coalesce(item->>'observed_at','') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+        or case when coalesce(item->>'observed_at','') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+             then (item->>'observed_at')::timestamptz > now() + interval '5 minutes' else true end
+        or coalesce(item->>'content_digest','') !~ '^sha256:[0-9a-f]{64}$'
+        or char_length(btrim(coalesce(item->>'finding',''))) not between 20 and 1000
+  ) then raise exception 'heavy build research evidence item is invalid or in the wrong source class'; end if;
+
+  if exists (
+    select source_ref from (
+      select item->>'source_ref' source_ref
+        from (values ('primary_sources'),('maintained_repositories'),('practitioner_evidence'),('current_baseline'),('failure_modes')) fields(field_name)
+        cross join lateral jsonb_array_elements(research->fields.field_name) item
+    ) refs group by source_ref having count(*) > 1
+  ) then raise exception 'heavy build research source refs must be unique across classes'; end if;
+
+  if not ops.heavy_build_jsonb_has_exact_keys(master_plan,
+       array['architecture','authority_boundaries','baseline_comparison','dependency_dag','fully_shipped_definition','non_goals','observability_strategy','planned_checks','prerequisite_policy','product_goal','release_strategy','rollback_strategy']) then
+    raise exception 'heavy build master plan must name the complete target-product contract';
+  end if;
+  foreach field in array array['product_goal','baseline_comparison','release_strategy','rollback_strategy','observability_strategy','fully_shipped_definition','prerequisite_policy'] loop
+    if char_length(btrim(coalesce(master_plan->>field,''))) not between 20 and 2000 then
+      raise exception 'heavy build master plan field % is incomplete', field;
+    end if;
+  end loop;
+  foreach field in array array['non_goals','architecture','authority_boundaries'] loop
+    minimum := case when field = 'architecture' then 2 else 1 end;
+    if jsonb_typeof(master_plan->field) is distinct from 'array'
+       or jsonb_array_length(master_plan->field) not between minimum and (case when field='architecture' then 20 else 12 end)
+       or exists (select 1 from jsonb_array_elements(master_plan->field) item
+                   where jsonb_typeof(item) <> 'string' or char_length(btrim(item #>> '{}')) not between 10 and 1000) then
+      raise exception 'heavy build master plan field % requires substantive entries', field;
+    end if;
+  end loop;
+  if jsonb_typeof(master_plan->'dependency_dag') is distinct from 'array'
+     or jsonb_array_length(master_plan->'dependency_dag') not between 1 and 20
+     or exists (select 1 from jsonb_array_elements(master_plan->'dependency_dag') step
+                 where not ops.heavy_build_jsonb_has_exact_keys(step,array['depends_on','step_ref'])
+                    or coalesce(step->>'step_ref','') !~ '^step:[a-z0-9][a-z0-9:._/-]*$'
+                    or jsonb_typeof(step->'depends_on') <> 'array'
+                    or exists (select 1 from jsonb_array_elements(step->'depends_on') dep
+                                where jsonb_typeof(dep) <> 'string' or dep #>> '{}' !~ '^step:[a-z0-9][a-z0-9:._/-]*$' or dep #>> '{}' = step->>'step_ref'))
+     or exists (select step->>'step_ref' from jsonb_array_elements(master_plan->'dependency_dag') step group by step->>'step_ref' having count(*) > 1)
+     or exists (select 1 from jsonb_array_elements(master_plan->'dependency_dag') step
+                 cross join lateral jsonb_array_elements_text(step->'depends_on') dep
+                where not exists (select 1 from jsonb_array_elements(master_plan->'dependency_dag') declared where declared->>'step_ref'=dep)) then
+    raise exception 'heavy build dependency DAG is invalid';
+  end if;
+  if exists (
+    with recursive edges(src,dst) as (
+      select step->>'step_ref', dep
+        from jsonb_array_elements(master_plan->'dependency_dag') step
+        cross join lateral jsonb_array_elements_text(step->'depends_on') dep
+    ), walk(start_node,node,path,cycle) as (
+      select src,dst,array[src,dst],dst=src from edges
+      union all
+      select walk.start_node,edges.dst,walk.path||edges.dst,edges.dst=any(walk.path)
+        from walk join edges on edges.src=walk.node where not walk.cycle
+    ) select 1 from walk where cycle limit 1
+  ) then raise exception 'heavy build dependency graph contains a cycle'; end if;
+  if jsonb_typeof(master_plan->'planned_checks') is distinct from 'array'
+     or jsonb_array_length(master_plan->'planned_checks') not between 1 and 20
+     or exists (select 1 from jsonb_array_elements(master_plan->'planned_checks') check_item
+                 where not ops.heavy_build_jsonb_has_exact_keys(check_item,array['artifact','comparator','failure_condition'])
+                    or char_length(btrim(coalesce(check_item->>'artifact',''))) not between 5 and 500
+                    or char_length(btrim(coalesce(check_item->>'comparator',''))) not between 5 and 500
+                    or char_length(btrim(coalesce(check_item->>'failure_condition',''))) not between 5 and 500) then
+    raise exception 'heavy build planned checks must name artifact, comparator, and failure condition';
+  end if;
+
+  select x.* into actor from public.actor x where x.id=p_proposed_by_actor_id and x.active for share;
+  if not found then raise exception 'heavy build admission actor is not active'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('heavy-build-admission:' || p_idempotency_key,0));
+  select x.* into a from ops.heavy_build_admission_revision x where x.idempotency_key=p_idempotency_key for share;
+  if found then
+    select x.* into w from ops.work_request x where x.id=a.work_request_id;
+    select x.* into p from ops.sourced_work_request_plan x where x.id=a.plan_id;
+    if not found or w.ref is distinct from p_work_request or p.id is distinct from p_plan_id
+       or p.work_request_version is distinct from p_base_version or a.classifier_reasons is distinct from p_classifier_reasons
+       or a.contract is distinct from p_contract or a.proposed_by_actor_id is distinct from p_proposed_by_actor_id then
+      raise exception 'idempotency key already names a different heavy build admission';
+    end if;
+    return query select w.id,w.ref,p.id,p.plan_ref,a.admission_ref,a.admission_hash,a.tier,a.classifier_reasons,a.builder_session_ref,true;
+    return;
+  end if;
+
+  select w0.* into w from ops.work_request w0 where w0.ref=p_work_request for update;
+  if not found or w.state is distinct from 'triaged' or w.version is distinct from p_base_version then
+    raise exception 'exact current triaged Work Request and immutable plan required for heavy build admission';
+  end if;
+  select p0.* into p from ops.sourced_work_request_plan p0 where p0.id=p_plan_id and p0.work_request_id=w.id for share;
+  if not found or p.work_request_version is distinct from w.version then
+    raise exception 'exact current triaged Work Request and immutable plan required for heavy build admission';
+  end if;
+  classification := ops.heavy_build_classification(w.id,p.scope_summary,p.dependency_refs,p.caps);
+  if coalesce((classification->>'shape_ready')::boolean,false) is not true then
+    raise exception 'heavy build requires a current evidence-backed Work Shape before plan proposal';
+  end if;
+  expected_reasons := case when classification->>'tier'='heavy' then classification->'reasons' else jsonb_build_array('caller:explicit-heavy-contract') end;
+  if p_classifier_reasons is distinct from expected_reasons then raise exception 'heavy build classifier reasons must be server-derived'; end if;
+
+  select coalesce(max(x.version),0)+1 into next_version from ops.heavy_build_admission_revision x where x.plan_id=p.id;
+  preimage := jsonb_build_object('contract','carr-heavy-build-admission/v1','work_request_id',w.id,'work_request_version',w.version,
+    'plan_id',p.id,'plan_hash',p.plan_hash,'classifier_reasons',expected_reasons,'heavy_build',p_contract,
+    'proposed_by_actor_id',p_proposed_by_actor_id,'version',next_version);
+  digest := ops.heavy_build_digest(preimage);
+  if exists (select 1 from ops.heavy_build_admission_revision x where x.plan_id=p.id and x.admission_hash=digest) then
+    raise exception 'the exact heavy build admission already exists under a different idempotency key';
+  end if;
+  insert into ops.heavy_build_admission_revision
+    (admission_ref,work_request_id,plan_id,version,idempotency_key,tier,classifier_reasons,contract,builder_session_ref,admission_hash,proposed_by_actor_id)
+  values ('HBA-'||substr(digest,8,12)||'-v'||next_version,w.id,p.id,next_version,p_idempotency_key,'heavy',expected_reasons,p_contract,p_contract->>'builder_session_ref',digest,p_proposed_by_actor_id)
+  returning * into a;
+  return query select w.id,w.ref,p.id,p.plan_ref,a.admission_ref,a.admission_hash,a.tier,a.classifier_reasons,a.builder_session_ref,false;
+end;
+$_$;
+
+
+--
 -- Name: record_staging_forward_fix_rehearsal(uuid, uuid, text, integer, text, integer, text, bigint, boolean); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -8747,6 +9109,77 @@ $$;
 
 
 --
+-- Name: review_sourced_heavy_build_plan(text, text, text, uuid, text, text, text, jsonb, jsonb, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.review_sourced_heavy_build_plan(p_work_request text, p_plan_hash text, p_admission_hash text, p_reviewer_actor_id uuid, p_verdict text, p_reviewer_session_ref text, p_review_summary text, p_evidence_refs jsonb, p_gaps jsonb, p_idempotency_key uuid) RETURNS TABLE(work_request_id uuid, ref text, plan_id uuid, admission_ref text, admission_hash text, review_ref text, review_hash text, verdict text, reviewer_session_ref text, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+declare
+  w ops.work_request%rowtype;
+  p ops.sourced_work_request_plan%rowtype;
+  a ops.heavy_build_admission_revision%rowtype;
+  r ops.heavy_build_plan_review%rowtype;
+  actor public.actor%rowtype;
+  next_version integer;
+  preimage jsonb;
+  digest text;
+begin
+  if coalesce(p_work_request,'') !~ '^WR-[0-9]{1,12}$' or coalesce(p_plan_hash,'') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(p_admission_hash,'') !~ '^sha256:[0-9a-f]{64}$' or p_reviewer_actor_id is null or p_idempotency_key is null
+     or p_verdict not in ('pass','fail') or coalesce(p_reviewer_session_ref,'') !~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$'
+     or char_length(btrim(coalesce(p_review_summary,''))) not between 20 and 1000
+     or jsonb_typeof(p_evidence_refs) is distinct from 'array' or jsonb_array_length(p_evidence_refs) not between 1 and 12
+     or exists (select 1 from jsonb_array_elements(p_evidence_refs) item where jsonb_typeof(item)<>'string' or item #>> '{}' !~ '^safe:[a-z0-9][a-z0-9:_./-]*$')
+     or exists (select item #>> '{}' from jsonb_array_elements(p_evidence_refs) item group by item #>> '{}' having count(*)>1)
+     or jsonb_typeof(p_gaps) is distinct from 'array' or jsonb_array_length(p_gaps)>12
+     or exists (select 1 from jsonb_array_elements(p_gaps) item where jsonb_typeof(item)<>'string' or char_length(btrim(item #>> '{}')) not between 10 and 500)
+     or (p_verdict='pass' and jsonb_array_length(p_gaps)<>0) or (p_verdict='fail' and jsonb_array_length(p_gaps)=0) then
+    raise exception 'heavy build review requires exact hashes, fresh session, verdict-consistent gaps, evidence, actor, and idempotency key';
+  end if;
+  select x.* into actor from public.actor x where x.id=p_reviewer_actor_id and x.active for share;
+  if not found then raise exception 'heavy build reviewer actor is not active'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('heavy-build-review:'||p_idempotency_key,0));
+  select x.* into r from ops.heavy_build_plan_review x where x.idempotency_key=p_idempotency_key for share;
+  if found then
+    select x.* into a from ops.heavy_build_admission_revision x where x.id=r.admission_id;
+    select x.* into p from ops.sourced_work_request_plan x where x.id=a.plan_id;
+    select x.* into w from ops.work_request x where x.id=a.work_request_id;
+    if not found or w.ref is distinct from p_work_request or p.plan_hash is distinct from p_plan_hash
+       or a.admission_hash is distinct from p_admission_hash or r.reviewer_actor_id is distinct from p_reviewer_actor_id
+       or r.verdict is distinct from p_verdict or r.reviewer_session_ref is distinct from p_reviewer_session_ref
+       or r.review_summary is distinct from btrim(p_review_summary) or r.evidence_refs is distinct from p_evidence_refs or r.gaps is distinct from p_gaps then
+      raise exception 'idempotency key already names a different heavy build review';
+    end if;
+    return query select w.id,w.ref,p.id,a.admission_ref,a.admission_hash,r.review_ref,r.review_hash,r.verdict,r.reviewer_session_ref,true;
+    return;
+  end if;
+  select w0.* into w from ops.work_request w0 where w0.ref=p_work_request and w0.state='triaged' for share;
+  if not found then raise exception 'exact current heavy build review target not found'; end if;
+  select p0.* into p from ops.sourced_work_request_plan p0 where p0.work_request_id=w.id and p0.plan_hash=p_plan_hash for share;
+  if not found then raise exception 'exact current heavy build review target not found'; end if;
+  select a0.* into a from ops.heavy_build_admission_revision a0
+   where a0.plan_id=p.id and a0.admission_hash=p_admission_hash
+     and a0.version=(select max(latest.version) from ops.heavy_build_admission_revision latest where latest.plan_id=p.id)
+   for share;
+  if not found then raise exception 'exact current heavy build review target not found'; end if;
+  if p_reviewer_session_ref=a.builder_session_ref then raise exception 'heavy build review requires a fresh session distinct from the builder context'; end if;
+  select coalesce(max(x.version),0)+1 into next_version from ops.heavy_build_plan_review x where x.admission_id=a.id;
+  preimage := jsonb_build_object('contract','carr-heavy-build-review/v1','admission_id',a.id,'admission_hash',a.admission_hash,
+    'plan_hash',p.plan_hash,'verdict',p_verdict,'reviewer_actor_id',p_reviewer_actor_id,'reviewer_session_ref',p_reviewer_session_ref,
+    'review_summary',btrim(p_review_summary),'evidence_refs',p_evidence_refs,'gaps',p_gaps,'version',next_version);
+  digest := ops.heavy_build_digest(preimage);
+  insert into ops.heavy_build_plan_review
+    (review_ref,admission_id,version,idempotency_key,verdict,reviewer_actor_id,reviewer_session_ref,review_summary,evidence_refs,gaps,review_hash)
+  values ('HBR-'||substr(digest,8,12)||'-v'||next_version,a.id,next_version,p_idempotency_key,p_verdict,p_reviewer_actor_id,p_reviewer_session_ref,btrim(p_review_summary),p_evidence_refs,p_gaps,digest)
+  returning * into r;
+  return query select w.id,w.ref,p.id,a.admission_ref,a.admission_hash,r.review_ref,r.review_hash,r.verdict,r.reviewer_session_ref,false;
+end;
+$_$;
+
+
+--
 -- Name: rule_delivery_audit_counts(integer); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -9284,6 +9717,24 @@ begin
    where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
   return true;
 end $$;
+
+
+--
+-- Name: sourced_heavy_build_review_target(text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) RETURNS TABLE(work_request_id uuid, ref text, plan_id uuid, admission_id uuid, admission_ref text, builder_session_ref text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select w.id,w.ref,p.id,a.id,a.admission_ref,a.builder_session_ref
+    from ops.work_request w
+    join ops.sourced_work_request_plan p on p.work_request_id=w.id
+    join ops.heavy_build_admission_revision a on a.plan_id=p.id
+   where w.ref=p_work_request and w.state='triaged' and p.plan_hash=p_plan_hash and a.admission_hash=p_admission_hash
+     and a.version=(select max(latest.version) from ops.heavy_build_admission_revision latest where latest.plan_id=p.id)
+     and w.organization_tenant_id='carr-internal';
+$$;
 
 
 --
@@ -13090,6 +13541,76 @@ ALTER TABLE ops.guidance_situation_mapping ALTER COLUMN mapping_seq ADD GENERATE
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Name: heavy_build_admission_revision; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.heavy_build_admission_revision (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    admission_ref text NOT NULL,
+    work_request_id uuid NOT NULL,
+    plan_id uuid NOT NULL,
+    version integer NOT NULL,
+    idempotency_key uuid NOT NULL,
+    tier text NOT NULL,
+    classifier_reasons jsonb NOT NULL,
+    contract jsonb NOT NULL,
+    builder_session_ref text NOT NULL,
+    admission_hash text NOT NULL,
+    proposed_by_actor_id uuid NOT NULL,
+    proposed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT heavy_build_admission_revision_admission_hash_check CHECK ((admission_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT heavy_build_admission_revision_builder_session_ref_check CHECK ((builder_session_ref ~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$'::text)),
+    CONSTRAINT heavy_build_admission_revision_classifier_reasons_check CHECK (((jsonb_typeof(classifier_reasons) = 'array'::text) AND (jsonb_array_length(classifier_reasons) > 0))),
+    CONSTRAINT heavy_build_admission_revision_contract_check CHECK ((jsonb_typeof(contract) = 'object'::text)),
+    CONSTRAINT heavy_build_admission_revision_tier_check CHECK ((tier = 'heavy'::text)),
+    CONSTRAINT heavy_build_admission_revision_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: TABLE heavy_build_admission_revision; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.heavy_build_admission_revision IS 'Append-only typed research manifest and complete target-product plan bound to one exact sourced ready-plan proposal. It grants no acceptance or execution authority.';
+
+
+--
+-- Name: heavy_build_plan_review; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.heavy_build_plan_review (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    review_ref text NOT NULL,
+    admission_id uuid NOT NULL,
+    version integer NOT NULL,
+    idempotency_key uuid NOT NULL,
+    verdict text NOT NULL,
+    reviewer_actor_id uuid NOT NULL,
+    reviewer_session_ref text NOT NULL,
+    review_summary text NOT NULL,
+    evidence_refs jsonb NOT NULL,
+    gaps jsonb NOT NULL,
+    review_hash text NOT NULL,
+    reviewed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT heavy_build_plan_review_check CHECK ((((verdict = 'pass'::text) AND (jsonb_array_length(gaps) = 0)) OR ((verdict = 'fail'::text) AND (jsonb_array_length(gaps) > 0)))),
+    CONSTRAINT heavy_build_plan_review_evidence_refs_check CHECK (((jsonb_typeof(evidence_refs) = 'array'::text) AND ((jsonb_array_length(evidence_refs) >= 1) AND (jsonb_array_length(evidence_refs) <= 12)))),
+    CONSTRAINT heavy_build_plan_review_gaps_check CHECK (((jsonb_typeof(gaps) = 'array'::text) AND (jsonb_array_length(gaps) <= 12))),
+    CONSTRAINT heavy_build_plan_review_review_hash_check CHECK ((review_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT heavy_build_plan_review_review_summary_check CHECK (((char_length(btrim(review_summary)) >= 20) AND (char_length(btrim(review_summary)) <= 1000))),
+    CONSTRAINT heavy_build_plan_review_reviewer_session_ref_check CHECK ((reviewer_session_ref ~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$'::text)),
+    CONSTRAINT heavy_build_plan_review_verdict_check CHECK ((verdict = ANY (ARRAY['pass'::text, 'fail'::text]))),
+    CONSTRAINT heavy_build_plan_review_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: TABLE heavy_build_plan_review; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.heavy_build_plan_review IS 'Append-only fresh-context review of one exact heavy-build admission revision. Only the latest passing review can admit human ready-plan acceptance.';
 
 
 --
@@ -25367,6 +25888,86 @@ ALTER TABLE ONLY ops.guidance_situation_mapping
 
 
 --
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_admission_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_admission_ref_key UNIQUE (admission_ref);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_plan_id_admission_hash_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_plan_id_admission_hash_key UNIQUE (plan_id, admission_hash);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_plan_id_version_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_plan_id_version_key UNIQUE (plan_id, version);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_admission_id_review_hash_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_admission_id_review_hash_key UNIQUE (admission_id, review_hash);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_admission_id_version_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_admission_id_version_key UNIQUE (admission_id, version);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_review_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_review_ref_key UNIQUE (review_ref);
+
+
+--
 -- Name: incident_fact incident_fact_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -30125,6 +30726,20 @@ CREATE TRIGGER guidance_situation_mapping_validate BEFORE INSERT ON ops.guidance
 
 
 --
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER heavy_build_admission_revision_immutable BEFORE DELETE OR UPDATE ON ops.heavy_build_admission_revision FOR EACH ROW EXECUTE FUNCTION ops.heavy_build_admission_rows_immutable();
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER heavy_build_plan_review_immutable BEFORE DELETE OR UPDATE ON ops.heavy_build_plan_review FOR EACH ROW EXECUTE FUNCTION ops.heavy_build_admission_rows_immutable();
+
+
+--
 -- Name: job_attempt job_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -30717,6 +31332,13 @@ CREATE TRIGGER work_request_execution_environment_bind AFTER INSERT ON ops.work_
 --
 
 CREATE TRIGGER work_request_execution_environment_binding_append_only BEFORE DELETE OR UPDATE ON ops.work_request_execution_environment_binding FOR EACH ROW EXECUTE FUNCTION ops.execution_environment_append_only_guard();
+
+
+--
+-- Name: work_request work_request_heavy_build_ready_plan_gate; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER work_request_heavy_build_ready_plan_gate BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.heavy_build_ready_plan_gate();
 
 
 --
@@ -31865,6 +32487,46 @@ ALTER TABLE ONLY ops.guidance_situation_mapping
 
 ALTER TABLE ONLY ops.guidance_situation_mapping
     ADD CONSTRAINT guidance_situation_mapping_supersedes_mapping_id_fkey FOREIGN KEY (supersedes_mapping_id) REFERENCES ops.guidance_situation_mapping(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_plan_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES ops.sourced_work_request_plan(id);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_proposed_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_proposed_by_actor_id_fkey FOREIGN KEY (proposed_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_admission_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_admission_id_fkey FOREIGN KEY (admission_id) REFERENCES ops.heavy_build_admission_revision(id);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_reviewer_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_reviewer_actor_id_fkey FOREIGN KEY (reviewer_actor_id) REFERENCES public.actor(id);
 
 
 --
@@ -35204,6 +35866,7 @@ revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit in
 revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
 revoke all on function ops.claim_staging_forward_fix_rehearsal(p_idempotency_key uuid) from public;
 revoke all on function ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) from public;
+revoke all on function ops.classify_sourced_work_request_build(p_work_request text, p_base_version integer, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) from public;
 revoke all on function ops.clear_recovered_incident(p_ref text, p_required integer) from public;
 revoke all on function ops.compile_context_bundle(p_work_request text, p_plan_ref text, p_tenant text) from public;
 revoke all on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) from public;
@@ -35234,6 +35897,9 @@ revoke all on function ops.guidance_import_manifest_digest(p_manifest_text text)
 revoke all on function ops.guidance_import_split_group_id(p_key text) from public;
 revoke all on function ops.guidance_revision_contract_hash(p_revision_id uuid) from public;
 revoke all on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) from public;
+revoke all on function ops.heavy_build_classification(p_work_request_id uuid, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) from public;
+revoke all on function ops.heavy_build_digest(p_preimage jsonb) from public;
+revoke all on function ops.heavy_build_jsonb_has_exact_keys(p_document jsonb, p_keys text[]) from public;
 revoke all on function ops.hermes_runtime_admission_for_brief_v1(p_runtime_slug text, p_profile_key text, p_sponsor_slug text, p_work_request text, p_binding_id text) from public;
 revoke all on function ops.ingest_calendar_prebrief_canary_projection(p_job_id uuid, p_lease uuid, p_destination text, p_observed_calendar_keys text[], p_events jsonb) from public;
 revoke all on function ops.ingest_calendar_prebrief_projection(p_job_id uuid, p_lease uuid, p_observed_calendar_keys text[], p_events jsonb) from public;
@@ -35273,6 +35939,7 @@ revoke all on function ops.record_launchd_scheduler_observation(p_surface_id tex
 revoke all on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) from public;
 revoke all on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) from public;
+revoke all on function ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
@@ -35292,6 +35959,7 @@ revoke all on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_atte
 revoke all on function ops.resolve_calendar_prebrief_email_ref(p_email text) from public;
 revoke all on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) from public;
 revoke all on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) from public;
+revoke all on function ops.review_sourced_heavy_build_plan(p_work_request text, p_plan_hash text, p_admission_hash text, p_reviewer_actor_id uuid, p_verdict text, p_reviewer_session_ref text, p_review_summary text, p_evidence_refs jsonb, p_gaps jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) from public;
 revoke all on function ops.schedule_calendar_prebrief_joe_live_job() from public;
 revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid) from public;
@@ -35300,6 +35968,7 @@ revoke all on function ops.select_provider_routes(p_requested text[]) from publi
 revoke all on function ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) from public;
 revoke all on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
+revoke all on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_preimage(p_work_request_id uuid, p_plan_id uuid, p_plan_acceptance_receipt_id uuid, p_criterion_results jsonb, p_evidence_refs jsonb, p_outcome text, p_blocker_code text, p_result_summary text, p_observed_minutes integer, p_interaction_surface text, p_heavy_session_used boolean, p_manual_context_transfers integer) from public;
 revoke all on function ops.sourced_work_request_plan_digest(p_preimage jsonb) from public;
@@ -36032,8 +36701,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
@@ -36048,6 +36717,7 @@ grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit
 grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.claim_staging_forward_fix_rehearsal(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) to carr_jobs;
+grant execute on function ops.classify_sourced_work_request_build(p_work_request text, p_base_version integer, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) to carr_writer;
 grant execute on function ops.clear_recovered_incident(p_ref text, p_required integer) to carr_jobs;
 grant execute on function ops.compile_context_bundle(p_work_request text, p_plan_ref text, p_tenant text) to carr_writer;
 grant execute on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) to carr_jobs;
@@ -36130,9 +36800,10 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
+grant execute on function ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_program5_forward_fix_verifiers;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -36147,6 +36818,7 @@ grant execute on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_a
 grant execute on function ops.resolve_calendar_prebrief_email_ref(p_email text) to carr_calendar_prebrief_email_resolver;
 grant execute on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
 grant execute on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) to carr_authority;
+grant execute on function ops.review_sourced_heavy_build_plan(p_work_request text, p_plan_hash text, p_admission_hash text, p_reviewer_actor_id uuid, p_verdict text, p_reviewer_session_ref text, p_review_summary text, p_evidence_refs jsonb, p_gaps jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_jobs;
 grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_reader;
 grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_writer;
@@ -36161,6 +36833,7 @@ grant execute on function ops.select_provider_routes(p_requested text[]) to carr
 grant execute on function ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) to carr_authority;
 grant execute on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
+grant execute on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) to carr_writer;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_writer;
@@ -36477,6 +37150,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0317_atomic_rule_delivery_cutover.sql	1fb3ae5dcbf006e76120750889617ccf59f358490c493993a90332ecb906ba54	2026-08-26 00:37:56.090239+00
 0318_tour_operations_foundation.sql	8cdb4b2127f7dcd6bdc265a402db6471465b10f35c6b06f2707e776f58bed8d6	2026-08-26 00:52:52.888614+00
 0319_engineering_envelope_writer_successor.sql	f45b50d9471153d25b07064055ef638b24e463866ef1e311cbe06d3fe930e097	2026-08-26 00:52:53.168213+00
+0320_heavy_build_admission.sql	f3db5160c88db372fd58fc8e73eaa2671c7c8997dd3bee2753d5b636cd074465	2026-08-26 02:22:40.923301+00
+0321_rule_delivery_policy_seed_repair.sql	98494c4715a09ed735524a97f8bd3a1d0323df4adda690f5f06abcc6e971b482	2026-08-26 02:22:41.137134+00
 \.
 
 
@@ -36530,6 +37205,32 @@ e6d681d4-ceac-43ed-a830-d86749e64814	hermes-pilot	automation	Hermes Agent (R0 ev
 
 COPY ops.guidance_registry (id, singleton, created_by, created_at) FROM stdin;
 67aa96b6-3cf8-45ce-b73c-6965d36a664c	t	b6c38b27-d006-4fad-9c38-49edf3130a07	2026-08-16 18:19:38.132972+00
+\.
+
+
+--
+-- Data for Name: rule_delivery_activation_target; Type: TABLE DATA; Schema: ops; Owner: -
+--
+
+COPY ops.rule_delivery_activation_target (short_id, expected_scope, expected_pack, from_control, from_enforcement_class, from_implementation_ref, from_test_ref, to_control, to_enforcement_class, to_implementation_ref, to_test_ref, map_digest) FROM stdin;
+25fcddee	shared	governance-rules	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+3fa17fa0	shared	client-deal	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+72e06bdf	shared	client-deal	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+581cb3fe	shared	delegation-council	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+113b3833	joe	governance-rules	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+57d13061	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+c66dc739	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+49533583	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+557838a5	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py	266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a
+\.
+
+
+--
+-- Data for Name: rule_delivery_policy; Type: TABLE DATA; Schema: ops; Owner: -
+--
+
+COPY ops.rule_delivery_policy (singleton, mode, changed_by, reason, changed_at) FROM stdin;
+t	shadow	migration:0291	Shadow first: the selector runs beside full recitation until a week of observations shows no consequential rule was omitted.	2026-08-24 16:04:55.847781+00
 \.
 
 
