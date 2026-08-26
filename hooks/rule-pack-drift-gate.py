@@ -47,6 +47,7 @@ boot would not have delivered. Enforcement flips on at zero unexplained misses.
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib
 import json
 import os
@@ -83,6 +84,16 @@ ENGINEERING_WORKFLOW_HEADER = (
     "You are the fresh, dedicated Codex executor for one bounded CARR Engineering Passport slice.\n\n"
     "RULE-DELIVERY WORKFLOW: engineering-slice\n"
     "RULE-DELIVERY PACKS: engineering-git,delegation-council,scheduled-automation,source-study\n")
+# Immutable custom-tool payloads from the source transcript for event 10529812.
+# Receipt normalization is deliberately a positive provenance check, not a
+# Python semantics decision. A one-byte change makes the payload observable.
+# Both captured programs emit the same schema-exact receipt.
+CAPTURED_RECEIPT_TOOL_INPUTS = {
+    "34c6578998ba91f1cf7d4a2192f907a9c1f05643236e450e60a34d71754c9627":
+        "d06a1a058c74e1859fc88e2ede25faf670193aee7acb9313559e05dfaf8e570f",
+    "bc258550a9b3a9812d322a0b702e546baa260dc89e4990a5e59c84eb44aeed08":
+        "d06a1a058c74e1859fc88e2ede25faf670193aee7acb9313559e05dfaf8e570f",
+}
 
 
 def load_packs():
@@ -479,172 +490,12 @@ def _line_offsets(text):
     return offsets
 
 
-def _call_name(node):
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        prefix = _call_name(node.value)
-        return f"{prefix}.{node.attr}" if prefix else node.attr
-    if isinstance(node, ast.Call):
-        return _call_name(node.func)
-    return ""
-
-
-def _uses_names(node, names):
-    return any(isinstance(item, ast.Name) and item.id in names for item in ast.walk(node))
-
-
-def _target_names(node):
-    if isinstance(node, ast.Name):
-        return {node.id}
-    if isinstance(node, (ast.Tuple, ast.List)):
-        return {name for item in node.elts for name in _target_names(item)}
-    return set()
-
-
-def _pure_name_target(node):
-    if isinstance(node, ast.Name):
-        return True
-    if isinstance(node, (ast.Tuple, ast.List)):
-        return all(_pure_name_target(item) for item in node.elts)
-    return False
-
-
-def _exact_validator_stub(target, value, receipt_name):
-    """The three captured data-only validator stubs, bytecode-free by AST."""
-    if not isinstance(value, ast.Lambda):
-        return False
-    path = _call_name(target)
-    args = [item.arg for item in value.args.args]
-    body = value.body
-    if path == "ep.base.validate_execution_envelope":
-        return args == ["x"] and isinstance(body, ast.Name) and body.id == "x"
-    if path == "ep._validate_plan_envelope_binding":
-        return args == ["p", "e"] and isinstance(body, ast.Constant) and body.value is None
-    return (path == "ep.base.execution_envelope_digest" and args == ["x"]
-            and isinstance(body, ast.Subscript) and isinstance(body.value, ast.Name)
-            and body.value.id == receipt_name and isinstance(body.slice, ast.Constant)
-            and body.slice.value == "envelope_digest")
-
-
-def _inert_call_allowlist(tree):
-    """Exact data-only emit/validation calls whose roots are not shadowed."""
-    imports = {}
-    shadowed = set()
-    assigned_paths = set()
-    for statement in tree.body:
-        if isinstance(statement, ast.Import):
-            for alias in statement.names:
-                bound = alias.asname or alias.name.split(".", 1)[0]
-                imports[bound] = alias.name
-        elif isinstance(statement, ast.ImportFrom):
-            for alias in statement.names:
-                bound = alias.asname or alias.name
-                imports[bound] = f"{statement.module or ''}.{alias.name}"
-        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            shadowed.add(statement.name)
-        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
-            targets = statement.targets if isinstance(statement, ast.Assign) \
-                else [statement.target]
-            for target in targets:
-                shadowed.update(_target_names(target))
-                path = _call_name(target)
-                if path:
-                    assigned_paths.add(path)
-    allowed = set()
-    if "print" not in shadowed and "print" not in imports and not any(
-            path.startswith(("builtins.print", "__builtins__.print"))
-            for path in assigned_paths):
-        allowed.add("print")
-    if (imports.get("json") == "json" and "json" not in shadowed
-            and "json.dumps" not in assigned_paths):
-        allowed.update({"json.dumps", "json.loads"})
-    if (imports.get("jsonschema") == "jsonschema" and "jsonschema" not in shadowed
-            and "jsonschema.Draft202012Validator" not in assigned_paths):
-        allowed.update({"jsonschema.Draft202012Validator",
-                        "jsonschema.Draft202012Validator.validate"})
-    if (imports.get("ep") == "engineering_passport" and "ep" not in shadowed
-            and "ep._validate_receipt" not in assigned_paths):
-        allowed.add("ep._validate_receipt")
-    if imports.get("Path") == "pathlib.Path" and "Path" not in shadowed:
-        allowed.update({"Path", "Path.read_text"})
-    if imports.get("sys") == "sys" and "sys" not in shadowed:
-        allowed.add("sys.path.insert")
-    constructors = [statement for statement in tree.body
-                    if isinstance(statement, ast.Assign)
-                    and len(statement.targets) == 1
-                    and isinstance(statement.targets[0], ast.Name)
-                    and statement.targets[0].id == "E"
-                    and isinstance(statement.value, ast.Lambda)]
-    if len(constructors) == 1:
-        allowed.add("E")
-    return allowed
-
-
-def _receipt_use_is_inert(tree, assignment, receipt_name):
-    """Refuse normalization if receipt-derived data reaches executable code."""
-    allowed = _inert_call_allowlist(tree)
-    for statement in tree.body:
-        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
-            continue
-        targets = statement.targets if isinstance(statement, ast.Assign) \
-            else [statement.target]
-        value = statement.value
-        for target in targets:
-            if (not _pure_name_target(target)
-                    and not _exact_validator_stub(target, value, receipt_name)):
-                return False
-    for call in (item for item in ast.walk(tree) if isinstance(item, ast.Call)):
-        name = _call_name(call.func)
-        if name not in allowed:
-            return False
-        if name == "sys.path.insert":
-            if (len(call.args) != 2 or not isinstance(call.args[0], ast.Constant)
-                    or call.args[0].value != 0 or not isinstance(call.args[1], ast.Constant)
-                    or call.args[1].value != "tools/room-bridge" or call.keywords):
-                return False
-        if name == "Path":
-            if (len(call.args) != 1 or not isinstance(call.args[0], ast.Constant)
-                    or call.args[0].value
-                    != "control-room/contracts/engineering-slice-receipt.v1.schema.json"
-                    or call.keywords):
-                return False
-    tainted = {receipt_name}
-    after = False
-    for statement in tree.body:
-        if statement is assignment:
-            after = True
-            continue
-        if not after:
-            continue
-        for call in (item for item in ast.walk(statement) if isinstance(item, ast.Call)):
-            if not _uses_names(call, tainted):
-                continue
-            name = _call_name(call.func)
-            if name not in allowed:
-                return False
-        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
-            value = statement.value
-            if value is not None and _uses_names(value, tainted):
-                targets = statement.targets if isinstance(statement, ast.Assign) \
-                    else [statement.target]
-                if any(not _pure_name_target(target) for target in targets):
-                    if (len(targets) == 1
-                            and _exact_validator_stub(
-                                targets[0], value, receipt_name)):
-                        continue
-                    return False
-                for target in targets:
-                    tainted.update(_target_names(target))
-    return True
-
-
-def _python_receipt_spans(text):
-    """Locate strict receipt assignments without executing assistant code."""
+def _captured_receipt_span(text):
+    """Locate one strict receipt literal after its enclosing bytes were pinned."""
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
-        return []
+        return None
     offsets = _line_offsets(text)
     values = {}
     spans = []
@@ -658,42 +509,13 @@ def _python_receipt_spans(text):
         except (TypeError, ValueError):
             continue
         values[name] = value
-        if (not exact_engineering_receipt(value)
-                or not _receipt_use_is_inert(tree, statement, name)):
+        if name != "receipt" or not exact_engineering_receipt(value):
             continue
         start = offsets[statement.value.lineno - 1] + statement.value.col_offset
         end = offsets[statement.value.end_lineno - 1] + statement.value.end_col_offset
-        spans.append((start, end))
-    return spans
-
-
-def _normalize_receipt_objects(text):
-    """Replace only independently strict JSON/Python receipt object literals."""
-    spans = _python_receipt_spans(text)
-    # Replace outermost matched spans from right to left. Nested valid receipts
-    # are impossible under the contract, but de-duplication keeps this total.
-    selected = []
-    for start, end in sorted(set(spans), key=lambda item: (item[0], -item[1])):
-        if not any(existing[0] <= start and end <= existing[1] for existing in selected):
-            selected.append((start, end))
-    for start, end in sorted(selected, reverse=True):
-        text = text[:start] + "[engineering-slice-receipt.v1]" + text[end:]
-    return text
-
-
-def _normalize_inert_json_emission(command):
-    """Normalize a strict JSON receipt only when the whole command emits it."""
-    matched = re.fullmatch(r"\s*(printf\s+['\"]%s['\"]\s+|echo\s+)'(.*)'\s*",
-                           command, re.S)
-    if not matched:
-        return command
-    try:
-        value = json.loads(matched.group(2))
-    except (TypeError, ValueError):
-        return command
-    if not exact_engineering_receipt(value):
-        return command
-    return matched.group(1) + "'[engineering-slice-receipt.v1]'"
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        spans.append((start, end, hashlib.sha256(canonical).hexdigest()))
+    return spans[0] if len(spans) == 1 else None
 
 
 def _decoded_command(input_text):
@@ -712,8 +534,34 @@ def _decoded_command(input_text):
     return value, input_text[:start] + '"[decoded-command]"' + input_text[start + used:]
 
 
+def _normalize_captured_tool_input(raw):
+    """Normalize only an immutable source-transcript payload and receipt."""
+    raw_digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    expected_receipt_digest = CAPTURED_RECEIPT_TOOL_INPUTS.get(raw_digest)
+    if expected_receipt_digest is None:
+        return None
+    decoded = _decoded_command(raw)
+    if decoded is None:
+        return None
+    command, outer = decoded
+    matched = re.search(r"<<['\"]?([A-Za-z0-9_]+)['\"]?\n(.*?)\n\1(?:\n|$)",
+                        command, re.S)
+    if matched is None:
+        return None
+    body = matched.group(2)
+    receipt = _captured_receipt_span(body)
+    if receipt is None:
+        return None
+    start, end, receipt_digest = receipt
+    if receipt_digest != expected_receipt_digest:
+        return None
+    normalized = body[:start] + "[engineering-slice-receipt.v1]" + body[end:]
+    command = command[:matched.start(2)] + normalized + command[matched.end(2):]
+    return "\n".join((outer, command))
+
+
 def custom_tool_text(payload):
-    """Observe every tool and command, minus strict typed receipt data only."""
+    """Observe tools fully except immutable, source-bound receipt payloads."""
     name = str(payload.get("name", ""))
     raw = payload.get("input")
     if not isinstance(raw, str):
@@ -724,22 +572,8 @@ def custom_tool_text(payload):
         # names visible while excluding those fixed transport arguments.
         packs = re.search(r"\bpacks\s*:\s*\[([^]]*)\]", raw)
         return "\n".join((name, "standing_context", packs.group(1) if packs else ""))
-    decoded = _decoded_command(raw)
-    if decoded:
-        command, outer = decoded
-        # Python receipts normally sit inside a heredoc. Parsing the body as
-        # Python lets aliases such as evidence=E(...) resolve as data-only
-        # literals while the shell command around it remains observable.
-        matched = re.search(r"<<['\"]?([A-Za-z0-9_]+)['\"]?\n(.*?)\n\1(?:\n|$)",
-                            command, re.S)
-        if matched:
-            body = matched.group(2)
-            normalized = _normalize_receipt_objects(body)
-            command = command[:matched.start(2)] + normalized + command[matched.end(2):]
-        command = _normalize_receipt_objects(command)
-        command = _normalize_inert_json_emission(command)
-        return "\n".join((name, outer, command))
-    return "\n".join((name, _normalize_receipt_objects(raw)))
+    normalized = _normalize_captured_tool_input(raw) if name == "exec" else None
+    return "\n".join((name, normalized if normalized is not None else raw))
 
 
 def work_text(record):

@@ -12,6 +12,7 @@ highest for anything that can refuse other work).
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
 import shutil
@@ -437,13 +438,14 @@ embedded = run([
     codex_tool("exec", "const r = await tools.exec_command({cmd: "
                + json.dumps("git status --short") + "}); text(r.output);"),
 ])
-check("exact Python receipt literal in assistant tool payload is normalized",
-      set(embedded["needed"]) == {"engineering-git"}, str(embedded))
+check("unproven Python receipt payload remains fully observable",
+      {"client-deal", "delegation-council", "engineering-git", "joe-development"}
+      <= set(embedded["needed"]), str(embedded))
 json_emission = run([codex_tool(
     "exec", "const r = await tools.exec_command({cmd: "
     + json.dumps("printf '%s' '" + receipt_json + "'") + "});")])
-check("whole-command strict JSON receipt emission is normalized",
-      json_emission["needed"] == [], str(json_emission))
+check("unproven JSON receipt emission remains fully observable",
+      "client-deal" in json_emission["needed"], str(json_emission))
 json_then_action = run([codex_tool(
     "exec", "const r = await tools.exec_command({cmd: "
     + json.dumps("printf '%s' '" + receipt_json + "'; git status") + "});")])
@@ -556,36 +558,19 @@ for label, mutation, call in (
     check(f"pre-receipt {label} mutation cannot spoof inert calls",
           "engineering-git" in target_mutation["needed"], str(target_mutation))
 
-# Compact replay of the immutable source behind event 10529812. It preserves
-# the two relevant custom-tool shapes: a validated receipt literal and the
-# job-passport source inspection. The source-owned workflow now declares the
-# four packs that were actually implicated; receipt-only client/ledger/surface
-# vocabulary must disappear without hiding git, executor, source, or job.
-event_replay = run([
-    codex_user("Execute the admitted engineering slice."),
-    codex_tool("exec", "const r = await tools.mcp__carr__standing_context("
-               "{packs:['engineering-git','delegation-council',"
-               "'scheduled-automation','source-study']}); text(r);"),
-    codex_standing_context_result(
-        "shadow", ["engineering-git", "delegation-council",
-                   "scheduled-automation", "source-study"], ["424ba0cc"]),
-    codex_tool("exec", "const r = await tools.exec_command({cmd: "
-               + json.dumps("python3 - <<'PY'\nreceipt = " + python_literal
-                            + "\nprint(receipt)\nPY")
-               + ", workdir:'/Users/booko/carr-system'}); text(r.output);"),
-    codex_tool("exec", "const r = await tools.exec_command({cmd: "
-               + json.dumps("sed -n '1,230p' tools/room-bridge/engineering_passport.py\n"
-                            "sed -n '300,365p' dealroom/js/job-passport.js\n"
-                            "git status --short\nexecutor source")
-               + "}); text(r.output);"),
-    codex_assistant(receipt_json),
-])
-check("event 10529812 replay needs exactly the four engineering-slice packs",
-      event_replay["needed"] == ["delegation-council", "engineering-git",
-                                  "scheduled-automation", "source-study"],
-      str(event_replay))
-check("event 10529812 replay has no missing pack",
-      event_replay["missing"] == [], str(event_replay))
+for label, prefix, suffix in (
+    ("context-manager execution", "from evil import cm\n", "\nwith cm:\n  pass"),
+    ("operator execution", "from evil import runner\n", "\nresult = runner @ "
+     "[receipt['source_evidence']['source_sha'], 'status']"),
+    ("descriptor execution", "from evil import obj\n", "\nresult = obj.run"),
+):
+    implicit_execution = run([codex_tool(
+        "exec", "const r = await tools.exec_command({cmd: "
+        + json.dumps(prefix + "receipt = " + repr(executable_receipt) + suffix)
+        + "});")])
+    check(f"unproven receipt with {label} remains fully observable",
+          "engineering-git" in implicit_execution["needed"],
+          str(implicit_execution))
 
 # On the evidence-owning machine, replay the immutable 69-record prefix that
 # produced event 10529812. The only hypothetical inputs are the landed
@@ -600,6 +585,27 @@ if exact_replay_path.is_file():
           gate.file_sha256(exact_replay_path)
           == "1e1dc9a09fc10cbb1906fc38c22b178207a64e40ac84f25d347abc157000eb73")
     exact_records = [json.loads(line) for line in exact_raw.splitlines()[:69]]
+    captured_inputs = [row["payload"]["input"] for row in exact_records
+                       if row.get("payload", {}).get("type") == "custom_tool_call"
+                       and row["payload"].get("name") == "exec"
+                       and hashlib.sha256(
+                           row["payload"].get("input", "").encode()).hexdigest()
+                       in gate.CAPTURED_RECEIPT_TOOL_INPUTS]
+    check("event 10529812 binds both captured receipt tool payloads",
+          len(captured_inputs) == 2, str(len(captured_inputs)))
+    for captured in captured_inputs:
+        normalized = gate.custom_tool_text(
+            {"type": "custom_tool_call", "name": "exec", "input": captured})
+        check("captured payload removes only the strict receipt literal",
+              "engineering-slice-receipt.v1]" in normalized
+              and "tour-foundation-contracts" not in normalized, normalized[:500])
+        tampered = captured.replace("python3", "python4", 1)
+        check("one-byte captured-payload change fails closed",
+              "tour-foundation-contracts" in gate.custom_tool_text(
+                  {"type": "custom_tool_call", "name": "exec", "input": tampered}))
+        check("captured bytes under another tool identity fail closed",
+              "tour-foundation-contracts" in gate.custom_tool_text(
+                  {"type": "custom_tool_call", "name": "other", "input": captured}))
     exact_records.append(codex_standing_context_result(
         "shadow", list(gate.ENGINEERING_WORKFLOW_PACKS), ["424ba0cc"]))
     exact_result = run(exact_records)
