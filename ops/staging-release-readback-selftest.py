@@ -487,7 +487,8 @@ class Cursor:
             self._row = ({"result_ref": "ops.staging-forward-fix-readback:sha256:" + "d" * 64,
                           "replayed": False},)
         elif "ops.read_staging_forward_fix_rehearsal_declaration" in compact:
-            exact_set = ["0315_program5_forward_fix_rehearsal.sql"]
+            # Number-base form: what tools/release-manifest.py actually emits.
+            exact_set = ["0315"]
             self._row = ({
                 "expected_provider_tag": getattr(self, "forward_tag", tag),
                 "declared_migration_set_sha256": "sha256:" + hashlib.sha256(
@@ -582,7 +583,12 @@ with tempfile.TemporaryDirectory() as tmp:
         "schema_highest_migration": forward_payload["schema"]["highest_applied_migration"],
         "schema_applied_count": forward_payload["schema"]["applied_count"],
         "schema_ledger_sha256": forward_payload["schema"]["ledger_sha256"],
-        "migration_set": ["0315_program5_forward_fix_rehearsal.sql"],
+        # The REAL builder (tools/release-manifest.py migration_set()) emits
+        # number bases, never filenames — this fixture must match what a live
+        # manifest actually carries, or the validator drifts unseen, which is
+        # exactly what happened until 2026-08-26: the forward-fix readback
+        # refused every real manifest with "lacks its exact migration set".
+        "migration_set": ["0315"],
         "program6_actions": {"enabled": True, "posture": "enabled"},
     }), encoding="utf-8")
     forward_cur = Cursor()

@@ -1845,8 +1845,14 @@ def cmd_staging_forward_fix(args) -> int:
                 if manifest.get(key) != observed:
                     raise ValueError("forward-fix readback does not match the exact candidate manifest")
             migration_set = manifest.get("migration_set")
+            # tools/release-manifest.py migration_set() emits NUMBER BASES
+            # ("0315"), not filenames — accept that canonical form (and full
+            # filenames for older hand-built fixtures). Until 2026-08-26 this
+            # check demanded filenames the builder never produced, so the
+            # typed forward-fix readback refused every real manifest.
             if (not isinstance(migration_set, list) or not migration_set
-                    or any(not isinstance(item, str) or not re.fullmatch(r"[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql", item)
+                    or any(not isinstance(item, str)
+                           or not re.fullmatch(r"[0-9]{4}[a-z]?(_[a-z0-9_.-]+\.sql)?", item)
                            for item in migration_set)):
                 raise ValueError("forward-fix manifest lacks its exact migration set")
             if manifest.get("program6_actions") != {"enabled": args.expected_program6_actions == "enabled",
