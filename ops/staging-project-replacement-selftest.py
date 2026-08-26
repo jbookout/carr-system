@@ -178,6 +178,8 @@ class ReadOnlyCursor:
 
 class ReadOnlyConnection:
     def __init__(self, value="on"): self.read_only = False; self.value = ReadOnlyCursor(value)
+    def __enter__(self): return self
+    def __exit__(self, *unused): return False
     def cursor(self): return self.value
 
 
@@ -186,6 +188,25 @@ assert ctl.production_overlap_count({table: () for table in ctl.CLIENT_TABLES}, 
 assert production.read_only is True
 refuses(lambda: ctl.production_overlap_count({table: () for table in ctl.CLIENT_TABLES},
                                               ReadOnlyConnection("off")), "not read-only")
+
+class OwnerReadRun:
+    def __init__(self): self.calls = []
+    def __call__(self, args, **unused):
+        self.calls.append(args)
+        value = "postgresql://neondb_owner:secret@ep-production.neon.tech/neondb"  # ci-secret-scan: allow
+        return subprocess.CompletedProcess(args, 0, value, "")
+
+production_scope = ctl.ProviderScope(
+    ctl.PRODUCTION_PROJECT_ID, "production", "br-production", "ep-production",
+    "ep-production.neon.tech")
+owner_read_run = OwnerReadRun()
+owner_read_connection = ReadOnlyConnection()
+assert ctl.read_production_overlap(
+    production_scope, {table: () for table in ctl.CLIENT_TABLES},
+    run=owner_read_run, environ=env,
+    connect=lambda _dsn: owner_read_connection) == 0
+assert owner_read_connection.read_only is True
+assert owner_read_run.calls[0][owner_read_run.calls[0].index("--role-name") + 1] == ctl.OWNER_ROLE
 
 
 # Provider-bound fixture door: declarations must match all three live objects.
@@ -386,6 +407,21 @@ try:
 finally:
     for name, value in saved.items(): setattr(ctl, name, value)
     ctl.psycopg = saved_psycopg
+
+
+# Any unexpected database/provider exception is a concise refusal boundary,
+# never a traceback that can reflect credentials or provider output.
+saved_validate_source = ctl.validate_source
+unexpected_secret = "unexpected-database-secret-must-not-escape"
+try:
+    ctl.validate_source = lambda _sha: (_ for _ in ()).throw(RuntimeError(unexpected_secret))
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        rc = ctl.main(["plan", "--sha", "a"*40, "--operation-id", str(operation_id)])
+    assert rc == 2 and "REFUSED" in stderr.getvalue()
+    assert unexpected_secret not in stderr.getvalue() and "Traceback" not in stderr.getvalue()
+finally:
+    ctl.validate_source = saved_validate_source
 
 
 try:
