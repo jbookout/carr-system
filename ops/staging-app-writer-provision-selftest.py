@@ -573,6 +573,42 @@ grant insert, select on table ops.work_request to carr_writer;
               ("preserve", None), ("bulk", future_values),
               ("bulk", old_values), ("verify", None), ("preserve", None),
           ])
+    uncertain_events: list[tuple[str, Any]] = []
+    uncertain_preserve_calls = 0
+    injected_secret = "provider-post-restore-secret-detail"
+    def uncertain_preservation() -> None:
+        nonlocal uncertain_preserve_calls
+        uncertain_preserve_calls += 1
+        uncertain_events.append(("preserve", uncertain_preserve_calls))
+        if uncertain_preserve_calls == 3:
+            raise provision.ProvisioningRefusal(
+                f"provider post-restore failed: {injected_secret}")
+    def uncertain_bulk(values) -> None:
+        uncertain_events.append(("bulk", dict(values)))
+    def uncertain_verify() -> None:
+        uncertain_events.append(("verify", None))
+    try:
+        provision.publish_worker_cutover(
+            future_values, old_values, preserve=uncertain_preservation,
+            bulk=uncertain_bulk, verify=uncertain_verify,
+            postflight=lambda: (_ for _ in ()).throw(
+                provision.ProvisioningRefusal("candidate postflight refused")),
+        )
+    except provision.ProvisioningRefusal as exc:
+        check("post-restore provider refusal occurs only after old bulk and name verification",
+              uncertain_events == [
+                  ("preserve", 1), ("bulk", future_values), ("verify", None),
+                  ("preserve", 2), ("bulk", old_values), ("verify", None),
+                  ("preserve", 3),
+              ])
+        check("post-restore provider refusal reports fixed redacted uncertain outcome",
+              str(exc) == (
+                  "Worker credential cutover refused and rollback outcome is uncertain; "
+                  "output suppressed")
+              and injected_secret not in str(exc)
+              and "provider post-restore failed" not in str(exc))
+    else:
+        raise AssertionError("post-restore provider uncertainty was accepted")
     try:
         with contextlib.redirect_stderr(io.StringIO()):
             provision.parse_args([
