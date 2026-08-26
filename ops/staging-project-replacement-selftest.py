@@ -306,9 +306,10 @@ assert ctl.CONTRACT_MIGRATION in contract["migration_ledger"]
 # migrations merged after the receipt contract itself.
 future_manifest = dict(contract)
 future_manifest["migration_ledger"] = dict(contract["migration_ledger"])
-future_manifest["migration_ledger"]["0323_future_source.sql"] = "f" * 64
+future_filename = "9999_future_source.sql"
+future_manifest["migration_ledger"][future_filename] = "f" * 64
 future_manifest["migration_count"] = len(future_manifest["migration_ledger"])
-future_manifest["migration_highest"] = "0323_future_source.sql"
+future_manifest["migration_highest"] = future_filename
 future_material = "".join(f"{name}\0{digest}\n"
                           for name, digest in future_manifest["migration_ledger"].items())
 future_manifest["migration_ledger_sha256"] = (
@@ -322,10 +323,10 @@ ctl.apply_candidate_migrations(
     owner, future_source,
     run=capture_migration,
     environ={"PATH": "/bin"})
-assert migration_calls and migration_calls[0][-2:] == ["--through", "0323_future_source.sql"]
+assert migration_calls and migration_calls[0][-2:] == ["--through", future_filename]
 prior_scope = ctl.ProviderScope("old", "carr-staging", "br-old", "ep-old", "ep-old.neon.tech")
 future_payload = ctl.prepare_payload(future_source, prior_scope, owner_scope, 1)
-assert future_payload["migration_highest"] == "0323_future_source.sql"
+assert future_payload["migration_highest"] == future_filename
 assert future_payload["migration_count"] == len(future_manifest["migration_ledger"])
 
 def copied_future_manifest():

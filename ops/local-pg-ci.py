@@ -308,6 +308,23 @@ def run_local_ci(
                     else:
                         print("local-db-ci: scoped engineering claim acceptance passed")
                 if exit_code == 0:
+                    engineering_race_script = repo / "ops/engineering-envelope-race-local-pg-gate.py"
+                    engineering_race = command_runner.run(
+                        [acceptance_python, engineering_race_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if engineering_race.returncode:
+                        print(
+                            f"local-db-ci: engineering envelope race acceptance failed: "
+                            f"{_failure_detail(engineering_race)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = engineering_race.returncode
+                    else:
+                        print("local-db-ci: Engineering envelope race acceptance passed")
+                if exit_code == 0:
                     canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
                     canary = command_runner.run(
                         [acceptance_python, canary_script],

@@ -21,6 +21,14 @@ export const ENGINEERING_REPOSITORY_ACTIONS = Object.freeze([
   "repository:push-branch",
   "repository:open-pr",
 ]);
+const ENGINEERING_CLAIM_LEASE_SECONDS = 1_800;
+const ENGINEERING_DISPATCH_STARTUP_MARGIN_SECONDS = 60;
+const ENGINEERING_ADMISSION_TO_CLAIM_BUDGET_SECONDS = 300;
+const ENGINEERING_DISPATCH_STARTUP_MARGIN_MS = ENGINEERING_DISPATCH_STARTUP_MARGIN_SECONDS * 1_000;
+const ENGINEERING_ENVELOPE_TTL_MS = (
+  ENGINEERING_CLAIM_LEASE_SECONDS + ENGINEERING_DISPATCH_STARTUP_MARGIN_SECONDS +
+  ENGINEERING_ADMISSION_TO_CLAIM_BUDGET_SECONDS
+) * 1_000;
 
 const canonicalize = value => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -151,7 +159,11 @@ function nowIso() { return new Date().toISOString().replace(/\.\d{3}Z$/, "Z"); }
 
 function isCurrentRepositoryWriteEnvelope(row) {
   const envelope = row?.envelope;
-  return Boolean(envelope && Date.parse(envelope.expires_at) > Date.now() &&
+  const packetExpiry = Date.parse(envelope?.expires_at);
+  const databaseExpiry = Date.parse(row?.expires_at);
+  return Boolean(envelope && Number.isFinite(packetExpiry) && Number.isFinite(databaseExpiry) &&
+    packetExpiry === databaseExpiry &&
+    databaseExpiry > Date.now() + ENGINEERING_DISPATCH_STARTUP_MARGIN_MS &&
     envelope.server_binding?.authority?.read_only === false &&
     envelope.server_binding?.authority?.capability_profile === "capability:engineering-repository-write" &&
     JSON.stringify(envelope.request?.allowed_actions) === JSON.stringify(ENGINEERING_REPOSITORY_ACTIONS));
@@ -159,7 +171,7 @@ function isCurrentRepositoryWriteEnvelope(row) {
 
 export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, actor, replacesEnvelope = null }) {
   const issue = nowIso();
-  const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const expiry = new Date(Date.now() + ENGINEERING_ENVELOPE_TTL_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
   const resources = slice.declared_resource_refs || [];
   const envelope = {
     schema_version: "execution-envelope.v1",
@@ -301,7 +313,11 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
     .filter(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id)
     .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
   const priorEnvelope = priorEnvelopes.at(-1) || null;
-  if (isCurrentRepositoryWriteEnvelope(priorEnvelope))
+  const priorSession = priorEnvelope?.agent_session_id
+    ? (await c.query("select state from ops.capability_agent_session where id=$1", [priorEnvelope.agent_session_id])).rows[0]
+    : null;
+  if (isCurrentRepositoryWriteEnvelope(priorEnvelope) && priorSession
+      && !["completed", "cancelled"].includes(priorSession.state))
     return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
 
   if (priorEnvelope) {
@@ -358,7 +374,8 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
 }
 
 export async function claimEngineeringSlice(c, worker, limit = 1) {
-  const claimed = await c.query("select * from ops.engineering_claim_slice($1::text,$2::integer,1800)", [worker, limit]);
+  const claimed = await c.query("select * from ops.engineering_claim_slice($1::text,$2::integer,$3::integer)",
+    [worker, limit, ENGINEERING_CLAIM_LEASE_SECONDS]);
   const rows = [];
   for (const job of claimed.rows) {
     // Sponsored-authority recovery may create an immutable successor envelope
@@ -375,9 +392,14 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
       continue;
     }
     const envelopeRow = bound.rows[0];
+    if (!isCurrentRepositoryWriteEnvelope(envelopeRow)) {
+      rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
+        envelope_digest: envelopeRow.envelope_digest, controller_error: "engineering_envelope_not_executable" });
+      continue;
+    }
     const bindingResult = await c.query(
-      "select ops.engineering_controller_binding($1::uuid,$2::uuid) as binding",
-      [envelopeRow.id, job.job_id],
+      "select ops.engineering_controller_binding($1::uuid,$2::uuid,$3::uuid) as binding",
+      [envelopeRow.id, job.job_id, job.lease_token],
     );
     const binding = bindingResult.rows[0]?.binding;
     if (!binding || typeof binding !== "object") {
@@ -395,20 +417,21 @@ export async function submitEngineeringReceipt(c, claimed, receipt, actor, ToolE
   if (!claimed?.job_id || !claimed.lease_token || !claimed.envelope_id) error(ToolError, { error: "engineering_claim_required" });
   const envelopeRow = (await c.query("select * from ops.engineering_execution_envelope where id=$1", [claimed.envelope_id])).rows[0];
   if (!envelopeRow) error(ToolError, { error: "engineering_envelope_not_found" });
-  const workRef = (await c.query("select w.ref from ops.work_request w where w.id=$1", [envelopeRow.work_request_id])).rows[0]?.ref;
-  const facts = workRef ? (await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRef])).rows[0]?.facts : null;
+  const workRef = claimed?.payload?.work_request;
+  if (typeof workRef !== "string" || !workRef.trim()) error(ToolError, { error: "engineering_work_request_binding_missing" });
+  const facts = (await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRef])).rows[0]?.facts;
   const source = facts ? sourceParts(facts.source, ToolError) : null;
+  if (!source || source.work.id !== `wr:${envelopeRow.work_request_id}`)
+    error(ToolError, { error: "engineering_work_request_binding_mismatch" });
   const plan = source ? sourcePlan(facts, source, ToolError) : null;
   const slice = plan ? sliceFor(plan, envelopeRow.slice_ref, ToolError) : { slice_ref: envelopeRow.slice_ref, plan_digest: null };
   if (plan && receipt.plan_digest !== plan.plan_digest) error(ToolError, { error: "engineering_receipt_plan_mismatch" });
   validateReceiptBinding(receipt, { ...envelopeRow.envelope, envelope_digest: envelopeRow.envelope_digest }, { ...slice, plan_digest: receipt.plan_digest }, actor, ToolError);
   const receiptDigest = canonicalDigest(receipt);
   const inserted = await c.query(
-    "select * from ops.engineering_record_slice_receipt($1::uuid,$2::uuid,$3::jsonb,$4::text,$5::uuid)",
+    "select * from ops.engineering_finalize_slice_receipt($1::uuid,$2::uuid,$3::jsonb,$4::text,$5::uuid)",
     [envelopeRow.id, claimed.lease_token, JSON.stringify(receipt), receiptDigest, actor.id]);
   if (!inserted.rows.length) error(ToolError, { error: "engineering_attempt_or_lease_mismatch" });
-  if (receipt.outcome === "claimed_complete") await c.query("select ops.complete_job($1::uuid,$2::uuid,$3::jsonb,$4::text)", [claimed.job_id, claimed.lease_token, JSON.stringify({ engineering_receipt_id: inserted.rows[0].id, receipt_digest: receiptDigest }), `engineering:${inserted.rows[0].id}`]);
-  else await c.query("select ops.fail_job($1::uuid,$2::uuid,$3::text,$4::text)", [claimed.job_id, claimed.lease_token, `engineering_${receipt.outcome}`, "typed engineering receipt reported non-complete outcome"]);
   return { ok: true, receipt_id: inserted.rows[0].id, receipt_digest: receiptDigest };
 }
 
