@@ -589,14 +589,14 @@ def prepare_candidate(source: SourceContract, operation_id: uuid.UUID, productio
         ids = client_row_ids(conn)
     synthetic = sum(len(rows) for rows in ids.values())
     prepared = prepare_payload(source, old, candidate, synthetic)
+    overlap = read_production_overlap(production, ids, run=run,
+                                      environ=environ, connect=connect)
+    observation = observation_payload(prepared, synthetic, overlap)
     with connect(jobs_dsn) as conn, conn.cursor() as cur:
         stated = call_json(cur, PREPARE_FUNCTION, operation_id, prepared); conn.commit()
     contract_id = stated.get("contract_id")
     if not contract_id or stated.get("state") not in {"prepared", "observed"}:
         raise ReplacementRefusal("prepare receipt state is invalid")
-    overlap = read_production_overlap(production, ids, run=run,
-                                      environ=environ, connect=connect)
-    observation = observation_payload(prepared, synthetic, overlap)
     with connect(verifier_dsn) as conn, conn.cursor() as cur:
         recorded = call_json(cur, RECORD_FUNCTION, operation_id, observation); conn.commit()
         if recorded.get("state") != "observed" or recorded.get("contract_id") != contract_id \
@@ -627,6 +627,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", nargs="?", choices=("plan", "prepare"), default="plan")
     parser.add_argument("--sha", required=True); parser.add_argument("--operation-id", required=True, type=uuid.UUID)
+    parser.add_argument("--candidate-operation-id", type=uuid.UUID)
     parser.add_argument("--apply", action="store_true"); parser.add_argument("--local-checks-green", action="store_true")
     args = parser.parse_args(argv)
     if args.phase == "plan" and (args.apply or args.local_checks_green):
@@ -639,19 +640,26 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        candidate_operation_id = args.candidate_operation_id or args.operation_id
         source, spec = validate_source(args.sha), load_candidate_spec()
-        production, old, candidate = resolve_existing_scopes(args.operation_id, run=subprocess.run, environ=os.environ)
+        production, old, candidate = resolve_existing_scopes(
+            candidate_operation_id, run=subprocess.run, environ=os.environ)
+        if candidate is None and candidate_operation_id != args.operation_id:
+            raise ReplacementRefusal("successor receipt candidate does not exist")
         if args.phase == "plan":
             print(json.dumps({"ok": True, "phase": "plan", "mutated": False,
-                "operation_id": str(args.operation_id), "candidate_name": candidate_name(args.operation_id),
+                "operation_id": str(args.operation_id),
+                "receipt_operation_id": str(args.operation_id),
+                "candidate_operation_id": str(candidate_operation_id),
+                "candidate_name": candidate_name(candidate_operation_id),
                 "candidate_exists": candidate is not None, "standing_project_create_count": 0 if candidate else 1,
                 "old_staging_untouched": True, "next_phase": "prepare --apply --local-checks-green",
                 "later_doors": ["bin/staging-secrets.sh", "bin/deploy-worker.sh staging"]}, sort_keys=True))
             return 0
         if candidate is None:
-            create_candidate(args.operation_id, source, spec, local_checks_green=True,
+            create_candidate(candidate_operation_id, source, spec, local_checks_green=True,
                              run=subprocess.run, environ=os.environ)
-            production, old, candidate = resolve_existing_scopes(args.operation_id,
+            production, old, candidate = resolve_existing_scopes(candidate_operation_id,
                                                                   run=subprocess.run, environ=os.environ)
         if candidate is None:
             raise ReplacementRefusal("candidate creation had no exact readback")
@@ -667,14 +675,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             apply_candidate_migrations(owner, source, run=subprocess.run, environ=os.environ)
         install_fixtures(owner, run=subprocess.run, environ=os.environ)
         jobs_dsn, verifier_dsn = provision_scoped_credentials(
-            owner, args.operation_id, connect=psycopg.connect)
+            owner, candidate_operation_id, connect=psycopg.connect)
         sync_control_plane(owner, run=subprocess.run, environ=os.environ)
         receipt = prepare_candidate(source, args.operation_id, production, old, candidate, owner,
                                     jobs_dsn, verifier_dsn, connect=psycopg.connect,
                                     run=subprocess.run, environ=os.environ)
-        prove_provider_preservation(args.operation_id, production, old, candidate,
+        prove_provider_preservation(candidate_operation_id, production, old, candidate,
                                     run=subprocess.run, environ=os.environ)
         print(json.dumps({"ok": True, "phase": "prepare", "mutated": True,
+                          "receipt_operation_id": str(args.operation_id),
+                          "candidate_operation_id": str(candidate_operation_id),
                           "old_staging_untouched": True, **receipt}, sort_keys=True))
         return 0
     except credential_helper.CredentialRefusal:
