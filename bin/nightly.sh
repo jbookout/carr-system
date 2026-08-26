@@ -1092,6 +1092,16 @@ step "type-check tripwire (mypy)"                    ./bin/type-check.sh
 # first and each parameter returned to its own field, per row.
 step "tool-call markup sweep (records)"              ./.venv/bin/python ops/store-markup-scan.py
 
+# Added 2026-08-25 (loop #314's named work). tools/check.sh verifies code
+# integrity (every manifest.tsv row clean vs HEAD), canonical export receipts,
+# and the manifest-governed runtime fork. It is read-only. Both of its
+# historical blockers are gone: the twin-copy SPLIT retired as an intentional
+# runtime fork (manifest-governed) and export receipts are current. A chronically
+# red check detects nothing; it is green today and wired so a new drift is seen
+# by the chain that runs every night, not only by a session that remembers to
+# run it.
+step "code integrity (manifest rows vs HEAD)"        ./tools/check.sh
+
 # The legacy one-page file is recovery-only. Normal dashboard delivery is the
 # record-native Front Door composition (today-triage, deal-room-board, and
 # loop-board), so the nightly chain must not call a missing-seam refusal for a
