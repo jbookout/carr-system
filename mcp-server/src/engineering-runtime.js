@@ -313,7 +313,11 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
     .filter(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id)
     .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
   const priorEnvelope = priorEnvelopes.at(-1) || null;
-  if (isCurrentRepositoryWriteEnvelope(priorEnvelope))
+  const priorSession = priorEnvelope?.agent_session_id
+    ? (await c.query("select state from ops.capability_agent_session where id=$1", [priorEnvelope.agent_session_id])).rows[0]
+    : null;
+  if (isCurrentRepositoryWriteEnvelope(priorEnvelope) && priorSession
+      && !["completed", "cancelled"].includes(priorSession.state))
     return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
 
   if (priorEnvelope) {
@@ -394,8 +398,8 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
       continue;
     }
     const bindingResult = await c.query(
-      "select ops.engineering_controller_binding($1::uuid,$2::uuid) as binding",
-      [envelopeRow.id, job.job_id],
+      "select ops.engineering_controller_binding($1::uuid,$2::uuid,$3::uuid) as binding",
+      [envelopeRow.id, job.job_id, job.lease_token],
     );
     const binding = bindingResult.rows[0]?.binding;
     if (!binding || typeof binding !== "object") {
@@ -425,11 +429,9 @@ export async function submitEngineeringReceipt(c, claimed, receipt, actor, ToolE
   validateReceiptBinding(receipt, { ...envelopeRow.envelope, envelope_digest: envelopeRow.envelope_digest }, { ...slice, plan_digest: receipt.plan_digest }, actor, ToolError);
   const receiptDigest = canonicalDigest(receipt);
   const inserted = await c.query(
-    "select * from ops.engineering_record_slice_receipt($1::uuid,$2::uuid,$3::jsonb,$4::text,$5::uuid)",
+    "select * from ops.engineering_finalize_slice_receipt($1::uuid,$2::uuid,$3::jsonb,$4::text,$5::uuid)",
     [envelopeRow.id, claimed.lease_token, JSON.stringify(receipt), receiptDigest, actor.id]);
   if (!inserted.rows.length) error(ToolError, { error: "engineering_attempt_or_lease_mismatch" });
-  if (receipt.outcome === "claimed_complete") await c.query("select ops.complete_job($1::uuid,$2::uuid,$3::jsonb,$4::text)", [claimed.job_id, claimed.lease_token, JSON.stringify({ engineering_receipt_id: inserted.rows[0].id, receipt_digest: receiptDigest }), `engineering:${inserted.rows[0].id}`]);
-  else await c.query("select ops.fail_job($1::uuid,$2::uuid,$3::text,$4::text)", [claimed.job_id, claimed.lease_token, `engineering_${receipt.outcome}`, "typed engineering receipt reported non-complete outcome"]);
   return { ok: true, receipt_id: inserted.rows[0].id, receipt_digest: receiptDigest };
 }
 

@@ -76,6 +76,36 @@ begin
   );
 end $$;
 
+create or replace function ops.engineering_finalize_slice_receipt(
+  p_envelope_id uuid,p_lease_token uuid,p_receipt jsonb,
+  p_receipt_digest text,p_executor_actor_id uuid
+) returns ops.engineering_slice_receipt
+language plpgsql security definer set search_path=pg_catalog,ops,public
+as $$
+declare e ops.engineering_execution_envelope%rowtype;
+        row ops.engineering_slice_receipt%rowtype;
+        terminal_state text;
+begin
+  select * into e from ops.engineering_execution_envelope where id=p_envelope_id;
+  if not found then raise exception 'engineering envelope not found'; end if;
+  select * into row from ops.engineering_record_slice_receipt(
+    p_envelope_id,p_lease_token,p_receipt,p_receipt_digest,p_executor_actor_id);
+  if row.outcome='claimed_complete' then
+    if not ops.complete_job(e.job_id,p_lease_token,
+      jsonb_build_object('engineering_receipt_id',row.id,'receipt_digest',p_receipt_digest),
+      'engineering:' || row.id::text) then
+      raise exception 'engineering completion did not transition the claimed job';
+    end if;
+  else
+    terminal_state:=ops.fail_job(e.job_id,p_lease_token,'engineering_' || row.outcome,
+      'typed engineering receipt reported non-complete outcome');
+    if terminal_state not in ('retry_wait','dead_lettered') then
+      raise exception 'engineering failure did not transition the claimed job';
+    end if;
+  end if;
+  return row;
+end $$;
+
 create or replace function ops.engineering_claim_slice(
   p_worker text, p_limit integer default 1, p_lease_seconds integer default 1800
 ) returns table (
@@ -156,15 +186,22 @@ drop trigger if exists engineering_session_terminalization_guard on ops.capabili
 create trigger engineering_session_terminalization_guard
 before update of state on ops.capability_agent_session
 for each row execute function ops.guard_engineering_session_terminalization();
+revoke all on function ops.guard_engineering_session_terminalization()
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 
-create or replace function ops.engineering_controller_binding(
-  p_envelope_id uuid,p_job_id uuid
+revoke all on function ops.engineering_controller_binding(uuid,uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+drop function ops.engineering_controller_binding(uuid,uuid);
+
+create function ops.engineering_controller_binding(
+  p_envelope_id uuid,p_job_id uuid,p_lease_token uuid
 ) returns jsonb
 language plpgsql volatile security definer set search_path=pg_catalog,ops,public
 as $$
 declare binding jsonb;
 begin
-  if not ops.engineering_envelope_is_executable(p_envelope_id,p_job_id) then return null; end if;
+  if p_lease_token is null
+     or not ops.engineering_envelope_is_executable(p_envelope_id,p_job_id) then return null; end if;
   select jsonb_build_object(
     'envelope_id',e.id::text,'envelope_digest',e.envelope_digest,
     'slice_ref',e.slice_ref,'plan_digest',sp.plan_digest,'slice_plan',sp.plan,
@@ -172,12 +209,16 @@ begin
     'agent_session_id',s.id::text
   ) into binding
     from ops.engineering_execution_envelope e
+    join ops.job j on j.id=e.job_id
     join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
     join ops.capability_agent_session s on s.id=e.agent_session_id
     join public.actor a on a.id=s.executor_actor_id
-   where e.id=p_envelope_id and e.job_id=p_job_id;
+   where e.id=p_envelope_id and e.job_id=p_job_id and j.state='running'
+     and j.lease_token=p_lease_token and j.leased_until>statement_timestamp();
   return binding;
 end $$;
+revoke all on function ops.engineering_controller_binding(uuid,uuid,uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 
 create or replace function ops.engineering_record_slice_receipt(
   p_envelope_id uuid,p_lease_token uuid,p_receipt jsonb,
@@ -256,6 +297,8 @@ begin
   end if;
   if prior.expires_at>now()
      and coalesce((prior.envelope->'server_binding'->'authority'->>'read_only')::boolean,true)=false
+     and exists (select 1 from ops.capability_agent_session s where s.id=prior.agent_session_id
+                   and s.state not in ('completed','cancelled'))
      and not exists (select 1 from ops.engineering_slice_receipt r
                       where r.envelope_id=prior.id and r.outcome in ('failed','blocked','reopened')) then
     raise exception 'current executable engineering envelope cannot be superseded';
@@ -265,21 +308,65 @@ end $$;
 
 revoke all on function ops.engineering_envelope_is_executable(uuid,uuid,integer)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
-revoke all on function ops.engineering_claim_slice(text,integer,integer) from public;
-revoke all on function ops.engineering_controller_binding(uuid,uuid) from public;
-revoke all on function ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid) from public;
+revoke all on function ops.engineering_claim_slice(text,integer,integer) from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid) from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid) from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.guard_engineering_envelope_supersession() from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 grant execute on function ops.engineering_claim_slice(text,integer,integer),
-  ops.engineering_controller_binding(uuid,uuid),
-  ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid) to carr_jobs;
+  ops.engineering_controller_binding(uuid,uuid,uuid),
+  ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid) to carr_jobs;
 
 do $$
+declare fn text;
 begin
+  for fn in select unnest(array[
+    'ops.engineering_envelope_is_executable(uuid,uuid,integer)',
+    'ops.engineering_claim_slice(text,integer,integer)',
+    'ops.guard_engineering_session_terminalization()',
+    'ops.engineering_controller_binding(uuid,uuid,uuid)',
+    'ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid)',
+    'ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid)',
+    'ops.guard_engineering_envelope_supersession()'])
+  loop
+    if exists (select 1 from pg_proc p cross join lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+                where p.oid=fn::regprocedure and acl.grantee=0 and acl.privilege_type='EXECUTE')
+       or has_function_privilege('carr_reader',fn::regprocedure,'EXECUTE')
+       or has_function_privilege('carr_writer',fn::regprocedure,'EXECUTE')
+       or has_function_privilege('carr_authority',fn::regprocedure,'EXECUTE') then
+      raise exception '0325 FAILED: public or forbidden role can execute %',fn;
+    end if;
+  end loop;
+  for fn in select unnest(array[
+    'ops.engineering_envelope_is_executable(uuid,uuid,integer)',
+    'ops.guard_engineering_session_terminalization()',
+    'ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid)',
+    'ops.guard_engineering_envelope_supersession()'])
+  loop
+    if has_function_privilege('carr_jobs',fn::regprocedure,'EXECUTE') then
+      raise exception '0325 FAILED: carr_jobs can execute private %',fn;
+    end if;
+  end loop;
   if has_function_privilege('carr_jobs',
        'ops.engineering_envelope_is_executable(uuid,uuid,integer)'::regprocedure,'EXECUTE')
      or not has_function_privilege('carr_jobs',
        'ops.engineering_claim_slice(text,integer,integer)'::regprocedure,'EXECUTE')
      or not has_function_privilege('carr_jobs',
-       'ops.engineering_controller_binding(uuid,uuid)'::regprocedure,'EXECUTE')
+       'ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_jobs',
+       'ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid)'::regprocedure,'EXECUTE')
+     or has_function_privilege('carr_jobs',
+       'ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid)'::regprocedure,'EXECUTE')
+     or has_function_privilege('carr_reader',
+       'ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure,'EXECUTE')
+     or has_function_privilege('carr_writer',
+       'ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure,'EXECUTE')
+     or has_function_privilege('carr_authority',
+       'ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure,'EXECUTE')
+     or exists (
+       select 1 from pg_proc p
+       cross join lateral aclexplode(coalesce(p.proacl, acldefault('f',p.proowner))) acl
+        where p.oid='ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure
+          and acl.grantee=0 and acl.privilege_type='EXECUTE')
      or has_table_privilege('carr_jobs','ops.work_request','SELECT')
      or has_table_privilege('carr_jobs','ops.job','UPDATE')
      or has_table_privilege('carr_jobs','ops.job_attempt','INSERT') then

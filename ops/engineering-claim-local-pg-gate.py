@@ -248,7 +248,7 @@ def expect_receipt_refusal(cur, envelope_id, lease_token, actor_id, label: str) 
     cur.execute("savepoint engineering_receipt_refusal")
     try:
         cur.execute(
-            "select ops.engineering_record_slice_receipt(%s,%s,%s,%s,%s)",
+            "select ops.engineering_finalize_slice_receipt(%s,%s,%s,%s,%s)",
             (envelope_id, lease_token, Jsonb({}), sha("7"), actor_id),
         )
     except psycopg.Error as exc:
@@ -268,7 +268,7 @@ def main() -> int:
         return fail("DATABASE_URL or CARR_LOCAL_PG_DSN is required")
     try:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
-            grant_settable_runtime_roles(cur, RUNTIME_ROLE)
+            grant_settable_runtime_roles(cur, RUNTIME_ROLE, "carr_reader")
             job_id, envelope_id, session_id, codex_id, plan_digest, slice_ref, envelope_digest = fixture(
                 cur, expires_in_seconds=2160)
             near_expiry_job_id, _, _, _, _, _, _ = fixture(cur, expires_in_seconds=90)
@@ -315,8 +315,10 @@ def main() -> int:
                 return fail("carr_jobs gained direct INSERT on ops.job_attempt")
             if not one(cur, "select has_function_privilege(current_user,'ops.engineering_claim_slice(text,integer,integer)'::regprocedure,'EXECUTE')")[0]:
                 return fail("carr_jobs cannot execute the scoped Engineering claim")
-            if not one(cur, "select has_function_privilege(current_user,'ops.engineering_controller_binding(uuid,uuid)'::regprocedure,'EXECUTE')")[0]:
+            if not one(cur, "select has_function_privilege(current_user,'ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure,'EXECUTE')")[0]:
                 return fail("carr_jobs cannot read the scoped controller binding")
+            if one(cur, "select has_function_privilege('carr_reader','ops.engineering_controller_binding(uuid,uuid,uuid)'::regprocedure,'EXECUTE')")[0]:
+                return fail("carr_reader gained execute on the controller binding")
             cur.execute("savepoint multi_claim_refusal")
             try:
                 cur.execute("select * from ops.engineering_claim_slice(%s,2,1800)",
@@ -347,15 +349,46 @@ def main() -> int:
                 return fail("an expired, read-only, superseded or terminal-session envelope left the unclaimed queue state")
             if one(cur, "select count(*) from ops.job_attempt where job_id=any(%s)", (invalid_jobs,))[0] != 0:
                 return fail("an ineligible Engineering envelope created an attempt")
-            binding = one(cur, "select ops.engineering_controller_binding(%s,%s)", (envelope_id, job_id))[0]
+            binding = one(cur, "select ops.engineering_controller_binding(%s,%s,%s)", (envelope_id, job_id, claimed[1]))[0]
             if binding != {"envelope_id": str(envelope_id), "envelope_digest": envelope_digest,
                            "slice_ref": slice_ref, "plan_digest": plan_digest,
                            "slice_plan": {"plan_digest": plan_digest, "slices": [{"slice_ref": slice_ref}]},
                            "executor_actor": {"id": str(codex_id), "slug": "codex"},
                            "agent_session_id": str(session_id)}:
                 return fail("controller binding did not remain exact after claim")
-            if one(cur, "select ops.engineering_controller_binding(%s,%s)",
-                   (superseded_envelope_id, superseded_job_id))[0] is not None:
+            cur.execute("reset role")
+            set_local_role(cur, "carr_reader")
+            cur.execute("savepoint reader_binding_refusal")
+            try:
+                cur.execute("select ops.engineering_controller_binding(%s,%s,%s)",
+                            (envelope_id, job_id, claimed[1]))
+            except psycopg.Error as exc:
+                detail = str(exc)
+                cur.execute("rollback to savepoint reader_binding_refusal")
+                cur.execute("release savepoint reader_binding_refusal")
+                if "permission denied" not in detail:
+                    raise RuntimeError(f"carr_reader binding refusal was not ACL-shaped: {detail}") from exc
+            else:
+                raise RuntimeError("carr_reader executed the controller binding")
+            cur.execute("savepoint reader_private_refusal")
+            try:
+                cur.execute("select ops.engineering_envelope_is_executable(%s,%s,%s)",
+                            (envelope_id, job_id, 60))
+            except psycopg.Error as exc:
+                detail = str(exc)
+                cur.execute("rollback to savepoint reader_private_refusal")
+                cur.execute("release savepoint reader_private_refusal")
+                if "permission denied" not in detail:
+                    raise RuntimeError(f"carr_reader helper refusal was not ACL-shaped: {detail}") from exc
+            else:
+                raise RuntimeError("carr_reader executed the private helper")
+            set_local_role(cur, RUNTIME_ROLE)
+            for bad_token in (None, uuid.uuid4()):
+                if one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                       (envelope_id, job_id, bad_token))[0] is not None:
+                    return fail("null or wrong lease token retained a controller binding")
+            if one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                   (superseded_envelope_id, superseded_job_id, uuid.uuid4()))[0] is not None:
                 return fail("a superseded envelope retained its controller binding")
             successor_claimed = one(
                 cur,
@@ -383,16 +416,16 @@ def main() -> int:
                                    "superseded-envelope receipt")
             # Model a lease whose immutable envelope has since expired: both
             # binding and receipt persistence must repeat the shared predicate.
-            if one(cur, "select ops.engineering_controller_binding(%s,%s)",
-                   (post_claim_expired_envelope_id, post_claim_expired_job_id))[0] is not None:
+            if one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                   (post_claim_expired_envelope_id, post_claim_expired_job_id, post_claim_expired_lease))[0] is not None:
                 return fail("an envelope that expired after claim retained its controller binding")
             expect_receipt_refusal(cur, post_claim_expired_envelope_id, post_claim_expired_lease, codex_id,
                                    "expiry-after-claim receipt")
             if one(cur, "select state,lease_token is not null,leased_until<statement_timestamp() from ops.job where id=%s",
                    (expired_lease_job_id,)) != ("running", True, True):
                 return fail("expired-lease fixture did not persist an expired running lease")
-            if one(cur, "select ops.engineering_controller_binding(%s,%s)",
-                   (expired_lease_envelope_id, expired_lease_job_id))[0] is not None:
+            if one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                   (expired_lease_envelope_id, expired_lease_job_id, expired_lease_token))[0] is not None:
                 return fail("an expired lease retained its controller binding")
             expect_receipt_refusal(cur, expired_lease_envelope_id, expired_lease_token,
                                    expired_lease_actor_id, "expired-lease receipt")
@@ -418,10 +451,44 @@ def main() -> int:
             cur.execute("update ops.job set state='failed',ended_at=now(),lease_token=null,leased_until=null where id=%s", (terminal_job_id,))
             cur.execute("update ops.capability_agent_session set state='cancelled',cancelled_at=now() where id=%s", (terminal_session_id,))
             set_local_role(cur, RUNTIME_ROLE)
-            if one(cur, "select ops.engineering_controller_binding(%s,%s)", (terminal_envelope_id, terminal_job_id))[0] is not None:
+            if one(cur, "select ops.engineering_controller_binding(%s,%s,%s)", (terminal_envelope_id, terminal_job_id, terminal_claimed[1]))[0] is not None:
                 return fail("a cancelled session retained its controller binding")
             expect_receipt_refusal(cur, terminal_envelope_id, terminal_claimed[1], codex_id,
                                    "terminal-session receipt")
+            cur.execute("reset role")
+            final_job_id, final_envelope_id, _, final_actor_id, _, final_slice_ref, final_digest = fixture(cur)
+            final_token = uuid.uuid4()
+            cur.execute("update ops.job set state='running',attempt=1,lease_owner='finalizer-fixture',lease_token=%s,leased_until=now()+interval '5 minutes',started_at=now() where id=%s", (final_token, final_job_id))
+            cur.execute("insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state) values (%s,1,'finalizer-fixture',%s,'running')", (final_job_id, final_token))
+            set_local_role(cur, RUNTIME_ROLE)
+            receipt = {"envelope_digest": final_digest, "slice_ref": final_slice_ref,
+                       "attempt_id": "attempt:1", "outcome": "failed"}
+            one(cur, "select ops.engineering_finalize_slice_receipt(%s,%s,%s,%s,%s)",
+                (final_envelope_id, final_token, Jsonb(receipt), sha("8"), final_actor_id))
+            if one(cur, "select state,lease_token is null from ops.job where id=%s", (final_job_id,)) != ("retry_wait", True):
+                return fail("atomic finalizer did not transition the job with its receipt")
+            if one(cur, "select count(*) from ops.engineering_slice_receipt where envelope_id=%s", (final_envelope_id,))[0] != 1:
+                return fail("atomic finalizer did not persist its receipt")
+            cur.execute("reset role")
+            blocked_job_id, blocked_envelope_id, _, blocked_actor_id, _, blocked_slice_ref, blocked_digest = fixture(cur)
+            blocked_token = uuid.uuid4()
+            cur.execute("update ops.job set state='running',attempt=1,lease_owner='blocked-finalizer',lease_token=%s,leased_until=now()+interval '5 minutes',started_at=now() where id=%s", (blocked_token, blocked_job_id))
+            cur.execute("insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state) values (%s,1,'blocked-finalizer',%s,'running')", (blocked_job_id, blocked_token))
+            cur.execute("create function pg_temp.block_finalizer_job() returns trigger language plpgsql as $$ begin raise exception 'fixture blocks terminal job update'; end $$")
+            cur.execute(f"create trigger block_finalizer_job before update on ops.job for each row when (old.id='{blocked_job_id}'::uuid) execute function pg_temp.block_finalizer_job()")
+            set_local_role(cur, RUNTIME_ROLE)
+            cur.execute("savepoint blocked_finalizer")
+            try:
+                cur.execute("select ops.engineering_finalize_slice_receipt(%s,%s,%s,%s,%s)", (blocked_envelope_id, blocked_token, Jsonb({"envelope_digest": blocked_digest, "slice_ref": blocked_slice_ref, "attempt_id": "attempt:1", "outcome": "failed"}), sha("9"), blocked_actor_id))
+            except psycopg.Error:
+                cur.execute("rollback to savepoint blocked_finalizer")
+                cur.execute("release savepoint blocked_finalizer")
+            else:
+                raise RuntimeError("blocked finalizer unexpectedly committed")
+            if one(cur, "select count(*) from ops.engineering_slice_receipt where envelope_id=%s", (blocked_envelope_id,))[0] != 0:
+                return fail("blocked finalizer left a receipt after rollback")
+            if one(cur, "select state,lease_token=%s from ops.job where id=%s", (blocked_token, blocked_job_id)) != ("running", True):
+                return fail("blocked finalizer changed its job despite rollback")
     except Exception as exc:  # noqa: BLE001 - DB gates report exact refusal details
         return fail(str(exc))
     print("engineering claim local acceptance passed: scoped lease, attempt, and binding are exact and rollback-only")

@@ -137,7 +137,7 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
     if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: fakeClaim.envelope_id, work_request_id: "11111111-1111-4111-8111-111111111111", envelope: fakeClaim.envelope, expires_at: fakeClaim.envelope.expires_at, envelope_digest: `sha256:${"a".repeat(64)}`, slice_ref: "slice:one" }] };
     if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: fakeClaim.envelope_id, envelope_digest: fakeClaim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug } } }] };
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts: { source: { work_request: source.work, accepted_plan: source.plan }, slice_plans: [{ accepted_plan_id: source.plan.record_id, accepted_plan_hash: source.plan.digest, plan: typed }] } }] };
-    if (sql.includes("engineering_record_slice_receipt")) return { rows: [{ id: "receipt:one" }] };
+    if (sql.includes("engineering_finalize_slice_receipt")) return { rows: [{ id: "receipt:one" }] };
     return { rows: [] };
   } };
   const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: fakeClaim.envelope_digest, attempt_id: "attempt:1", slice_ref: "slice:one", plan_digest: typed.plan_digest, attribution: {}, planned_resource_refs: [], actual_resource_refs: [], planned_component_refs: [], actual_component_refs: [], checks: [{ check_ref: "check:one" }], artifact_refs: [], evidence_refs: [], deviations: [], source_evidence: {}, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false }, executor_claim: { claimed_by: "codex" }, independent_verification_required: true, outcome: "claimed_complete" };
@@ -270,7 +270,7 @@ test("successful admission persists its event through the injected writer", asyn
   assert.equal(insertParams[10], admitted.expires_at);
 });
 
-test("admission replaces a stale read-only envelope with a new immutable generation", async () => {
+test("admission replaces a terminal prior-session envelope with a new immutable generation", async () => {
   const item = {
     slice_ref: "slice:one", ordinal: 1, objective: "Do the bounded work", definition_of_done: "A typed receipt exists",
     dependency_refs: [], declared_resource_refs: [], declared_component_refs: [], declared_plan_step_refs: [],
@@ -284,18 +284,12 @@ test("admission replaces a stale read-only envelope with a new immutable generat
   const priorSession = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const legacy = buildCodexEnvelope({ source, plan: typedPlan, slice: item,
     jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", sessionId: priorSession, actor });
-  legacy.request.allowed_actions = [];
-  legacy.server_binding.authority.capability_profile = "capability:engineering-read-only";
-  legacy.server_binding.authority.capability_grant_ref = "grant:engineering-read-only-v1";
-  legacy.server_binding.authority.read_only = true;
-  legacy.expires_at = "2026-08-24T00:00:00Z";
-  legacy.agent_session.lease_expires_at = legacy.expires_at;
   const facts = {
     source: { work_request: source.work, accepted_plan: source.plan },
     slice_plans: [{ accepted_plan_id: source.plan.record_id, accepted_plan_hash: source.plan.digest, plan: typedPlan }],
     envelopes: [{ id: priorId, job_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-      accepted_plan_id: source.plan.record_id, slice_ref: item.slice_ref,
-      created_at: "2026-08-24T00:00:00Z", envelope: legacy }],
+      accepted_plan_id: source.plan.record_id, slice_ref: item.slice_ref, agent_session_id: priorSession,
+      expires_at: legacy.expires_at, created_at: legacy.issued_at, envelope: legacy }],
     receipts: [], reviewer_facts: [],
   };
   const newSession = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -305,6 +299,7 @@ test("admission replaces a stale read-only envelope with a new immutable generat
   let enqueueParams;
   const c = { query: async (sql, params = []) => {
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
+    if (sql.includes("select state from ops.capability_agent_session")) return { rows: [{ state: "completed" }] };
     if (sql.includes("update ops.capability_agent_session")) return { rows: [] };
     if (sql.includes("insert into ops.capability_agent_session"))
       return { rows: [{ id: newSession, executor_actor_id: actor.id, state: "active" }] };

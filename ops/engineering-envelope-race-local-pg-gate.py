@@ -57,8 +57,8 @@ def main() -> int:
         def bind() -> None:
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
                 gate.set_local_role(cur, RUNTIME_ROLE)
-                binding = gate.one(cur, "select ops.engineering_controller_binding(%s,%s)",
-                                   (envelope_id, job_id))[0]
+                binding = gate.one(cur, "select ops.engineering_controller_binding(%s,%s,%s)",
+                                   (envelope_id, job_id, claimed[1]))[0]
                 if binding is None:
                     raise RuntimeError("live fixture unexpectedly had no controller binding")
                 binding_ready.set()

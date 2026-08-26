@@ -42,9 +42,9 @@ test("0310's receipt insertion requires the claimed lease and concrete attempt",
   assert.match(migration, /create or replace function ops\.engineering_record_slice_receipt/);
   assert.match(migration, /attempt_row\.lease_token=p_lease_token and attempt_row\.state='running'/);
   assert.match(migration, /job_attempt_id uuid not null unique references ops\.job_attempt\(id\)/);
-  assert.match(runtime, /engineering_record_slice_receipt/);
+  assert.match(runtime, /engineering_finalize_slice_receipt/);
   assert.match(runtime, /engineering_claim_slice/);
-  assert.match(runtime, /ops\.complete_job\(/, "the runtime uses the existing completion seam");
+  assert.doesNotMatch(runtime, /ops\.complete_job\(/, "receipt append and completion stay in one database statement");
 });
 
 test("0310 admits dependent slices from the reviewer fact's bound attempt", () => {
@@ -108,6 +108,8 @@ test("0325 refuses stale Engineering envelopes before a lease is created", () =>
   assert.match(claimEligibilityRepair, /p_limit<>1/);
   assert.match(claimEligibilityRepair, /order by e\.slice_plan_id,e\.slice_ref/);
   assert.match(claimEligibilityRepair, /j\.lease_token=p_lease_token/);
+  assert.match(claimEligibilityRepair, /engineering_controller_binding\(uuid,uuid,uuid\)/);
+  assert.match(claimEligibilityRepair, /j\.lease_token=p_lease_token and j\.leased_until>statement_timestamp\(\)/);
   assert.match(claimEligibilityRepair, /j\.mode='shadow'/);
   assert.equal((claimEligibilityRepair.match(/engineering_envelope_is_executable\(/g) || []).length >= 4, true);
   assert.match(claimEligibilityRepair, /leased engineering envelope cannot be superseded/);
@@ -117,7 +119,8 @@ test("0325 refuses stale Engineering envelopes before a lease is created", () =>
   assert.match(claimEligibilityRepair, /capability:engineering-repository-write/);
   assert.match(claimEligibilityRepair, /codex_desktop/);
   assert.match(claimEligibilityRepair, /returning claimed_attempt\.job_id/);
-  assert.match(claimEligibilityRepair, /grant execute on function ops\.engineering_claim_slice\(text,integer,integer\),[\s\S]*engineering_record_slice_receipt\(uuid,uuid,jsonb,text,uuid\) to carr_jobs/);
+  assert.match(claimEligibilityRepair, /engineering_finalize_slice_receipt/);
+  assert.match(claimEligibilityRepair, /grant execute on function ops\.engineering_claim_slice\(text,integer,integer\),[\s\S]*engineering_finalize_slice_receipt\(uuid,uuid,jsonb,text,uuid\) to carr_jobs/);
   assert.doesNotMatch(claimEligibilityRepair, /grant\s+(?:all|select|insert|update|delete)\s+on\s+/i);
 });
 
