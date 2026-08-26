@@ -56,7 +56,8 @@ def digest(value: object) -> bool:
 
 
 def verify_legacy_ledger(raw: bytes, *, prefix_rows: int, prefix_sha256: str,
-                         expected: dict[str, tuple[str, str]]) -> bool:
+                         expected: dict[str, tuple[str, str]],
+                         require_evidence: bool = False) -> bool:
     """Verify the immutable legacy prefix, while allowing append-only suffixes.
 
     A fresh clone can legitimately create a new local shadow log during tests.
@@ -70,6 +71,7 @@ def verify_legacy_ledger(raw: bytes, *, prefix_rows: int, prefix_sha256: str,
                for row in rows if finding(row)}
     pinned_present = set(derived) & set(expected)
     if not pinned_present:
+        assert not require_evidence, "canonical legacy evidence has no pinned identities"
         return False
     assert set(expected) <= set(derived), "partial pinned legacy evidence is invalid"
     assert len(lines) >= prefix_rows, "pinned legacy ledger prefix is truncated"
@@ -139,22 +141,29 @@ for event in events:
 # derive its finding identities, and rehash every transcript/excerpt. Hosted CI
 # does not own these raw local files; that branch explicitly validates the full
 # committed digest envelope above and reports which external proof was absent.
-ledger_candidates = [
-    REPO / document["ledger"]["path"],
-    Path("/Users/booko/carr-system") / document["ledger"]["path"],
-]
-ledger_path = next((path for path in ledger_candidates if path.is_file()), None)
-if ledger_path:
-    expected_events = {event["event_id"]: (event["session_id"], event["observed_at"])
-                       for event in events}
+expected_events = {event["event_id"]: (event["session_id"], event["observed_at"])
+                   for event in events}
+local_ledger = (REPO / document["ledger"]["path"]).resolve()
+canonical_ledger = (Path("/Users/booko/carr-system") / document["ledger"]["path"]).resolve()
+checked_ledger = False
+if local_ledger.is_file() and local_ledger != canonical_ledger:
+    checked_ledger = True
     if verify_legacy_ledger(
-            ledger_path.read_bytes(), prefix_rows=PINNED_PREFIX_ROWS,
+            local_ledger.read_bytes(), prefix_rows=PINNED_PREFIX_ROWS,
             prefix_sha256=document["ledger"]["sha256"], expected=expected_events):
         print(f"verified immutable {PINNED_PREFIX_ROWS}-row ledger prefix and "
               f"{len(expected_events)} derived finding identities")
     else:
         print("external raw ledger unavailable; clone-local log has no pinned legacy events")
-else:
+if canonical_ledger.is_file():
+    checked_ledger = True
+    assert verify_legacy_ledger(
+        canonical_ledger.read_bytes(), prefix_rows=PINNED_PREFIX_ROWS,
+        prefix_sha256=document["ledger"]["sha256"], expected=expected_events,
+        require_evidence=True)
+    print(f"verified canonical immutable {PINNED_PREFIX_ROWS}-row ledger prefix and "
+          f"{len(expected_events)} derived finding identities")
+if not checked_ledger:
     print("external raw ledger unavailable; validated committed 14-event digest envelope")
 
 # Hermetic boundary cases for the evidence classifier itself.
@@ -183,6 +192,15 @@ for bad in (fixture_raw.splitlines(keepends=True)[0],
         pass
     else:
         raise AssertionError("partial or tampered pinned legacy evidence was accepted")
+fully_tampered = fixture_raw.replace(b"legacy-a", b"changed-a", 1).replace(
+    b"legacy-b", b"changed-b", 1)
+try:
+    verify_legacy_ledger(fully_tampered, prefix_rows=2, prefix_sha256=fixture_digest,
+                         expected=fixture_expected, require_evidence=True)
+except AssertionError:
+    pass
+else:
+    raise AssertionError("total canonical pinned-evidence tamper was accepted as unavailable")
 
 verified_transcripts = 0
 missing_transcripts = []

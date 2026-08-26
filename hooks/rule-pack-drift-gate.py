@@ -47,6 +47,7 @@ boot would not have delivered. Enforcement flips on at zero unexplained misses.
 from __future__ import annotations
 
 import ast
+import importlib
 import json
 import os
 import re
@@ -311,7 +312,7 @@ def scheduled_workflow_packs(record):
 
 
 def engineering_workflow_packs(record):
-    """Packs from the exact controller-owned Engineering Passport wrapper."""
+    """Packs from a fully bound controller Engineering Passport wrapper."""
     role, value = role_and_text(record)
     if role not in {"user", "human"} or not value.startswith(ENGINEERING_WORKFLOW_HEADER):
         return []
@@ -319,6 +320,66 @@ def engineering_workflow_packs(record):
             or value.count("CONTROLLER TASK BINDING (immutable):") != 1
             or "FIRST: call `standing-context` with exactly the four packs above" not in value
             or "REFUSE before inspecting the envelope, source, or job" not in value):
+        return []
+    packet_marker = "SERVER-ISSUED SLICE PACKET (immutable):\n"
+    task_marker = "\n\nCONTROLLER TASK BINDING (immutable):\n"
+    try:
+        packet_text, task_text = value.split(packet_marker, 1)[1].split(task_marker, 1)
+        packet = json.loads(packet_text)
+        task = json.loads(task_text)
+        bridge = os.path.join(REPO, "tools", "room-bridge")
+        if bridge not in sys.path:
+            sys.path.insert(0, bridge)
+        passport = importlib.import_module("engineering_passport")
+        expected_task_keys = {
+            "attempt_id", "engineering_plan", "engineering_slice", "generation",
+            "job_ref", "plan_digest", "slice_ref", "work_request",
+        }
+        if not isinstance(task, dict) or set(task) != expected_task_keys:
+            return []
+        plan = passport.validate_engineering_slice_plan(task["engineering_plan"])
+        expected_packet_keys = {
+            "schema_version", "slice_ref", "plan_digest", "envelope_digest",
+            "fresh_native_session_required", "objective", "definition_of_done",
+            "planned_checks", "scope_boundary", "forbidden_change_refs", "envelope",
+            "packet_digest",
+        }
+        if not isinstance(packet, dict) or set(packet) != expected_packet_keys:
+            return []
+        envelope = passport.base.validate_execution_envelope(packet["envelope"])
+        selected = next(item for item in plan["slices"]
+                        if item["slice_ref"] == task["slice_ref"])
+        packet_without_digest = {key: item for key, item in packet.items()
+                                 if key != "packet_digest"}
+        expected_scope = {
+            "plan_step_refs": sorted(set(selected["declared_plan_step_refs"])),
+            "component_refs": sorted(set(selected["declared_component_refs"])),
+            "component_dependencies": sorted(
+                envelope["request"]["declared_expectations"]["component_dependencies"],
+                key=lambda edge: (edge["component_ref"], edge["depends_on_component_ref"])),
+            "resource_refs": sorted(set(selected["declared_resource_refs"])),
+        }
+        if (task["engineering_slice"] != selected
+                or task["plan_digest"] != plan["plan_digest"]
+                or packet["plan_digest"] != plan["plan_digest"]
+                or packet["slice_ref"] != task["slice_ref"]
+                or packet["schema_version"] != "engineering-slice-packet.v1"
+                or packet["fresh_native_session_required"] is not True
+                or not isinstance(packet["envelope_digest"], str)
+                or re.fullmatch(r"sha256:[a-f0-9]{64}", packet["envelope_digest"]) is None
+                or packet["packet_digest"] != passport.base.canonical_digest(
+                    packet_without_digest)
+                or envelope["request"]["declared_expectations"] != expected_scope
+                or envelope["request"]["job_ref"] != task["job_ref"]
+                or any(packet[field] != selected[field] for field in (
+                    "objective", "definition_of_done", "planned_checks",
+                    "scope_boundary", "forbidden_change_refs"))
+                or not isinstance(task["generation"], int) or isinstance(task["generation"], bool)
+                or task["generation"] < 1
+                or not all(isinstance(task[field], str) and task[field].strip()
+                           for field in ("attempt_id", "job_ref"))):
+            return []
+    except (ImportError, KeyError, StopIteration, TypeError, ValueError):
         return []
     return list(ENGINEERING_WORKFLOW_PACKS)
 
@@ -378,31 +439,6 @@ def _find_delivery(value):
     return None
 
 
-def _brace_spans(text):
-    """Yield balanced object spans without being confused by quoted braces."""
-    stack = []
-    quote = None
-    escaped = False
-    for index, char in enumerate(text):
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\" and quote:
-            escaped = True
-            continue
-        if quote:
-            if char == quote:
-                quote = None
-            continue
-        if char in {"'", '"'}:
-            quote = char
-        elif char == "{":
-            stack.append(index)
-        elif char == "}" and stack:
-            start = stack.pop()
-            yield start, index + 1
-
-
 def _safe_literal(node, values):
     """Evaluate data-only Python literals and local literal-constructor lambdas."""
     if isinstance(node, ast.Constant):
@@ -441,6 +477,57 @@ def _line_offsets(text):
     return offsets
 
 
+def _call_name(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _call_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    if isinstance(node, ast.Call):
+        return _call_name(node.func)
+    return ""
+
+
+def _uses_names(node, names):
+    return any(isinstance(item, ast.Name) and item.id in names for item in ast.walk(node))
+
+
+def _target_names(node):
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return {name for item in node.elts for name in _target_names(item)}
+    return set()
+
+
+def _receipt_use_is_inert(tree, assignment, receipt_name):
+    """Refuse normalization if receipt-derived data reaches executable code."""
+    allowed = ("print", "json.dumps")
+    tainted = {receipt_name}
+    after = False
+    for statement in tree.body:
+        if statement is assignment:
+            after = True
+            continue
+        if not after:
+            continue
+        for call in (item for item in ast.walk(statement) if isinstance(item, ast.Call)):
+            if not _uses_names(call, tainted):
+                continue
+            name = _call_name(call.func)
+            if (name not in allowed and not name.endswith(".validate")
+                    and not name.endswith("._validate_receipt")):
+                return False
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            value = statement.value
+            if value is not None and _uses_names(value, tainted):
+                targets = statement.targets if isinstance(statement, ast.Assign) \
+                    else [statement.target]
+                for target in targets:
+                    tainted.update(_target_names(target))
+    return True
+
+
 def _python_receipt_spans(text):
     """Locate strict receipt assignments without executing assistant code."""
     try:
@@ -460,7 +547,8 @@ def _python_receipt_spans(text):
         except (TypeError, ValueError):
             continue
         values[name] = value
-        if not exact_engineering_receipt(value):
+        if (not exact_engineering_receipt(value)
+                or not _receipt_use_is_inert(tree, statement, name)):
             continue
         start = offsets[statement.value.lineno - 1] + statement.value.col_offset
         end = offsets[statement.value.end_lineno - 1] + statement.value.end_col_offset
@@ -470,19 +558,7 @@ def _python_receipt_spans(text):
 
 def _normalize_receipt_objects(text):
     """Replace only independently strict JSON/Python receipt object literals."""
-    spans = []
-    for start, end in _brace_spans(text):
-        candidate = text[start:end]
-        value = None
-        for parser in (json.loads, ast.literal_eval):
-            try:
-                value = parser(candidate)
-                break
-            except (SyntaxError, TypeError, ValueError):
-                pass
-        if exact_engineering_receipt(value):
-            spans.append((start, end))
-    spans.extend(_python_receipt_spans(text))
+    spans = _python_receipt_spans(text)
     # Replace outermost matched spans from right to left. Nested valid receipts
     # are impossible under the contract, but de-duplication keeps this total.
     selected = []
@@ -492,6 +568,21 @@ def _normalize_receipt_objects(text):
     for start, end in sorted(selected, reverse=True):
         text = text[:start] + "[engineering-slice-receipt.v1]" + text[end:]
     return text
+
+
+def _normalize_inert_json_emission(command):
+    """Normalize a strict JSON receipt only when the whole command emits it."""
+    matched = re.fullmatch(r"\s*(printf\s+['\"]%s['\"]\s+|echo\s+)'(.*)'\s*",
+                           command, re.S)
+    if not matched:
+        return command
+    try:
+        value = json.loads(matched.group(2))
+    except (TypeError, ValueError):
+        return command
+    if not exact_engineering_receipt(value):
+        return command
+    return matched.group(1) + "'[engineering-slice-receipt.v1]'"
 
 
 def _decoded_command(input_text):
@@ -535,6 +626,7 @@ def custom_tool_text(payload):
             normalized = _normalize_receipt_objects(body)
             command = command[:matched.start(2)] + normalized + command[matched.end(2):]
         command = _normalize_receipt_objects(command)
+        command = _normalize_inert_json_emission(command)
         return "\n".join((name, outer, command))
     return "\n".join((name, _normalize_receipt_objects(raw)))
 
@@ -571,6 +663,12 @@ def work_text(record):
         if (payload_text.lstrip().startswith("{")
                 and "engineering-slice-receipt.v1" in payload_text
                 and assistant_machine_receipt(record) is None):
+            parts.append(payload_text)
+        elif (payload_text.startswith(ENGINEERING_WORKFLOW_HEADER)
+              and not engineering_workflow_packs(record)):
+            # An ordinary user can copy the visible header. Without a packet
+            # rebuilt from the strict plan/envelope and exact task binding it
+            # has no source provenance and fails closed to lexical scanning.
             parts.append(payload_text)
     if isinstance(content, str):
         if role in {"user", "human", "assistant"}:

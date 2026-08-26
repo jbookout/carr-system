@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -18,6 +19,12 @@ import engineering_dispatch_adapter as adapter  # noqa: E402
 import engineering_passport as passport  # noqa: E402
 import execution_contract as contract  # noqa: E402
 import bridge  # noqa: E402
+
+GATE_SPEC = importlib.util.spec_from_file_location(
+    "engineering_rule_pack_gate", ROOT / "hooks" / "rule-pack-drift-gate.py")
+assert GATE_SPEC and GATE_SPEC.loader
+rule_pack_gate = importlib.util.module_from_spec(GATE_SPEC)
+GATE_SPEC.loader.exec_module(rule_pack_gate)
 
 
 FAILURES: list[str] = []
@@ -70,7 +77,9 @@ def request() -> dict:
     first = PLAN["slices"][0]
     return {"desk": "engineering-codex", "envelope": copy.deepcopy(ENVELOPE), "executor_slug": "codex",
             "task": {"work_request": "WR-SYNTHETIC", "slice_ref": "slice:a", "plan_digest": PLAN["plan_digest"],
-                     "job_ref": "job:synthetic", "attempt_id": "attempt:1", "engineering_plan": copy.deepcopy(PLAN),
+                     "job_ref": ENVELOPE["request"]["job_ref"], "attempt_id": "attempt:1",
+                     "generation": 1,
+                     "engineering_plan": copy.deepcopy(PLAN),
                      "engineering_slice": copy.deepcopy(first)}}
 
 
@@ -126,6 +135,16 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert ("RULE-DELIVERY PACKS: engineering-git,delegation-council,"
             "scheduled-automation,source-study") in seen["prompt"]
     assert "REFUSE before inspecting the envelope, source, or job" in seen["prompt"]
+    prompt_record = {"type": "response_item", "payload": {"type": "message",
+                     "role": "user", "content": [
+                         {"type": "input_text", "text": seen["prompt"]}]}}
+    assert rule_pack_gate.engineering_workflow_packs(prompt_record) == [
+        "engineering-git", "delegation-council", "scheduled-automation", "source-study"]
+    tampered_prompt = copy.deepcopy(prompt_record)
+    tampered_prompt["payload"]["content"][0]["text"] = seen["prompt"].replace(
+        '"packet_digest":"sha256:', '"packet_digest":"sha256:0', 1)
+    assert rule_pack_gate.engineering_workflow_packs(tampered_prompt) == []
+    assert rule_pack_gate.work_text(tampered_prompt)
 
 
 def test_invalid_model_receipt_refuses_before_the_controller_can_persist_it():

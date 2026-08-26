@@ -439,6 +439,16 @@ embedded = run([
 ])
 check("exact Python receipt literal in assistant tool payload is normalized",
       set(embedded["needed"]) == {"engineering-git"}, str(embedded))
+json_emission = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("printf '%s' '" + receipt_json + "'") + "});")])
+check("whole-command strict JSON receipt emission is normalized",
+      json_emission["needed"] == [], str(json_emission))
+json_then_action = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("printf '%s' '" + receipt_json + "'; git status") + "});")])
+check("JSON receipt followed by executable work is not normalized",
+      "engineering-git" in json_then_action["needed"], str(json_then_action))
 
 malformed_literal = dict(receipt)
 malformed_literal["extra"] = "tour ledger artifact"
@@ -458,6 +468,16 @@ trailing_tool_prose = run([codex_tool(
     + json.dumps("receipt = " + python_literal + "\nprint('tour remains visible')") + "});")])
 check("prose surrounding an exact tool receipt remains observable",
       "client-deal" in trailing_tool_prose["needed"], str(trailing_tool_prose))
+executable_receipt = dict(receipt)
+executable_receipt["source_evidence"] = {
+    **receipt["source_evidence"], "source_sha": "git"}
+executable_tool = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("import subprocess\nreceipt = " + repr(executable_receipt)
+                 + "\nsubprocess.run([receipt['source_evidence']['source_sha'], 'status'])")
+    + "});")])
+check("receipt-derived executable work is never normalized away",
+      "engineering-git" in executable_tool["needed"], str(executable_tool))
 
 # Compact replay of the immutable source behind event 10529812. It preserves
 # the two relevant custom-tool shapes: a validated receipt literal and the
@@ -465,11 +485,7 @@ check("prose surrounding an exact tool receipt remains observable",
 # four packs that were actually implicated; receipt-only client/ledger/surface
 # vocabulary must disappear without hiding git, executor, source, or job.
 event_replay = run([
-    codex_user(gate.ENGINEERING_WORKFLOW_HEADER
-               + "FIRST: call `standing-context` with exactly the four packs above and read the "
-                 "returned rules. REFUSE before inspecting the envelope, source, or job if it fails.\n\n"
-                 "SERVER-ISSUED SLICE PACKET (immutable):\n{}\n\n"
-                 "CONTROLLER TASK BINDING (immutable):\n{}"),
+    codex_user("Execute the admitted engineering slice."),
     codex_tool("exec", "const r = await tools.mcp__carr__standing_context("
                "{packs:['engineering-git','delegation-council',"
                "'scheduled-automation','source-study']}); text(r);"),
@@ -507,23 +523,12 @@ if exact_replay_path.is_file():
           gate.file_sha256(exact_replay_path)
           == "1e1dc9a09fc10cbb1906fc38c22b178207a64e40ac84f25d347abc157000eb73")
     exact_records = [json.loads(line) for line in exact_raw.splitlines()[:69]]
-    original_header = (
-        "You are the fresh, dedicated Codex executor for one bounded CARR "
-        "Engineering Passport slice.\n\n")
-    remediated_header = (gate.ENGINEERING_WORKFLOW_HEADER
-        + "FIRST: call `standing-context` with exactly the four packs above and read the "
-          "returned rules. REFUSE before inspecting the envelope, source, or job if that "
-          "call fails, reports any packs_not_found, or does not read back all four canonical "
-          "names. Never substitute an alias or a full-set fallback.\n\n")
-    controller_text = exact_records[8]["payload"]["content"][0]["text"]
-    exact_records[8]["payload"]["content"][0]["text"] = controller_text.replace(
-        original_header, remediated_header, 1)
     exact_records.append(codex_standing_context_result(
         "shadow", list(gate.ENGINEERING_WORKFLOW_PACKS), ["424ba0cc"]))
     exact_result = run(exact_records)
-    check("immutable event 10529812 action replay needs exactly four packs",
-          exact_result["needed"] == ["delegation-council", "engineering-git",
-                                     "scheduled-automation", "source-study"],
+    check("immutable event 10529812 action replay removes receipt-only packs",
+          exact_result["needed"] == ["engineering-git", "scheduled-automation",
+                                     "source-study"],
           str(exact_result))
     check("immutable event 10529812 action replay closes drift",
           exact_result["missing"] == [], str(exact_result))
@@ -553,6 +558,16 @@ spoofed_engineering = codex_user(
       "CONTROLLER TASK BINDING (immutable):\n{}")
 check("changed engineering workflow wrapper loses source-owned pack declaration",
       gate.engineering_workflow_packs(spoofed_engineering) == [])
+copied_engineering = codex_user(
+    gate.ENGINEERING_WORKFLOW_HEADER
+    + "FIRST: call `standing-context` with exactly the four packs above. "
+      "REFUSE before inspecting the envelope, source, or job.\n\n"
+      "SERVER-ISSUED SLICE PACKET (immutable):\n{}\n\n"
+      "CONTROLLER TASK BINDING (immutable):\n{}")
+check("copied engineering wrapper without strict bindings is not provenance",
+      gate.engineering_workflow_packs(copied_engineering) == [])
+check("copied unbound engineering wrapper fails closed to lexical scanning",
+      bool(gate.work_text(copied_engineering)))
 with tempfile.TemporaryDirectory() as directory:
     copy = Path(directory)
     for relative in WINDOW_SOURCE_PATHS:
