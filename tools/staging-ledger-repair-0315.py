@@ -38,6 +38,7 @@ import hashlib
 import os
 import sys
 from pathlib import Path
+from typing import Any, NoReturn
 
 import psycopg
 
@@ -51,8 +52,15 @@ LATER_APPLIED_REQUIRED = [
 ]
 
 
-def fail(msg: str) -> None:
+def fail(msg: str) -> NoReturn:
     sys.exit(f"staging-ledger-repair-0315: {msg}")
+
+
+def one(cur: Any) -> tuple[Any, ...]:
+    row = cur.fetchone()
+    if row is None:
+        fail("query returned no row")
+    return row
 
 
 def main() -> None:
@@ -80,7 +88,7 @@ def main() -> None:
             "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace "
             "where n.nspname='ops' and p.proname like %s",
             ("%forward_fix_rehearsal%",))
-        fn_count = cur.fetchone()[0]
+        fn_count = one(cur)[0]
         if fn_count != 0:
             fail(f"marker failed: {fn_count} forward_fix_rehearsal function(s) already "
                  "exist while 0315 is unrecorded — reconcile by hand, not with this tool")
@@ -100,12 +108,12 @@ def main() -> None:
             "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace "
             "where n.nspname='ops' and p.proname like %s",
             ("%forward_fix_rehearsal%",))
-        if cur.fetchone()[0] == 0:
+        if one(cur)[0] == 0:
             fail("post-apply verification failed: rehearsal functions still absent; rolling back")
         cur.execute(
             "select count(*) from information_schema.columns "
             "where table_name='v_schema_ledger' and column_name='sha256'")
-        if cur.fetchone()[0] != 1:
+        if one(cur)[0] != 1:
             fail("post-apply verification failed: v_schema_ledger has no sha256 column; rolling back")
 
         conn.commit()
