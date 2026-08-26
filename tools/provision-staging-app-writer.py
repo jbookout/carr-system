@@ -44,7 +44,6 @@ BOOTSTRAP_SUPERUSER_OID = 10
 WRANGLER = REPO / "mcp-server/node_modules/.bin/wrangler"
 WRANGLER_CONFIG = REPO / "mcp-server/wrangler.toml"
 STAGING_WORKER_NAME = "carr-mcp-staging"
-EXPECTED_PROPOSAL_STATUS = (("pending", 10),)
 
 FORBIDDEN_ENV = (
     "CARR_BREAK_GLASS",
@@ -191,7 +190,7 @@ class ScopedDsn:
 
 
 @dataclass(frozen=True)
-class ExpectedSeedState:
+class SeedState:
     proposal_status: tuple[tuple[str, int], ...]
     target_count: int
     batch_count: int
@@ -778,7 +777,7 @@ def validate_connection_scope(owner: ScopedDsn, writer: ScopedDsn) -> None:
         )
 
 
-def collect_seed_state(cur: Any) -> ExpectedSeedState:
+def collect_seed_state(cur: Any) -> SeedState:
     seed_contract = load_module(
         "staging_app_writer_seed_contract_runtime",
         REPO / "pipelines/staging_retrieval_doctrine_seed.py",
@@ -798,21 +797,10 @@ def collect_seed_state(cur: Any) -> ExpectedSeedState:
         target_count += int(cur.fetchone()[0])
     cur.execute("select count(*) from doctrine_migration_batch")
     batch_count = int(cur.fetchone()[0])
-    return ExpectedSeedState(proposal_status, target_count, batch_count)
+    return SeedState(proposal_status, target_count, batch_count)
 
 
-def validate_seed_state(state: ExpectedSeedState) -> None:
-    if state.proposal_status != EXPECTED_PROPOSAL_STATUS:
-        raise ProvisioningRefusal(
-            f"staging retrieval proposals are not exactly 10 pending: {state.proposal_status}"
-        )
-    if state.target_count != 0 or state.batch_count != 0:
-        raise ProvisioningRefusal(
-            "staging doctrine seed targets or migration batches are no longer absent"
-        )
-
-
-def read_seed_state(dsn: str, *, connect: Connect = psycopg.connect) -> ExpectedSeedState:
+def read_seed_state(dsn: str, *, connect: Connect = psycopg.connect) -> SeedState:
     conn = connect(dsn)
     try:
         cur = conn.cursor()
@@ -1290,7 +1278,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         scope = _local_scope(binding.candidate)
         owner_dsn = binding.owner
         before = read_seed_state(owner_dsn.value)
-        validate_seed_state(before)
         if not args.apply:
             print(json.dumps({
                 "environment": "staging", "project": binding.candidate.project_name,
@@ -1392,10 +1379,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except (psycopg.Error, ValueError):
                     pass
                 owner.close()
-        final_state: dict[str, ExpectedSeedState] = {}
+        final_state: dict[str, SeedState] = {}
         def verify_final_candidate_state() -> None:
             observed = read_seed_state(owner_dsn.value)
-            validate_seed_state(observed)
             if observed != before:
                 raise ProvisioningRefusal(
                     "provisioning changed proposals, doctrine targets, or batches")
@@ -1421,7 +1407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "identities": [READER_ROLE, APP_ROLE], "statement_timeout_seconds": 60,
             "idle_timeout_seconds": 120,
             "proposal_status": dict(after.proposal_status),
-            "target_count": 0, "batch_count": 0,
+            "target_count": after.target_count, "batch_count": after.batch_count,
         }, sort_keys=True))
         return 0
     except SystemExit:

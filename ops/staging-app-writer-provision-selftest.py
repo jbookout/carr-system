@@ -630,7 +630,8 @@ grant insert, select on table ops.work_request to carr_writer;
     )
     binding_fixture = provision.ReplacementBinding(
         target, production, old, candidate, source_manifest, exact_receipt, candidate_owner)
-    valid_state = provision.ExpectedSeedState(provision.EXPECTED_PROPOSAL_STATUS, 0, 0)
+    valid_state = provision.SeedState(
+        (("approved", 60), ("pending", 2)), 3, 4)
     worker_lock = provision.worker_cutover_lock_path()
     active_locks: set[pathlib.Path] = set()
     lock_events: list[tuple[str, pathlib.Path]] = []
@@ -740,6 +741,23 @@ grant insert, select on table ops.work_request to carr_writer;
             (_ for _ in ()).throw(AssertionError("dry-run mutated Worker secrets"))
         provision.psycopg.connect = lambda *_args, **_kwargs: \
             (_ for _ in ()).throw(AssertionError("dry-run opened candidate owner DB"))
+
+        # An unreadable initial snapshot must refuse before any provider,
+        # credential, role, or Worker mutation path becomes callable.
+        provision.read_seed_state = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            provision.ProvisioningRefusal("synthetic initial read failure"))
+        initial_stdout = io.StringIO()
+        initial_stderr = io.StringIO()
+        with contextlib.redirect_stdout(initial_stdout), contextlib.redirect_stderr(initial_stderr):
+            initial_rc = provision.main([
+                "--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+                "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
+            ])
+        check("initial business-state read failure refuses before every mutation path",
+              initial_rc == 2 and initial_stdout.getvalue() == ""
+              and "synthetic initial read failure" in initial_stderr.getvalue())
+
+        provision.read_seed_state = lambda *_args, **_kwargs: valid_state
         dry_stdout = io.StringIO()
         with contextlib.redirect_stdout(dry_stdout):
             dry_rc = provision.main([
@@ -752,7 +770,9 @@ grant insert, select on table ops.work_request to carr_writer;
               and dry_output["mutated"] is False
               and dry_output["candidate_project_id"] == candidate.project_id
               and dry_output["prior_staging_project_id"] == old.project_id
-              and dry_output["production_project_id"] == production.project_id)
+              and dry_output["production_project_id"] == production.project_id
+              and dry_output["proposal_status"] == {"approved": 60, "pending": 2}
+              and dry_output["target_count"] == 3 and dry_output["batch_count"] == 4)
 
         real_profile = saved_main_dependencies["credential_profile"]
         def candidate_profile(label: str, *, config_root=None):
@@ -819,8 +839,52 @@ grant insert, select on table ops.work_request to carr_writer;
         check("main apply completes exact final readback without fallback or disclosure",
               apply_output["state"] == "provisioned" and seed_reads == 2
               and apply_output["candidate_operation_id"] == str(CANDIDATE_OPERATION_ID)
+              and apply_output["proposal_status"] == {"approved": 60, "pending": 2}
+              and apply_output["target_count"] == 3 and apply_output["batch_count"] == 4
               and all(secret not in stdout.getvalue()
                       for secret in expected_candidate_values.values()))
+
+        # Every field in the readable business-state snapshot is immutable
+        # across credential publication. Any drift restores the prior pair.
+        for drift_label, drift_state in (
+            ("proposal", provision.SeedState(
+                (("approved", 61), ("pending", 1)), 3, 4)),
+            ("target", provision.SeedState(
+                (("approved", 60), ("pending", 2)), 4, 4)),
+            ("batch", provision.SeedState(
+                (("approved", 60), ("pending", 2)), 3, 5)),
+        ):
+            orchestration_events.clear()
+            profile_roots.clear()
+            preserve_calls = 0
+            unlocked_preserve_budget = 1
+            drift_reads = 0
+            def drifting_seed_read(*_args, **_kwargs):
+                nonlocal drift_reads
+                drift_reads += 1
+                if drift_reads == 2 and worker_lock not in active_locks:
+                    raise AssertionError(
+                        "drifted business-state read ran outside the global Worker lock")
+                orchestration_events.append(("seed", drift_reads))
+                return valid_state if drift_reads == 1 else drift_state
+            provision.read_seed_state = drifting_seed_read
+            drift_stdout = io.StringIO()
+            drift_stderr = io.StringIO()
+            with contextlib.redirect_stdout(drift_stdout), \
+                    contextlib.redirect_stderr(drift_stderr):
+                drift_rc = provision.main([
+                    "--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+                    "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
+                ])
+            check(f"main {drift_label} drift restores the exact prior Worker pair",
+                  drift_rc == 2 and orchestration_events == [
+                      ("seed", 1), ("preserve", None), ("preserve", None),
+                      ("bulk", expected_candidate_values), ("verify", None),
+                      ("preserve", None), ("seed", 2),
+                      ("bulk", old_values), ("verify", None), ("preserve", None),
+                  ] and all(secret not in drift_stdout.getvalue() + drift_stderr.getvalue()
+                            for secret in (*expected_candidate_values.values(),
+                                           *old_values.values())))
 
         # If the complete final seed readback refuses, main must atomically
         # restore and verify the old pair before re-proving provider preservation.
