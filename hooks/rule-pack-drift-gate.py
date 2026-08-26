@@ -310,6 +310,10 @@ def _skill_injection_record_ids(records):
             continue
         result = by_uuid.get(result_uuid)
         result_message = result.get("message") if isinstance(result, dict) else None
+        if (not isinstance(result, dict) or result.get("type") != "user"
+                or not isinstance(result_message, dict)
+                or result_message.get("role") != "user"):
+            continue
         result_content = (result_message or {}).get("content")
         if (not isinstance(result_content, list) or len(result_content) != 1
                 or not isinstance(result_content[0], dict)
@@ -323,6 +327,10 @@ def _skill_injection_record_ids(records):
             continue
         assistant = by_uuid.get(assistant_uuid)
         assistant_message = (assistant or {}).get("message")
+        if (not isinstance(assistant, dict) or assistant.get("type") != "assistant"
+                or not isinstance(assistant_message, dict)
+                or assistant_message.get("role") != "assistant"):
+            continue
         assistant_content = (assistant_message or {}).get("content")
         if (not isinstance(assistant_content, list) or len(assistant_content) != 1
                 or not isinstance(assistant_content[0], dict)

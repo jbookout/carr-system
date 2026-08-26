@@ -310,6 +310,8 @@ for label in (
     "missing-child-prompt", "missing-result-prompt", "mismatched-prompt",
     "mixed-tool-call", "multiple-skill-calls", "duplicate-tool-results",
     "duplicate-tool-use-id", "missing-tool-use-id", "missing-tool-result-id",
+    "assistant-type-swap", "assistant-role-swap", "result-type-swap",
+    "result-role-swap",
     "duplicate-record-uuid",
 ):
     chain = json.loads(json.dumps(claude_skill_injection(skill_body)))
@@ -345,6 +347,14 @@ for label in (
         del chain[0]["message"]["content"][0]["id"]
     elif label == "missing-tool-result-id":
         del chain[1]["message"]["content"][0]["tool_use_id"]
+    elif label == "assistant-type-swap":
+        chain[0]["type"] = "user"
+    elif label == "assistant-role-swap":
+        chain[0]["message"]["role"] = "user"
+    elif label == "result-type-swap":
+        chain[1]["type"] = "assistant"
+    elif label == "result-role-swap":
+        chain[1]["message"]["role"] = "assistant"
     elif label == "duplicate-record-uuid":
         chain.append(json.loads(json.dumps(chain[1])))
     negative = run([
