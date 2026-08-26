@@ -47,7 +47,7 @@ install. Unreadable state, unwritable state, corrupt JSON, a missing session id:
 every one of them means NOT LATCHED, so the gate speaks. A latch that failed
 closed would let one bad directory permission silence the entire Stop cluster on
 this machine, which is enormously worse than the duplicate fire it exists to
-stop. ops/stop-latch-selftest.py asserts both failure paths explicitly.
+stop. ops/stop_latch-selftest.py asserts both failure paths explicitly.
 
 STATE IS PER SESSION, under out/stop-latch/<session>.json, and that is not
 incidental either: out/ is a symlink back to the canonical checkout from every
@@ -76,7 +76,7 @@ deliberately excluded, the floor on the changed paths plus write-verb names, and
 dual_block not at all — a close that calls landed work unbuilt is worth refusing
 every time it is uttered.
 
-Fixtures: ops/stop-latch-selftest.py
+Fixtures: ops/stop_latch-selftest.py
 """
 
 import hashlib

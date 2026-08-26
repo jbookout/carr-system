@@ -32,7 +32,7 @@ write its state must let the gate SPEAK, never silence it. An unwritable
 directory silencing every Stop gate on the machine is a far worse failure than
 one duplicate fire, so the unwritable case is asserted explicitly.
 
-    .venv/bin/python ops/stop-latch-selftest.py
+    .venv/bin/python ops/stop_latch-selftest.py
 """
 from __future__ import annotations
 
