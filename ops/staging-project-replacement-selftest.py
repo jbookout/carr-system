@@ -69,13 +69,15 @@ assert ctl.load_candidate_spec() == ctl.CandidateSpec(18, "aws-us-east-1",
 
 
 class ScopeRun:
-    def __init__(self, project_bound: bool = True, endpoint_bound: bool = True):
+    def __init__(self, project_bound: bool = True, endpoint_bound: bool = True,
+                 branch_name: str = "main"):
         self.project_bound = project_bound
         self.endpoint_bound = endpoint_bound
+        self.branch_name = branch_name
 
     def __call__(self, args, **unused):
         if "branches" in args:
-            payload = {"branches": [{"id": "br-candidate", "name": "main", "default": True,
+            payload = {"branches": [{"id": "br-candidate", "name": self.branch_name, "default": True,
                          "project_id": "candidate" if self.project_bound else "wrong"}]}
         else:
             payload = {"endpoints": [{"id": "ep-candidate", "host": "ep-candidate.neon.tech",
@@ -88,11 +90,19 @@ class ScopeRun:
 project = {"id": "candidate", "name": ctl.candidate_name(operation_id),
            "pg_version": 18, "region_id": "aws-us-east-1"}
 env = {"NEON_API_KEY": "fixture-key", "PATH": "/bin"}
-scope = ctl.resolve_scope(project, run=ScopeRun(), environ=env)
+scope = ctl.resolve_scope(project, expected_branch_name="main", run=ScopeRun(), environ=env)
 assert scope.project_id == "candidate" and scope.branch_id == "br-candidate"
-refuses(lambda: ctl.resolve_scope(project, run=ScopeRun(project_bound=False), environ=env),
+production_scope = ctl.resolve_scope(
+    project, expected_branch_name="production", run=ScopeRun(branch_name="production"), environ=env)
+assert production_scope.branch_id == "br-candidate"
+refuses(lambda: ctl.resolve_scope(project, expected_branch_name="main",
+                                  run=ScopeRun(branch_name="production"), environ=env),
         "default branch")
-refuses(lambda: ctl.resolve_scope(project, run=ScopeRun(endpoint_bound=False), environ=env),
+refuses(lambda: ctl.resolve_scope(project, expected_branch_name="main",
+                                  run=ScopeRun(project_bound=False), environ=env),
+        "default branch")
+refuses(lambda: ctl.resolve_scope(project, expected_branch_name="main",
+                                  run=ScopeRun(endpoint_bound=False), environ=env),
         "endpoint")
 
 

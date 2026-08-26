@@ -49,6 +49,8 @@ MIGRATION_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PRODUCTION_PROJECT_ID = "steep-field-48688294"
 NEON_ORG_ID = "org-dry-dew-75906281"
 STAGING_NAME = "carr-staging"
+PRODUCTION_BRANCH_NAME = "production"
+STAGING_BRANCH_NAME = "main"
 OWNER_ROLE = "neondb_owner"
 CLIENT_TABLES = ("party", "client", "deal", "lead", "vendor")
 PREPARE_FUNCTION = "ops.prepare_staging_replacement_project"
@@ -238,12 +240,14 @@ def list_projects(*, run: Run, environ: Mapping[str, str]) -> list[dict[str, Any
                        "project list"), "projects")
 
 
-def resolve_scope(project: Mapping[str, Any], *, run: Run, environ: Mapping[str, str]) -> ProviderScope:
+def resolve_scope(project: Mapping[str, Any], *, expected_branch_name: str,
+                  run: Run, environ: Mapping[str, str]) -> ProviderScope:
     project_id, name = str(project.get("id") or ""), str(project.get("name") or "")
     env = provider_environment(environ)
     branches = _rows(_json(_run([str(NEONCTL), "branches", "list", "--project-id", project_id,
                                  "--output", "json"], run=run, env=env), "branch list"), "branches")
-    mains = [r for r in branches if r.get("name") == "main" and r.get("default") is True
+    mains = [r for r in branches if r.get("name") == expected_branch_name
+             and r.get("default") is True
              and str(r.get("project_id") or "") == project_id]
     if not project_id or not name or len(mains) != 1:
         raise ReplacementRefusal("provider project/default branch is not exact")
@@ -280,12 +284,16 @@ def resolve_existing_scopes(operation_id: uuid.UUID, *, run: Run,
         if len(rows) != 1:
             raise ReplacementRefusal("provider project identity did not resolve exactly once")
         return rows[0]
-    production = resolve_scope(one("id", PRODUCTION_PROJECT_ID), run=run, environ=environ)
-    old = resolve_scope(one("name", STAGING_NAME), run=run, environ=environ)
+    production = resolve_scope(one("id", PRODUCTION_PROJECT_ID),
+                               expected_branch_name=PRODUCTION_BRANCH_NAME,
+                               run=run, environ=environ)
+    old = resolve_scope(one("name", STAGING_NAME), expected_branch_name=STAGING_BRANCH_NAME,
+                        run=run, environ=environ)
     found = [r for r in projects if r.get("name") == candidate_name(operation_id)]
     if len(found) > 1:
         raise ReplacementRefusal("candidate name is not unique")
-    candidate = resolve_scope(found[0], run=run, environ=environ) if found else None
+    candidate = resolve_scope(found[0], expected_branch_name=STAGING_BRANCH_NAME,
+                              run=run, environ=environ) if found else None
     scopes = [production, old] + ([candidate] if candidate else [])
     for attr in ("project_id", "branch_id", "endpoint_id", "endpoint_host"):
         values = [getattr(s, attr) for s in scopes]
