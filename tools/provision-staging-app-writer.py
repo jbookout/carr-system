@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Provision the one isolated-staging ``app_writer`` runtime identity.
+"""Cut the staging Worker over to a receipted replacement candidate.
 
-Dry-run is the default. ``--apply`` is the only mutating path. There are no
-project, branch, role, DSN, or grants arguments: those are the authority being
-bounded, not caller choices.
+Read-only planning is the default. ``--apply`` is the only mutating path. The
+caller must supply the full candidate-operation UUID, immutable receipt UUID,
+and merged source SHA; provider scopes, roles, DSNs, grants, and Worker names
+remain server- and repository-derived authority rather than caller choices.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -110,6 +112,27 @@ snapshot_grants = load_module(
 credential = load_module(
     "staging_database_credential", REPO / "tools/staging_database_credential.py"
 )
+replacement = load_module(
+    "staging_project_replacement_for_worker_cutover",
+    REPO / "tools/staging-project-replacement.py",
+)
+
+REPLACEMENT_VERIFIER_KEY = "CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL"
+REPLACEMENT_VERIFIER_ROLE = "carr_program5_forward_fix_verifier"
+WORKER_DATABASE_SECRET_NAMES = ("DATABASE_URL_READER", "DATABASE_URL_WRITER")
+WORKER_ENV_ALLOWLIST = (
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "CLOUDFLARE_API_TOKEN",
+)
+REPLACEMENT_RECEIPT_KEYS = frozenset({
+    "contract_id", "receipt_id", "evidence_ref", "receipt_sha256", "git_sha",
+    "source_tree_oid", "source_tree_sha256", "source_tree_entry_count",
+    "artifact_sha256", "config_sha256", "dependency_sha256",
+    "prior_staging_project_id", "replacement_project_id", "replacement_branch_id",
+    "replacement_endpoint_id", "live_migration_ledger", "live_migration_count",
+    "live_migration_highest", "live_migration_ledger_sha256", "synthetic_data_count",
+    "production_overlap_count", "observed_at",
+})
 
 
 def _wrangler_account_id() -> str:
@@ -135,6 +158,24 @@ class ProviderScope:
     endpoint_host: str
     port: int
     database: str
+
+
+@dataclass(frozen=True)
+class ReplacementTarget:
+    candidate_operation_id: uuid.UUID
+    receipt_id: uuid.UUID
+    expected_sha: str
+
+
+@dataclass(frozen=True)
+class ReplacementBinding:
+    target: ReplacementTarget
+    production: Any
+    old: Any
+    candidate: Any
+    source_manifest: dict[str, Any]
+    receipt: dict[str, Any]
+    owner: "ScopedDsn"
 
 
 @dataclass(frozen=True)
@@ -310,12 +351,224 @@ def provider_environment(environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def worker_environment(environ: Mapping[str, str]) -> dict[str, str]:
-    result = dict(environ)
-    ambient = result.get("CLOUDFLARE_ACCOUNT_ID")
+    ambient = environ.get("CLOUDFLARE_ACCOUNT_ID")
     if ambient and ambient != CLOUDFLARE_ACCOUNT_ID:
         raise ProvisioningRefusal("ambient Cloudflare account differs from the pinned CARR account")
+    result = {name: environ[name] for name in WORKER_ENV_ALLOWLIST if environ.get(name)}
     result["CLOUDFLARE_ACCOUNT_ID"] = CLOUDFLARE_ACCOUNT_ID
     return result
+
+
+def _canonical_uuid4(value: str, label: str) -> uuid.UUID:
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise ProvisioningRefusal(f"{label} must be a full canonical UUIDv4") from exc
+    if str(parsed) != value or parsed.version != 4 or parsed.variant != uuid.RFC_4122:
+        raise ProvisioningRefusal(f"{label} must be a full canonical UUIDv4")
+    return parsed
+
+
+def replacement_target(
+    candidate_operation_id: str, receipt_id: str, expected_sha: str, *,
+    run: Run = subprocess.run,
+) -> ReplacementTarget:
+    candidate = _canonical_uuid4(candidate_operation_id, "candidate operation id")
+    receipt = _canonical_uuid4(receipt_id, "receipt id")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+        raise ProvisioningRefusal("expected merged SHA must be a full lowercase commit SHA")
+    try:
+        result = run(
+            ["git", "-C", str(REPO), "merge-base", "--is-ancestor", expected_sha,
+             "origin/main"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProvisioningRefusal("merged source ancestry check did not complete; output suppressed") from exc
+    if result.returncode != 0:
+        raise ProvisioningRefusal("expected source SHA is not reachable from origin/main; output suppressed")
+    return ReplacementTarget(candidate, receipt, expected_sha)
+
+
+def replacement_credential_root(operation_id: uuid.UUID) -> pathlib.Path:
+    if operation_id.version != 4 or operation_id.variant != uuid.RFC_4122:
+        raise ProvisioningRefusal("candidate operation id must be UUIDv4")
+    return pathlib.Path.home() / ".config/carr/staging-replacements" / str(operation_id)
+
+
+def load_replacement_source_manifest(
+    target: ReplacementTarget, *, run: Run = subprocess.run,
+) -> dict[str, Any]:
+    try:
+        result = run(
+            [sys.executable, str(replacement.RELEASE_MANIFEST), "source-contract",
+             "--sha", target.expected_sha],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProvisioningRefusal("merged source contract did not complete; output suppressed") from exc
+    if result.returncode != 0:
+        raise ProvisioningRefusal("merged source contract failed; output suppressed")
+    try:
+        manifest = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProvisioningRefusal("merged source contract was not JSON; output suppressed") from exc
+    exact = {"git_sha": target.expected_sha, "tree_mode": "full",
+             "tree_tuple": ["mode", "type", "object", "path"]}
+    if not isinstance(manifest, dict) or any(manifest.get(k) != v for k, v in exact.items()):
+        raise ProvisioningRefusal("merged source contract identity is not exact")
+    replacement.validate_migration_ledger(manifest)
+    if not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("source_tree_oid") or "")) \
+            or not isinstance(manifest.get("source_tree_entry_count"), int) \
+            or manifest["source_tree_entry_count"] <= 0:
+        raise ProvisioningRefusal("merged source tree identity is invalid")
+    for key in ("source_tree_sha256", "artifact_sha256", "config_sha256",
+                "dependency_sha256", "migration_ledger_sha256"):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(manifest.get(key) or "")):
+            raise ProvisioningRefusal(f"merged source contract {key} is invalid")
+    return manifest
+
+
+def validate_replacement_receipt(
+    target: ReplacementTarget, production: Any, old: Any, candidate: Any,
+    receipt: Mapping[str, Any], source_manifest: Mapping[str, Any],
+) -> None:
+    if set(receipt) != REPLACEMENT_RECEIPT_KEYS:
+        raise ProvisioningRefusal("immutable replacement receipt projection is not exact")
+    if production.project_id != replacement.PRODUCTION_PROJECT_ID \
+            or old.project_name != replacement.STAGING_NAME \
+            or candidate.project_name != replacement.candidate_name(target.candidate_operation_id):
+        raise ProvisioningRefusal("replacement provider project identities are not exact")
+    for attribute in ("project_id", "branch_id", "endpoint_id", "endpoint_host"):
+        values = [getattr(scope, attribute) for scope in (production, old, candidate)]
+        if len(values) != len(set(values)):
+            raise ProvisioningRefusal(f"replacement provider {attribute} identities overlap")
+    try:
+        contract_id = uuid.UUID(str(receipt["contract_id"]))
+        observed_receipt = uuid.UUID(str(receipt["receipt_id"]))
+    except (ValueError, AttributeError) as exc:
+        raise ProvisioningRefusal("replacement receipt UUID projection is invalid") from exc
+    if contract_id.version != 4 or contract_id.variant != uuid.RFC_4122 \
+            or str(contract_id) != str(receipt["contract_id"]) \
+            or observed_receipt != target.receipt_id \
+            or str(observed_receipt) != str(receipt["receipt_id"]):
+        raise ProvisioningRefusal("replacement receipt identity disagrees")
+    expected_source = {
+        "git_sha": target.expected_sha,
+        "source_tree_oid": source_manifest.get("source_tree_oid"),
+        "source_tree_sha256": source_manifest.get("source_tree_sha256"),
+        "source_tree_entry_count": source_manifest.get("source_tree_entry_count"),
+        "artifact_sha256": source_manifest.get("artifact_sha256"),
+        "config_sha256": source_manifest.get("config_sha256"),
+        "dependency_sha256": source_manifest.get("dependency_sha256"),
+        "live_migration_ledger": source_manifest.get("migration_ledger"),
+        "live_migration_count": source_manifest.get("migration_count"),
+        "live_migration_highest": source_manifest.get("migration_highest"),
+        "live_migration_ledger_sha256": source_manifest.get("migration_ledger_sha256"),
+    }
+    expected_scope = {
+        "prior_staging_project_id": old.project_id,
+        "replacement_project_id": candidate.project_id,
+        "replacement_branch_id": candidate.branch_id,
+        "replacement_endpoint_id": candidate.endpoint_id,
+        "production_overlap_count": 0,
+    }
+    if source_manifest.get("git_sha") != target.expected_sha \
+            or any(receipt.get(key) != value for key, value in {
+                **expected_source, **expected_scope}.items()):
+        raise ProvisioningRefusal("replacement receipt disagrees with source or provider scope")
+    if not re.fullmatch(r"ops\.staging-replacement-project:sha256:[0-9a-f]{64}",
+                        str(receipt.get("evidence_ref") or "")) \
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}",
+                                str(receipt.get("receipt_sha256") or "")) \
+            or not isinstance(receipt.get("observed_at"), str) \
+            or not receipt["observed_at"].strip() \
+            or not isinstance(receipt.get("synthetic_data_count"), int) \
+            or isinstance(receipt.get("synthetic_data_count"), bool) \
+            or receipt["synthetic_data_count"] <= 0:
+        raise ProvisioningRefusal("replacement receipt evidence projection is invalid")
+    try:
+        replacement.validate_migration_ledger(source_manifest)
+    except replacement.ReplacementRefusal as exc:
+        raise ProvisioningRefusal("replacement receipt migration ledger is invalid") from exc
+
+
+def _local_scope(scope: Any) -> ProviderScope:
+    return ProviderScope(
+        scope.project_id, scope.branch_id, scope.endpoint_id, scope.endpoint_host,
+        5432, "neondb",
+    )
+
+
+def resolve_replacement_binding(
+    target: ReplacementTarget, *, run: Run = subprocess.run,
+    environ: Mapping[str, str], connect: Connect = psycopg.connect,
+) -> ReplacementBinding:
+    try:
+        production, old, candidate = replacement.resolve_existing_scopes(
+            target.candidate_operation_id, run=run, environ=environ)
+    except replacement.ReplacementRefusal as exc:
+        raise ProvisioningRefusal("replacement provider readback refused; output suppressed") from exc
+    if candidate is None:
+        raise ProvisioningRefusal("exact replacement candidate does not exist; no fallback allowed")
+    source_manifest = load_replacement_source_manifest(target, run=run)
+    root = replacement_credential_root(target.candidate_operation_id)
+    verifier_path = root / "verifier.env"
+    verifier = credential.load_for_endpoint_id(
+        credential.CredentialPaths(
+            final=verifier_path, pending=pathlib.Path(str(verifier_path) + ".pending")),
+        key=REPLACEMENT_VERIFIER_KEY, role_name=REPLACEMENT_VERIFIER_ROLE,
+        expected_endpoint_id=candidate.endpoint_id, expected_port=5432,
+        expected_database="neondb",
+    )
+    conn = connect(verifier.value)
+    try:
+        cur = conn.cursor()
+        cur.execute("begin transaction read only")
+        cur.execute(
+            "select session_user,current_user,"
+            "pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')"
+        )
+        if tuple(cur.fetchone() or ()) != (
+            REPLACEMENT_VERIFIER_ROLE, REPLACEMENT_VERIFIER_ROLE, True,
+        ):
+            raise ProvisioningRefusal("replacement verifier identity is not exact")
+        receipt = replacement.call_json(
+            cur, replacement.READ_FUNCTION, target.receipt_id)
+        conn.rollback()
+    finally:
+        conn.close()
+    validate_replacement_receipt(
+        target, production, old, candidate, receipt, source_manifest)
+    try:
+        secret_owner = replacement.derive_dsn(
+            candidate, replacement.OWNER_ROLE, run=run, environ=environ)
+    except replacement.ReplacementRefusal as exc:
+        raise ProvisioningRefusal("replacement owner DSN derivation refused; output suppressed") from exc
+    local = _local_scope(candidate)
+    owner = ScopedDsn(
+        local, replacement.OWNER_ROLE, candidate.endpoint_host, 5432, "neondb",
+        secret_owner.value,
+    )
+    return ReplacementBinding(
+        target, production, old, candidate, dict(source_manifest), dict(receipt), owner)
+
+
+def load_rollback_worker_values(old: Any) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for login_profile in PROFILES:
+        file_profile = credential.profile(login_profile.label)
+        stored = credential.load_existing(
+            file_profile.paths, key=file_profile.key,
+            role_name=file_profile.role_name,
+            expected_endpoint=old.endpoint_host, expected_port=5432,
+            expected_database="neondb",
+        )
+        if stored.state != "final":
+            raise ProvisioningRefusal(
+                "canonical old-staging rollback credential is not final")
+        values[login_profile.secret_name] = stored.value
+    return values
 
 
 def validate_provider_scope(
@@ -827,28 +1080,34 @@ def validate_profile_login(
         conn.close()
 
 
-def put_worker_database_secret(
-    profile: LoginProfile, value: str, *, wrangler: str = str(WRANGLER),
+def bulk_worker_database_secrets(
+    values: Mapping[str, str], *, wrangler: str = str(WRANGLER),
     run: Run = subprocess.run, environ: Mapping[str, str] | None = None,
 ) -> None:
+    if set(values) != set(WORKER_DATABASE_SECRET_NAMES) \
+            or any(not isinstance(value, str) or not value for value in values.values()):
+        raise ProvisioningRefusal("Worker database secret bulk payload is not exact")
+    payload = json.dumps({name: values[name] for name in WORKER_DATABASE_SECRET_NAMES},
+                         sort_keys=True, separators=(",", ":"))
     try:
         result = run(
-            [wrangler, "secret", "put", profile.secret_name,
-             "--env", "staging", "--config", str(WRANGLER_CONFIG),
+            [wrangler, "secret", "bulk", "--env", "staging",
+             "--config", str(WRANGLER_CONFIG),
              "--name", STAGING_WORKER_NAME],
-            input=value, capture_output=True, text=True, timeout=60,
+            input=payload, capture_output=True, text=True, timeout=60,
             env=worker_environment(environ if environ is not None else os.environ),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ProvisioningRefusal("Worker secret update outcome is uncertain; output suppressed") from exc
+    except Exception as exc:
+        raise ProvisioningRefusal(
+            "Worker database secret bulk outcome is uncertain; output suppressed") from exc
     if result.returncode != 0:
         raise ProvisioningRefusal(
-            f"Worker secret update failed (rc={result.returncode}); output suppressed"
+            f"Worker database secret bulk failed (rc={result.returncode}); output suppressed"
         )
 
 
-def verify_worker_secret_binding(
-    profile: LoginProfile, *, wrangler: str = str(WRANGLER),
+def verify_worker_database_secret_bindings(
+    *, wrangler: str = str(WRANGLER),
     run: Run = subprocess.run, environ: Mapping[str, str] | None = None,
 ) -> None:
     try:
@@ -867,10 +1126,53 @@ def verify_worker_secret_binding(
         payload = json.loads(result.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ProvisioningRefusal("Worker secret readback was not JSON; output suppressed") from exc
-    if not isinstance(payload, list) or sum(
-        isinstance(row, dict) and row.get("name") == profile.secret_name for row in payload
-    ) != 1:
-        raise ProvisioningRefusal(f"Worker does not report exactly one {profile.secret_name} binding")
+    if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
+        raise ProvisioningRefusal("Worker secret name readback has the wrong shape")
+    names = [str(row.get("name") or "") for row in payload]
+    database_names = sorted(name for name in names if name.startswith("DATABASE_URL"))
+    if len(names) != len(set(names)) \
+            or database_names != sorted(WORKER_DATABASE_SECRET_NAMES):
+        raise ProvisioningRefusal("Worker database secret name readback is not exact")
+
+
+def publish_worker_cutover(
+    candidate_values: Mapping[str, str], rollback_values: Mapping[str, str], *,
+    preserve: Callable[[], None], bulk: Callable[[Mapping[str, str]], None],
+    verify: Callable[[], None],
+) -> None:
+    """Publish one atomic pair; restore the old pair if postflight refuses."""
+    if set(candidate_values) != set(WORKER_DATABASE_SECRET_NAMES) \
+            or set(rollback_values) != set(WORKER_DATABASE_SECRET_NAMES):
+        raise ProvisioningRefusal("Worker cutover and rollback secret sets are not exact")
+    preserve()
+    try:
+        bulk(candidate_values)
+        verify()
+        preserve()
+    except Exception as exc:
+        try:
+            bulk(rollback_values)
+            verify()
+        except Exception as rollback_exc:
+            raise ProvisioningRefusal(
+                "Worker credential cutover refused and rollback outcome is uncertain; output suppressed"
+            ) from rollback_exc
+        raise ProvisioningRefusal(
+            "Worker credential cutover refused; prior bindings restored; output suppressed"
+        ) from exc
+
+
+def rollback_worker_to_prior(
+    rollback_values: Mapping[str, str], *, preserve: Callable[[], None],
+    bulk: Callable[[Mapping[str, str]], None], verify: Callable[[], None],
+) -> None:
+    """Atomically restore the untouched old-staging pair through the same door."""
+    if set(rollback_values) != set(WORKER_DATABASE_SECRET_NAMES):
+        raise ProvisioningRefusal("Worker rollback secret set is not exact")
+    preserve()
+    bulk(rollback_values)
+    verify()
+    preserve()
 
 
 def require_direct_owner_identity(cur: Any) -> str:
@@ -924,45 +1226,90 @@ def redact_error(exc: BaseException) -> str:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate-operation-id", required=True,
+                        help="full UUIDv4 of the already-receipted replacement candidate")
+    parser.add_argument("--receipt-id", required=True,
+                        help="full immutable replacement receipt UUIDv4")
+    parser.add_argument("--sha", required=True,
+                        help="full merged lowercase source SHA attested by the receipt")
     parser.add_argument("--apply", action="store_true",
-                        help="create/reuse the staging login roles and apply canonical ACLs")
-    return parser.parse_args(argv)
+                        help="converge candidate roles and atomically cut over both Worker secrets")
+    parser.add_argument("--rollback-to-prior-staging", action="store_true",
+                        help="atomically restore both untouched prior-staging Worker secrets")
+    args = parser.parse_args(argv)
+    if args.rollback_to_prior_staging and not args.apply:
+        parser.error("--rollback-to-prior-staging requires --apply")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         reject_unsafe_environment(os.environ)
+        target = replacement_target(
+            args.candidate_operation_id, args.receipt_id, args.sha)
         plans = {
             profile.label: snapshot_grants.load_current_grants_to_role(
                 SCHEMA, MIGRATIONS, profile.bundle_role
             ) for profile in PROFILES
         }
-        scope = resolve_provider_scope(
-            neonctl=db_tap.NEONCTL, environ=os.environ,
-        )
-        owner_dsn = provider_dsn(
-            scope, "neondb_owner", neonctl=db_tap.NEONCTL, environ=os.environ,
-        )
+        binding = resolve_replacement_binding(target, environ=os.environ)
+        def preserve_provider_scopes() -> None:
+            try:
+                replacement.prove_provider_preservation(
+                    target.candidate_operation_id, binding.production, binding.old,
+                    binding.candidate, run=subprocess.run, environ=os.environ)
+            except replacement.ReplacementRefusal as exc:
+                raise ProvisioningRefusal(
+                    "replacement provider preservation readback refused; output suppressed"
+                ) from exc
+
+        if args.rollback_to_prior_staging:
+            rollback_values = load_rollback_worker_values(binding.old)
+            rollback_worker_to_prior(
+                rollback_values, preserve=preserve_provider_scopes,
+                bulk=lambda values: bulk_worker_database_secrets(values),
+                verify=lambda: verify_worker_database_secret_bindings(),
+            )
+            print(json.dumps({
+                "environment": "staging", "state": "rolled_back_to_prior_staging",
+                "candidate_operation_id": str(target.candidate_operation_id),
+                "receipt_id": str(target.receipt_id), "git_sha": target.expected_sha,
+                "prior_staging_project_id": binding.old.project_id,
+                "worker_secret_update": "atomic_bulk_pair", "candidate_roles_mutated": False,
+            }, sort_keys=True))
+            return 0
+
+        scope = _local_scope(binding.candidate)
+        owner_dsn = binding.owner
         before = read_seed_state(owner_dsn.value)
         validate_seed_state(before)
         if not args.apply:
             print(json.dumps({
-                "environment": "staging", "project": STAGING_PROJECT_NAME,
+                "environment": "staging", "project": binding.candidate.project_name,
                 "branch": STAGING_BRANCH_NAME, "state": "dry_run",
+                "mutated": False,
+                "candidate_operation_id": str(target.candidate_operation_id),
+                "receipt_id": str(target.receipt_id), "git_sha": target.expected_sha,
+                "candidate_project_id": binding.candidate.project_id,
+                "prior_staging_project_id": binding.old.project_id,
+                "production_project_id": binding.production.project_id,
                 "canonical_grants": {label: len(plan) for label, plan in plans.items()},
                 "proposal_status": dict(before.proposal_status),
                 "target_count": before.target_count, "batch_count": before.batch_count,
                 "reader_least_privilege_required": True,
+                "worker_secret_update": "atomic_bulk_pair",
+                "rollback_source": "untouched canonical old-staging credential files",
+                "next_phase": "rerun with --apply after local checks are green",
             }, sort_keys=True))
             return 0
 
-        verify_provider_scope(
-            scope, neonctl=db_tap.NEONCTL, environ=os.environ,
-        )
-        config_root = credential.profile("writer").paths.final.parent
+        preserve_provider_scopes()
+        rollback_values = load_rollback_worker_values(binding.old)
+        config_root = replacement_credential_root(target.candidate_operation_id)
         lock_path = config_root / ".staging-role-operation.lock"
         outcomes: dict[str, str] = {}
+        candidate_values: dict[str, str] = {}
         with credential.exclusive_lock(lock_path):
             owner = psycopg.connect(owner_dsn.value)
             try:
@@ -973,7 +1320,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cur.execute("select pg_advisory_lock(%s)", (LOCK_KEY,))
                 owner.autocommit = False
                 def converge(login_profile: LoginProfile) -> tuple[str, str]:
-                    file_profile = credential.profile(login_profile.label)
+                    file_profile = credential.profile(
+                        login_profile.label, config_root=config_root)
                     cur.execute("select exists(select 1 from pg_roles where rolname=%s)",
                                 (login_profile.login_role,))
                     exists = cur.fetchone() == (True,)
@@ -1025,17 +1373,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                             expected_value=stored.value,
                         )
                     return stored.value, outcome
-
-                def publish(login_profile: LoginProfile, value: str) -> None:
-                    verify_provider_scope(
-                        scope, neonctl=db_tap.NEONCTL, environ=os.environ,
-                    )
-                    put_worker_database_secret(login_profile, value)
-                    verify_worker_secret_binding(login_profile)
-                    verify_provider_scope(
-                        scope, neonctl=db_tap.NEONCTL, environ=os.environ,
-                    )
-                outcomes = run_profile_sequence(PROFILES, converge, publish)
+                for login_profile in PROFILES:
+                    value, outcome = converge(login_profile)
+                    candidate_values[login_profile.secret_name] = value
+                    outcomes[login_profile.label] = outcome
             finally:
                 try:
                     owner.rollback()
@@ -1044,13 +1385,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except (psycopg.Error, ValueError):
                     pass
                 owner.close()
+        publish_worker_cutover(
+            candidate_values, rollback_values, preserve=preserve_provider_scopes,
+            bulk=lambda values: bulk_worker_database_secrets(values),
+            verify=lambda: verify_worker_database_secret_bindings(),
+        )
         after = read_seed_state(owner_dsn.value)
         validate_seed_state(after)
         if after != before:
             raise ProvisioningRefusal("provisioning changed proposals, doctrine targets, or batches")
         print(json.dumps({
-            "environment": "staging", "project": STAGING_PROJECT_NAME,
+            "environment": "staging", "project": binding.candidate.project_name,
             "branch": STAGING_BRANCH_NAME, "state": "provisioned",
+            "candidate_operation_id": str(target.candidate_operation_id),
+            "receipt_id": str(target.receipt_id), "git_sha": target.expected_sha,
             "role_outcomes": outcomes,
             "canonical_grants": {label: len(plan) for label, plan in plans.items()},
             "identities": [READER_ROLE, APP_ROLE], "statement_timeout_seconds": 60,
@@ -1067,7 +1415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except (
         OSError, ValueError, ProvisioningRefusal, credential.CredentialRefusal, psycopg.Error,
-        subprocess.TimeoutExpired,
+        replacement.ReplacementRefusal, subprocess.TimeoutExpired,
     ) as exc:
         print("staging-app-writer-provision: REFUSED — " + redact_error(exc), file=sys.stderr)
         return 2
