@@ -50,9 +50,14 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+from lib.rule_delivery_shadow import (  # noqa:E402
+    append_locked, file_sha256, make_error_observation, make_observation,
+    source_sha256, stamp,
+)
 MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 LOG = os.path.join(REPO, "out", "rule-delivery-shadow.jsonl")
 CARR_PATH_MARKERS = ("/carr-system/", "/carr-system", "my drive/carr ai")
@@ -258,9 +263,7 @@ def audit(row):
     if row.get("session") == "selftest":
         return
     try:
-        os.makedirs(os.path.dirname(LOG), exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
+        append_locked(Path(LOG), lambda _rows: row)
     except Exception:
         pass
 
@@ -300,10 +303,12 @@ def main():
             records = [json.loads(line) for line in handle if line.strip()]
         triggers, members = load_packs()
         result = evaluate(records, triggers, members)
-        row = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-               "hook": "rule-pack-drift-gate",
-               "session": payload.get("session_id") or payload.get("sessionId"),
-               **result}
+        raw_session = payload.get("session_id") or payload.get("sessionId")
+        session = raw_session if isinstance(raw_session, str) and raw_session.strip() \
+            else "unavailable"
+        row = make_observation(
+            session=session, map_digest=file_sha256(Path(MAP)),
+            source_digest=source_sha256(Path(REPO)), result=result)
         # A turn that implied no pack and loaded none is the ordinary case and
         # writing a row per turn for it would bury the rows that matter.
         if result["needed"] or result["loaded"]:
@@ -318,10 +323,24 @@ def main():
         # This one guards DELIVERY: a bug here that blocked every turn would
         # stop all work over a check that has not cut a single rule yet, and the
         # first fix anyone reached for would be to uninstall it.
-        audit({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-               "hook": "rule-pack-drift-gate",
-               "session": payload.get("session_id") or payload.get("sessionId"),
-               "error": type(exc).__name__, "detail": str(exc)[:200]})
+        raw_session = payload.get("session_id") or payload.get("sessionId")
+        session = raw_session if isinstance(raw_session, str) and raw_session.strip() \
+            else "unavailable"
+        category = {"JSONDecodeError": "invalid-transcript-json",
+                    "FileNotFoundError": "transcript-or-source-absent",
+                    "PermissionError": "transcript-or-source-unreadable",
+                    "ValueError": "invalid-shadow-observation"}.get(
+                        type(exc).__name__, "unexpected-gate-error")
+        try:
+            map_digest = file_sha256(Path(MAP))
+            source_digest = source_sha256(Path(REPO))
+        except Exception:
+            map_digest = "0" * 64
+            source_digest = "0" * 64
+        row = make_error_observation(
+            session=session, error=category, detail="rule-pack-drift-gate-failed-open",
+            map_digest=map_digest, source_digest=source_digest)
+        audit(row)
         return 0
 
 

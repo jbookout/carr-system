@@ -64,6 +64,12 @@ check("and its age is reported in hours", round(stale["age_hours"]) == 200,
 
 fresh = watch.summarize([row(ts=stamp(3), needed=["engineering-git"])], now=NOW)
 check("a fresh log is not stale", fresh["stale"] is False)
+with_receipt = watch.summarize([
+    row(ts=stamp(3), needed=["engineering-git"]),
+    {"record_type": "epoch", "ts": stamp(1), "record_id": "a" * 64},
+], now=NOW)
+check("ledger receipts are not counted as observed turns", with_receipt["turns"] == 1,
+      str(with_receipt))
 
 # ── the miss is the number the enforcement flip turns on ────────────────────
 missed = watch.summarize([
@@ -101,10 +107,10 @@ check("a missing log reads as empty rather than raising", missing_file == ([], 0
 # ── the printed report says the thing a reader must not miss ────────────────
 import io, contextlib  # noqa: E402
 
-def rendered(summary):
+def rendered(summary, eligibility=None):
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        watch.report(summary)
+        watch.report(summary, eligibility)
     return buffer.getvalue()
 
 check("an empty log prints that nothing was measured",
@@ -118,6 +124,13 @@ check("a clean fresh week prints the turn count and zero misses",
       "0 misses" in rendered(fresh), rendered(fresh))
 check("and it does not claim to have counted turns it never saw",
       "with a pack signal" in rendered(fresh), rendered(fresh))
+
+blocked = {"eligible": False, "reasons": ["one unresolved finding"],
+           "open": [{"kind": "miss", "event_id": "a" * 64}], "closed": []}
+check("nightly report surfaces eligibility and missing ownership/remedy",
+      "ENFORCEMENT BLOCKED" in rendered(missed)
+      and "owner=UNASSIGNED" in rendered(missed, blocked),
+      rendered(missed, blocked))
 
 # ── delivery scope is part of the production acceptance signal ─────────────
 audit = watch.load_audit()
@@ -139,4 +152,4 @@ if FAILURES:
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-delivery-shadow-watch-selftest: 20 cases passed")
+print("rule-delivery-shadow-watch-selftest: 22 cases passed")

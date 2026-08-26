@@ -25,7 +25,10 @@ done
 if (( APPLY )); then
   dirty=$(cd "$REPO" && git status --porcelain -- \
     ops/config/rule-delivery-activation-overlay.v1.json \
-    ops/rule-delivery-cutover.py bin/rule-delivery-cutover-prod.sh \
+    hooks/rule-pack-drift-gate.py lib/rule_delivery_shadow.py \
+    ops/rule-delivery-cutover.py ops/rule-delivery-shadow-eligibility.py \
+    ops/rule-delivery-shadow-ledger.py ops/rule-delivery-shadow-watch.py \
+    bin/rule-delivery-cutover-prod.sh bin/rule-delivery-shadow-ledger-prod.sh \
     migrations/0317_atomic_rule_delivery_cutover.sql)
   [[ -z "$dirty" ]] || { print -u2 "REFUSED: cutover source is uncommitted"; exit 1; }
 fi
