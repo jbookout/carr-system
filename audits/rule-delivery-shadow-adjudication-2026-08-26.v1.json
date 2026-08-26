@@ -10,7 +10,10 @@
   },
   "ledger": {
     "path": "out/rule-delivery-shadow.jsonl",
-    "sha256": "6a7a06e2b032088013090aa97bc34cb668e3a8a3b4809a19cd6938849213853f",
+    "snapshot": {
+      "line_count": 30,
+      "sha256": "6a7a06e2b032088013090aa97bc34cb668e3a8a3b4809a19cd6938849213853f"
+    },
     "finding_count": 14,
     "mutation": "none"
   },

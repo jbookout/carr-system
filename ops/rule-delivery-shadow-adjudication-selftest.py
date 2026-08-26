@@ -54,6 +54,21 @@ def digest(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= HEX
 
 
+def pinned_ledger_prefix(raw: bytes, snapshot: dict) -> tuple[bytes, int]:
+    """Return the immutable line-preserving snapshot prefix of an append-only log."""
+    assert set(snapshot) == {"line_count", "sha256"}
+    line_count = snapshot["line_count"]
+    assert (isinstance(line_count, int) and not isinstance(line_count, bool)
+            and line_count > 0)
+    assert digest(snapshot["sha256"])
+    lines = raw.splitlines(keepends=True)
+    assert len(lines) >= line_count, "ledger is shorter than its immutable snapshot"
+    prefix = b"".join(lines[:line_count])
+    assert (hashlib.sha256(prefix).hexdigest() == snapshot["sha256"]), (
+        "ledger snapshot prefix changed")
+    return prefix, len(lines) - line_count
+
+
 document = json.loads(ARTIFACT.read_text(encoding="utf-8"))
 assert document["schema"] == "rule-delivery-shadow-adjudication/v1"
 assert document["status"] == "independently-reviewed"
@@ -65,7 +80,10 @@ assert document["review"] == {
 }
 assert document["ledger"] == {
     "path": "out/rule-delivery-shadow.jsonl",
-    "sha256": "6a7a06e2b032088013090aa97bc34cb668e3a8a3b4809a19cd6938849213853f",
+    "snapshot": {
+        "line_count": 30,
+        "sha256": "6a7a06e2b032088013090aa97bc34cb668e3a8a3b4809a19cd6938849213853f",
+    },
     "finding_count": 14,
     "mutation": "none",
 }
@@ -111,17 +129,36 @@ ledger_candidates = [
 ]
 ledger_path = next((path for path in ledger_candidates if path.is_file()), None)
 if ledger_path:
-    assert hashlib.sha256(ledger_path.read_bytes()).hexdigest() == document["ledger"]["sha256"]
+    ledger_prefix, appended_lines = pinned_ledger_prefix(
+        ledger_path.read_bytes(), document["ledger"]["snapshot"])
     derived = {}
-    for line in ledger_path.read_text(encoding="utf-8").splitlines():
+    for line in ledger_prefix.splitlines():
         row = json.loads(line)
         if finding(row):
             derived[observation_id(row)] = (row.get("session"), row.get("ts"))
     assert derived == {event["event_id"]: (event["session_id"], event["observed_at"])
                        for event in events}
-    print(f"verified pinned ledger bytes and {len(derived)} derived finding identities")
+    print(f"verified immutable ledger snapshot and {len(derived)} derived finding identities; "
+          f"retained {appended_lines} later append-only line(s)")
 else:
     print("external raw ledger unavailable; validated committed 14-event digest envelope")
+
+# Snapshot validation deliberately accepts appended telemetry but never a short
+# or rewritten historical prefix.
+fixture_prefix = b'{"record_type":"observation","n":1}\n{"record_type":"observation","n":2}\n'
+fixture_snapshot = {"line_count": 2,
+                    "sha256": hashlib.sha256(fixture_prefix).hexdigest()}
+fixture_appended = fixture_prefix + b'{"record_type":"disposition"}\n'
+assert pinned_ledger_prefix(fixture_appended, fixture_snapshot)[1] == 1
+fixture_lines = fixture_prefix.splitlines(keepends=True)
+rewritten_fixture = b'{"record_type":"rewritten"}\n' + fixture_lines[1]
+for invalid_fixture in (fixture_lines[0], rewritten_fixture):
+    try:
+        pinned_ledger_prefix(invalid_fixture, fixture_snapshot)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("short or rewritten ledger snapshot prefix was accepted")
 
 verified_transcripts = 0
 missing_transcripts = []
