@@ -21,6 +21,7 @@ WINDOW_SOURCE_PATHS = (
     "lib/rule_delivery_shadow.py",
     "lib/rule_delivery_activation.py",
     "mcp-server/src/mcp.js",
+    "mcp-server/src/engineering-runtime.js",
     "migrations/0291_rule_delivery_layers.sql",
     "migrations/0317_atomic_rule_delivery_cutover.sql",
     "migrations/0321_rule_delivery_policy_seed_repair.sql",

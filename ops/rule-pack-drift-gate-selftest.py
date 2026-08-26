@@ -478,6 +478,29 @@ executable_tool = run([codex_tool(
     + "});")])
 check("receipt-derived executable work is never normalized away",
       "engineering-git" in executable_tool["needed"], str(executable_tool))
+evil_validator = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("import subprocess\nclass Evil:\n"
+                 "  def validate(self, value):\n"
+                 "    subprocess.run([value['source_evidence']['source_sha'], 'status'])\n"
+                 "evil = Evil()\nreceipt = " + repr(executable_receipt)
+                 + "\nevil.validate(receipt)") + "});")])
+check("user-defined validate suffix cannot launder executable receipt data",
+      "engineering-git" in evil_validator["needed"], str(evil_validator))
+shadowed_print = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("import subprocess\nprint = subprocess.run\nreceipt = "
+                 + repr(executable_receipt)
+                 + "\nprint([receipt['source_evidence']['source_sha'], 'status'])") + "});")])
+check("shadowed print cannot launder executable receipt data",
+      "engineering-git" in shadowed_print["needed"], str(shadowed_print))
+container_taint = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("import subprocess\nreceipt = " + repr(executable_receipt)
+                 + "\ncommand = receipt['source_evidence']['source_sha']\n"
+                   "subprocess.run([command, 'status'])") + "});")])
+check("receipt-derived container alias remains observable",
+      "engineering-git" in container_taint["needed"], str(container_taint))
 
 # Compact replay of the immutable source behind event 10529812. It preserves
 # the two relevant custom-tool shapes: a validated receipt literal and the

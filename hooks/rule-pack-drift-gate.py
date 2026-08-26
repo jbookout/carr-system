@@ -361,6 +361,8 @@ def engineering_workflow_packs(record):
         }
         if (task["engineering_slice"] != selected
                 or task["plan_digest"] != plan["plan_digest"]
+                or task["work_request"] != plan["work_request"]["id"]
+                or task["work_request"] != envelope["work_request_id"]
                 or packet["plan_digest"] != plan["plan_digest"]
                 or packet["slice_ref"] != task["slice_ref"]
                 or packet["schema_version"] != "engineering-slice-packet.v1"
@@ -500,9 +502,45 @@ def _target_names(node):
     return set()
 
 
+def _inert_call_allowlist(tree):
+    """Exact data-only emit/validation calls whose roots are not shadowed."""
+    imports = set()
+    shadowed = set()
+    assigned_paths = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            imports.update(alias.asname or alias.name for alias in statement.names)
+        elif isinstance(statement, ast.ImportFrom):
+            imports.update(alias.asname or alias.name for alias in statement.names)
+        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadowed.add(statement.name)
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            targets = statement.targets if isinstance(statement, ast.Assign) \
+                else [statement.target]
+            for target in targets:
+                shadowed.update(_target_names(target))
+                path = _call_name(target)
+                if path:
+                    assigned_paths.add(path)
+    allowed = set()
+    if "print" not in shadowed and not any(
+            path.startswith(("builtins.print", "__builtins__.print"))
+            for path in assigned_paths):
+        allowed.add("print")
+    if "json" in imports and "json" not in shadowed and "json.dumps" not in assigned_paths:
+        allowed.add("json.dumps")
+    if ("jsonschema" in imports and "jsonschema" not in shadowed
+            and "jsonschema.Draft202012Validator" not in assigned_paths):
+        allowed.add("jsonschema.Draft202012Validator.validate")
+    if ("ep" in imports and "ep" not in shadowed
+            and "ep._validate_receipt" not in assigned_paths):
+        allowed.add("ep._validate_receipt")
+    return allowed
+
+
 def _receipt_use_is_inert(tree, assignment, receipt_name):
     """Refuse normalization if receipt-derived data reaches executable code."""
-    allowed = ("print", "json.dumps")
+    allowed = _inert_call_allowlist(tree)
     tainted = {receipt_name}
     after = False
     for statement in tree.body:
@@ -515,8 +553,7 @@ def _receipt_use_is_inert(tree, assignment, receipt_name):
             if not _uses_names(call, tainted):
                 continue
             name = _call_name(call.func)
-            if (name not in allowed and not name.endswith(".validate")
-                    and not name.endswith("._validate_receipt")):
+            if name not in allowed:
                 return False
         if isinstance(statement, (ast.Assign, ast.AnnAssign)):
             value = statement.value

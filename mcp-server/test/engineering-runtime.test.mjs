@@ -145,6 +145,7 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
   assert.equal(result.completed, 1);
   assert.deepEqual(calls.find(row => row.options)?.options, { fresh: true });
   assert.equal(calls.find(row => row.options)?.task.engineering_plan.plan_digest, typed.plan_digest);
+  assert.equal(calls.find(row => row.options)?.task.work_request, typed.work_request.id);
   assert.ok(!calls.some(sql => typeof sql === "string" && /from ops\.work_request/i.test(sql)));
 });
 

@@ -495,7 +495,8 @@ export async function runEngineeringWorker({ c, worker, desk, dispatchEnvelope, 
       if (claim.controller_error) error(ToolError, { error: claim.controller_error });
       const actor = controllerActor(claim, ToolError);
       const { plan, slice } = controllerPlan(claim, ToolError);
-      const task = { ...(claim.payload || {}), job_ref: `job:${claim.job_id}`,
+      const task = { ...(claim.payload || {}), work_request: plan.work_request.id,
+        job_ref: `job:${claim.job_id}`,
         attempt_id: `attempt:${claim.attempt}`, engineering_plan: plan, engineering_slice: slice };
       const receipt = await runCodexSlice({ dispatchEnvelope, desk, envelope: claim.envelope, task });
       if (!receipt || typeof receipt !== "object") throw new Error("Codex worker returned no typed receipt");

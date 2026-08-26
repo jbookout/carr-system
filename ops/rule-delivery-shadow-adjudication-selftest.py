@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -87,6 +88,20 @@ def verify_legacy_ledger(raw: bytes, *, prefix_rows: int, prefix_sha256: str,
     return True
 
 
+def verify_owned_ledger(root: Path, relative: str, *, prefix_rows: int,
+                        prefix_sha256: str,
+                        expected: dict[str, tuple[str, str]]) -> bool:
+    """The evidence-owning checkout may be absent, never partially present."""
+    if not root.exists():
+        return False
+    path = root / relative
+    assert path.is_file(), "canonical legacy ledger is missing or not a regular file"
+    assert verify_legacy_ledger(
+        path.read_bytes(), prefix_rows=prefix_rows, prefix_sha256=prefix_sha256,
+        expected=expected, require_evidence=True)
+    return True
+
+
 document = json.loads(ARTIFACT.read_text(encoding="utf-8"))
 assert document["schema"] == "rule-delivery-shadow-adjudication/v1"
 assert document["status"] == "independently-reviewed"
@@ -144,7 +159,8 @@ for event in events:
 expected_events = {event["event_id"]: (event["session_id"], event["observed_at"])
                    for event in events}
 local_ledger = (REPO / document["ledger"]["path"]).resolve()
-canonical_ledger = (Path("/Users/booko/carr-system") / document["ledger"]["path"]).resolve()
+canonical_root = Path("/Users/booko/carr-system")
+canonical_ledger = (canonical_root / document["ledger"]["path"]).resolve()
 checked_ledger = False
 if local_ledger.is_file() and local_ledger != canonical_ledger:
     checked_ledger = True
@@ -155,12 +171,10 @@ if local_ledger.is_file() and local_ledger != canonical_ledger:
               f"{len(expected_events)} derived finding identities")
     else:
         print("external raw ledger unavailable; clone-local log has no pinned legacy events")
-if canonical_ledger.is_file():
+if verify_owned_ledger(
+        canonical_root, document["ledger"]["path"], prefix_rows=PINNED_PREFIX_ROWS,
+        prefix_sha256=document["ledger"]["sha256"], expected=expected_events):
     checked_ledger = True
-    assert verify_legacy_ledger(
-        canonical_ledger.read_bytes(), prefix_rows=PINNED_PREFIX_ROWS,
-        prefix_sha256=document["ledger"]["sha256"], expected=expected_events,
-        require_evidence=True)
     print(f"verified canonical immutable {PINNED_PREFIX_ROWS}-row ledger prefix and "
           f"{len(expected_events)} derived finding identities")
 if not checked_ledger:
@@ -201,6 +215,24 @@ except AssertionError:
     pass
 else:
     raise AssertionError("total canonical pinned-evidence tamper was accepted as unavailable")
+with tempfile.TemporaryDirectory() as directory:
+    owning_root = Path(directory) / "carr-system"
+    owning_root.mkdir()
+    for state in ("missing", "directory"):
+        ledger = owning_root / "out/shadow.jsonl"
+        if state == "directory":
+            ledger.mkdir(parents=True)
+        try:
+            verify_owned_ledger(
+                owning_root, "out/shadow.jsonl", prefix_rows=2,
+                prefix_sha256=fixture_digest, expected=fixture_expected)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"owning-root {state} ledger evidence was accepted")
+        if ledger.is_dir():
+            ledger.rmdir()
+            ledger.parent.rmdir()
 
 verified_transcripts = 0
 missing_transcripts = []

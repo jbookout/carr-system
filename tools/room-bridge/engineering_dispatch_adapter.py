@@ -151,6 +151,10 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
         raise DispatchRefusal("engineering envelope does not select the Codex desktop adapter")
     if not isinstance(slice_row, dict) or not isinstance(task.get("slice_ref"), str):
         raise DispatchRefusal("engineering controller task has no exact slice")
+    if (not isinstance(plan, dict) or not isinstance(plan.get("work_request"), dict)
+            or task.get("work_request") != plan["work_request"].get("id")
+            or task.get("work_request") != envelope.get("work_request_id")):
+        raise DispatchRefusal("engineering controller task work request is not plan/envelope bound")
     packet = engineering_passport.build_engineering_slice_packet(envelope, plan, task["slice_ref"])
     if packet["slice_ref"] != slice_row.get("slice_ref") or task.get("plan_digest") != packet["plan_digest"]:
         raise DispatchRefusal("engineering controller task does not match its accepted packet")

@@ -76,7 +76,7 @@ def valid_receipt() -> dict:
 def request() -> dict:
     first = PLAN["slices"][0]
     return {"desk": "engineering-codex", "envelope": copy.deepcopy(ENVELOPE), "executor_slug": "codex",
-            "task": {"work_request": "WR-SYNTHETIC", "slice_ref": "slice:a", "plan_digest": PLAN["plan_digest"],
+            "task": {"work_request": PLAN["work_request"]["id"], "slice_ref": "slice:a", "plan_digest": PLAN["plan_digest"],
                      "job_ref": ENVELOPE["request"]["job_ref"], "attempt_id": "attempt:1",
                      "generation": 1,
                      "engineering_plan": copy.deepcopy(PLAN),
@@ -145,6 +145,15 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
         '"packet_digest":"sha256:', '"packet_digest":"sha256:0', 1)
     assert rule_pack_gate.engineering_workflow_packs(tampered_prompt) == []
     assert rule_pack_gate.work_text(tampered_prompt)
+    task_marker = "\n\nCONTROLLER TASK BINDING (immutable):\n"
+    prompt_prefix, prompt_task = seen["prompt"].split(task_marker, 1)
+    unbound_task = json.loads(prompt_task)
+    unbound_task["work_request"] = "wr:unrelated-human-spoof"
+    unbound_prompt = copy.deepcopy(prompt_record)
+    unbound_prompt["payload"]["content"][0]["text"] = (
+        prompt_prefix + task_marker
+        + json.dumps(unbound_task, sort_keys=True, separators=(",", ":")))
+    assert rule_pack_gate.engineering_workflow_packs(unbound_prompt) == []
 
 
 def test_invalid_model_receipt_refuses_before_the_controller_can_persist_it():
@@ -155,6 +164,22 @@ def test_invalid_model_receipt_refuses_before_the_controller_can_persist_it():
     except adapter.DispatchRefusal:
         return
     raise AssertionError("non-JSON result reached receipt persistence")
+
+
+def test_unbound_task_work_request_refuses_before_dispatch():
+    value = request()
+    value["task"]["work_request"] = "wr:unrelated-human-spoof"
+    dispatched = False
+    def fake_dispatch(*_args, **_kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return {}
+    try:
+        adapter.run(value, dispatch_fn=fake_dispatch, registry=ValidEngineeringDesk())
+    except adapter.DispatchRefusal:
+        assert dispatched is False
+        return
+    raise AssertionError("unbound task work request reached dispatch")
 
 
 def test_receipt_cannot_relabel_the_server_issued_native_session_or_adapter():
