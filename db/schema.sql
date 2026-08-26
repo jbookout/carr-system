@@ -857,103 +857,41 @@ CREATE FUNCTION ops.approve_program5_release(p_release_key text, p_plan_hash tex
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
 declare actor_slug text; rel ops.release%rowtype; existing ops.release_approval_receipt%rowtype;
-  rehearsal_run ops.run%rowtype; approval_uuid uuid; approved_time timestamptz;
-  expiry_time timestamptz; projection jsonb; approval_hash text; approval_ref text;
-  supplied_verifier_actor text; supplied_verifier_evidence text;
-  candidate_verifier_actor text; candidate_verifier_evidence text;
-  verifier_actor_value text; verifier_evidence_value text;
+  rehearsal_run ops.run%rowtype; approval_uuid uuid; approved_time timestamptz; expiry_time timestamptz;
+  projection jsonb; approval_hash text; approval_ref text; supplied_verifier_actor text; supplied_verifier_evidence text;
+  candidate_verifier_actor text; candidate_verifier_evidence text; verifier_actor_value text; verifier_evidence_value text;
 begin
   actor_slug:=ops.authority_actor_slug();
   if actor_slug<>'joe' then raise exception 'Program 5 Production approval requires Joe authority'; end if;
-  if p_idempotency_key is null or coalesce(p_release_key,'')='' or coalesce(p_plan_hash,'')=''
-     or coalesce(p_expires_hours,0) not between 1 and 24 then
-    raise exception 'invalid Program 5 approval input';
-  end if;
-  if (p_verifier_actor is null) <> (p_verifier_evidence_ref is null)
-     or (p_verifier_actor is not null
-         and (btrim(p_verifier_actor)='' or btrim(p_verifier_evidence_ref)='')) then
-    raise exception 'supplied verifier actor and evidence must be an atomic nonblank pair';
-  end if;
+  if p_idempotency_key is null or coalesce(p_release_key,'')='' or coalesce(p_plan_hash,'')='' or coalesce(p_expires_hours,0) not between 1 and 24 then raise exception 'invalid Program 5 approval input'; end if;
+  if (p_verifier_actor is null)<>(p_verifier_evidence_ref is null) or (p_verifier_actor is not null and (btrim(p_verifier_actor)='' or btrim(p_verifier_evidence_ref)='')) then raise exception 'supplied verifier actor and evidence must be an atomic nonblank pair'; end if;
   supplied_verifier_actor:=case when p_verifier_actor is null then null else lower(btrim(p_verifier_actor)) end;
   supplied_verifier_evidence:=case when p_verifier_evidence_ref is null then null else btrim(p_verifier_evidence_ref) end;
   perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
   select * into existing from ops.release_approval_receipt where idempotency_key=p_idempotency_key;
   if found then
-    if existing.plan_hash<>p_plan_hash
-       or existing.approval_expires_at-existing.approved_at
-          <> make_interval(hours=>p_expires_hours)
-       or not exists (
-      select 1 from ops.release where id=existing.release_id and release_key=p_release_key
-        and plan_hash=existing.plan_hash and approval_receipt_id=existing.id
-        and state in ('approved','deploying','verifying','complete')
-        and approved_at=existing.approved_at
-        and approval_expires_at=existing.approval_expires_at
-        and (supplied_verifier_actor is null or existing.verifier_actor=supplied_verifier_actor)
-        and (supplied_verifier_evidence is null or existing.verifier_evidence_ref=supplied_verifier_evidence)) then
-      raise exception 'Program 5 approval idempotency key was reused with changed input';
-    end if;
-    return jsonb_build_object('approval_receipt_id',existing.id,
-      'approval_ref',existing.evidence_ref,'approval_expires_at',existing.approval_expires_at,
-      'replayed',true);
+    if existing.plan_hash<>p_plan_hash or existing.approval_expires_at-existing.approved_at<>make_interval(hours=>p_expires_hours)
+       or not exists(select 1 from ops.release where id=existing.release_id and release_key=p_release_key and plan_hash=existing.plan_hash and approval_receipt_id=existing.id and state in ('approved','deploying','verifying','complete') and approved_at=existing.approved_at and approval_expires_at=existing.approval_expires_at and (supplied_verifier_actor is null or existing.verifier_actor=supplied_verifier_actor) and (supplied_verifier_evidence is null or existing.verifier_evidence_ref=supplied_verifier_evidence)) then raise exception 'Program 5 approval idempotency key was reused with changed input'; end if;
+    return jsonb_build_object('approval_receipt_id',existing.id,'approval_ref',existing.evidence_ref,'approval_expires_at',existing.approval_expires_at,'replayed',true);
   end if;
   select * into rel from ops.release where release_key=p_release_key for update;
-  if not found or rel.environment<>'production' or rel.state<>'candidate'
-     or rel.plan_hash is distinct from p_plan_hash then
-    raise exception 'release is not the exact Production candidate plan requested';
-  end if;
-  if (rel.verifier_actor is null) <> (rel.verifier_evidence_ref is null)
-     or (rel.verifier_actor is not null
-         and (btrim(rel.verifier_actor)='' or btrim(rel.verifier_evidence_ref)='')) then
-    raise exception 'candidate verifier actor and evidence must be an atomic nonblank pair';
-  end if;
+  if not found or rel.environment<>'production' or rel.state<>'candidate' or rel.plan_hash is distinct from p_plan_hash then raise exception 'release is not the exact Production candidate plan requested'; end if;
+  if (rel.verifier_actor is null)<>(rel.verifier_evidence_ref is null) or (rel.verifier_actor is not null and (btrim(rel.verifier_actor)='' or btrim(rel.verifier_evidence_ref)='')) then raise exception 'candidate verifier actor and evidence must be an atomic nonblank pair'; end if;
   candidate_verifier_actor:=case when rel.verifier_actor is null then null else lower(btrim(rel.verifier_actor)) end;
   candidate_verifier_evidence:=case when rel.verifier_evidence_ref is null then null else btrim(rel.verifier_evidence_ref) end;
   verifier_actor_value:=coalesce(supplied_verifier_actor,candidate_verifier_actor);
   verifier_evidence_value:=coalesce(supplied_verifier_evidence,candidate_verifier_evidence);
-  if verifier_actor_value is null or verifier_evidence_value is null then
-    raise exception 'release cannot be approved without an INDEPENDENT VERIFIER and verification evidence';
-  end if;
-  if rel.maker_actor is not null
-     and verifier_actor_value=lower(btrim(rel.maker_actor)) then
-    raise exception 'maker cannot independently verify their own release';
-  end if;
-  select r.* into rehearsal_run from ops.run r
-   join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
-   where r.release_id=rel.id and r.service_id=rel.service_id
-     and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
-     and r.state='succeeded' and r.evidence_ref=b.evidence_ref
-     and b.current_release_id=rel.id and b.service_id=rel.service_id
-     and b.recovery_strategy=rel.recovery_strategy
-     and b.recovery_plan_ref=rel.rollback_plan_ref and b.plan_hash=rel.plan_hash
-     and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(rel.migration_set)
-     and b.declared_migration_count=cardinality(rel.migration_set)
-     and b.declared_schema_highest_migration=rel.schema_highest_migration
-     and b.declared_schema_applied_count=rel.schema_applied_count
-     and b.declared_schema_ledger_sha256=rel.schema_ledger_sha256
-     and b.completed_at between clock_timestamp()-interval '24 hours' and clock_timestamp()
-   order by r.ended_at desc limit 1;
+  if verifier_actor_value is null or verifier_evidence_value is null then raise exception 'release cannot be approved without an INDEPENDENT VERIFIER and verification evidence'; end if;
+  if rel.maker_actor is not null and verifier_actor_value=lower(btrim(rel.maker_actor)) then raise exception 'maker cannot independently verify their own release'; end if;
+  select * into rehearsal_run from ops.run where id=ops.program5_exact_recovery_rehearsal(rel.id,clock_timestamp()-interval '24 hours');
   if not found then raise exception 'release has no exact typed recovery rehearsal'; end if;
   approved_time:=clock_timestamp(); expiry_time:=approved_time+make_interval(hours=>p_expires_hours);
-  projection:=jsonb_build_object('release_id',rel.id,'plan_hash',rel.plan_hash,
-    'recovery_run_id',rehearsal_run.id,'recovery_bundle_id',rehearsal_run.recovery_rehearsal_bundle_id,
-    'approved_by_actor',actor_slug,'approved_at',approved_time,'approval_expires_at',expiry_time,
-    'verifier_actor',verifier_actor_value,'verifier_evidence_ref',verifier_evidence_value);
-  approval_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
-  approval_ref:='ops.program5-release-approval:'||approval_hash;
-  insert into ops.release_approval_receipt(idempotency_key,release_id,recovery_run_id,
-    recovery_bundle_id,plan_hash,approved_by_actor,approved_at,approval_expires_at,
-    verifier_actor,verifier_evidence_ref,
-    approval_sha256,evidence_ref)
-  values(p_idempotency_key,rel.id,rehearsal_run.id,rehearsal_run.recovery_rehearsal_bundle_id,
-    rel.plan_hash,actor_slug,approved_time,expiry_time,verifier_actor_value,verifier_evidence_value,
-    approval_hash,approval_ref)
-  returning id into approval_uuid;
-  update ops.release set verifier_actor=verifier_actor_value,
-    verifier_evidence_ref=verifier_evidence_value,state='approved',approved_by_actor=actor_slug,
-    approved_at=approved_time,approval_expires_at=expiry_time,
-    approval_receipt_id=approval_uuid where id=rel.id;
-  return jsonb_build_object('approval_receipt_id',approval_uuid,'approval_ref',approval_ref,
-    'approval_expires_at',expiry_time,'replayed',false);
+  projection:=jsonb_build_object('release_id',rel.id,'plan_hash',rel.plan_hash,'recovery_run_id',rehearsal_run.id,'recovery_bundle_id',rehearsal_run.recovery_rehearsal_bundle_id,'approved_by_actor',actor_slug,'approved_at',approved_time,'approval_expires_at',expiry_time,'verifier_actor',verifier_actor_value,'verifier_evidence_ref',verifier_evidence_value);
+  approval_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex'); approval_ref:='ops.program5-release-approval:'||approval_hash;
+  insert into ops.release_approval_receipt(idempotency_key,release_id,recovery_run_id,recovery_bundle_id,plan_hash,approved_by_actor,approved_at,approval_expires_at,verifier_actor,verifier_evidence_ref,approval_sha256,evidence_ref)
+  values(p_idempotency_key,rel.id,rehearsal_run.id,rehearsal_run.recovery_rehearsal_bundle_id,rel.plan_hash,actor_slug,approved_time,expiry_time,verifier_actor_value,verifier_evidence_value,approval_hash,approval_ref) returning id into approval_uuid;
+  update ops.release set verifier_actor=verifier_actor_value,verifier_evidence_ref=verifier_evidence_value,state='approved',approved_by_actor=actor_slug,approved_at=approved_time,approval_expires_at=expiry_time,approval_receipt_id=approval_uuid where id=rel.id;
+  return jsonb_build_object('approval_receipt_id',approval_uuid,'approval_ref',approval_ref,'approval_expires_at',expiry_time,'replayed',false);
 end $$;
 
 
@@ -2174,6 +2112,14 @@ begin
   if old.program_key = 'carr-ai-engineering-suite-v1'
      and old.state = 'confirmed_closed'
      and new is distinct from old then
+    if coalesce(current_setting('carr.legacy_program_tenant_backfill', true), '') = 'on'
+       and old.organization_tenant_id is null
+       and new.organization_tenant_id = 'carr-internal'
+       and (to_jsonb(new) - 'organization_tenant_id')
+           is not distinct from
+           (to_jsonb(old) - 'organization_tenant_id') then
+      return new;
+    end if;
     raise exception 'closed capability programme evidence is immutable';
   end if;
   return new;
@@ -2455,6 +2401,30 @@ begin
   return jsonb_build_object('attempt_id',attempt.id,
     'deploy_allowed',inserted_count=1,'replayed',inserted_count=0,
     'state',case when inserted_count=1 then 'claimed' else 'claimed_pending_readback' end);
+end $$;
+
+
+--
+-- Name: claim_staging_forward_fix_rehearsal(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.claim_staging_forward_fix_rehearsal(p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare attempt ops.staging_forward_fix_rehearsal_attempt%rowtype; result_row ops.staging_forward_fix_rehearsal_result%rowtype; inserted_count integer;
+begin
+  if session_user<>'carr_jobs' then raise exception 'forward-fix rehearsal claim requires the carr_jobs session'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,315));
+  select * into attempt from ops.staging_forward_fix_rehearsal_attempt where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'forward-fix rehearsal must be prepared before claim'; end if;
+  select * into result_row from ops.staging_forward_fix_rehearsal_result where rehearsal_attempt_id=attempt.id;
+  if found then return jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt.id,'mutation_allowed',false,'state','observed','replayed',true); end if;
+  insert into ops.staging_forward_fix_rehearsal_claim(rehearsal_attempt_id,writer_session_user)
+  values(attempt.id,session_user) on conflict do nothing;
+  get diagnostics inserted_count=row_count;
+  return jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt.id,'mutation_allowed',inserted_count=1,
+    'state',case when inserted_count=1 then 'claimed' else 'claimed_pending_result' end,'replayed',inserted_count=0);
 end $$;
 
 
@@ -4388,7 +4358,7 @@ begin
     raise exception 'later engineering envelope must name its immutable predecessor';
   end if;
   select * into prior from ops.engineering_execution_envelope
-   where id=new.supersedes_envelope_id for key share;
+   where id=new.supersedes_envelope_id;
   if not found or prior.slice_plan_id<>new.slice_plan_id or prior.slice_ref<>new.slice_ref
      or prior.accepted_plan_id<>new.accepted_plan_id or prior.work_request_id<>new.work_request_id then
     raise exception 'engineering envelope predecessor is outside the exact slice binding';
@@ -5540,6 +5510,77 @@ end $_$;
 
 
 --
+-- Name: prepare_staging_forward_fix_rehearsal(uuid, uuid, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.prepare_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_git_sha text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare rel ops.release%rowtype; existing ops.staging_forward_fix_rehearsal_attempt%rowtype;
+  result_row ops.staging_forward_fix_rehearsal_result%rowtype; migration_hash text;
+  migration_count integer; provider_uuid uuid; attempt_uuid uuid; expected_tag text;
+begin
+  if session_user<>'carr_jobs' then raise exception 'forward-fix rehearsal writer requires the carr_jobs session'; end if;
+  if p_idempotency_key is null or p_correlation_id is null or coalesce(p_release_key,'')=''
+     or coalesce(p_git_sha,'') !~ '^[0-9a-f]{40}$' then
+    raise exception 'invalid typed forward-fix rehearsal input';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,315));
+  perform pg_advisory_xact_lock(hashtextextended(p_correlation_id::text,315));
+  select * into rel from ops.release where release_key=p_release_key;
+  if not found or rel.environment<>'production' or rel.state<>'candidate'
+     or rel.recovery_strategy<>'forward_fix' or rel.rollback_ready is not true
+     or coalesce(btrim(rel.rollback_plan_ref),'')='' or coalesce(btrim(rel.plan_hash),'')=''
+     or rel.service_id is null or rel.provider<>'cloudflare-workers'
+     or coalesce(btrim(rel.provider_version_id),'')='' then
+    raise exception 'forward-fix rehearsal target is not an exact forward-fix Production candidate';
+  end if;
+  provider_uuid:=rel.provider_version_id::uuid;
+  if p_git_sha<>rel.git_sha or coalesce(cardinality(rel.migration_set),0)<=0
+     or coalesce(rel.schema_highest_migration,'') !~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'
+     or coalesce(rel.schema_applied_count,0)<=0
+     or coalesce(rel.schema_ledger_sha256,'') !~ '^sha256:[0-9a-f]{64}$' then
+    raise exception 'forward-fix rehearsal target lacks the exact declared candidate identity';
+  end if;
+  migration_hash:=ops.program5_migration_set_sha256(rel.migration_set);
+  migration_count:=cardinality(rel.migration_set);
+  expected_tag:='carr-staging-forward-fix-'||replace(p_idempotency_key::text,'-','');
+  select * into existing from ops.staging_forward_fix_rehearsal_attempt where idempotency_key=p_idempotency_key;
+  if found then
+    if (existing.correlation_id,existing.release_id,existing.service_id,existing.git_sha,
+        existing.candidate_provider_version_id,existing.recovery_strategy,existing.recovery_plan_ref,
+        existing.plan_hash,existing.expected_provider_tag,existing.declared_migration_set_sha256,
+        existing.declared_migration_count,existing.declared_schema_highest_migration,
+        existing.declared_schema_applied_count,existing.declared_schema_ledger_sha256) is distinct from
+       (p_correlation_id,rel.id,rel.service_id,p_git_sha,provider_uuid,'forward_fix',rel.rollback_plan_ref,
+        rel.plan_hash,expected_tag,migration_hash,migration_count,rel.schema_highest_migration,
+        rel.schema_applied_count,rel.schema_ledger_sha256) then
+      raise exception 'forward-fix rehearsal idempotency key was reused with changed input';
+    end if;
+    select * into result_row from ops.staging_forward_fix_rehearsal_result where rehearsal_attempt_id=existing.id;
+    return jsonb_build_object('forward_fix_rehearsal_attempt_id',existing.id,
+      'expected_provider_tag',existing.expected_provider_tag,
+      'state',case when result_row.id is null then 'prepared' else 'observed' end,
+      'mutation_claimed',exists(select 1 from ops.staging_forward_fix_rehearsal_claim where rehearsal_attempt_id=existing.id),
+      'result_ref',result_row.evidence_ref,'replayed',true);
+  end if;
+  insert into ops.staging_forward_fix_rehearsal_attempt(
+    idempotency_key,correlation_id,release_id,service_id,environment,git_sha,provider,
+    candidate_provider_version_id,recovery_strategy,recovery_plan_ref,plan_hash,expected_provider_tag,
+    declared_migration_set_sha256,declared_migration_count,declared_schema_highest_migration,
+    declared_schema_applied_count,declared_schema_ledger_sha256,writer_session_user)
+  values(p_idempotency_key,p_correlation_id,rel.id,rel.service_id,'staging',p_git_sha,'cloudflare-workers',
+    provider_uuid,'forward_fix',rel.rollback_plan_ref,rel.plan_hash,expected_tag,migration_hash,migration_count,
+    rel.schema_highest_migration,rel.schema_applied_count,rel.schema_ledger_sha256,session_user)
+  returning id into attempt_uuid;
+  return jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt_uuid,
+    'expected_provider_tag',expected_tag,'state','prepared','mutation_claimed',false,
+    'result_ref',null,'replayed',false);
+end $_$;
+
+
+--
 -- Name: prepare_staging_restore_only_attempt(uuid, uuid, text, text, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -5631,6 +5672,35 @@ begin
   return jsonb_build_object('restore_attempt_id',attempt_uuid,'expected_provider_tag',expected_tag,
     'state','prepared','mutation_claimed',false,'result_ref',null,'replayed',false);
 end $_$;
+
+
+--
+-- Name: program5_exact_recovery_rehearsal(uuid, timestamp with time zone); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone DEFAULT NULL::timestamp with time zone) RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+  select r.id
+    from ops.release rel
+    join ops.run r on r.release_id=rel.id and r.service_id=rel.service_id
+    join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
+   where rel.id=$1 and r.environment='staging' and r.state='succeeded' and r.evidence_ref=b.evidence_ref
+     and r.run_key=case when rel.recovery_strategy='rollback' then 'recovery.rehearsal.worker' else 'recovery.rehearsal.forward-fix' end
+     and b.current_release_id=rel.id and b.service_id=rel.service_id and b.recovery_strategy=rel.recovery_strategy
+     and b.recovery_plan_ref=rel.rollback_plan_ref and b.plan_hash=rel.plan_hash
+     and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(rel.migration_set)
+     and b.declared_migration_count=cardinality(rel.migration_set)
+     and b.declared_schema_highest_migration=rel.schema_highest_migration
+     and b.declared_schema_applied_count=rel.schema_applied_count
+     and b.declared_schema_ledger_sha256=rel.schema_ledger_sha256
+     and (rel.recovery_strategy='rollback' or (b.candidate_git_sha=rel.git_sha
+          and b.candidate_provider_version_id::text=rel.provider_version_id
+          and exists(select 1 from ops.staging_forward_fix_rehearsal_result x where x.id=b.forward_fix_result_id)))
+     and (p_not_before is null or b.completed_at>=p_not_before)
+   order by b.completed_at desc limit 1
+$_$;
 
 
 --
@@ -6306,6 +6376,26 @@ CREATE FUNCTION ops.read_execution_environment_providers() RETURNS jsonb
   from ops.execution_environment_provider p
   left join lateral (select c.* from ops.execution_environment_conformance c where c.provider_id=p.id order by c.observed_at desc,c.id desc limit 1) c on true
 $$;
+
+
+--
+-- Name: read_staging_forward_fix_rehearsal_declaration(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) RETURNS TABLE(expected_provider_tag text, declared_migration_set_sha256 text, declared_migration_count integer, declared_schema_highest_migration text, declared_schema_applied_count integer, declared_schema_ledger_sha256 text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  if session_user<>'carr_program5_forward_fix_verifier'
+     or not pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member') then
+    raise exception using errcode='42501',message='forward-fix declaration projection requires the exact scoped verifier capability';
+  end if;
+  return query select a.expected_provider_tag,a.declared_migration_set_sha256,
+    a.declared_migration_count,a.declared_schema_highest_migration,
+    a.declared_schema_applied_count,a.declared_schema_ledger_sha256
+  from ops.staging_forward_fix_rehearsal_attempt a where a.idempotency_key=p_idempotency_key;
+end $$;
 
 
 --
@@ -7093,6 +7183,101 @@ end $$;
 
 
 --
+-- Name: record_staging_forward_fix_rehearsal(uuid, uuid, text, integer, text, integer, text, bigint, boolean); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare attempt ops.staging_forward_fix_rehearsal_attempt%rowtype; existing ops.staging_forward_fix_rehearsal_result%rowtype;
+  result_uuid uuid; bundle_uuid uuid; run_uuid uuid; observed_time timestamptz:=clock_timestamp();
+  projection jsonb; projection_hash text; result_ref text; bundle_projection jsonb; bundle_hash text; bundle_ref text;
+begin
+  if session_user<>'carr_program5_forward_fix_verifier'
+     or not pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member') then
+    raise exception using errcode='42501',message='forward-fix rehearsal result requires the exact scoped verifier capability';
+  end if;
+  if p_idempotency_key is null or p_provider_version_id is null or coalesce(p_provider_tag,'') !~ '^carr-staging-forward-fix-[0-9a-f]{32}$'
+     or coalesce(p_verb_count,0)<=0 or coalesce(p_schema_highest_migration,'') !~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'
+     or coalesce(p_schema_applied_count,0)<=0 or coalesce(p_schema_ledger_sha256,'') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(p_doctrine_generation,-1)<0 or p_program6_actions_enabled is null then
+    raise exception 'invalid typed forward-fix staging readback input';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,315));
+  select * into attempt from ops.staging_forward_fix_rehearsal_attempt where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'forward-fix rehearsal result has no prepared attempt'; end if;
+  if not exists(select 1 from ops.staging_forward_fix_rehearsal_claim where rehearsal_attempt_id=attempt.id) then
+    raise exception 'forward-fix rehearsal result was never claimed';
+  end if;
+  select * into existing from ops.staging_forward_fix_rehearsal_result where rehearsal_attempt_id=attempt.id;
+  if found then
+    if (existing.provider_version_id,existing.provider_tag,existing.verb_count,existing.schema_highest_migration,
+        existing.schema_applied_count,existing.schema_ledger_sha256,existing.doctrine_generation,existing.program6_actions_enabled) is distinct from
+       (p_provider_version_id,p_provider_tag,p_verb_count,p_schema_highest_migration,p_schema_applied_count,
+        p_schema_ledger_sha256,p_doctrine_generation,p_program6_actions_enabled) then
+      raise exception 'forward-fix rehearsal result idempotency key was reused with changed input';
+    end if;
+    return jsonb_build_object('forward_fix_rehearsal_result_id',existing.id,'result_ref',existing.evidence_ref,
+      'bundle_id',(select id from ops.staging_recovery_rehearsal_bundle where forward_fix_result_id=existing.id),
+      'recovery_run_id',(select id from ops.run where recovery_rehearsal_bundle_id=(select id from ops.staging_recovery_rehearsal_bundle where forward_fix_result_id=existing.id)),
+      'replayed',true);
+  end if;
+  if p_provider_version_id=attempt.candidate_provider_version_id or p_provider_tag<>attempt.expected_provider_tag
+     or p_schema_highest_migration<>attempt.declared_schema_highest_migration
+     or p_schema_applied_count<>attempt.declared_schema_applied_count
+     or p_schema_ledger_sha256<>attempt.declared_schema_ledger_sha256 then
+    raise exception 'forward-fix rehearsal readback does not match the exact staging candidate boundary';
+  end if;
+  projection:=jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt.id,'release_id',attempt.release_id,
+    'service_id',attempt.service_id,'environment','staging','git_sha',attempt.git_sha,
+    'candidate_provider_version_id',attempt.candidate_provider_version_id,'provider_version_id',p_provider_version_id,
+    'provider_tag',p_provider_tag,'verb_count',p_verb_count,'schema_highest_migration',p_schema_highest_migration,
+    'schema_applied_count',p_schema_applied_count,'schema_ledger_sha256',p_schema_ledger_sha256,
+    'doctrine_generation',p_doctrine_generation,'program6_actions_enabled',p_program6_actions_enabled);
+  projection_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
+  result_ref:='ops.staging-forward-fix-readback:'||projection_hash;
+  insert into ops.staging_forward_fix_rehearsal_result(
+    idempotency_key,rehearsal_attempt_id,provider_version_id,provider_tag,verb_count,schema_highest_migration,
+    schema_applied_count,schema_ledger_sha256,doctrine_generation,program6_actions_enabled,
+    projection_sha256,evidence_ref,observed_at,writer_session_user)
+  values(p_idempotency_key,attempt.id,p_provider_version_id,p_provider_tag,p_verb_count,p_schema_highest_migration,
+    p_schema_applied_count,p_schema_ledger_sha256,p_doctrine_generation,p_program6_actions_enabled,
+    projection_hash,result_ref,observed_time,session_user) returning id into result_uuid;
+  bundle_projection:=jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt.id,'forward_fix_result_id',result_uuid,
+    'current_release_id',attempt.release_id,'service_id',attempt.service_id,'environment','staging','git_sha',attempt.git_sha,
+    'candidate_provider_version_id',attempt.candidate_provider_version_id,'recovery_strategy','forward_fix',
+    'recovery_plan_ref',attempt.recovery_plan_ref,'plan_hash',attempt.plan_hash,
+    'declared_migration_set_sha256',attempt.declared_migration_set_sha256,
+    'declared_migration_count',attempt.declared_migration_count,
+    'declared_schema_highest_migration',attempt.declared_schema_highest_migration,
+    'declared_schema_applied_count',attempt.declared_schema_applied_count,
+    'declared_schema_ledger_sha256',attempt.declared_schema_ledger_sha256);
+  bundle_hash:='sha256:'||encode(public.digest(bundle_projection::text,'sha256'),'hex');
+  bundle_ref:='ops.staging-recovery-bundle:'||bundle_hash;
+  insert into ops.staging_recovery_rehearsal_bundle(
+    recovery_attempt_id,correlation_id,current_release_id,prior_release_id,service_id,environment,
+    current_before_receipt_id,prior_after_rollback_receipt_id,current_after_restore_receipt_id,
+    forward_fix_result_id,candidate_git_sha,candidate_provider_version_id,recovery_strategy,recovery_plan_ref,
+    plan_hash,declared_migration_set_sha256,declared_migration_count,declared_schema_highest_migration,
+    declared_schema_applied_count,declared_schema_ledger_sha256,bundle_sha256,evidence_ref,completed_at,writer_session_user)
+  values(attempt.id,attempt.correlation_id,attempt.release_id,null,attempt.service_id,'staging',null,null,null,
+    result_uuid,attempt.git_sha,attempt.candidate_provider_version_id,'forward_fix',attempt.recovery_plan_ref,
+    attempt.plan_hash,attempt.declared_migration_set_sha256,attempt.declared_migration_count,
+    attempt.declared_schema_highest_migration,attempt.declared_schema_applied_count,
+    attempt.declared_schema_ledger_sha256,bundle_hash,bundle_ref,observed_time,session_user)
+  returning id into bundle_uuid;
+  insert into ops.run(correlation_id,kind,service_id,environment,run_key,state,started_at,ended_at,source_kind,
+    source_ref,observed_at,evidence_ref,release_id,recovery_strategy,recovery_plan_ref,recovery_rehearsal_bundle_id)
+  values(attempt.correlation_id,'check',attempt.service_id,'staging','recovery.rehearsal.forward-fix','succeeded',
+    observed_time,observed_time,'wrapper','ops.record_staging_forward_fix_rehearsal',observed_time,bundle_ref,
+    attempt.release_id,'forward_fix',attempt.recovery_plan_ref,bundle_uuid) returning id into run_uuid;
+  return jsonb_build_object('forward_fix_rehearsal_result_id',result_uuid,'result_ref',result_ref,
+    'bundle_id',bundle_uuid,'recovery_run_id',run_uuid,'replayed',false);
+end $_$;
+
+
+--
 -- Name: record_staging_release_readback(uuid, uuid, text, integer, text, integer, bigint); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -7523,6 +7708,21 @@ end $$;
 
 
 --
+-- Name: refuse_direct_rule_delivery_policy_update(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_direct_rule_delivery_policy_update() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if current_setting('carr.rule_delivery_cutover',true) is distinct from 'on' then
+    raise exception 'direct rule-delivery policy update refused; use ops.set_rule_delivery_mode';
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: refuse_engineering_evidence_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -7610,6 +7810,18 @@ CREATE FUNCTION ops.refuse_rule_approval_receipt_rewrite() RETURNS trigger
     AS $$
 begin
   raise exception 'rule approval receipts are append-only';
+end $$;
+
+
+--
+-- Name: refuse_rule_delivery_activation_receipt_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_rule_delivery_activation_receipt_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'rule-delivery activation receipts are append-only';
 end $$;
 
 
@@ -7726,23 +7938,8 @@ CREATE FUNCTION ops.release_approval_requires_recovery_rehearsal() RETURNS trigg
     AS $$
 begin
   if new.environment='production' and new.state='approved'
-     and (tg_op='INSERT' or old.environment is distinct from 'production'
-          or old.state is distinct from 'approved')
-     and not exists (
-       select 1 from ops.run r
-       join ops.staging_recovery_rehearsal_bundle b
-         on b.id=r.recovery_rehearsal_bundle_id
-       where r.release_id=new.id and r.service_id=new.service_id
-        and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
-        and r.state='succeeded' and r.evidence_ref=b.evidence_ref
-        and b.current_release_id=new.id and b.service_id=new.service_id
-        and b.recovery_strategy=new.recovery_strategy
-        and b.recovery_plan_ref=new.rollback_plan_ref and b.plan_hash=new.plan_hash
-        and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(new.migration_set)
-        and b.declared_migration_count=cardinality(new.migration_set)
-        and b.declared_schema_highest_migration=new.schema_highest_migration
-        and b.declared_schema_applied_count=new.schema_applied_count
-        and b.declared_schema_ledger_sha256=new.schema_ledger_sha256) then
+     and (tg_op='INSERT' or old.environment is distinct from 'production' or old.state is distinct from 'approved')
+     and ops.program5_exact_recovery_rehearsal(new.id) is null then
     raise exception 'Production release % cannot be approved: no exact typed recovery bundle',new.release_key;
   end if;
   return new;
@@ -7801,39 +7998,19 @@ CREATE FUNCTION ops.release_completion_requires_a_read_back() RETURNS trigger
     AS $$
 begin
   if new.state='complete' and (tg_op='INSERT' or old.state is distinct from 'complete') then
-    if not exists (select 1 from ops.deployment d where d.release_id=new.id
-      and d.service_id=new.service_id and d.environment='production'
-      and d.state='complete' and d.read_back_at is not null and d.git_sha=new.git_sha
+    if not exists(select 1 from ops.deployment d where d.release_id=new.id and d.service_id=new.service_id
+      and d.environment='production' and d.state='complete' and d.read_back_at is not null and d.git_sha=new.git_sha
       and d.provider=new.provider and d.provider_version_id=new.provider_version_id) then
       raise exception 'release % cannot be complete: no exact Production read-back',new.release_key;
     end if;
-    if not exists (select 1 from ops.run r join ops.deployment d
-      on d.release_id=r.release_id and d.service_id=r.service_id
-      and d.correlation_id=r.correlation_id
-      where r.release_id=new.id and r.service_id=new.service_id
-      and r.environment='production' and r.run_key like 'performance.%'
-      and r.state='succeeded' and r.evidence_ref is not null
-      and r.budget_ms=new.performance_budget_ms and r.duration_ms>0
-      and r.duration_ms<=r.budget_ms and d.environment='production'
-      and d.state='complete' and d.read_back_at is not null
-      and d.git_sha=new.git_sha and d.provider=new.provider
-      and d.provider_version_id=new.provider_version_id) then
+    if not exists(select 1 from ops.run r join ops.deployment d on d.release_id=r.release_id and d.service_id=r.service_id and d.correlation_id=r.correlation_id
+      where r.release_id=new.id and r.service_id=new.service_id and r.environment='production' and r.run_key like 'performance.%'
+        and r.state='succeeded' and r.evidence_ref is not null and r.budget_ms=new.performance_budget_ms
+        and r.duration_ms>0 and r.duration_ms<=r.budget_ms and d.environment='production' and d.state='complete'
+        and d.read_back_at is not null and d.git_sha=new.git_sha and d.provider=new.provider and d.provider_version_id=new.provider_version_id) then
       raise exception 'release % cannot be complete: no within-budget Production performance receipt',new.release_key;
     end if;
-    if not exists (select 1 from ops.run r
-      join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
-      where r.release_id=new.id and r.service_id=new.service_id
-      and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
-      and r.state='succeeded' and r.evidence_ref=b.evidence_ref
-      and b.current_release_id=new.id and b.service_id=new.service_id
-      and b.recovery_strategy=new.recovery_strategy
-      and b.recovery_plan_ref=new.rollback_plan_ref and b.plan_hash=new.plan_hash
-      and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(new.migration_set)
-      and b.declared_migration_count=cardinality(new.migration_set)
-      and b.declared_schema_highest_migration=new.schema_highest_migration
-      and b.declared_schema_applied_count=new.schema_applied_count
-      and b.declared_schema_ledger_sha256=new.schema_ledger_sha256
-      and b.completed_at between new.approved_at-interval '24 hours' and new.approved_at) then
+    if ops.program5_exact_recovery_rehearsal(new.id,new.approved_at-interval '24 hours') is null then
       raise exception 'release % cannot be complete: no exact typed recovery bundle',new.release_key;
     end if;
   end if;
@@ -8570,6 +8747,77 @@ $$;
 
 
 --
+-- Name: rule_delivery_audit_counts(integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.rule_delivery_audit_counts(p_layer0_shared_cap integer DEFAULT 35) RETURNS TABLE(total bigint, untagged bigint, orphaned bigint, layer0 bigint, control bigint, pack bigint, layer0_shared bigint, layer0_shared_cap integer, wildcarded bigint, packless bigint, packs bigint, emptypack bigint, scope_mismatch bigint, mode text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'ops'
+    AS $$
+  select
+    (select count(*) from public.rule r where r.status = 'active'),
+    (select count(*)
+       from public.rule r
+       left join ops.rule_load_layer l on l.rule_id = r.id
+      where r.status = 'active' and l.rule_id is null),
+    (select count(*)
+       from ops.rule_load_layer l
+      where not exists (
+        select 1 from public.rule r
+         where r.id = l.rule_id and r.status = 'active')),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'layer0'),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'control'),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'pack'),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'layer0' and l.scope = 'shared'),
+    p_layer0_shared_cap,
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where '*' = any(l.packs)),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'pack' and cardinality(l.packs) = 0),
+    (select count(*) from ops.rule_pack),
+    (select count(*)
+       from ops.rule_pack p
+      where not exists (
+        select 1
+          from ops.rule_load_layer l
+          join public.rule r on r.id = l.rule_id and r.status = 'active'
+         where p.pack = any(l.packs))),
+    (select count(*)
+       from public.rule r
+       join ops.rule_load_layer l on l.rule_id = r.id
+       left join public.actor owner on owner.id = r.personal_to
+      where r.status = 'active'
+        and l.scope is distinct from coalesce(owner.slug, 'shared')),
+    coalesce(
+      (select p.mode from ops.rule_delivery_policy p limit 1),
+      '(none)')
+$$;
+
+
+--
+-- Name: FUNCTION rule_delivery_audit_counts(p_layer0_shared_cap integer); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) IS 'Aggregate delivery coverage, layer, scope and policy health. SECURITY DEFINER so carr_jobs can detect missing current rules and personal-scope drift without receiving SELECT on rule text or actor rows.';
+
+
+--
 -- Name: rule_delivery_plan(text, text[]); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -8774,6 +9022,142 @@ CREATE FUNCTION ops.select_provider_routes(p_requested text[]) RETURNS TABLE(rou
      and v.health not in ('disabled','unavailable','rate_limited')
    order by array_position(p_requested,v.route_key),v.priority,v.route_key
 $$;
+
+
+--
+-- Name: set_rule_delivery_mode(text, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) RETURNS TABLE(mode text, changed_controls bigint, receipt_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'ops'
+    AS $$
+declare
+  v_from_mode text;
+  v_expected_control text;
+  v_expected_class text;
+  v_next_control text;
+  v_next_class text;
+  v_count bigint;
+  v_receipt uuid;
+  v_health record;
+begin
+  if p_mode not in ('shadow','enforced') then
+    raise exception 'unknown rule-delivery mode %',p_mode;
+  end if;
+  if coalesce(btrim(p_changed_by),'')='' or coalesce(btrim(p_reason),'')='' then
+    raise exception 'changed_by and reason are required';
+  end if;
+  if (select count(*) from ops.rule_delivery_activation_target) <> 9 then
+    raise exception 'activation target set is not exactly nine';
+  end if;
+  if exists (select 1 from ops.rule_delivery_activation_target
+              where map_digest<>p_expected_map_digest) then
+    raise exception 'activation map digest preimage differs';
+  end if;
+
+  select p.mode into v_from_mode
+    from ops.rule_delivery_policy p where p.singleton for update;
+  if v_from_mode is null then raise exception 'delivery policy singleton is absent'; end if;
+  if v_from_mode=p_mode then
+    raise exception 'delivery policy already %; refusing a receipt-free no-op',p_mode;
+  end if;
+  if v_from_mode='shadow' and p_mode='enforced' then
+    v_expected_control:='session_boot'; v_expected_class:='surfacing';
+    v_next_control:='pack_delivery'; v_next_class:='stop_gate';
+  elsif v_from_mode='enforced' and p_mode='shadow' then
+    v_expected_control:='pack_delivery'; v_expected_class:='stop_gate';
+    v_next_control:='session_boot'; v_next_class:='surfacing';
+  else
+    raise exception 'unsupported delivery transition % -> %',v_from_mode,p_mode;
+  end if;
+
+  select * into v_health from ops.rule_delivery_audit_counts(35);
+  if v_health.total=0 or v_health.untagged<>0 or v_health.orphaned<>0
+     or v_health.wildcarded<>0 or v_health.packless<>0 or v_health.emptypack<>0
+     or v_health.scope_mismatch<>0 then
+    raise exception 'delivery coverage is not activation-safe: %',row_to_json(v_health);
+  end if;
+
+  perform r.id from public.rule r
+    join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id
+   where r.status='active' for update of r;
+  get diagnostics v_count=row_count;
+  if v_count<>9 then raise exception 'active target preimage count is %, expected 9',v_count; end if;
+
+  perform l.rule_id from ops.rule_load_layer l
+    join ops.rule_delivery_activation_target t on t.short_id=l.short_id
+   where l.scope=t.expected_scope and l.packs=array[t.expected_pack]
+     and l.load_layer='pack' and l.map_digest=t.map_digest
+   for update of l;
+  get diagnostics v_count=row_count;
+  if v_count<>9 then raise exception 'delivery target tag preimage count is %, expected 9',v_count; end if;
+
+  perform a.rule_id from ops.rule_admission a
+    join public.rule r on r.id=a.rule_id
+    join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id
+   where a.state='admitted'
+     and a.reason='Backfilled from the reviewed active rule enforcement map'
+     and a.enforcement_status='blocked'
+     and not exists (select 1 from ops.rule_approval_receipt ar where ar.rule_id=r.id)
+   for update of a;
+  get diagnostics v_count=row_count;
+  if v_count<>9 then raise exception 'admission target preimage count is %, expected 9',v_count; end if;
+
+  select count(*) into v_count
+    from ops.rule_enforcement_point ep
+    join public.rule r on r.id=ep.rule_id
+    join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id
+   where ep.control_key=v_expected_control
+     and ep.enforcement_class=v_expected_class and ep.installed;
+  if v_count<>9 or (select count(*) from ops.rule_enforcement_point ep
+      join public.rule r on r.id=ep.rule_id
+      join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id)<>9 then
+    raise exception 'enforcement-point preimage is not the exact nine %/% rows',
+      v_expected_control,v_expected_class;
+  end if;
+  if p_mode='enforced' and not exists (
+      select 1 from ops.enforcement_control_catalog c
+       where c.control_key='pack_delivery' and c.enforcement_class='stop_gate'
+         and c.installed and c.verified_at is not null) then
+    raise exception 'pack_delivery is not an installed, verified stop gate';
+  end if;
+
+  delete from ops.rule_enforcement_point ep using public.rule r,
+      ops.rule_delivery_activation_target t
+   where ep.rule_id=r.id and left(r.id::text,8)=t.short_id;
+  insert into ops.rule_enforcement_point
+    (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+  select r.id,
+         case when p_mode='enforced' then t.to_control else t.from_control end,
+         case when p_mode='enforced' then t.to_implementation_ref else t.from_implementation_ref end,
+         case when p_mode='enforced' then t.to_test_ref else t.from_test_ref end,
+         case when p_mode='enforced' then t.to_enforcement_class else t.from_enforcement_class end,
+         true,now()
+    from public.rule r join ops.rule_delivery_activation_target t
+      on left(r.id::text,8)=t.short_id where r.status='active';
+
+  update ops.rule_admission a
+     set coverage_detail=jsonb_set(a.coverage_detail,'{rule_delivery}',
+           jsonb_build_object('mode',p_mode,'control',v_next_control,
+                              'changed_by',p_changed_by,'changed_at',now()),true),
+         version=a.version+1,updated_at=now()
+    from public.rule r join ops.rule_delivery_activation_target t
+      on left(r.id::text,8)=t.short_id
+   where a.rule_id=r.id;
+
+  perform set_config('carr.rule_delivery_cutover','on',true);
+  update ops.rule_delivery_policy
+     set mode=p_mode,changed_by=p_changed_by,reason=p_reason,changed_at=now()
+   where singleton;
+
+  insert into ops.rule_delivery_activation_receipt
+    (from_mode,to_mode,changed_by,reason,map_digest,target_short_ids)
+  select v_from_mode,p_mode,p_changed_by,p_reason,p_expected_map_digest,
+         array_agg(t.short_id order by t.short_id)
+    from ops.rule_delivery_activation_target t returning id into v_receipt;
+  return query select p_mode,9::bigint,v_receipt;
+end $$;
 
 
 --
@@ -9496,6 +9880,184 @@ end $$;
 
 
 --
+-- Name: tour_assertion_rights_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_assertion_rights_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if not exists (select 1 from ops.tour_rights_receipt r where r.id=new.rights_receipt_id and r.organization_tenant_id=new.organization_tenant_id and r.status='active' and r.effective_at <= new.observed_at and (r.expires_at is null or r.expires_at > new.observed_at) and r.revoked_at is null and r.allowed_use_classes ? 'canonical_fact' and (r.allowed_field_classes ? new.field_key or r.allowed_field_classes ? '*') and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= new.observed_at)) then raise exception 'rights receipt refuses asserted field/use'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_conflict_participant_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_conflict_participant_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if not exists (select 1 from ops.tour_fact_conflict c join ops.tour_field_assertion a on a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id where c.id=new.conflict_id and c.organization_tenant_id=new.organization_tenant_id and c.property_id=a.property_id and c.field_key=a.field_key) then raise exception 'conflict participant does not match conflict property and field'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_conflict_resolution_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_conflict_resolution_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if not exists (select 1 from ops.tour_fact_conflict_participant p join ops.tour_fact_conflict c on c.id=p.conflict_id and c.organization_tenant_id=p.organization_tenant_id join ops.tour_field_assertion a on a.id=p.field_assertion_id and a.organization_tenant_id=p.organization_tenant_id where p.conflict_id=new.conflict_id and p.organization_tenant_id=new.organization_tenant_id and p.field_assertion_id=new.selected_field_assertion_id and a.property_id=c.property_id and a.field_key=c.field_key) then raise exception 'conflict resolution selection is not a matching participant'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_membership_seal_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_membership_seal_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  perform 1 from ops.tour where id=new.tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  if exists (select 1 from ops.tour_public_projection p where p.organization_tenant_id=new.organization_tenant_id and p.tour_id=new.tour_id and p.route_version=new.route_version) then raise exception 'tour route version is sealed by an existing projection'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_projection_creation_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_projection_creation_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  perform 1 from ops.tour where id=new.tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  if not exists (select 1 from ops.tour_property_membership m where m.organization_tenant_id=new.organization_tenant_id and m.tour_id=new.tour_id and m.route_version=new.route_version) or exists (select 1 from ops.tour_property_membership m where m.organization_tenant_id=new.organization_tenant_id and m.tour_id=new.tour_id and m.route_version=new.route_version and m.selected_at > new.as_of) then raise exception 'projection requires a complete membership set selected by as_of'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_projection_fact_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_projection_fact_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare p_tour_id uuid; p ops.tour_public_projection%rowtype;
+begin
+  if tg_op <> 'INSERT' then raise exception 'tour_public_projection_fact is append-only'; end if;
+  select tour_id into p_tour_id from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id;
+  if not found then raise exception 'projection fact projection is unavailable'; end if;
+  perform 1 from ops.tour where id=p_tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  select * into p from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id for update;
+  if not exists (select 1 from ops.tour_field_assertion a join ops.tour_rights_receipt r on r.id=a.rights_receipt_id and r.organization_tenant_id=a.organization_tenant_id join ops.tour_property_membership m on m.tour_id=p.tour_id and m.property_id=new.property_id and m.organization_tenant_id=new.organization_tenant_id and m.route_version=p.route_version where p.status='draft' and not exists (select 1 from ops.tour_public_projection_seal_receipt seal where seal.organization_tenant_id=p.organization_tenant_id and seal.projection_id=p.id) and new.route_version=p.route_version and a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id and a.property_id=new.property_id and a.field_key=new.display_field_key and a.review_state='reviewed' and a.data_classification='public' and m.selected_at <= p.as_of and a.effective_from <= p.as_of and (a.effective_to is null or a.effective_to > p.as_of) and r.status='active' and r.effective_at <= p.as_of and (r.expires_at is null or r.expires_at > p.as_of) and r.revoked_at is null and r.allowed_use_classes ? 'client_public_display' and (r.allowed_field_classes ? a.field_key or r.allowed_field_classes ? '*') and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= p.as_of) and ops.tour_public_value_safe(a.field_key,a.value)) then raise exception 'projection fact lacks current public assertion, rights, or safe value'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_projection_seal_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_projection_seal_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare p_tour_id uuid; p ops.tour_public_projection%rowtype;
+begin
+  select tour_id into p_tour_id from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id;
+  if not found then raise exception 'projection seal target is unavailable'; end if;
+  perform 1 from ops.tour where id=p_tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  select * into p from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id for update;
+  if p.status <> 'draft' or exists (select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id) then raise exception 'projection is not an unsealed draft'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_public_value_safe(text, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_public_value_safe(p_field_key text, p_value jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select case
+    when p_field_key in ('display.name','display.address','suite','property_type','availability','parking','access','source_attribution','as_of','caveat') then jsonb_typeof(p_value) = 'string'
+    when p_field_key in ('size','asking_economics') then jsonb_typeof(p_value) = 'object' and not exists (select 1 from jsonb_each(p_value) e where e.key not in ('value','unit','min','max','currency','period','label') or jsonb_typeof(e.value) not in ('string','number','boolean','null'))
+    when p_field_key in ('photos','floor_plan') then jsonb_typeof(p_value) = 'array' and not exists (select 1 from jsonb_array_elements(p_value) item where jsonb_typeof(item) <> 'object' or exists (select 1 from jsonb_each(item) e where e.key not in ('url','alt','caption','source') or jsonb_typeof(e.value) <> 'string'))
+    else false end;
+$$;
+
+
+--
+-- Name: tour_reject_mutation(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_reject_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ begin raise exception '% is append-only', tg_table_name; end $$;
+
+
+--
+-- Name: tour_rights_lineage_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_rights_lineage_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare prior ops.tour_rights_receipt%rowtype;
+begin
+  if new.supersedes_receipt_id is null and new.receipt_version <> 1 then raise exception 'rights receipt version requires supersession lineage'; end if;
+  if new.supersedes_receipt_id is not null then
+    select * into prior from ops.tour_rights_receipt where id=new.supersedes_receipt_id and organization_tenant_id=new.organization_tenant_id for update;
+    if not found or prior.policy_key <> new.policy_key or prior.provider <> new.provider or new.receipt_version <> prior.receipt_version + 1 then raise exception 'rights receipt supersession lineage is invalid'; end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_share_rotation_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_share_rotation_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare prior ops.tour_share_grant%rowtype;
+begin
+  if new.rotated_from_grant_id is null and new.grant_version <> 1 then raise exception 'share grant version requires rotation lineage'; end if;
+  if new.rotated_from_grant_id is not null then
+    if new.rotated_from_grant_id = new.id then raise exception 'share grant cannot rotate itself'; end if;
+    select * into prior from ops.tour_share_grant where id=new.rotated_from_grant_id and organization_tenant_id=new.organization_tenant_id for update;
+    if not found or prior.projection_id <> new.projection_id or new.grant_version <> prior.grant_version + 1 then raise exception 'share grant rotation lineage is invalid'; end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_source_rights_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_source_rights_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if not exists (select 1 from ops.tour_rights_receipt r where r.id=new.rights_receipt_id and r.organization_tenant_id=new.organization_tenant_id and r.status='active' and r.effective_at <= new.retrieved_at and (r.expires_at is null or r.expires_at > new.retrieved_at) and r.revoked_at is null and r.allowed_use_classes ? 'source_intake' and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= new.retrieved_at)) then raise exception 'rights receipt refuses source intake'; end if;
+  return new;
+end $$;
+
+
+--
 -- Name: transition_execution_environment_provider(text, text, text, jsonb, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -10102,20 +10664,22 @@ end $$;
 CREATE FUNCTION ops.validate_recovery_rehearsal_run() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-declare b ops.staging_recovery_rehearsal_bundle%rowtype;
+declare b ops.staging_recovery_rehearsal_bundle%rowtype; expected_started timestamptz;
 begin
+  if new.run_key like 'recovery.rehearsal.%' and new.state='succeeded'
+     and new.recovery_rehearsal_bundle_id is null then
+    raise exception 'successful recovery rehearsal run requires a typed bundle';
+  end if;
   if new.recovery_rehearsal_bundle_id is null then return new; end if;
-  select * into strict b from ops.staging_recovery_rehearsal_bundle
-   where id=new.recovery_rehearsal_bundle_id;
-  if new.kind <> 'check' or new.run_key <> 'recovery.rehearsal.worker'
-     or new.state <> 'succeeded' or new.environment <> 'staging'
-     or new.release_id <> b.current_release_id or new.service_id <> b.service_id
-     or new.correlation_id <> b.correlation_id
-     or new.recovery_strategy <> b.recovery_strategy
-     or new.recovery_plan_ref <> b.recovery_plan_ref
-     or new.evidence_ref <> b.evidence_ref
-     or new.started_at is distinct from (
-       select observed_at from ops.staging_release_readback_receipt where id=b.current_before_receipt_id)
+  select * into strict b from ops.staging_recovery_rehearsal_bundle where id=new.recovery_rehearsal_bundle_id;
+  expected_started:=case when b.recovery_strategy='rollback' then
+    (select observed_at from ops.staging_release_readback_receipt where id=b.current_before_receipt_id)
+    else (select observed_at from ops.staging_forward_fix_rehearsal_result where id=b.forward_fix_result_id) end;
+  if new.kind<>'check' or new.run_key<>(case when b.recovery_strategy='rollback' then 'recovery.rehearsal.worker' else 'recovery.rehearsal.forward-fix' end)
+     or new.state<>'succeeded' or new.environment<>'staging' or new.release_id<>b.current_release_id
+     or new.service_id<>b.service_id or new.correlation_id<>b.correlation_id
+     or new.recovery_strategy<>b.recovery_strategy or new.recovery_plan_ref<>b.recovery_plan_ref
+     or new.evidence_ref<>b.evidence_ref or new.started_at is distinct from expected_started
      or new.ended_at is distinct from b.completed_at then
     raise exception 'recovery rehearsal run does not exactly match its typed bundle';
   end if;
@@ -13358,6 +13922,48 @@ COMMENT ON TABLE ops.rule_control_binding IS 'Owner/deployment-authored exact se
 
 
 --
+-- Name: rule_delivery_activation_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_delivery_activation_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    from_mode text NOT NULL,
+    to_mode text NOT NULL,
+    changed_by text NOT NULL,
+    reason text NOT NULL,
+    map_digest text NOT NULL,
+    target_short_ids text[] NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rule_delivery_activation_receipt_changed_by_check CHECK ((btrim(changed_by) <> ''::text)),
+    CONSTRAINT rule_delivery_activation_receipt_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT rule_delivery_activation_receipt_target_short_ids_check CHECK ((cardinality(target_short_ids) = 9))
+);
+
+
+--
+-- Name: rule_delivery_activation_target; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_delivery_activation_target (
+    short_id text NOT NULL,
+    expected_scope text NOT NULL,
+    expected_pack text NOT NULL,
+    from_control text NOT NULL,
+    from_enforcement_class text NOT NULL,
+    from_implementation_ref text CONSTRAINT rule_delivery_activation_targe_from_implementation_ref_not_null NOT NULL,
+    from_test_ref text NOT NULL,
+    to_control text NOT NULL,
+    to_enforcement_class text NOT NULL,
+    to_implementation_ref text NOT NULL,
+    to_test_ref text NOT NULL,
+    map_digest text NOT NULL,
+    CONSTRAINT rule_delivery_activation_target_expected_scope_check CHECK ((expected_scope = ANY (ARRAY['shared'::text, 'joe'::text, 'dell'::text]))),
+    CONSTRAINT rule_delivery_activation_target_map_digest_check CHECK ((map_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT rule_delivery_activation_target_short_id_check CHECK ((short_id ~ '^[0-9a-f]{8}$'::text))
+);
+
+
+--
 -- Name: rule_delivery_policy; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -13901,6 +14507,89 @@ CREATE TABLE ops.staging_deployment_claim (
 
 
 --
+-- Name: staging_forward_fix_rehearsal_attempt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_forward_fix_rehearsal_attempt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    correlation_id uuid NOT NULL,
+    release_id uuid NOT NULL,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    git_sha text NOT NULL,
+    provider text NOT NULL,
+    candidate_provider_version_id uuid CONSTRAINT staging_forward_fix_rehears_candidate_provider_version_not_null NOT NULL,
+    recovery_strategy text CONSTRAINT staging_forward_fix_rehearsal_attemp_recovery_strategy_not_null NOT NULL,
+    recovery_plan_ref text CONSTRAINT staging_forward_fix_rehearsal_attemp_recovery_plan_ref_not_null NOT NULL,
+    plan_hash text NOT NULL,
+    expected_provider_tag text CONSTRAINT staging_forward_fix_rehearsal_at_expected_provider_tag_not_null NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_forward_fix_rehears_declared_migration_set_sha_not_null NOT NULL,
+    declared_migration_count integer CONSTRAINT staging_forward_fix_rehearsal_declared_migration_count_not_null NOT NULL,
+    declared_schema_highest_migration text CONSTRAINT staging_forward_fix_rehears_declared_schema_highest_mi_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_forward_fix_rehears_declared_schema_applied_co_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_forward_fix_rehears_declared_schema_ledger_sha_not_null NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_forward_fix_rehearsal_atte_writer_session_user_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_forward_fix_rehearsa_declared_migration_set_sha25_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsa_declared_schema_applied_coun_check CHECK ((declared_schema_applied_count > 0)),
+    CONSTRAINT staging_forward_fix_rehearsa_declared_schema_highest_migr_check CHECK ((declared_schema_highest_migration ~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsa_declared_schema_ledger_sha25_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_at_declared_migration_count_check CHECK ((declared_migration_count > 0)),
+    CONSTRAINT staging_forward_fix_rehearsal_attem_expected_provider_tag_check CHECK ((expected_provider_tag ~ '^carr-staging-forward-fix-[0-9a-f]{32}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_environment_check CHECK ((environment = 'staging'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_plan_hash_check CHECK ((btrim(plan_hash) <> ''::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_provider_check CHECK ((provider = 'cloudflare-workers'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_recovery_plan_ref_check CHECK ((btrim(recovery_plan_ref) <> ''::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_recovery_strategy_check CHECK ((recovery_strategy = 'forward_fix'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_claim; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_forward_fix_rehearsal_claim (
+    rehearsal_attempt_id uuid CONSTRAINT staging_forward_fix_rehearsal_cla_rehearsal_attempt_id_not_null NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_forward_fix_rehearsal_clai_writer_session_user_not_null NOT NULL,
+    claimed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_forward_fix_rehearsal_claim_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_forward_fix_rehearsal_result (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    rehearsal_attempt_id uuid CONSTRAINT staging_forward_fix_rehearsal_res_rehearsal_attempt_id_not_null NOT NULL,
+    provider_version_id uuid CONSTRAINT staging_forward_fix_rehearsal_resu_provider_version_id_not_null NOT NULL,
+    provider_tag text NOT NULL,
+    verb_count integer NOT NULL,
+    schema_highest_migration text CONSTRAINT staging_forward_fix_rehearsal_schema_highest_migration_not_null NOT NULL,
+    schema_applied_count integer CONSTRAINT staging_forward_fix_rehearsal_res_schema_applied_count_not_null NOT NULL,
+    schema_ledger_sha256 text CONSTRAINT staging_forward_fix_rehearsal_res_schema_ledger_sha256_not_null NOT NULL,
+    doctrine_generation bigint CONSTRAINT staging_forward_fix_rehearsal_resu_doctrine_generation_not_null NOT NULL,
+    program6_actions_enabled boolean CONSTRAINT staging_forward_fix_rehearsal_program6_actions_enabled_not_null NOT NULL,
+    projection_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_forward_fix_rehearsal_resu_writer_session_user_not_null NOT NULL,
+    CONSTRAINT staging_forward_fix_rehearsal_result_doctrine_generation_check CHECK ((doctrine_generation >= 0)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-forward-fix-readback:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_projection_sha256_check CHECK ((projection_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_schema_applied_count_check CHECK ((schema_applied_count > 0)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_schema_ledger_sha256_check CHECK ((schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_verb_count_check CHECK ((verb_count > 0)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_writer_session_user_check CHECK ((writer_session_user = 'carr_program5_forward_fix_verifier'::text))
+);
+
+
+--
 -- Name: staging_recovery_rehearsal_bundle; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -13909,12 +14598,12 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     recovery_attempt_id uuid NOT NULL,
     correlation_id uuid NOT NULL,
     current_release_id uuid NOT NULL,
-    prior_release_id uuid NOT NULL,
+    prior_release_id uuid,
     service_id uuid NOT NULL,
     environment text NOT NULL,
-    current_before_receipt_id uuid CONSTRAINT staging_recovery_rehearsal_b_current_before_receipt_id_not_null NOT NULL,
-    prior_after_rollback_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__prior_after_rollback_recei_not_null NOT NULL,
-    current_after_restore_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__current_after_restore_rece_not_null NOT NULL,
+    current_before_receipt_id uuid,
+    prior_after_rollback_receipt_id uuid,
+    current_after_restore_receipt_id uuid,
     recovery_strategy text NOT NULL,
     recovery_plan_ref text NOT NULL,
     plan_hash text NOT NULL,
@@ -13928,17 +14617,18 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     completed_at timestamp with time zone NOT NULL,
     recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     writer_session_user text NOT NULL,
-    CONSTRAINT recovery_bundle_distinct_receipts CHECK (((current_before_receipt_id <> prior_after_rollback_receipt_id) AND (current_before_receipt_id <> current_after_restore_receipt_id) AND (prior_after_rollback_receipt_id <> current_after_restore_receipt_id))),
-    CONSTRAINT recovery_bundle_distinct_releases CHECK ((current_release_id <> prior_release_id)),
+    forward_fix_result_id uuid,
+    candidate_git_sha text,
+    candidate_provider_version_id uuid,
+    CONSTRAINT recovery_bundle_strategy_shape CHECK ((((recovery_strategy = 'rollback'::text) AND (prior_release_id IS NOT NULL) AND (current_before_receipt_id IS NOT NULL) AND (prior_after_rollback_receipt_id IS NOT NULL) AND (current_after_restore_receipt_id IS NOT NULL) AND (forward_fix_result_id IS NULL) AND (candidate_git_sha IS NULL) AND (candidate_provider_version_id IS NULL) AND (current_release_id <> prior_release_id) AND (current_before_receipt_id <> prior_after_rollback_receipt_id) AND (current_before_receipt_id <> current_after_restore_receipt_id) AND (prior_after_rollback_receipt_id <> current_after_restore_receipt_id)) OR ((recovery_strategy = 'forward_fix'::text) AND (prior_release_id IS NULL) AND (current_before_receipt_id IS NULL) AND (prior_after_rollback_receipt_id IS NULL) AND (current_after_restore_receipt_id IS NULL) AND (forward_fix_result_id IS NOT NULL) AND (candidate_git_sha IS NOT NULL) AND (candidate_git_sha ~ '^[0-9a-f]{40}$'::text) AND (candidate_provider_version_id IS NOT NULL)))),
+    CONSTRAINT recovery_bundle_writer_strategy CHECK ((((recovery_strategy = 'rollback'::text) AND (writer_session_user = 'carr_jobs'::text)) OR ((recovery_strategy = 'forward_fix'::text) AND (writer_session_user = 'carr_program5_forward_fix_verifier'::text)))),
     CONSTRAINT staging_recovery_rehearsal_b_declared_migration_set_sha25_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_recovery_rehearsal_b_declared_schema_applied_coun_check CHECK ((declared_schema_applied_count > 0)),
     CONSTRAINT staging_recovery_rehearsal_b_declared_schema_ledger_sha25_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_recovery_rehearsal_bundl_declared_migration_count_check CHECK ((declared_migration_count > 0)),
     CONSTRAINT staging_recovery_rehearsal_bundle_bundle_sha256_check CHECK ((bundle_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_recovery_rehearsal_bundle_environment_check CHECK ((environment = 'staging'::text)),
-    CONSTRAINT staging_recovery_rehearsal_bundle_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-recovery-bundle:sha256:[0-9a-f]{64}$'::text)),
-    CONSTRAINT staging_recovery_rehearsal_bundle_recovery_strategy_check CHECK ((recovery_strategy = 'rollback'::text)),
-    CONSTRAINT staging_recovery_rehearsal_bundle_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+    CONSTRAINT staging_recovery_rehearsal_bundle_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-recovery-bundle:sha256:[0-9a-f]{64}$'::text))
 );
 
 
@@ -14114,6 +14804,385 @@ CREATE TABLE ops.staging_restore_only_result (
 
 
 --
+-- Name: tour; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    tour_name text NOT NULL,
+    tour_status text NOT NULL,
+    route_version integer NOT NULL,
+    canonical_dataset_version text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_route_version_check CHECK ((route_version > 0)),
+    CONSTRAINT tour_tour_status_check CHECK ((tour_status = ANY (ARRAY['draft'::text, 'active'::text, 'completed'::text, 'cancelled'::text, 'archived'::text])))
+);
+
+
+--
+-- Name: tour_audit_event; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_audit_event (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    event_type text NOT NULL,
+    entity_type text NOT NULL,
+    entity_id uuid NOT NULL,
+    actor_id text,
+    occurred_at timestamp with time zone NOT NULL,
+    event_digest text NOT NULL,
+    payload jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_audit_event_event_digest_check CHECK ((event_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_audit_event_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text))
+);
+
+
+--
+-- Name: tour_cheat_sheet_revision; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_cheat_sheet_revision (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    tour_id uuid NOT NULL,
+    revision_number integer NOT NULL,
+    content jsonb NOT NULL,
+    editor_actor_id text NOT NULL,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_cheat_sheet_revision_content_check CHECK ((jsonb_typeof(content) = 'object'::text)),
+    CONSTRAINT tour_cheat_sheet_revision_revision_number_check CHECK ((revision_number > 0)),
+    CONSTRAINT tour_cheat_sheet_revision_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'saved'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: tour_conflict_resolution_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_conflict_resolution_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text CONSTRAINT tour_conflict_resolution_receip_organization_tenant_id_not_null NOT NULL,
+    conflict_id uuid NOT NULL,
+    selected_field_assertion_id uuid CONSTRAINT tour_conflict_resolution_re_selected_field_assertion_i_not_null NOT NULL,
+    rationale text NOT NULL,
+    evidence jsonb NOT NULL,
+    resolver_actor_id text NOT NULL,
+    resolved_at timestamp with time zone NOT NULL,
+    receipt_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_conflict_resolution_receipt_evidence_check CHECK ((jsonb_typeof(evidence) = 'object'::text)),
+    CONSTRAINT tour_conflict_resolution_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[a-f0-9]{64}$'::text))
+);
+
+
+--
+-- Name: tour_fact_conflict; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_fact_conflict (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    property_id uuid NOT NULL,
+    field_key text NOT NULL,
+    state text NOT NULL,
+    opened_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_fact_conflict_state_check CHECK ((state = ANY (ARRAY['open'::text, 'resolved'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: tour_fact_conflict_participant; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_fact_conflict_participant (
+    conflict_id uuid NOT NULL,
+    organization_tenant_id text NOT NULL,
+    field_assertion_id uuid NOT NULL,
+    participant_role text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_fact_conflict_participant_participant_role_check CHECK ((participant_role = ANY (ARRAY['candidate'::text, 'selected'::text, 'rejected'::text])))
+);
+
+
+--
+-- Name: tour_field_assertion; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_field_assertion (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    property_id uuid NOT NULL,
+    field_key text NOT NULL,
+    value jsonb NOT NULL,
+    source_evidence_id uuid NOT NULL,
+    rights_receipt_id uuid NOT NULL,
+    observed_at timestamp with time zone NOT NULL,
+    effective_from timestamp with time zone NOT NULL,
+    effective_to timestamp with time zone,
+    confidence text NOT NULL,
+    data_classification text NOT NULL,
+    review_state text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_field_assertion_check CHECK (((effective_to IS NULL) OR (effective_to >= effective_from))),
+    CONSTRAINT tour_field_assertion_confidence_check CHECK ((confidence = ANY (ARRAY['low'::text, 'medium'::text, 'high'::text, 'unknown'::text]))),
+    CONSTRAINT tour_field_assertion_data_classification_check CHECK ((data_classification = ANY (ARRAY['public'::text, 'client_authorized'::text, 'internal'::text, 'restricted'::text]))),
+    CONSTRAINT tour_field_assertion_review_state_check CHECK ((review_state = ANY (ARRAY['unreviewed'::text, 'reviewed'::text, 'conflicted'::text, 'superseded'::text, 'withdrawn'::text]))),
+    CONSTRAINT tour_field_assertion_value_check CHECK ((jsonb_typeof(value) = ANY (ARRAY['object'::text, 'array'::text, 'string'::text, 'number'::text, 'boolean'::text, 'null'::text])))
+);
+
+
+--
+-- Name: tour_property; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_property (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    property_status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    retired_at timestamp with time zone,
+    CONSTRAINT tour_property_property_status_check CHECK ((property_status = ANY (ARRAY['active'::text, 'inactive'::text, 'withdrawn'::text, 'unknown'::text])))
+);
+
+
+--
+-- Name: tour_property_membership; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_property_membership (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    tour_id uuid NOT NULL,
+    property_id uuid NOT NULL,
+    route_version integer NOT NULL,
+    route_sequence integer NOT NULL,
+    route_label text NOT NULL,
+    assertion_set_digest text NOT NULL,
+    selected_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_property_membership_assertion_set_digest_check CHECK ((assertion_set_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_property_membership_route_sequence_check CHECK ((route_sequence > 0)),
+    CONSTRAINT tour_property_membership_route_version_check CHECK ((route_version > 0))
+);
+
+
+--
+-- Name: tour_public_projection; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_public_projection (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    tour_id uuid NOT NULL,
+    projection_version integer NOT NULL,
+    route_version integer NOT NULL,
+    as_of timestamp with time zone NOT NULL,
+    facts_only boolean NOT NULL,
+    projection_digest text NOT NULL,
+    derived_render_digest text,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_public_projection_facts_only_check CHECK (facts_only),
+    CONSTRAINT tour_public_projection_projection_digest_check CHECK ((projection_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_public_projection_projection_version_check CHECK ((projection_version > 0)),
+    CONSTRAINT tour_public_projection_route_version_check CHECK ((route_version > 0)),
+    CONSTRAINT tour_public_projection_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'qc_blocked'::text, 'approved'::text, 'published'::text, 'superseded'::text, 'quarantined'::text, 'rolled_back'::text])))
+);
+
+
+--
+-- Name: TABLE tour_public_projection; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.tour_public_projection IS 'Client renderer cache metadata only. Facts exist only in normalized tour_public_projection_fact rows.';
+
+
+--
+-- Name: tour_public_projection_fact; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_public_projection_fact (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    projection_id uuid NOT NULL,
+    property_id uuid NOT NULL,
+    field_assertion_id uuid NOT NULL,
+    route_version integer NOT NULL,
+    display_field_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_public_projection_fact_display_field_key_check CHECK ((display_field_key = ANY (ARRAY['display.name'::text, 'display.address'::text, 'suite'::text, 'property_type'::text, 'size'::text, 'asking_economics'::text, 'availability'::text, 'parking'::text, 'access'::text, 'photos'::text, 'floor_plan'::text, 'source_attribution'::text, 'as_of'::text, 'caveat'::text])))
+);
+
+
+--
+-- Name: tour_public_projection_seal_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_public_projection_seal_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text CONSTRAINT tour_public_projection_seal_rec_organization_tenant_id_not_null NOT NULL,
+    projection_id uuid NOT NULL,
+    sealed_at timestamp with time zone NOT NULL,
+    sealed_state text NOT NULL,
+    actor_id text NOT NULL,
+    receipt_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_public_projection_seal_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_public_projection_seal_receipt_sealed_state_check CHECK ((sealed_state = ANY (ARRAY['approved'::text, 'published'::text, 'quarantined'::text, 'rolled_back'::text])))
+);
+
+
+--
+-- Name: tour_publication; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_publication (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    projection_id uuid NOT NULL,
+    publication_state text NOT NULL,
+    projection_digest text NOT NULL,
+    actor_id text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    state_changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_publication_projection_digest_check CHECK ((projection_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_publication_publication_state_check CHECK ((publication_state = ANY (ARRAY['draft'::text, 'pending_qc'::text, 'approved'::text, 'published'::text, 'quarantined'::text, 'rolled_back'::text])))
+);
+
+
+--
+-- Name: tour_qc_finding; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_qc_finding (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    artifact_type text NOT NULL,
+    artifact_id uuid NOT NULL,
+    check_id text NOT NULL,
+    severity text NOT NULL,
+    state text NOT NULL,
+    evidence jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    resolved_at timestamp with time zone,
+    CONSTRAINT tour_qc_finding_artifact_type_check CHECK ((artifact_type = ANY (ARRAY['public_projection'::text, 'pdf'::text, 'map'::text, 'cheat_sheet'::text, 'share_grant'::text]))),
+    CONSTRAINT tour_qc_finding_evidence_check CHECK ((jsonb_typeof(evidence) = 'object'::text)),
+    CONSTRAINT tour_qc_finding_severity_check CHECK ((severity = ANY (ARRAY['blocker'::text, 'error'::text, 'warning'::text, 'info'::text]))),
+    CONSTRAINT tour_qc_finding_state_check CHECK ((state = ANY (ARRAY['open'::text, 'accepted_risk'::text, 'resolved'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: tour_rights_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_rights_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    provider text NOT NULL,
+    sku text,
+    policy_key text NOT NULL,
+    receipt_version integer NOT NULL,
+    receipt_digest text NOT NULL,
+    terms_url text NOT NULL,
+    reviewed_at timestamp with time zone NOT NULL,
+    reviewer text NOT NULL,
+    intended_use text NOT NULL,
+    allowed_field_classes jsonb NOT NULL,
+    allowed_use_classes jsonb NOT NULL,
+    effective_at timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    supersedes_receipt_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_rights_receipt_check CHECK (((jsonb_typeof(allowed_field_classes) = 'array'::text) AND (jsonb_typeof(allowed_use_classes) = 'array'::text))),
+    CONSTRAINT tour_rights_receipt_check1 CHECK (((expires_at IS NULL) OR (expires_at > effective_at))),
+    CONSTRAINT tour_rights_receipt_check2 CHECK (((status <> 'revoked'::text) OR (revoked_at IS NOT NULL))),
+    CONSTRAINT tour_rights_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_rights_receipt_receipt_version_check CHECK ((receipt_version > 0)),
+    CONSTRAINT tour_rights_receipt_status_check CHECK ((status = ANY (ARRAY['active'::text, 'expired'::text, 'revoked'::text, 'unknown'::text])))
+);
+
+
+--
+-- Name: tour_share_grant; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_share_grant (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    projection_id uuid NOT NULL,
+    grant_version integer NOT NULL,
+    token_digest text NOT NULL,
+    audience text NOT NULL,
+    permission_scopes jsonb NOT NULL,
+    rotated_from_grant_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    status text NOT NULL,
+    CONSTRAINT tour_share_grant_audience_check CHECK ((audience = ANY (ARRAY['client'::text, 'internal'::text]))),
+    CONSTRAINT tour_share_grant_check CHECK (((expires_at IS NULL) OR (expires_at > created_at))),
+    CONSTRAINT tour_share_grant_check1 CHECK (((status <> 'revoked'::text) OR (revoked_at IS NOT NULL))),
+    CONSTRAINT tour_share_grant_grant_version_check CHECK ((grant_version > 0)),
+    CONSTRAINT tour_share_grant_permission_scopes_check CHECK (((jsonb_typeof(permission_scopes) = 'array'::text) AND (jsonb_array_length(permission_scopes) > 0) AND (permission_scopes <@ '["view_packet", "view_map"]'::jsonb))),
+    CONSTRAINT tour_share_grant_status_check CHECK ((status = ANY (ARRAY['active'::text, 'revoked'::text, 'expired'::text, 'rotated'::text]))),
+    CONSTRAINT tour_share_grant_token_digest_check CHECK ((token_digest ~ '^sha256:[a-f0-9]{64}$'::text))
+);
+
+
+--
+-- Name: TABLE tour_share_grant; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.tour_share_grant IS 'Stores opaque-token digests and scope/version/rotation lineage; never plaintext tokens.';
+
+
+--
+-- Name: tour_share_grant_revocation_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_share_grant_revocation_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text CONSTRAINT tour_share_grant_revocation_rec_organization_tenant_id_not_null NOT NULL,
+    share_grant_id uuid NOT NULL,
+    revoked_at timestamp with time zone NOT NULL,
+    actor_id text NOT NULL,
+    reason text NOT NULL,
+    receipt_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_share_grant_revocation_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[a-f0-9]{64}$'::text))
+);
+
+
+--
+-- Name: tour_source_evidence; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_source_evidence (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    stable_locator text NOT NULL,
+    evidence_class text NOT NULL,
+    retrieved_at timestamp with time zone NOT NULL,
+    retrieval_status text NOT NULL,
+    content_digest text NOT NULL,
+    rights_receipt_id uuid NOT NULL,
+    data_classification text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_source_evidence_content_digest_check CHECK ((content_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_source_evidence_data_classification_check CHECK ((data_classification = ANY (ARRAY['public'::text, 'client_authorized'::text, 'internal'::text, 'restricted'::text]))),
+    CONSTRAINT tour_source_evidence_evidence_class_check CHECK ((evidence_class = ANY (ARRAY['direct_source'::text, 'linked_artifact'::text, 'public_mirror'::text, 'inference'::text]))),
+    CONSTRAINT tour_source_evidence_retrieval_status_check CHECK ((retrieval_status = ANY (ARRAY['read'::text, 'partial'::text, 'inaccessible'::text, 'failed'::text])))
+);
+
+
+--
 -- Name: work_request; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -14173,6 +15242,7 @@ CREATE TABLE ops.work_request (
     CONSTRAINT work_request_program_ordinal_positive CHECK (((program_ordinal IS NULL) OR (program_ordinal > 0))),
     CONSTRAINT work_request_shape_disposition_complete CHECK ((((shape_disposition IS NULL) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NULL) AND (shape_decided_by_actor_id IS NULL) AND (shape_decided_at IS NULL)) OR ((shape_disposition = 'required'::text) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)) OR ((shape_disposition = 'not_required'::text) AND (shape_fixed_surface_ref IS NOT NULL) AND (btrim(shape_fixed_surface_ref) <> ''::text) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)))),
     CONSTRAINT work_request_shape_disposition_valid CHECK (((shape_disposition IS NULL) OR (shape_disposition = ANY (ARRAY['required'::text, 'not_required'::text])))),
+    CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL)) OR ((capture_idempotency_key IS NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (NOT (program_key IS DISTINCT FROM 'carr-ai-engineering-suite-v1'::text)) AND (program_ordinal IS NOT NULL) AND (program_ordinal > 0) AND (NOT (requester_actor IS DISTINCT FROM 'joe'::text)) AND (NOT (owner_actor IS DISTINCT FROM 'joe'::text))) OR ((capture_idempotency_key IS NOT NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref IS NOT NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)))))),
     CONSTRAINT work_request_state_check CHECK ((state = ANY (ARRAY['captured'::text, 'triaged'::text, 'ready'::text, 'claimed'::text, 'in_progress'::text, 'verification'::text, 'awaiting_release'::text, 'released'::text, 'confirmed_closed'::text, 'needs_joe'::text, 'blocked'::text, 'declined'::text, 'superseded'::text, 'failed'::text])))
 );
 
@@ -14209,7 +15279,7 @@ COMMENT ON COLUMN ops.work_request.shape_disposition IS 'Mandatory before a requ
 -- Name: COLUMN work_request.organization_tenant_id; Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON COLUMN ops.work_request.organization_tenant_id IS 'Server-derived CARR organization tenant for sourced Program 6 capture. Historical rows remain null.';
+COMMENT ON COLUMN ops.work_request.organization_tenant_id IS 'Server-derived CARR organization tenant for sourced Program 6 capture and the exact fixed carr-ai-engineering-suite-v1 legacy program. Other historical rows remain null.';
 
 
 --
@@ -22969,7 +24039,8 @@ COMMENT ON VIEW public.v_role_timeouts IS 'Per-role statement and idle-transacti
 
 CREATE VIEW public.v_schema_ledger AS
  SELECT filename,
-    applied_at
+    applied_at,
+    sha256
    FROM public.schema_migrations;
 
 
@@ -24752,7 +25823,7 @@ ALTER TABLE ONLY ops.provider_route
 --
 
 ALTER TABLE ops.run
-    ADD CONSTRAINT recovery_rehearsal_assurance CHECK (((run_key !~~ 'recovery.rehearsal.%'::text) OR ((release_id IS NOT NULL) AND (environment = 'staging'::text) AND (evidence_ref IS NOT NULL) AND (recovery_strategy = 'rollback'::text) AND (recovery_plan_ref IS NOT NULL) AND ((state <> 'succeeded'::text) OR (recovery_rehearsal_bundle_id IS NOT NULL))))) NOT VALID;
+    ADD CONSTRAINT recovery_rehearsal_assurance CHECK (((run_key !~~ 'recovery.rehearsal.%'::text) OR ((release_id IS NOT NULL) AND (environment = 'staging'::text) AND (evidence_ref IS NOT NULL) AND (recovery_strategy = ANY (ARRAY['rollback'::text, 'forward_fix'::text])) AND (recovery_plan_ref IS NOT NULL) AND ((state <> 'succeeded'::text) OR (recovery_rehearsal_bundle_id IS NOT NULL))))) NOT VALID;
 
 
 --
@@ -24937,6 +26008,22 @@ ALTER TABLE ONLY ops.rule_approval_receipt
 
 ALTER TABLE ONLY ops.rule_control_binding
     ADD CONSTRAINT rule_control_binding_pkey PRIMARY KEY (rule_id, control_key);
+
+
+--
+-- Name: rule_delivery_activation_receipt rule_delivery_activation_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_delivery_activation_receipt
+    ADD CONSTRAINT rule_delivery_activation_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rule_delivery_activation_target rule_delivery_activation_target_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_delivery_activation_target
+    ADD CONSTRAINT rule_delivery_activation_target_pkey PRIMARY KEY (short_id);
 
 
 --
@@ -25276,6 +26363,86 @@ ALTER TABLE ONLY ops.staging_deployment_claim
 
 
 --
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_correlation_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_correlation_id_key UNIQUE (correlation_id);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_expected_provider_tag_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_expected_provider_tag_key UNIQUE (expected_provider_tag);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_claim staging_forward_fix_rehearsal_claim_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_claim
+    ADD CONSTRAINT staging_forward_fix_rehearsal_claim_pkey PRIMARY KEY (rehearsal_attempt_id);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_projection_sha256_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_projection_sha256_key UNIQUE (projection_sha256);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_rehearsal_attempt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_rehearsal_attempt_id_key UNIQUE (rehearsal_attempt_id);
+
+
+--
 -- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bu_current_after_restore_receipt_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -25508,6 +26675,406 @@ ALTER TABLE ONLY ops.staging_restore_only_result
 
 
 --
+-- Name: tour_audit_event tour_audit_event_organization_tenant_id_event_digest_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_audit_event
+    ADD CONSTRAINT tour_audit_event_organization_tenant_id_event_digest_key UNIQUE (organization_tenant_id, event_digest);
+
+
+--
+-- Name: tour_audit_event tour_audit_event_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_audit_event
+    ADD CONSTRAINT tour_audit_event_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_audit_event tour_audit_event_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_audit_event
+    ADD CONSTRAINT tour_audit_event_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_cheat_sheet_revision
+    ADD CONSTRAINT tour_cheat_sheet_revision_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_organization_tenant_id_tour_id_re_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_cheat_sheet_revision
+    ADD CONSTRAINT tour_cheat_sheet_revision_organization_tenant_id_tour_id_re_key UNIQUE (organization_tenant_id, tour_id, revision_number);
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_cheat_sheet_revision
+    ADD CONSTRAINT tour_cheat_sheet_revision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_rece_organization_tenant_id_confli_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_rece_organization_tenant_id_confli_key UNIQUE (organization_tenant_id, conflict_id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_receipt_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_receipt_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_fact_conflict tour_fact_conflict_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict
+    ADD CONSTRAINT tour_fact_conflict_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_fact_conflict_participant tour_fact_conflict_participant_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict_participant
+    ADD CONSTRAINT tour_fact_conflict_participant_pkey PRIMARY KEY (organization_tenant_id, conflict_id, field_assertion_id);
+
+
+--
+-- Name: tour_fact_conflict tour_fact_conflict_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict
+    ADD CONSTRAINT tour_fact_conflict_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour tour_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour
+    ADD CONSTRAINT tour_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour tour_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour
+    ADD CONSTRAINT tour_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_tour_id_ro_key1; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_tour_id_ro_key1 UNIQUE (organization_tenant_id, tour_id, route_version, route_sequence);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_tour_id_ro_key2; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_tour_id_ro_key2 UNIQUE (organization_tenant_id, tour_id, route_version, route_label);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_tour_id_rou_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_tour_id_rou_key UNIQUE (organization_tenant_id, tour_id, route_version, property_id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_property tour_property_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property
+    ADD CONSTRAINT tour_property_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_property tour_property_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property
+    ADD CONSTRAINT tour_property_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_projecti_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_projecti_key UNIQUE (organization_tenant_id, projection_id, property_id, display_field_key);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_public_projection tour_public_projection_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection
+    ADD CONSTRAINT tour_public_projection_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection tour_public_projection_organization_tenant_id_tour_id_proje_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection
+    ADD CONSTRAINT tour_public_projection_organization_tenant_id_tour_id_proje_key UNIQUE (organization_tenant_id, tour_id, projection_version);
+
+
+--
+-- Name: tour_public_projection tour_public_projection_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection
+    ADD CONSTRAINT tour_public_projection_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_r_organization_tenant_id_projec_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_seal_receipt
+    ADD CONSTRAINT tour_public_projection_seal_r_organization_tenant_id_projec_key UNIQUE (organization_tenant_id, projection_id);
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_recei_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_seal_receipt
+    ADD CONSTRAINT tour_public_projection_seal_recei_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_seal_receipt
+    ADD CONSTRAINT tour_public_projection_seal_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_publication tour_publication_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_publication
+    ADD CONSTRAINT tour_publication_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_publication tour_publication_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_publication
+    ADD CONSTRAINT tour_publication_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_qc_finding tour_qc_finding_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_qc_finding
+    ADD CONSTRAINT tour_qc_finding_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_qc_finding tour_qc_finding_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_qc_finding
+    ADD CONSTRAINT tour_qc_finding_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_one_successor; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_one_successor UNIQUE (organization_tenant_id, supersedes_receipt_id);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_organization_tenant_id_provider_policy__key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_organization_tenant_id_provider_policy__key UNIQUE (organization_tenant_id, provider, policy_key, receipt_version);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_one_successor; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_one_successor UNIQUE (organization_tenant_id, rotated_from_grant_id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_organization_tenant_id_projection_id_grant_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_organization_tenant_id_projection_id_grant_key UNIQUE (organization_tenant_id, projection_id, grant_version);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_r_organization_tenant_id_share__key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant_revocation_receipt
+    ADD CONSTRAINT tour_share_grant_revocation_r_organization_tenant_id_share__key UNIQUE (organization_tenant_id, share_grant_id);
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_recei_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant_revocation_receipt
+    ADD CONSTRAINT tour_share_grant_revocation_recei_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant_revocation_receipt
+    ADD CONSTRAINT tour_share_grant_revocation_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_token_digest_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_token_digest_key UNIQUE (token_digest);
+
+
+--
+-- Name: tour_source_evidence tour_source_evidence_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_source_evidence
+    ADD CONSTRAINT tour_source_evidence_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_source_evidence tour_source_evidence_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_source_evidence
+    ADD CONSTRAINT tour_source_evidence_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: work_request_execution_assignment work_request_execution_assignment_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -25561,14 +27128,6 @@ ALTER TABLE ONLY ops.work_request
 
 ALTER TABLE ONLY ops.work_request
     ADD CONSTRAINT work_request_ref_key UNIQUE (ref);
-
-
---
--- Name: work_request work_request_sourced_capture_shape; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ops.work_request
-    ADD CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((capture_idempotency_key IS NOT NULL) AND (organization_tenant_id = 'carr-internal'::text) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)))))) NOT VALID;
 
 
 --
@@ -27318,6 +28877,20 @@ CREATE INDEX settings_change_recorded_idx ON ops.settings_change USING btree (re
 
 
 --
+-- Name: staging_recovery_bundle_forward_fix_result_once; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX staging_recovery_bundle_forward_fix_result_once ON ops.staging_recovery_rehearsal_bundle USING btree (forward_fix_result_id) WHERE (forward_fix_result_id IS NOT NULL);
+
+
+--
+-- Name: tour_field_assertion_property_field_active_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX tour_field_assertion_property_field_active_idx ON ops.tour_field_assertion USING btree (organization_tenant_id, property_id, field_key, effective_from DESC) WHERE (review_state = ANY (ARRAY['unreviewed'::text, 'reviewed'::text, 'conflicted'::text]));
+
+
+--
 -- Name: work_request_capture_idempotency_key_uniq; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -28790,6 +30363,20 @@ CREATE TRIGGER rule_approval_receipt_append_only BEFORE DELETE OR UPDATE ON ops.
 
 
 --
+-- Name: rule_delivery_activation_receipt rule_delivery_activation_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_delivery_activation_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_delivery_activation_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_delivery_activation_receipt_rewrite();
+
+
+--
+-- Name: rule_delivery_policy rule_delivery_policy_cutover_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_delivery_policy_cutover_only BEFORE UPDATE ON ops.rule_delivery_policy FOR EACH ROW EXECUTE FUNCTION ops.refuse_direct_rule_delivery_policy_update();
+
+
+--
 -- Name: rule_load_layer rule_load_layer_packs_exist; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28867,6 +30454,27 @@ CREATE TRIGGER staging_deployment_claim_append_only BEFORE DELETE OR UPDATE ON o
 
 
 --
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_forward_fix_rehearsal_attempt_append_only BEFORE DELETE OR UPDATE ON ops.staging_forward_fix_rehearsal_attempt FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_forward_fix_rehearsal_claim staging_forward_fix_rehearsal_claim_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_forward_fix_rehearsal_claim_append_only BEFORE DELETE OR UPDATE ON ops.staging_forward_fix_rehearsal_claim FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_forward_fix_rehearsal_result_append_only BEFORE DELETE OR UPDATE ON ops.staging_forward_fix_rehearsal_result FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
 -- Name: staging_recovery_rehearsal_bundle staging_recovery_bundle_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28913,6 +30521,174 @@ CREATE TRIGGER staging_restore_only_claim_append_only BEFORE DELETE OR UPDATE ON
 --
 
 CREATE TRIGGER staging_restore_only_result_append_only BEFORE DELETE OR UPDATE ON ops.staging_restore_only_result FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: tour_field_assertion tour_assertion_rights_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_assertion_rights_guard BEFORE INSERT ON ops.tour_field_assertion FOR EACH ROW EXECUTE FUNCTION ops.tour_assertion_rights_guard();
+
+
+--
+-- Name: tour_audit_event tour_audit_event_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_audit_event_append_only BEFORE DELETE OR UPDATE ON ops.tour_audit_event FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_cheat_sheet_revision_append_only BEFORE DELETE OR UPDATE ON ops.tour_cheat_sheet_revision FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_fact_conflict_participant tour_conflict_participant_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_conflict_participant_guard BEFORE INSERT ON ops.tour_fact_conflict_participant FOR EACH ROW EXECUTE FUNCTION ops.tour_conflict_participant_guard();
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_conflict_resolution_guard BEFORE INSERT ON ops.tour_conflict_resolution_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_conflict_resolution_guard();
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_conflict_resolution_receipt_append_only BEFORE DELETE OR UPDATE ON ops.tour_conflict_resolution_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_fact_conflict tour_fact_conflict_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_fact_conflict_append_only BEFORE DELETE OR UPDATE ON ops.tour_fact_conflict FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_fact_conflict_participant tour_fact_conflict_participant_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_fact_conflict_participant_append_only BEFORE DELETE OR UPDATE ON ops.tour_fact_conflict_participant FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_field_assertion_append_only BEFORE DELETE OR UPDATE ON ops.tour_field_assertion FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_property_membership tour_membership_seal_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_membership_seal_guard BEFORE INSERT ON ops.tour_property_membership FOR EACH ROW EXECUTE FUNCTION ops.tour_membership_seal_guard();
+
+
+--
+-- Name: tour_public_projection tour_projection_creation_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_projection_creation_guard BEFORE INSERT ON ops.tour_public_projection FOR EACH ROW EXECUTE FUNCTION ops.tour_projection_creation_guard();
+
+
+--
+-- Name: tour_public_projection_fact tour_projection_fact_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_projection_fact_guard BEFORE INSERT OR UPDATE ON ops.tour_public_projection_fact FOR EACH ROW EXECUTE FUNCTION ops.tour_projection_fact_guard();
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_projection_seal_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_projection_seal_guard BEFORE INSERT ON ops.tour_public_projection_seal_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_projection_seal_guard();
+
+
+--
+-- Name: tour_property_membership tour_property_membership_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_property_membership_append_only BEFORE DELETE OR UPDATE ON ops.tour_property_membership FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_public_projection tour_public_projection_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_public_projection_append_only BEFORE DELETE OR UPDATE ON ops.tour_public_projection FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_public_projection_fact_append_only BEFORE DELETE OR UPDATE ON ops.tour_public_projection_fact FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_public_projection_seal_receipt_append_only BEFORE DELETE OR UPDATE ON ops.tour_public_projection_seal_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_rights_receipt tour_rights_lineage_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_rights_lineage_guard BEFORE INSERT ON ops.tour_rights_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_rights_lineage_guard();
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_rights_receipt_append_only BEFORE DELETE OR UPDATE ON ops.tour_rights_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_share_grant tour_share_grant_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_share_grant_append_only BEFORE DELETE OR UPDATE ON ops.tour_share_grant FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_share_grant_revocation_receipt_append_only BEFORE DELETE OR UPDATE ON ops.tour_share_grant_revocation_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_share_grant tour_share_rotation_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_share_rotation_guard BEFORE INSERT ON ops.tour_share_grant FOR EACH ROW EXECUTE FUNCTION ops.tour_share_rotation_guard();
+
+
+--
+-- Name: tour_source_evidence tour_source_evidence_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_source_evidence_append_only BEFORE DELETE OR UPDATE ON ops.tour_source_evidence FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_source_evidence tour_source_rights_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_source_rights_guard BEFORE INSERT ON ops.tour_source_evidence FOR EACH ROW EXECUTE FUNCTION ops.tour_source_rights_guard();
 
 
 --
@@ -30796,6 +32572,38 @@ ALTER TABLE ONLY ops.staging_deployment_claim
 
 
 --
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_release_id_fkey FOREIGN KEY (release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_forward_fix_rehearsal_claim staging_forward_fix_rehearsal_claim_rehearsal_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_claim
+    ADD CONSTRAINT staging_forward_fix_rehearsal_claim_rehearsal_attempt_id_fkey FOREIGN KEY (rehearsal_attempt_id) REFERENCES ops.staging_forward_fix_rehearsal_attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_rehearsal_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_rehearsal_attempt_id_fkey FOREIGN KEY (rehearsal_attempt_id) REFERENCES ops.staging_forward_fix_rehearsal_attempt(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bu_current_after_restore_receip_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -30825,6 +32633,14 @@ ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
 
 ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
     ADD CONSTRAINT staging_recovery_rehearsal_bundle_current_release_id_fkey FOREIGN KEY (current_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_forward_fix_result_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_forward_fix_result_id_fkey FOREIGN KEY (forward_fix_result_id) REFERENCES ops.staging_forward_fix_rehearsal_result(id) ON DELETE RESTRICT;
 
 
 --
@@ -30937,6 +32753,182 @@ ALTER TABLE ONLY ops.staging_restore_only_claim
 
 ALTER TABLE ONLY ops.staging_restore_only_result
     ADD CONSTRAINT staging_restore_only_result_restore_attempt_id_fkey FOREIGN KEY (restore_attempt_id) REFERENCES ops.staging_restore_only_attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_organization_tenant_id_tour_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_cheat_sheet_revision
+    ADD CONSTRAINT tour_cheat_sheet_revision_organization_tenant_id_tour_id_fkey FOREIGN KEY (organization_tenant_id, tour_id) REFERENCES ops.tour(organization_tenant_id, id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_rece_organization_tenant_id_confl_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_rece_organization_tenant_id_confl_fkey FOREIGN KEY (organization_tenant_id, conflict_id) REFERENCES ops.tour_fact_conflict(organization_tenant_id, id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_rece_organization_tenant_id_selec_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_rece_organization_tenant_id_selec_fkey FOREIGN KEY (organization_tenant_id, selected_field_assertion_id) REFERENCES ops.tour_field_assertion(organization_tenant_id, id);
+
+
+--
+-- Name: tour_fact_conflict tour_fact_conflict_organization_tenant_id_property_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict
+    ADD CONSTRAINT tour_fact_conflict_organization_tenant_id_property_id_fkey FOREIGN KEY (organization_tenant_id, property_id) REFERENCES ops.tour_property(organization_tenant_id, id);
+
+
+--
+-- Name: tour_fact_conflict_participant tour_fact_conflict_participan_organization_tenant_id_confl_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict_participant
+    ADD CONSTRAINT tour_fact_conflict_participan_organization_tenant_id_confl_fkey FOREIGN KEY (organization_tenant_id, conflict_id) REFERENCES ops.tour_fact_conflict(organization_tenant_id, id);
+
+
+--
+-- Name: tour_fact_conflict_participant tour_fact_conflict_participan_organization_tenant_id_field_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict_participant
+    ADD CONSTRAINT tour_fact_conflict_participan_organization_tenant_id_field_fkey FOREIGN KEY (organization_tenant_id, field_assertion_id) REFERENCES ops.tour_field_assertion(organization_tenant_id, id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_organization_tenant_id_property_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_organization_tenant_id_property_id_fkey FOREIGN KEY (organization_tenant_id, property_id) REFERENCES ops.tour_property(organization_tenant_id, id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_organization_tenant_id_rights_receipt_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_organization_tenant_id_rights_receipt_fkey FOREIGN KEY (organization_tenant_id, rights_receipt_id) REFERENCES ops.tour_rights_receipt(organization_tenant_id, id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_organization_tenant_id_source_evidenc_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_organization_tenant_id_source_evidenc_fkey FOREIGN KEY (organization_tenant_id, source_evidence_id) REFERENCES ops.tour_source_evidence(organization_tenant_id, id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_property_i_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_property_i_fkey FOREIGN KEY (organization_tenant_id, property_id) REFERENCES ops.tour_property(organization_tenant_id, id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_tour_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_tour_id_fkey FOREIGN KEY (organization_tenant_id, tour_id) REFERENCES ops.tour(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_field_a_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_field_a_fkey FOREIGN KEY (organization_tenant_id, field_assertion_id) REFERENCES ops.tour_field_assertion(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_project_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_project_fkey FOREIGN KEY (organization_tenant_id, projection_id) REFERENCES ops.tour_public_projection(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_propert_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_propert_fkey FOREIGN KEY (organization_tenant_id, property_id) REFERENCES ops.tour_property(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection tour_public_projection_organization_tenant_id_tour_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection
+    ADD CONSTRAINT tour_public_projection_organization_tenant_id_tour_id_fkey FOREIGN KEY (organization_tenant_id, tour_id) REFERENCES ops.tour(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_r_organization_tenant_id_proje_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_seal_receipt
+    ADD CONSTRAINT tour_public_projection_seal_r_organization_tenant_id_proje_fkey FOREIGN KEY (organization_tenant_id, projection_id) REFERENCES ops.tour_public_projection(organization_tenant_id, id);
+
+
+--
+-- Name: tour_publication tour_publication_organization_tenant_id_projection_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_publication
+    ADD CONSTRAINT tour_publication_organization_tenant_id_projection_id_fkey FOREIGN KEY (organization_tenant_id, projection_id) REFERENCES ops.tour_public_projection(organization_tenant_id, id);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_organization_tenant_id_supersedes_rece_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_organization_tenant_id_supersedes_rece_fkey FOREIGN KEY (organization_tenant_id, supersedes_receipt_id) REFERENCES ops.tour_rights_receipt(organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_organization_tenant_id_projection_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_organization_tenant_id_projection_id_fkey FOREIGN KEY (organization_tenant_id, projection_id) REFERENCES ops.tour_public_projection(organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_organization_tenant_id_rotated_from_grant_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_organization_tenant_id_rotated_from_grant_fkey FOREIGN KEY (organization_tenant_id, rotated_from_grant_id) REFERENCES ops.tour_share_grant(organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_r_organization_tenant_id_share_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant_revocation_receipt
+    ADD CONSTRAINT tour_share_grant_revocation_r_organization_tenant_id_share_fkey FOREIGN KEY (organization_tenant_id, share_grant_id) REFERENCES ops.tour_share_grant(organization_tenant_id, id);
+
+
+--
+-- Name: tour_source_evidence tour_source_evidence_organization_tenant_id_rights_receipt_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_source_evidence
+    ADD CONSTRAINT tour_source_evidence_organization_tenant_id_rights_receipt_fkey FOREIGN KEY (organization_tenant_id, rights_receipt_id) REFERENCES ops.tour_rights_receipt(organization_tenant_id, id);
 
 
 --
@@ -33210,6 +35202,7 @@ revoke all on function ops.claim_calendar_prebrief_joe_live_job(p_worker text, p
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
+revoke all on function ops.claim_staging_forward_fix_rehearsal(p_idempotency_key uuid) from public;
 revoke all on function ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) from public;
 revoke all on function ops.clear_recovered_incident(p_ref text, p_required integer) from public;
 revoke all on function ops.compile_context_bundle(p_work_request text, p_plan_ref text, p_tenant text) from public;
@@ -33252,7 +35245,9 @@ revoke all on function ops.issue_execution_envelope_v1_without_environment_gate(
 revoke all on function ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) from public;
+revoke all on function ops.prepare_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_git_sha text) from public;
 revoke all on function ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) from public;
+revoke all on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) from public;
 revoke all on function ops.program5_migration_set_sha256(p_migration_set text[]) from public;
 revoke all on function ops.program6_browser_action_challenge_redemptions_immutable() from public;
 revoke all on function ops.propose_eval_candidate(p_attempt_id text, p_fact_event_ref text, p_idempotency_key uuid) from public;
@@ -33265,6 +35260,7 @@ revoke all on function ops.read_attempt_receipt_reliability(p_attempt_id text) f
 revoke all on function ops.read_calendar_prebrief_joe_activation(p_id uuid) from public;
 revoke all on function ops.read_context_activation(p_work_request text, p_binding_id text) from public;
 revoke all on function ops.read_execution_environment_providers() from public;
+revoke all on function ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) from public;
 revoke all on function ops.reap_expired_jobs() from public;
 revoke all on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
@@ -33277,6 +35273,7 @@ revoke all on function ops.record_launchd_scheduler_observation(p_surface_id tex
 revoke all on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) from public;
 revoke all on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) from public;
+revoke all on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
 revoke all on function ops.record_staging_release_readback_program6(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
@@ -33295,10 +35292,12 @@ revoke all on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_atte
 revoke all on function ops.resolve_calendar_prebrief_email_ref(p_email text) from public;
 revoke all on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) from public;
 revoke all on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) from public;
+revoke all on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) from public;
 revoke all on function ops.schedule_calendar_prebrief_joe_live_job() from public;
 revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) from public;
 revoke all on function ops.select_provider_routes(p_requested text[]) from public;
+revoke all on function ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) from public;
 revoke all on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
@@ -33334,6 +35333,7 @@ grant usage on schema ops to carr_calendar_prebrief_email_resolver;
 grant usage on schema ops to carr_calendar_prebrief_jobs;
 grant usage on schema ops to carr_device_evidence;
 grant usage on schema ops to carr_jobs;
+grant usage on schema ops to carr_program5_forward_fix_verifiers;
 grant usage on schema ops to carr_reader;
 grant usage on schema ops to carr_renewal_source_attestors;
 grant usage on schema ops to carr_writer;
@@ -33344,6 +35344,7 @@ grant usage on schema public to carr_calendar_prebrief_email_resolver;
 grant usage on schema public to carr_calendar_prebrief_jobs;
 grant usage on schema public to carr_exporter;
 grant usage on schema public to carr_jobs;
+grant usage on schema public to carr_program5_forward_fix_verifiers;
 grant usage on schema public to carr_reader;
 grant usage on schema public to carr_renewal_source_attestors;
 grant usage on schema public to carr_writer;
@@ -33483,6 +35484,10 @@ grant select on table ops.rule_control_binding to carr_authority;
 grant select on table ops.rule_control_binding to carr_jobs;
 grant select on table ops.rule_control_binding to carr_reader;
 grant select on table ops.rule_control_binding to carr_writer;
+grant select on table ops.rule_delivery_activation_receipt to carr_reader;
+grant select on table ops.rule_delivery_activation_receipt to carr_writer;
+grant select on table ops.rule_delivery_activation_target to carr_reader;
+grant select on table ops.rule_delivery_activation_target to carr_writer;
 grant select on table ops.rule_delivery_policy to carr_jobs;
 grant select on table ops.rule_delivery_policy to carr_reader;
 grant select on table ops.rule_delivery_policy to carr_writer;
@@ -33524,6 +35529,18 @@ grant select on table ops.staging_deployment_claim to carr_authority;
 grant select on table ops.staging_deployment_claim to carr_jobs;
 grant select on table ops.staging_deployment_claim to carr_reader;
 grant select on table ops.staging_deployment_claim to carr_writer;
+grant select on table ops.staging_forward_fix_rehearsal_attempt to carr_authority;
+grant select on table ops.staging_forward_fix_rehearsal_attempt to carr_jobs;
+grant select on table ops.staging_forward_fix_rehearsal_attempt to carr_reader;
+grant select on table ops.staging_forward_fix_rehearsal_attempt to carr_writer;
+grant select on table ops.staging_forward_fix_rehearsal_claim to carr_authority;
+grant select on table ops.staging_forward_fix_rehearsal_claim to carr_jobs;
+grant select on table ops.staging_forward_fix_rehearsal_claim to carr_reader;
+grant select on table ops.staging_forward_fix_rehearsal_claim to carr_writer;
+grant select on table ops.staging_forward_fix_rehearsal_result to carr_authority;
+grant select on table ops.staging_forward_fix_rehearsal_result to carr_jobs;
+grant select on table ops.staging_forward_fix_rehearsal_result to carr_reader;
+grant select on table ops.staging_forward_fix_rehearsal_result to carr_writer;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_authority;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_jobs;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_reader;
@@ -34029,6 +36046,7 @@ grant execute on function ops.claim_calendar_prebrief_joe_live_job(p_worker text
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
+grant execute on function ops.claim_staging_forward_fix_rehearsal(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.clear_recovered_incident(p_ref text, p_required integer) to carr_jobs;
 grant execute on function ops.compile_context_bundle(p_work_request text, p_plan_ref text, p_tenant text) to carr_writer;
@@ -34079,7 +36097,10 @@ grant execute on function ops.issue_execution_envelope_v1(p_work_request text, p
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_reader;
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_writer;
 grant execute on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) to carr_jobs;
+grant execute on function ops.prepare_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_git_sha text) to carr_jobs;
 grant execute on function ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) to carr_jobs;
+grant execute on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) to carr_authority;
+grant execute on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) to carr_jobs;
 grant execute on function ops.program5_migration_set_sha256(p_migration_set text[]) to carr_jobs;
 grant execute on function ops.propose_eval_candidate(p_attempt_id text, p_fact_event_ref text, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) to carr_writer;
@@ -34096,6 +36117,7 @@ grant execute on function ops.read_context_activation(p_work_request text, p_bin
 grant execute on function ops.read_execution_environment_providers() to carr_authority;
 grant execute on function ops.read_execution_environment_providers() to carr_reader;
 grant execute on function ops.read_execution_environment_providers() to carr_writer;
+grant execute on function ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
 grant execute on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
@@ -34108,8 +36130,9 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -34124,6 +36147,9 @@ grant execute on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_a
 grant execute on function ops.resolve_calendar_prebrief_email_ref(p_email text) to carr_calendar_prebrief_email_resolver;
 grant execute on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
 grant execute on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) to carr_authority;
+grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_jobs;
+grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_reader;
+grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_writer;
 grant execute on function ops.rule_delivery_plan(p_actor text, p_packs text[]) to carr_reader;
 grant execute on function ops.rule_delivery_plan(p_actor text, p_packs text[]) to carr_writer;
 grant execute on function ops.rule_pack_index() to carr_jobs;
@@ -34132,6 +36158,7 @@ grant execute on function ops.rule_pack_index() to carr_writer;
 grant execute on function ops.schedule_calendar_prebrief_joe_live_job() to carr_jobs;
 grant execute on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) to carr_renewal_source_attestors;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
+grant execute on function ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) to carr_authority;
 grant execute on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
@@ -34168,6 +36195,7 @@ grant carr_calendar_prebrief_jobs to neondb_owner;
 grant carr_device_evidence to neondb_owner;
 grant carr_exporter to neondb_owner;
 grant carr_jobs to neondb_owner;
+grant carr_program5_forward_fix_verifiers to neondb_owner;
 grant carr_reader to carr_exporter;
 grant carr_reader to neondb_owner;
 grant carr_renewal_source_attestors to neondb_owner;
@@ -34443,6 +36471,12 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0310_engineering_execution_fabric.sql	f321288d38550d5d82598d6c335690d54c2c3acbb035c339387fe3f128a69e55	2026-08-25 16:46:49.704808+00
 0311_sponsored_engineering_executor_authority.sql	c465664010c578da8201a536887e0bf2a21f7573d5706ff62e943b460b3992c5	2026-08-25 19:06:06.825594+00
 0312_engineering_dispatch_controller.sql	96a9aed7dd38c11d0c9886fc88ba0fb62c647be7bdc194489a765e0083b8a500	2026-08-25 20:25:47.711357+00
+0314_doctorcre_home_legacy_program_tenant.sql	4a69a1fbed9da29d93e5da899ba2a14eff542c792a388eaa248d9a551434cbf7	2026-08-26 00:33:57.465684+00
+0315_program5_forward_fix_rehearsal.sql	ff7d032af80eeab2ffbb44d777492ef5e62a6eee932eaa30799c411e02c29b37	2026-08-26 00:37:55.578346+00
+0316_rule_delivery_audit_counts.sql	fcfb7d9c823d846f4e1cb26623895f69128c9e0eb7b13d35af06c2ba400a965e	2026-08-26 00:37:55.866314+00
+0317_atomic_rule_delivery_cutover.sql	1fb3ae5dcbf006e76120750889617ccf59f358490c493993a90332ecb906ba54	2026-08-26 00:37:56.090239+00
+0318_tour_operations_foundation.sql	8cdb4b2127f7dcd6bdc265a402db6471465b10f35c6b06f2707e776f58bed8d6	2026-08-26 00:52:52.888614+00
+0319_engineering_envelope_writer_successor.sql	f45b50d9471153d25b07064055ef638b24e463866ef1e311cbe06d3fe930e097	2026-08-26 00:52:53.168213+00
 \.
 
 
@@ -34743,15 +36777,8 @@ a5c64024-d679-41c2-979b-6e707eec657b	mapping	{"role": "governs", "weight": 1, "r
 b4188a13-123f-4897-bbe0-c45dfcec2602	concept	{"label": "Record layer outage diagnosis", "definition": "Diagnosing an unavailable or failing CARR record layer before attempting repair.", "concept_key": "record-layer-outage-diagnosis"}	RET-002 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{425482a0-1109-4434-8343-8ec6485f9212}	13500000-0000-4000-8000-000000000001	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
 227897ce-1025-42d6-b96f-f9338fac3197	concept	{"label": "Relationship path finding", "definition": "Finding who can introduce whom: walking the party intro graph to answer 'who do we know that can reach X'. Served by the who-do-we-know verb over v_party_graph edges; distinct from name lookup (find) and from deal context (catch-me-up).", "concept_key": "relationship-path-finding", "review_after": null}	Golden-miss probe 2026-08-22: partner-phrased question 'who can introduce me to a hospital decision maker' returned ZERO hits on search-doctrine despite a live who-do-we-know verb and doctrine covering the intro graph.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{ab4ef440-b834-454d-993b-93cf5883a418}	1743e0b3-0b23-4bf0-947e-017a9853f3c0	2	2026-08-22 16:32:49.703719+00	2026-08-22 17:44:56.197601+00
 fe5c7f51-b71c-41b8-92f8-61f315471d77	phrase	{"phrase": "lead system", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-008, failing on production baseline 2026-08-22", "concept_key": "lead-system", "min_similarity": 0.35}	The exact words a partner and the golden suite use for this system.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b91e6244-df5e-466c-8e9b-8ce5c49ecbcc}	e4bfffb5-82cc-4e6d-9dce-0eab64bbfc5f	2	2026-08-22 17:29:26.725705+00	2026-08-22 17:44:56.197601+00
-7ba92102-48ce-4f9f-adbb-b628a6889c56	concept	{"label": "Source-study capability proof", "definition": "Testing an existing-system capability claim property by property against a supplied source, with the burden on the claim that the capability already exists.", "concept_key": "source-study-capability-proof", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	34a1afa6-d67b-596a-a53a-f303333ca826	1	2026-08-24 00:11:06.812529+00	\N
-d48e543d-0026-4b85-9278-3b1fe5d1997c	phrase	{"phrase": "prove an existing capability against the source", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "source-study-capability-proof", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	ad01d8d6-c18b-507c-847f-41ad2689c4d4	1	2026-08-24 00:11:09.831275+00	\N
-3b883519-f3b2-48af-984d-7e57f17216c8	mapping	{"role": "supports", "weight": 1, "rationale": "The active corrected study is the proof example and provenance; the source rule remains authoritative across every Joe-provided source.", "concept_key": "source-study-capability-proof", "section_address": "2026-08-07-tenex-metaharness-sdlc-takeaways#preamble"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0a62921a-07b5-5429-b739-9d02fffe04b2	1	2026-08-24 00:11:15.089212+00	\N
-b60fdc59-3e48-4d91-b291-d345aa176004	concept	{"label": "Partner calibration without profiling", "definition": "Adapting to a partner's directly stated preferences and corrections without inferring hidden psychology, motivation, mood, or personality.", "concept_key": "partner-calibration-without-profiling", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	4a26d2e5-4ff2-58bb-95d0-381570826785	1	2026-08-24 00:11:20.172679+00	\N
-6b38f514-4172-4180-bb0d-eeb998ba6f3b	phrase	{"phrase": "adapt to Dell without personality profiling", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "partner-calibration-without-profiling", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	3f752654-6a73-5865-a8c6-e7899941f94a	1	2026-08-24 00:11:24.119225+00	\N
-30046271-2917-4073-86f0-0b0dd5b47a35	mapping	{"role": "governs", "weight": 1, "rationale": "The active memory doctrine supports Dell-specific calibration from directly stated or demonstrated preferences while forbidding personality, motive, mood, or state inference.", "concept_key": "partner-calibration-without-profiling", "section_address": "dr-cre-doctrine-2026-08-01#iii-memory-what-he-keeps-and-the-line-he-never-crosses"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	fc37b865-a5fe-5838-a002-09a05430f1b0	1	2026-08-24 00:11:29.230662+00	\N
-eb34968e-bc1d-42bd-9217-f7da073f8bd8	concept	{"label": "One implementation for every write path", "definition": "Keeping manual and automated callers on the same governed implementation so configuration, validation, and evidence cannot drift between paths.", "concept_key": "one-implementation-for-every-write-path", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	30d5d7bb-0eac-586b-b1bf-30b513908e78	1	2026-08-24 00:11:31.982531+00	\N
-7ef8a7fc-3d79-424e-ba30-ef50cc49e7d9	phrase	{"phrase": "manual and automated paths use the same implementation", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "one-implementation-for-every-write-path", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	ce14e6aa-8925-5423-93f1-936a628e57ef	1	2026-08-24 00:11:35.663231+00	\N
-787b4b47-bc3d-4cc9-a248-d60891f89db7	phrase	{"phrase": "capture reusable knowledge for later", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "capture-reusable-deferred-knowledge", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	e0dbb452-d38e-59fc-8bfe-cf23bb89d1d1	1	2026-08-24 00:12:40.667031+00	\N
+7ba92102-48ce-4f9f-adbb-b628a6889c56	concept	{"label": "Source-study capability proof", "definition": "Testing an existing-system capability claim property by property against a supplied source, with the burden on the claim that the capability already exists.", "concept_key": "source-study-capability-proof", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{04d46639-cd91-4caa-a79d-a8abe596a5d8}	34a1afa6-d67b-596a-a53a-f303333ca826	2	2026-08-24 00:11:06.812529+00	2026-08-26 00:30:55.219671+00
+b60fdc59-3e48-4d91-b291-d345aa176004	concept	{"label": "Partner calibration without profiling", "definition": "Adapting to a partner's directly stated preferences and corrections without inferring hidden psychology, motivation, mood, or personality.", "concept_key": "partner-calibration-without-profiling", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{d84f6920-8407-4480-80c2-5110f37a4eb7}	4a26d2e5-4ff2-58bb-95d0-381570826785	2	2026-08-24 00:11:20.172679+00	2026-08-26 00:30:55.219671+00
 c25b1976-3068-4048-a7ba-dc143b41b7b2	concept	{"label": "National accounts", "definition": "The national-account client type: a parent organization spanning many markets, with per-market deals under one account owner. Ruled first-class by Joe on the Musicologie case (2026-08-02); served by create-national-account, set-national-account-owner, set-market-agent and the Lead Board's national-accounts lane.", "concept_key": "national-accounts", "review_after": null}	Golden-miss probe 2026-08-22: 'national account modelling musicologie' returned ZERO hits on search-doctrine although the ruling exists in precedent search and the lane is built — the doctrine side never names the concept the way partners say it.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e0083f58-b3fa-4127-a430-db35ac514c64}	d67ae31e-a5fc-4998-87b5-6e1a487c2a2b	2	2026-08-22 16:36:37.606914+00	2026-08-22 17:44:56.197601+00
 4d7e4d6f-5be4-46cd-8c3e-efe5c6418460	concept	{"label": "Lead system", "definition": "The shared lead pipeline machinery as one system: the lead board, claim-before-touch protocol, drips, weekly refresh duties, and the handoff document that consolidates how leads move from sweep to claimed work.", "concept_key": "lead-system", "review_after": null}	The golden question "lead system" has failed against production since the corpus grew competing sections that tie it lexically out of the top three; the handoff document is the governing answer and needs concept evidence to say so.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{8aa41aa1-ccca-4560-9f96-927ffd37d894}	9ca38048-0f88-4a71-8d26-d14308b3d19d	2	2026-08-22 17:28:55.901014+00	2026-08-22 17:44:56.197601+00
 6801daff-1f32-4ad1-8e6c-91afdfa8d3b0	concept	{"label": "Authoritative record ownership", "definition": "Choosing one canonical home for a record or fact and making every other surface a governed consumer instead of a competing copy — the single-source-of-truth discipline.", "concept_key": "authoritative-record-ownership", "review_after": null}	The golden question "single source of truth" has failed against production since a social-media section began outranking the enrichment rules lexically; the standing rule needs its governing section reachable by its own name.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{3658ad6c-2d93-4107-a4bf-0f380de7a97c}	097f6450-9fa4-43cf-a59f-4aa02f21ca0c	2	2026-08-22 17:29:07.47438+00	2026-08-22 17:44:56.197601+00
@@ -34768,35 +36795,42 @@ d00bf818-02e6-467b-8739-0e4e48a1eb2e	phrase	{"phrase": "single source of truth",
 6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{dade0b55-03ac-4d96-8dea-18a67e23f0a4}	13500000-0000-4000-8000-000000000008	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
 926cdffa-2477-452d-baf7-ba2f0700ea25	mapping	{"role": "governs", "weight": 1, "rationale": "The handoff document's opening section is the consolidated statement of how the lead system works end to end; the sibling sections (claim protocol, drips, weekly duties) are parts of it.", "concept_key": "lead-system", "section_address": "lead-system-handoff#preamble"}	Binds the lead-system concept to the section the golden suite names as its governing answer.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{12cb4791-c775-4c06-898b-05e022b28383}	f968566b-14ec-43a2-baaa-3a41e699ff9e	2	2026-08-22 17:29:59.543131+00	2026-08-22 17:44:56.197601+00
 5f83aa52-8901-4a0b-8cc0-83d51a841401	mapping	{"role": "governs", "weight": 1, "rationale": "The enrichment rules section states the single-source-of-truth discipline as an operating rule for deal data — where the question \\"what is our single source of truth\\" is actually answered.", "concept_key": "authoritative-record-ownership", "section_address": "deal-enrichment-sop#rules"}	Binds the authoritative-record-ownership concept to the section the golden suite names as its governing answer.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{68ec37b8-f301-4bd3-b34b-edf7fef8088d}	72f3fdb2-681d-470f-a891-35d8918330b7	2	2026-08-22 17:30:01.93936+00	2026-08-22 17:44:56.197601+00
-c25d5333-7111-4a10-acf8-31cca41d6320	concept	{"label": "Partner complementarity reasoning", "definition": "Reasoning about how Joe and Dell's demonstrated strengths fit together without profiling either partner in isolation.", "concept_key": "partner-complementarity-reasoning", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	092cef0b-799b-5910-9bc9-ed482f065fed	1	2026-08-24 00:10:15.618415+00	\N
-c7674241-e986-4562-8d6f-c0738831dc45	phrase	{"phrase": "Joe and Dell partner complementarity", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "partner-complementarity-reasoning", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0648bb96-f1d7-5c39-bcc8-f270a9db9111	1	2026-08-24 00:10:20.885324+00	\N
-c43c937f-d247-4744-b4cb-d20a4a99f8ea	mapping	{"role": "supports", "weight": 1, "rationale": "The active collaboration-model section supports partner-complementarity reasoning, while the source rule remains authoritative for evidence, symmetry, no profiling, and visibility requirements.", "concept_key": "partner-complementarity-reasoning", "section_address": "twin-system-playbook#collaboration-model-designed-with-joe-july-6-2026-the-max-efficiency-layer"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	cf623396-afb2-5424-b5ba-64224c11a9ab	1	2026-08-24 00:10:25.003703+00	\N
-ad70fc8a-3c8e-4815-af65-250c82d9b8f3	mapping	{"role": "supports", "weight": 1, "rationale": "The active knowledge-architecture section supports authoritative ownership during change; it does not replace the source rule's universal anti-duplication and generated-view mandate.", "concept_key": "authoritative-record-ownership", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	9fb86288-cc27-55b6-b49b-5fa3ee921201	1	2026-08-24 00:10:28.949747+00	\N
-23eecdde-9cbe-4c9d-8f75-4fe2a57d7a8d	concept	{"label": "Joe brokerage priority context", "definition": "Interpreting Joe's priorities from his healthcare brokerage role and current pipeline-building work rather than over-weighting recent system construction.", "concept_key": "joe-brokerage-priority-context", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	e0ac3e63-560d-50e2-a903-f9fd4e265d60	1	2026-08-24 00:10:32.204027+00	\N
-5e1cc7c7-765a-437a-a34a-b32a86eece41	phrase	{"phrase": "Joe brokerage priorities and current focus", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "joe-brokerage-priority-context", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	f05a6e62-cc21-5873-bf7a-f69170a3c770	1	2026-08-24 00:10:35.582595+00	\N
-8644c978-8d25-4932-8508-a900226c67f0	mapping	{"role": "governs", "weight": 1, "rationale": "The active profile section states Joe's present brokerage stage and primary prospecting, outreach, follow-up, and market-work focus without treating historical system-building residue as his defining work or unfinished-project behavior.", "concept_key": "joe-brokerage-priority-context", "section_address": "carr-profile#current-stage"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	2053e5ee-89d5-590c-a681-229612de451e	1	2026-08-24 00:10:39.630231+00	\N
-4f2573bc-ee34-43de-ac34-71825fb33bbf	concept	{"label": "Session work-shape assessment", "definition": "Assessing an agent session from its actual scope, authority, tools, and actions rather than inferring behavior from its title.", "concept_key": "session-work-shape-assessment", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	517598e5-2edd-5091-93d7-e41cf4916546	1	2026-08-24 00:10:45.045187+00	\N
-ad6b4235-0e70-478d-9d46-2a991ee0e98b	phrase	{"phrase": "assess the actual session work shape", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "session-work-shape-assessment", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	996b5b91-45eb-50a8-8f6a-c20fd42cb450	1	2026-08-24 00:10:48.05803+00	\N
-0fc908bc-1780-471d-8864-fbea47a907cd	mapping	{"role": "governs", "weight": 1, "rationale": "The active AgentOps contract supports judging actual tool use, dirty paths, transcript, concurrency, and worktree risk rather than trusting a session label.", "concept_key": "session-work-shape-assessment", "section_address": "carr-production-maturity-baseline#s13-agentops-doc-and-engineering-sessions"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	617d2462-eefc-56f1-9956-722a67621e47	1	2026-08-24 00:10:51.647008+00	\N
-eccae8c1-ff93-4a72-948d-0cbd44e17459	concept	{"label": "LOI term negotiation posture", "definition": "Treating every LOI term and template value as a deal-specific negotiable position rather than fixed policy.", "concept_key": "loi-term-negotiation-posture", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	f0c49626-78c5-5f9d-bcc9-be5b41d316b3	1	2026-08-24 00:10:56.036341+00	\N
-8db78c9a-cd18-4ed6-a8e9-874640296aee	phrase	{"phrase": "negotiate LOI template terms", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "loi-term-negotiation-posture", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	b53857b7-4614-5890-8489-9bfa285de4b8	1	2026-08-24 00:11:00.526241+00	\N
-8ebde12c-2384-4a08-aa87-e0f14e25cee6	mapping	{"role": "governs", "weight": 1, "rationale": "The active negotiation section supports deal-specific LOI judgment; templates remain overridable defaults rather than fixed policy, and one client's documents do not establish common terms.", "concept_key": "loi-term-negotiation-posture", "section_address": "negotiation#5-documents-rfp-vs-loi"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	67728535-7646-5381-a46c-942455a49a38	1	2026-08-24 00:11:03.33502+00	\N
-59d2b498-4000-41a5-8234-2fdb3feb1a01	mapping	{"role": "governs", "weight": 1, "rationale": "The active domain-data write law governs shared write services; the source rule's broader anti-drift scope still covers scripts, documented commands, environment setup, and duplicated configuration contracts.", "concept_key": "one-implementation-for-every-write-path", "section_address": "carr-mature-software-end-state-bduf#s14-domain-data"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	3eb67a52-cd26-5c4f-b9c5-c84163867903	1	2026-08-24 00:11:39.978452+00	\N
-1b2c02ef-8d5a-4221-871b-3fdc3fd6a6a5	concept	{"label": "Architecture for the planned trajectory", "definition": "Sizing durable foundations for the practice's intended future scale while keeping unproven workflow details reversible.", "concept_key": "architecture-for-the-planned-trajectory", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0cffcedb-ed7f-5904-bdc7-6dd12ff8a9fe	1	2026-08-24 00:11:44.929701+00	\N
-0ee22eb0-4f3a-4e4e-950c-c90c75cfe67e	phrase	{"phrase": "design for the planned future trajectory", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "architecture-for-the-planned-trajectory", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	69deb2f1-a908-55fe-bc51-403cbebe0977	1	2026-08-24 00:11:49.477258+00	\N
-6a82c7c6-ba5a-4aec-a65b-9aefc3b24de6	mapping	{"role": "governs", "weight": 1, "rationale": "The active end-state ruling governs real planned growth while preserving the source rule's discipline against speculative complexity and its requirement to state cost and complexity honestly.", "concept_key": "architecture-for-the-planned-trajectory", "section_address": "carr-mature-software-end-state-bduf#s40-owner-controlled-tenant-readiness-evolving-workflows-and-low-toil-end-state"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	4374b1c5-fea6-54fb-9b87-66cb555752e2	1	2026-08-24 00:11:54.187531+00	\N
-b9bb1437-e49a-4d11-aed4-68a967e2bb63	concept	{"label": "Consolidate duplicate authorities", "definition": "Choosing one surviving authority, migrating its consumers, and retiring parallel versions instead of maintaining two sources of truth.", "concept_key": "consolidate-duplicate-authorities", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	5d539d32-9123-501a-a40a-cfeceba45394	1	2026-08-24 00:11:58.715956+00	\N
-62b93b26-0e1c-4d17-982d-1e97cf45caf9	phrase	{"phrase": "consolidate duplicate sources of truth", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "consolidate-duplicate-authorities", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	6467a1d4-2828-536c-bbe3-7cebedd3fb6d	1	2026-08-24 00:12:03.107857+00	\N
-e8332363-e8bc-4715-bcea-38f0a9a5943b	mapping	{"role": "governs", "weight": 1, "rationale": "The active deprecation and knowledge-architecture section governs consolidation while preserving the proactive rule not to create two maintained authorities in the first place.", "concept_key": "consolidate-duplicate-authorities", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	db6655ee-fc9c-5a65-a91c-3d92b4bccb8e	1	2026-08-24 00:12:06.389684+00	\N
-3fc61f51-95f3-4f3d-83ec-b7c29a3cf359	concept	{"label": "Constraint-preserving alternative route", "definition": "Continuing to solve the underlying problem after one route is refused by finding another route that preserves the binding constraint and authority boundary.", "concept_key": "constraint-preserving-alternative-route", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	3a3671f9-95ec-5f89-b179-9127458babbb	1	2026-08-24 00:12:09.529671+00	\N
-0843ca0a-bbd7-4d03-bde6-05b9f9847399	phrase	{"phrase": "find another route after a refusal", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "constraint-preserving-alternative-route", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	b70b5acd-34a7-519d-aaba-0ffbb38f2cb7	1	2026-08-24 00:12:13.126376+00	\N
-f2516c3b-e6cf-406d-ad15-6c5c64e17417	mapping	{"role": "governs", "weight": 1, "rationale": "The active judgment doctrine governs safe sanctioned alternative routes while preserving the requirement to stop for actions that genuinely require human authority.", "concept_key": "constraint-preserving-alternative-route", "section_address": "dr-cre-doctrine-2026-08-01#iv-judgment-how-he-pushes-back-and-how-he-acts-alone"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	12d7c24f-f16e-5eb8-a04e-7b6a075a3bca	1	2026-08-24 00:12:15.758401+00	\N
-8d350185-39ac-4204-96db-30d6e973a53d	concept	{"label": "Mobility and privacy architecture choice", "definition": "Designing for cross-device mobility while presenting the specific data, exposure, and consequences of privacy choices for a human decision.", "concept_key": "mobility-privacy-architecture-choice", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	3bc9b55d-7366-5b00-a5c6-a93905074b5b	1	2026-08-24 00:12:19.990575+00	\N
-a170d862-5fe4-4a1e-b52c-7d0d2ded3450	phrase	{"phrase": "choose between mobility and privacy architecture", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "mobility-privacy-architecture-choice", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	4e26921e-697e-55d4-916f-683ec16c0c89	1	2026-08-24 00:12:24.072295+00	\N
-57c5a043-fc1c-4313-bc76-b700bc305f1d	mapping	{"role": "governs", "weight": 1, "rationale": "The active cross-device section governs mobile continuity while preserving explicit privacy disclosure and all non-negotiable legal and trust safeguards.", "concept_key": "mobility-privacy-architecture-choice", "section_address": "carr-workspace-bduf#s14-cross-device-continuity"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	59458807-a257-56e3-9827-fc0e78bed6cd	1	2026-08-24 00:12:29.163849+00	\N
-f2cce7a5-9a24-4c81-bdd8-af0ca10a1c03	mapping	{"role": "supports", "weight": 1, "rationale": "The active privacy section supplies the exact identity, data-classification, retention, provider, and threat-model facts that must be presented with the mobility option.", "concept_key": "mobility-privacy-architecture-choice", "section_address": "carr-workspace-bduf#s17-security-privacy-and-retention"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	12bbe51b-050c-54ab-852e-112645fe0bac	1	2026-08-24 00:12:33.327469+00	\N
-aef50308-749a-4ff2-81d1-1e40cd6620b3	concept	{"label": "Capture reusable deferred knowledge", "definition": "Placing useful knowledge outside today's task into its canonical durable home with enough context to retrieve and apply it later.", "concept_key": "capture-reusable-deferred-knowledge", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	2a55f866-583c-574d-aca2-6e66c65bc63d	1	2026-08-24 00:12:36.84024+00	\N
-71b5dbdd-b108-48f9-bcda-c954919baf3d	mapping	{"role": "governs", "weight": 1, "rationale": "The active knowledge-placement section governs the related durable home, provenance, review triggers, and generated consumers; the source rule remains authoritative for proactive capture, future-use proposals, and Joe's sole authority over scope expansion.", "concept_key": "capture-reusable-deferred-knowledge", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	5242f7be-7fe7-5cca-a65a-afce684b1f8c	1	2026-08-24 00:12:45.383156+00	\N
+c25d5333-7111-4a10-acf8-31cca41d6320	concept	{"label": "Partner complementarity reasoning", "definition": "Reasoning about how Joe and Dell's demonstrated strengths fit together without profiling either partner in isolation.", "concept_key": "partner-complementarity-reasoning", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{f36774db-8dfe-4e3b-a49f-d0b9767a0a23}	092cef0b-799b-5910-9bc9-ed482f065fed	2	2026-08-24 00:10:15.618415+00	2026-08-26 00:30:55.219671+00
+23eecdde-9cbe-4c9d-8f75-4fe2a57d7a8d	concept	{"label": "Joe brokerage priority context", "definition": "Interpreting Joe's priorities from his healthcare brokerage role and current pipeline-building work rather than over-weighting recent system construction.", "concept_key": "joe-brokerage-priority-context", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{49ffac2e-60a6-4dcc-bfea-c6bfce2f72fc}	e0ac3e63-560d-50e2-a903-f9fd4e265d60	2	2026-08-24 00:10:32.204027+00	2026-08-26 00:30:55.219671+00
+4f2573bc-ee34-43de-ac34-71825fb33bbf	concept	{"label": "Session work-shape assessment", "definition": "Assessing an agent session from its actual scope, authority, tools, and actions rather than inferring behavior from its title.", "concept_key": "session-work-shape-assessment", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{7cbdbcf3-df3f-4b60-b32b-39ecd36bf771}	517598e5-2edd-5091-93d7-e41cf4916546	2	2026-08-24 00:10:45.045187+00	2026-08-26 00:30:55.219671+00
+eccae8c1-ff93-4a72-948d-0cbd44e17459	concept	{"label": "LOI term negotiation posture", "definition": "Treating every LOI term and template value as a deal-specific negotiable position rather than fixed policy.", "concept_key": "loi-term-negotiation-posture", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e7cf8c6a-80d9-4052-9efa-a98cd438e9ec}	f0c49626-78c5-5f9d-bcc9-be5b41d316b3	2	2026-08-24 00:10:56.036341+00	2026-08-26 00:30:55.219671+00
+eb34968e-bc1d-42bd-9217-f7da073f8bd8	concept	{"label": "One implementation for every write path", "definition": "Keeping manual and automated callers on the same governed implementation so configuration, validation, and evidence cannot drift between paths.", "concept_key": "one-implementation-for-every-write-path", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b88d39a4-9d52-43e0-8065-2fa3834cdd1a}	30d5d7bb-0eac-586b-b1bf-30b513908e78	2	2026-08-24 00:11:31.982531+00	2026-08-26 00:30:55.219671+00
+1b2c02ef-8d5a-4221-871b-3fdc3fd6a6a5	concept	{"label": "Architecture for the planned trajectory", "definition": "Sizing durable foundations for the practice's intended future scale while keeping unproven workflow details reversible.", "concept_key": "architecture-for-the-planned-trajectory", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{0990e445-e767-4316-843c-94c02691fb0c}	0cffcedb-ed7f-5904-bdc7-6dd12ff8a9fe	2	2026-08-24 00:11:44.929701+00	2026-08-26 00:30:55.219671+00
+b9bb1437-e49a-4d11-aed4-68a967e2bb63	concept	{"label": "Consolidate duplicate authorities", "definition": "Choosing one surviving authority, migrating its consumers, and retiring parallel versions instead of maintaining two sources of truth.", "concept_key": "consolidate-duplicate-authorities", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{4a644b05-835e-4739-ac5c-30d881882752}	5d539d32-9123-501a-a40a-cfeceba45394	2	2026-08-24 00:11:58.715956+00	2026-08-26 00:30:55.219671+00
+3fc61f51-95f3-4f3d-83ec-b7c29a3cf359	concept	{"label": "Constraint-preserving alternative route", "definition": "Continuing to solve the underlying problem after one route is refused by finding another route that preserves the binding constraint and authority boundary.", "concept_key": "constraint-preserving-alternative-route", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{0e11fc3f-8cb2-4af2-8fac-f1d45602fa6e}	3a3671f9-95ec-5f89-b179-9127458babbb	2	2026-08-24 00:12:09.529671+00	2026-08-26 00:30:55.219671+00
+8d350185-39ac-4204-96db-30d6e973a53d	concept	{"label": "Mobility and privacy architecture choice", "definition": "Designing for cross-device mobility while presenting the specific data, exposure, and consequences of privacy choices for a human decision.", "concept_key": "mobility-privacy-architecture-choice", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{95a97cc6-dde0-44d0-bb8c-41926797f2c4}	3bc9b55d-7366-5b00-a5c6-a93905074b5b	2	2026-08-24 00:12:19.990575+00	2026-08-26 00:30:55.219671+00
+aef50308-749a-4ff2-81d1-1e40cd6620b3	concept	{"label": "Capture reusable deferred knowledge", "definition": "Placing useful knowledge outside today's task into its canonical durable home with enough context to retrieve and apply it later.", "concept_key": "capture-reusable-deferred-knowledge", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{2868a25d-540f-4e53-b35e-385cb22e10f3}	2a55f866-583c-574d-aca2-6e66c65bc63d	2	2026-08-24 00:12:36.84024+00	2026-08-26 00:30:55.219671+00
+c7674241-e986-4562-8d6f-c0738831dc45	phrase	{"phrase": "Joe and Dell partner complementarity", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "partner-complementarity-reasoning", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e5740fb4-2f17-49a0-a651-20005ddad66c}	0648bb96-f1d7-5c39-bcc8-f270a9db9111	2	2026-08-24 00:10:20.885324+00	2026-08-26 00:30:55.219671+00
+5e1cc7c7-765a-437a-a34a-b32a86eece41	phrase	{"phrase": "Joe brokerage priorities and current focus", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "joe-brokerage-priority-context", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{99688361-4017-41e4-b585-398ca0feb85e}	f05a6e62-cc21-5873-bf7a-f69170a3c770	2	2026-08-24 00:10:35.582595+00	2026-08-26 00:30:55.219671+00
+ad6b4235-0e70-478d-9d46-2a991ee0e98b	phrase	{"phrase": "assess the actual session work shape", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "session-work-shape-assessment", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{1d6f44bc-c8a4-4c3a-8a4f-18cb17a3d311}	996b5b91-45eb-50a8-8f6a-c20fd42cb450	2	2026-08-24 00:10:48.05803+00	2026-08-26 00:30:55.219671+00
+8db78c9a-cd18-4ed6-a8e9-874640296aee	phrase	{"phrase": "negotiate LOI template terms", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "loi-term-negotiation-posture", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{60890a80-14cd-489b-8cd5-98e9023889c7}	b53857b7-4614-5890-8489-9bfa285de4b8	2	2026-08-24 00:11:00.526241+00	2026-08-26 00:30:55.219671+00
+d48e543d-0026-4b85-9278-3b1fe5d1997c	phrase	{"phrase": "prove an existing capability against the source", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "source-study-capability-proof", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b7019c8f-9745-42a3-9fd7-f2ed2dec7023}	ad01d8d6-c18b-507c-847f-41ad2689c4d4	2	2026-08-24 00:11:09.831275+00	2026-08-26 00:30:55.219671+00
+6b38f514-4172-4180-bb0d-eeb998ba6f3b	phrase	{"phrase": "adapt to Dell without personality profiling", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "partner-calibration-without-profiling", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{cfe76151-abdc-4493-95f6-85c82c588376}	3f752654-6a73-5865-a8c6-e7899941f94a	2	2026-08-24 00:11:24.119225+00	2026-08-26 00:30:55.219671+00
+7ef8a7fc-3d79-424e-ba30-ef50cc49e7d9	phrase	{"phrase": "manual and automated paths use the same implementation", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "one-implementation-for-every-write-path", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{8ede45ea-1d83-4d08-9879-9c48630a610b}	ce14e6aa-8925-5423-93f1-936a628e57ef	2	2026-08-24 00:11:35.663231+00	2026-08-26 00:30:55.219671+00
+0ee22eb0-4f3a-4e4e-950c-c90c75cfe67e	phrase	{"phrase": "design for the planned future trajectory", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "architecture-for-the-planned-trajectory", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{31d7f0fc-cac6-4722-9f0e-538d3c246062}	69deb2f1-a908-55fe-bc51-403cbebe0977	2	2026-08-24 00:11:49.477258+00	2026-08-26 00:30:55.219671+00
+62b93b26-0e1c-4d17-982d-1e97cf45caf9	phrase	{"phrase": "consolidate duplicate sources of truth", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "consolidate-duplicate-authorities", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{ef59f4b5-bcd7-42a6-ab3c-8d6b86ec4af9}	6467a1d4-2828-536c-bbe3-7cebedd3fb6d	2	2026-08-24 00:12:03.107857+00	2026-08-26 00:30:55.219671+00
+0843ca0a-bbd7-4d03-bde6-05b9f9847399	phrase	{"phrase": "find another route after a refusal", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "constraint-preserving-alternative-route", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{fc1a0c99-801e-47a9-8e19-ba6b6056721b}	b70b5acd-34a7-519d-aaba-0ffbb38f2cb7	2	2026-08-24 00:12:13.126376+00	2026-08-26 00:30:55.219671+00
+a170d862-5fe4-4a1e-b52c-7d0d2ded3450	phrase	{"phrase": "choose between mobility and privacy architecture", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "mobility-privacy-architecture-choice", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{1c2ac066-8982-4864-a9bc-20e2bf8a9465}	4e26921e-697e-55d4-916f-683ec16c0c89	2	2026-08-24 00:12:24.072295+00	2026-08-26 00:30:55.219671+00
+787b4b47-bc3d-4cc9-a248-d60891f89db7	phrase	{"phrase": "capture reusable knowledge for later", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "capture-reusable-deferred-knowledge", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{a8c1d29d-d50c-4e74-9bb2-1efc00b07130}	e0dbb452-d38e-59fc-8bfe-cf23bb89d1d1	2	2026-08-24 00:12:40.667031+00	2026-08-26 00:30:55.219671+00
+c43c937f-d247-4744-b4cb-d20a4a99f8ea	mapping	{"role": "supports", "weight": 1, "rationale": "The active collaboration-model section supports partner-complementarity reasoning, while the source rule remains authoritative for evidence, symmetry, no profiling, and visibility requirements.", "concept_key": "partner-complementarity-reasoning", "section_address": "twin-system-playbook#collaboration-model-designed-with-joe-july-6-2026-the-max-efficiency-layer"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{46269778-73ce-4a65-9859-593faf59b74b}	cf623396-afb2-5424-b5ba-64224c11a9ab	2	2026-08-24 00:10:25.003703+00	2026-08-26 00:30:55.219671+00
+ad70fc8a-3c8e-4815-af65-250c82d9b8f3	mapping	{"role": "supports", "weight": 1, "rationale": "The active knowledge-architecture section supports authoritative ownership during change; it does not replace the source rule's universal anti-duplication and generated-view mandate.", "concept_key": "authoritative-record-ownership", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{8dcf290f-16fa-4b97-84df-bbf972abc7fd}	9fb86288-cc27-55b6-b49b-5fa3ee921201	2	2026-08-24 00:10:28.949747+00	2026-08-26 00:30:55.219671+00
+8644c978-8d25-4932-8508-a900226c67f0	mapping	{"role": "governs", "weight": 1, "rationale": "The active profile section states Joe's present brokerage stage and primary prospecting, outreach, follow-up, and market-work focus without treating historical system-building residue as his defining work or unfinished-project behavior.", "concept_key": "joe-brokerage-priority-context", "section_address": "carr-profile#current-stage"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{cada5dd0-10a3-4e3c-abb5-e764f8a9a9f6}	2053e5ee-89d5-590c-a681-229612de451e	2	2026-08-24 00:10:39.630231+00	2026-08-26 00:30:55.219671+00
+0fc908bc-1780-471d-8864-fbea47a907cd	mapping	{"role": "governs", "weight": 1, "rationale": "The active AgentOps contract supports judging actual tool use, dirty paths, transcript, concurrency, and worktree risk rather than trusting a session label.", "concept_key": "session-work-shape-assessment", "section_address": "carr-production-maturity-baseline#s13-agentops-doc-and-engineering-sessions"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{1862f3a0-be60-431e-8461-3f20856fc8d7}	617d2462-eefc-56f1-9956-722a67621e47	2	2026-08-24 00:10:51.647008+00	2026-08-26 00:30:55.219671+00
+8ebde12c-2384-4a08-aa87-e0f14e25cee6	mapping	{"role": "governs", "weight": 1, "rationale": "The active negotiation section supports deal-specific LOI judgment; templates remain overridable defaults rather than fixed policy, and one client's documents do not establish common terms.", "concept_key": "loi-term-negotiation-posture", "section_address": "negotiation#5-documents-rfp-vs-loi"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{d5ef45e7-4158-4c69-aee4-03ffcb7bb1af}	67728535-7646-5381-a46c-942455a49a38	2	2026-08-24 00:11:03.33502+00	2026-08-26 00:30:55.219671+00
+3b883519-f3b2-48af-984d-7e57f17216c8	mapping	{"role": "supports", "weight": 1, "rationale": "The active corrected study is the proof example and provenance; the source rule remains authoritative across every Joe-provided source.", "concept_key": "source-study-capability-proof", "section_address": "2026-08-07-tenex-metaharness-sdlc-takeaways#preamble"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{62d10585-7e19-49dc-8ea9-75f8d69ec692}	0a62921a-07b5-5429-b739-9d02fffe04b2	2	2026-08-24 00:11:15.089212+00	2026-08-26 00:30:55.219671+00
+30046271-2917-4073-86f0-0b0dd5b47a35	mapping	{"role": "governs", "weight": 1, "rationale": "The active memory doctrine supports Dell-specific calibration from directly stated or demonstrated preferences while forbidding personality, motive, mood, or state inference.", "concept_key": "partner-calibration-without-profiling", "section_address": "dr-cre-doctrine-2026-08-01#iii-memory-what-he-keeps-and-the-line-he-never-crosses"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{877bcb8e-0e39-4742-b356-c8c33c4db2fa}	fc37b865-a5fe-5838-a002-09a05430f1b0	2	2026-08-24 00:11:29.230662+00	2026-08-26 00:30:55.219671+00
+59d2b498-4000-41a5-8234-2fdb3feb1a01	mapping	{"role": "governs", "weight": 1, "rationale": "The active domain-data write law governs shared write services; the source rule's broader anti-drift scope still covers scripts, documented commands, environment setup, and duplicated configuration contracts.", "concept_key": "one-implementation-for-every-write-path", "section_address": "carr-mature-software-end-state-bduf#s14-domain-data"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{15b883ea-55e7-4adc-8dd3-01fd271541ba}	3eb67a52-cd26-5c4f-b9c5-c84163867903	2	2026-08-24 00:11:39.978452+00	2026-08-26 00:30:55.219671+00
+6a82c7c6-ba5a-4aec-a65b-9aefc3b24de6	mapping	{"role": "governs", "weight": 1, "rationale": "The active end-state ruling governs real planned growth while preserving the source rule's discipline against speculative complexity and its requirement to state cost and complexity honestly.", "concept_key": "architecture-for-the-planned-trajectory", "section_address": "carr-mature-software-end-state-bduf#s40-owner-controlled-tenant-readiness-evolving-workflows-and-low-toil-end-state"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b22f7309-16d5-4e31-a7df-0bf292a36031}	4374b1c5-fea6-54fb-9b87-66cb555752e2	2	2026-08-24 00:11:54.187531+00	2026-08-26 00:30:55.219671+00
+e8332363-e8bc-4715-bcea-38f0a9a5943b	mapping	{"role": "governs", "weight": 1, "rationale": "The active deprecation and knowledge-architecture section governs consolidation while preserving the proactive rule not to create two maintained authorities in the first place.", "concept_key": "consolidate-duplicate-authorities", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{66324b26-774d-4dd2-86b2-fb7a3cc04bfc}	db6655ee-fc9c-5a65-a91c-3d92b4bccb8e	2	2026-08-24 00:12:06.389684+00	2026-08-26 00:30:55.219671+00
+f2516c3b-e6cf-406d-ad15-6c5c64e17417	mapping	{"role": "governs", "weight": 1, "rationale": "The active judgment doctrine governs safe sanctioned alternative routes while preserving the requirement to stop for actions that genuinely require human authority.", "concept_key": "constraint-preserving-alternative-route", "section_address": "dr-cre-doctrine-2026-08-01#iv-judgment-how-he-pushes-back-and-how-he-acts-alone"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{628b07db-4bf7-4c87-90a8-8259fec37dfe}	12d7c24f-f16e-5eb8-a04e-7b6a075a3bca	2	2026-08-24 00:12:15.758401+00	2026-08-26 00:30:55.219671+00
+57c5a043-fc1c-4313-bc76-b700bc305f1d	mapping	{"role": "governs", "weight": 1, "rationale": "The active cross-device section governs mobile continuity while preserving explicit privacy disclosure and all non-negotiable legal and trust safeguards.", "concept_key": "mobility-privacy-architecture-choice", "section_address": "carr-workspace-bduf#s14-cross-device-continuity"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{3e52de6c-0e30-4af8-a797-1fac9fc319ef}	59458807-a257-56e3-9827-fc0e78bed6cd	2	2026-08-24 00:12:29.163849+00	2026-08-26 00:30:55.219671+00
+f2cce7a5-9a24-4c81-bdd8-af0ca10a1c03	mapping	{"role": "supports", "weight": 1, "rationale": "The active privacy section supplies the exact identity, data-classification, retention, provider, and threat-model facts that must be presented with the mobility option.", "concept_key": "mobility-privacy-architecture-choice", "section_address": "carr-workspace-bduf#s17-security-privacy-and-retention"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{a84e2aad-fdec-4b6d-b2d9-853fcabfc5fa}	12bbe51b-050c-54ab-852e-112645fe0bac	2	2026-08-24 00:12:33.327469+00	2026-08-26 00:30:55.219671+00
+71b5dbdd-b108-48f9-bcda-c954919baf3d	mapping	{"role": "governs", "weight": 1, "rationale": "The active knowledge-placement section governs the related durable home, provenance, review triggers, and generated consumers; the source rule remains authoritative for proactive capture, future-use proposals, and Joe's sole authority over scope expansion.", "concept_key": "capture-reusable-deferred-knowledge", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{d2b0623c-d6cf-4c80-89f4-2a4a43b71239}	5242f7be-7fe7-5cca-a65a-afce684b1f8c	2	2026-08-24 00:12:45.383156+00	2026-08-26 00:30:55.219671+00
 \.
 
 
