@@ -7,6 +7,15 @@ description: On-demand Engineering Passport execution contract; never scheduled.
 
 # Engineering Passport Slice
 
+RULE-DELIVERY WORKFLOW: engineering-slice
+RULE-DELIVERY PACKS: engineering-git,delegation-council,scheduled-automation,source-study
+
+FIRST: call `standing-context` with exactly the four packs above and read the
+returned rules before inspecting an envelope, source, or job. REFUSE to claim or
+execute the slice when that call fails, returns any `packs_not_found`, or does
+not read back all four canonical pack names. Do not substitute an alias or a
+full-set fallback.
+
 This is an on-demand control-plane definition, not a recurring task. Never
 create a provider schedule, cron entry, automation, or fallback launcher for
 it. Admission occurs only through `admit-engineering-slice` after an exact

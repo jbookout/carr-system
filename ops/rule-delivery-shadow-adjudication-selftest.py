@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -54,19 +55,71 @@ def digest(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= HEX
 
 
-def pinned_ledger_prefix(raw: bytes, snapshot: dict) -> tuple[bytes, int]:
-    """Return the immutable line-preserving snapshot prefix of an append-only log."""
-    assert set(snapshot) == {"line_count", "sha256"}
-    line_count = snapshot["line_count"]
-    assert (isinstance(line_count, int) and not isinstance(line_count, bool)
-            and line_count > 0)
-    assert digest(snapshot["sha256"])
+def pinned_file_prefix(raw: bytes, expected_sha256: str) -> tuple[bytes, int]:
+    """Bind the once-complete transcript while allowing later JSONL appends."""
+    assert digest(expected_sha256)
     lines = raw.splitlines(keepends=True)
-    assert len(lines) >= line_count, "ledger is shorter than its immutable snapshot"
-    prefix = b"".join(lines[:line_count])
-    assert (hashlib.sha256(prefix).hexdigest() == snapshot["sha256"]), (
-        "ledger snapshot prefix changed")
-    return prefix, len(lines) - line_count
+    running = hashlib.sha256()
+    for line_count, line in enumerate(lines, 1):
+        running.update(line)
+        if running.hexdigest() == expected_sha256:
+            suffix = lines[line_count:]
+            assert all(line.endswith(b"\n") for line in suffix), \
+                "transcript suffix contains an unterminated JSONL fragment"
+            for appended_line in suffix:
+                try:
+                    json.loads(appended_line)
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise AssertionError(
+                        "transcript suffix contains a malformed JSONL row") from exc
+            return b"".join(lines[:line_count]), len(suffix)
+    raise AssertionError("transcript is shorter than or changed within its pinned prefix")
+
+
+def verify_legacy_ledger(raw: bytes, *, prefix_rows: int, prefix_sha256: str,
+                         expected: dict[str, tuple[str, str]],
+                         require_evidence: bool = False) -> bool:
+    """Verify the immutable legacy prefix, while allowing append-only suffixes.
+
+    A fresh clone can legitimately create a new local shadow log during tests.
+    If it contains none of the pinned legacy identities it is not the external
+    evidence artifact. Once even one pinned identity is present, however, the
+    evidence must be complete and the original byte prefix must match exactly.
+    """
+    lines = raw.splitlines(keepends=True)
+    rows = [json.loads(line) for line in lines if line.strip()]
+    derived = {observation_id(row): (row.get("session"), row.get("ts"))
+               for row in rows if finding(row)}
+    pinned_present = set(derived) & set(expected)
+    if not pinned_present:
+        assert not require_evidence, "canonical legacy evidence has no pinned identities"
+        return False
+    assert set(expected) <= set(derived), "partial pinned legacy evidence is invalid"
+    assert len(lines) >= prefix_rows, "pinned legacy ledger prefix is truncated"
+    prefix = b"".join(lines[:prefix_rows])
+    assert hashlib.sha256(prefix).hexdigest() == prefix_sha256, \
+        "pinned legacy ledger prefix bytes changed"
+    prefix_derived = {}
+    for line in lines[:prefix_rows]:
+        row = json.loads(line)
+        if finding(row):
+            prefix_derived[observation_id(row)] = (row.get("session"), row.get("ts"))
+    assert prefix_derived == expected, "pinned legacy finding identities changed"
+    return True
+
+
+def verify_owned_ledger(root: Path, relative: str, *, prefix_rows: int,
+                        prefix_sha256: str,
+                        expected: dict[str, tuple[str, str]]) -> bool:
+    """The evidence-owning checkout may be absent, never partially present."""
+    if not root.exists():
+        return False
+    path = root / relative
+    assert path.is_file(), "canonical legacy ledger is missing or not a regular file"
+    assert verify_legacy_ledger(
+        path.read_bytes(), prefix_rows=prefix_rows, prefix_sha256=prefix_sha256,
+        expected=expected, require_evidence=True)
+    return True
 
 
 document = json.loads(ARTIFACT.read_text(encoding="utf-8"))
@@ -123,42 +176,106 @@ for event in events:
 # derive its finding identities, and rehash every transcript/excerpt. Hosted CI
 # does not own these raw local files; that branch explicitly validates the full
 # committed digest envelope above and reports which external proof was absent.
-ledger_candidates = [
-    REPO / document["ledger"]["path"],
-    Path("/Users/booko/carr-system") / document["ledger"]["path"],
-]
-ledger_path = next((path for path in ledger_candidates if path.is_file()), None)
-if ledger_path:
-    ledger_prefix, appended_lines = pinned_ledger_prefix(
-        ledger_path.read_bytes(), document["ledger"]["snapshot"])
-    derived = {}
-    for line in ledger_prefix.splitlines():
-        row = json.loads(line)
-        if finding(row):
-            derived[observation_id(row)] = (row.get("session"), row.get("ts"))
-    assert derived == {event["event_id"]: (event["session_id"], event["observed_at"])
-                       for event in events}
-    print(f"verified immutable ledger snapshot and {len(derived)} derived finding identities; "
-          f"retained {appended_lines} later append-only line(s)")
-else:
+expected_events = {event["event_id"]: (event["session_id"], event["observed_at"])
+                   for event in events}
+ledger_snapshot = document["ledger"]["snapshot"]
+prefix_rows = ledger_snapshot["line_count"]
+prefix_sha256 = ledger_snapshot["sha256"]
+local_ledger = (REPO / document["ledger"]["path"]).resolve()
+canonical_root = Path("/Users/booko/carr-system")
+canonical_ledger = (canonical_root / document["ledger"]["path"]).resolve()
+checked_ledger = False
+if local_ledger.is_file() and local_ledger != canonical_ledger:
+    checked_ledger = True
+    if verify_legacy_ledger(
+            local_ledger.read_bytes(), prefix_rows=prefix_rows,
+            prefix_sha256=prefix_sha256, expected=expected_events):
+        print(f"verified immutable {prefix_rows}-row ledger prefix and "
+              f"{len(expected_events)} derived finding identities")
+    else:
+        print("external raw ledger unavailable; clone-local log has no pinned legacy events")
+if verify_owned_ledger(
+        canonical_root, document["ledger"]["path"], prefix_rows=prefix_rows,
+        prefix_sha256=prefix_sha256, expected=expected_events):
+    checked_ledger = True
+    print(f"verified canonical immutable {prefix_rows}-row ledger prefix and "
+          f"{len(expected_events)} derived finding identities")
+if not checked_ledger:
     print("external raw ledger unavailable; validated committed 14-event digest envelope")
 
-# Snapshot validation deliberately accepts appended telemetry but never a short
-# or rewritten historical prefix.
-fixture_prefix = b'{"record_type":"observation","n":1}\n{"record_type":"observation","n":2}\n'
-fixture_snapshot = {"line_count": 2,
-                    "sha256": hashlib.sha256(fixture_prefix).hexdigest()}
-fixture_appended = fixture_prefix + b'{"record_type":"disposition"}\n'
-assert pinned_ledger_prefix(fixture_appended, fixture_snapshot)[1] == 1
-fixture_lines = fixture_prefix.splitlines(keepends=True)
-rewritten_fixture = b'{"record_type":"rewritten"}\n' + fixture_lines[1]
-for invalid_fixture in (fixture_lines[0], rewritten_fixture):
+# Hermetic boundary cases for the evidence classifier itself.
+fixture_rows = [
+    {"session": "legacy-a", "ts": "2026-08-25T00:00:00Z", "missed_rules": ["a"]},
+    {"session": "legacy-b", "ts": "2026-08-25T00:01:00Z", "missed_rules": ["b"]},
+]
+fixture_raw = b"".join(json.dumps(row, sort_keys=True).encode() + b"\n"
+                       for row in fixture_rows)
+fixture_expected = {observation_id(row): (str(row["session"]), str(row["ts"]))
+                    for row in fixture_rows}
+fixture_digest = hashlib.sha256(fixture_raw).hexdigest()
+suffix = json.dumps({"record_type": "epoch", "owner": "test"}).encode() + b"\n"
+assert verify_legacy_ledger(fixture_raw + suffix, prefix_rows=2,
+                            prefix_sha256=fixture_digest, expected=fixture_expected)
+unrelated = json.dumps({"session": "clone", "ts": "2026-08-26T00:00:00Z",
+                        "missed_rules": ["new"]}).encode() + b"\n"
+assert not verify_legacy_ledger(unrelated, prefix_rows=2,
+                                prefix_sha256=fixture_digest, expected=fixture_expected)
+for bad in (fixture_raw.splitlines(keepends=True)[0],
+            fixture_raw.replace(b"legacy-a", b"legacy-x", 1)):
     try:
-        pinned_ledger_prefix(invalid_fixture, fixture_snapshot)
+        verify_legacy_ledger(bad, prefix_rows=2, prefix_sha256=fixture_digest,
+                             expected=fixture_expected)
     except AssertionError:
         pass
     else:
-        raise AssertionError("short or rewritten ledger snapshot prefix was accepted")
+        raise AssertionError("partial or tampered pinned legacy evidence was accepted")
+fully_tampered = fixture_raw.replace(b"legacy-a", b"changed-a", 1).replace(
+    b"legacy-b", b"changed-b", 1)
+try:
+    verify_legacy_ledger(fully_tampered, prefix_rows=2, prefix_sha256=fixture_digest,
+                         expected=fixture_expected, require_evidence=True)
+except AssertionError:
+    pass
+else:
+    raise AssertionError("total canonical pinned-evidence tamper was accepted as unavailable")
+with tempfile.TemporaryDirectory() as directory:
+    owning_root = Path(directory) / "carr-system"
+    owning_root.mkdir()
+    for state in ("missing", "directory"):
+        ledger = owning_root / "out/shadow.jsonl"
+        if state == "directory":
+            ledger.mkdir(parents=True)
+        try:
+            verify_owned_ledger(
+                owning_root, "out/shadow.jsonl", prefix_rows=2,
+                prefix_sha256=fixture_digest, expected=fixture_expected)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"owning-root {state} ledger evidence was accepted")
+        if ledger.is_dir():
+            ledger.rmdir()
+            ledger.parent.rmdir()
+
+# Transcript files are append-only session logs too. A source session may keep
+# running after adjudication pins its then-complete bytes; later rows are lawful,
+# but no byte in the pinned prefix may move.
+transcript_fixture = b'{"row":1}\n{"row":2}\n'
+transcript_digest = hashlib.sha256(transcript_fixture).hexdigest()
+prefix, appended = pinned_file_prefix(
+    transcript_fixture + b'{"row":3}\n', transcript_digest)
+assert prefix == transcript_fixture and appended == 1
+for bad_transcript in (
+        transcript_fixture.splitlines(keepends=True)[0],
+        transcript_fixture.replace(b'"row":1', b'"row":9', 1),
+        transcript_fixture + b'{"row":',
+        transcript_fixture + b'not-json\n'):
+    try:
+        pinned_file_prefix(bad_transcript, transcript_digest)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("short or rewritten transcript prefix was accepted")
 
 verified_transcripts = 0
 missing_transcripts = []
@@ -169,9 +286,10 @@ for event in events:
         missing_transcripts.append(transcript["path"])
         continue
     raw = path.read_bytes()
-    assert hashlib.sha256(raw).hexdigest() == transcript["sha256"]
-    lines = raw.splitlines(keepends=True)
+    pinned_raw, _appended_lines = pinned_file_prefix(raw, transcript["sha256"])
+    lines = pinned_raw.splitlines(keepends=True)
     excerpt = transcript["excerpt"]
+    assert excerpt["end_line"] <= len(lines), "excerpt falls outside pinned transcript"
     selected = b"".join(lines[excerpt["start_line"] - 1:excerpt["end_line"]])
     assert hashlib.sha256(selected).hexdigest() == excerpt["sha256"]
     verified_transcripts += 1
