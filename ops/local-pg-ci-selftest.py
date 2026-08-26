@@ -124,6 +124,10 @@ check(
     events[6][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
 )
 check(
+    "scoped engineering claim runs after the authority acceptances",
+    events[7][-1].endswith("ops/engineering-claim-local-pg-acceptance.py"),
+)
+check(
     "authority acceptance receives only the local disposable DSN",
     child_envs[5].get("CARR_LOCAL_PG_DSN")
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci"
@@ -152,6 +156,10 @@ check(
 check(
     "strict lane also proves atomic rule-delivery cutover",
     events[6][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+)
+check(
+    "strict lane also proves the scoped engineering claim",
+    events[7][-1].endswith("ops/engineering-claim-local-pg-acceptance.py"),
 )
 
 
