@@ -7,6 +7,9 @@ The hook calls the existing authenticated standing-context door, injects the
 source-owned rules as additional context, and leaves the original tool input
 untouched.  Any failure remains visible to Stop telemetry and never blocks.
 """
+
+# doctrine: rule-delivery-load-layers
+
 from __future__ import annotations
 
 import json
