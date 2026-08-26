@@ -1,6 +1,6 @@
 {
   "schema": "rule-delivery-activation-overlay/v1",
-  "base_map_sha256": "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a",
+  "base_map_sha256": "c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997",
   "targets": [
     {"short_id":"25fcddee","scope":"shared","pack":"governance-rules","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
     {"short_id":"3fa17fa0","scope":"shared","pack":"client-deal","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
