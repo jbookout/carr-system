@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
-# doctrine: engineering-passport-executable-slices-v1
+# doctrine: runbook
 """Rollback-only proof that carr_writer can replace an expired envelope.
 
 The serving role must create an immutable successor without UPDATE permission.
