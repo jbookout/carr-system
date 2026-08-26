@@ -375,6 +375,11 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
       continue;
     }
     const envelopeRow = bound.rows[0];
+    if (!isCurrentRepositoryWriteEnvelope(envelopeRow)) {
+      rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
+        envelope_digest: envelopeRow.envelope_digest, controller_error: "engineering_envelope_not_executable" });
+      continue;
+    }
     const bindingResult = await c.query(
       "select ops.engineering_controller_binding($1::uuid,$2::uuid) as binding",
       [envelopeRow.id, job.job_id],
@@ -395,9 +400,12 @@ export async function submitEngineeringReceipt(c, claimed, receipt, actor, ToolE
   if (!claimed?.job_id || !claimed.lease_token || !claimed.envelope_id) error(ToolError, { error: "engineering_claim_required" });
   const envelopeRow = (await c.query("select * from ops.engineering_execution_envelope where id=$1", [claimed.envelope_id])).rows[0];
   if (!envelopeRow) error(ToolError, { error: "engineering_envelope_not_found" });
-  const workRef = (await c.query("select w.ref from ops.work_request w where w.id=$1", [envelopeRow.work_request_id])).rows[0]?.ref;
-  const facts = workRef ? (await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRef])).rows[0]?.facts : null;
+  const workRef = claimed?.payload?.work_request;
+  if (typeof workRef !== "string" || !workRef.trim()) error(ToolError, { error: "engineering_work_request_binding_missing" });
+  const facts = (await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRef])).rows[0]?.facts;
   const source = facts ? sourceParts(facts.source, ToolError) : null;
+  if (!source || source.work.id !== `wr:${envelopeRow.work_request_id}`)
+    error(ToolError, { error: "engineering_work_request_binding_mismatch" });
   const plan = source ? sourcePlan(facts, source, ToolError) : null;
   const slice = plan ? sliceFor(plan, envelopeRow.slice_ref, ToolError) : { slice_ref: envelopeRow.slice_ref, plan_digest: null };
   if (plan && receipt.plan_digest !== plan.plan_digest) error(ToolError, { error: "engineering_receipt_plan_mismatch" });
