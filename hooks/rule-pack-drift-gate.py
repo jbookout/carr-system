@@ -502,16 +502,40 @@ def _target_names(node):
     return set()
 
 
+def _pure_name_target(node):
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(_pure_name_target(item) for item in node.elts)
+    return False
+
+
+def _exact_receipt_digest_stub(target, value, receipt_name):
+    """One captured validator stub; it returns data and cannot execute it."""
+    if (_call_name(target) != "ep.base.execution_envelope_digest"
+            or not isinstance(value, ast.Lambda) or len(value.args.args) != 1):
+        return False
+    body = value.body
+    return (isinstance(body, ast.Subscript)
+            and isinstance(body.value, ast.Name) and body.value.id == receipt_name
+            and isinstance(body.slice, ast.Constant)
+            and body.slice.value == "envelope_digest")
+
+
 def _inert_call_allowlist(tree):
     """Exact data-only emit/validation calls whose roots are not shadowed."""
-    imports = set()
+    imports = {}
     shadowed = set()
     assigned_paths = set()
     for statement in tree.body:
         if isinstance(statement, ast.Import):
-            imports.update(alias.asname or alias.name for alias in statement.names)
+            for alias in statement.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                imports[bound] = alias.name
         elif isinstance(statement, ast.ImportFrom):
-            imports.update(alias.asname or alias.name for alias in statement.names)
+            for alias in statement.names:
+                bound = alias.asname or alias.name
+                imports[bound] = f"{statement.module or ''}.{alias.name}"
         elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             shadowed.add(statement.name)
         if isinstance(statement, (ast.Assign, ast.AnnAssign)):
@@ -523,24 +547,53 @@ def _inert_call_allowlist(tree):
                 if path:
                     assigned_paths.add(path)
     allowed = set()
-    if "print" not in shadowed and not any(
+    if "print" not in shadowed and "print" not in imports and not any(
             path.startswith(("builtins.print", "__builtins__.print"))
             for path in assigned_paths):
         allowed.add("print")
-    if "json" in imports and "json" not in shadowed and "json.dumps" not in assigned_paths:
-        allowed.add("json.dumps")
-    if ("jsonschema" in imports and "jsonschema" not in shadowed
+    if (imports.get("json") == "json" and "json" not in shadowed
+            and "json.dumps" not in assigned_paths):
+        allowed.update({"json.dumps", "json.loads"})
+    if (imports.get("jsonschema") == "jsonschema" and "jsonschema" not in shadowed
             and "jsonschema.Draft202012Validator" not in assigned_paths):
-        allowed.add("jsonschema.Draft202012Validator.validate")
-    if ("ep" in imports and "ep" not in shadowed
+        allowed.update({"jsonschema.Draft202012Validator",
+                        "jsonschema.Draft202012Validator.validate"})
+    if (imports.get("ep") == "engineering_passport" and "ep" not in shadowed
             and "ep._validate_receipt" not in assigned_paths):
         allowed.add("ep._validate_receipt")
+    if imports.get("Path") == "pathlib.Path" and "Path" not in shadowed:
+        allowed.update({"Path", "Path.read_text"})
+    if imports.get("sys") == "sys" and "sys" not in shadowed:
+        allowed.add("sys.path.insert")
+    constructors = [statement for statement in tree.body
+                    if isinstance(statement, ast.Assign)
+                    and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)
+                    and statement.targets[0].id == "E"
+                    and isinstance(statement.value, ast.Lambda)]
+    if len(constructors) == 1:
+        allowed.add("E")
     return allowed
 
 
 def _receipt_use_is_inert(tree, assignment, receipt_name):
     """Refuse normalization if receipt-derived data reaches executable code."""
     allowed = _inert_call_allowlist(tree)
+    for call in (item for item in ast.walk(tree) if isinstance(item, ast.Call)):
+        name = _call_name(call.func)
+        if name not in allowed:
+            return False
+        if name == "sys.path.insert":
+            if (len(call.args) != 2 or not isinstance(call.args[0], ast.Constant)
+                    or call.args[0].value != 0 or not isinstance(call.args[1], ast.Constant)
+                    or call.args[1].value != "tools/room-bridge" or call.keywords):
+                return False
+        if name == "Path":
+            if (len(call.args) != 1 or not isinstance(call.args[0], ast.Constant)
+                    or call.args[0].value
+                    != "control-room/contracts/engineering-slice-receipt.v1.schema.json"
+                    or call.keywords):
+                return False
     tainted = {receipt_name}
     after = False
     for statement in tree.body:
@@ -560,6 +613,12 @@ def _receipt_use_is_inert(tree, assignment, receipt_name):
             if value is not None and _uses_names(value, tainted):
                 targets = statement.targets if isinstance(statement, ast.Assign) \
                     else [statement.target]
+                if any(not _pure_name_target(target) for target in targets):
+                    if (len(targets) == 1
+                            and _exact_receipt_digest_stub(
+                                targets[0], value, receipt_name)):
+                        continue
+                    return False
                 for target in targets:
                     tainted.update(_target_names(target))
     return True

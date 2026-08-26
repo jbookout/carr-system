@@ -501,6 +501,42 @@ container_taint = run([codex_tool(
                    "subprocess.run([command, 'status'])") + "});")])
 check("receipt-derived container alias remains observable",
       "engineering-git" in container_taint["needed"], str(container_taint))
+subscript_taint = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("import subprocess\nholder = {}\nreceipt = " + repr(executable_receipt)
+                 + "\nholder['x'] = receipt\n"
+                   "subprocess.run([holder['x']['source_evidence']['source_sha'], 'status'])")
+    + "});")])
+check("receipt-derived subscript container remains observable",
+      "engineering-git" in subscript_taint["needed"], str(subscript_taint))
+attribute_taint = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("import subprocess\nclass Holder: pass\nholder = Holder()\nreceipt = "
+                 + repr(executable_receipt) + "\nholder.x = receipt\n"
+                   "subprocess.run([holder.x['source_evidence']['source_sha'], 'status'])")
+    + "});")])
+check("receipt-derived attribute container remains observable",
+      "engineering-git" in attribute_taint["needed"], str(attribute_taint))
+for alias_name, call in (
+    ("ep", "ep._validate_receipt(receipt)"),
+    ("json", "json.dumps(receipt)"),
+    ("jsonschema", "jsonschema.Draft202012Validator.validate(receipt)"),
+):
+    alias_spoof = run([codex_tool(
+        "exec", "const r = await tools.exec_command({cmd: "
+        + json.dumps(f"import evil as {alias_name}\nreceipt = "
+                     + repr(executable_receipt) + "\n" + call) + "});")])
+    check(f"arbitrary import origin cannot spoof inert {alias_name} validation",
+          "engineering-git" in alias_spoof["needed"], str(alias_spoof))
+module_mutation = run([codex_tool(
+    "exec", "const r = await tools.exec_command({cmd: "
+    + json.dumps("import json, subprocess\n"
+                 "setattr(json, 'dumps', subprocess.run)\nreceipt = "
+                 + repr(executable_receipt)
+                 + "\njson.dumps([receipt['source_evidence']['source_sha'], 'status'])")
+    + "});")])
+check("dynamic module mutation cannot spoof inert serialization",
+      "engineering-git" in module_mutation["needed"], str(module_mutation))
 
 # Compact replay of the immutable source behind event 10529812. It preserves
 # the two relevant custom-tool shapes: a validated receipt literal and the
