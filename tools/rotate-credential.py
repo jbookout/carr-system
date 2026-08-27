@@ -373,7 +373,9 @@ def read_env() -> dict[str, str]:
 def shell_quote(value: str) -> str:
     """Single-quote a value so `set -a; . db.env` survives it.
 
-    THIS FILE HAS TWO PARSERS AND THEREFORE TWO CONTRACTS (rule 73381d78). Python
+    THIS FILE HAS TWO PARSERS AND THEREFORE TWO CONTRACTS — the rule that a config
+    file read by two parsers has two contracts, and fixing one breaks the other
+    unless you check (73381d78). Python
     readers split on '=' and strip quotes, so they do not care. zsh SOURCES this
     file — bin/migrate-prod.sh, bin/nightly.sh and every other shell job do
     `set -a; . db.env` — and an unquoted '&' in a DSN is a background operator,
