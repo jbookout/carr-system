@@ -1273,6 +1273,34 @@ tombstone "incident sweep" \
 # and one more step on a chain that is already awake is the whole cost.
 step "hook telemetry rollup (reports, never retires)"  ./.venv/bin/python ops/hook-telemetry-rollup.py --days 7
 
+# ── RULE REPLAY + WEEKLY RE-SORT (WR-000019 slice S12, Obedience & Autonomy,
+# 2026-08-27) ─────────────────────────────────────────────────────────────
+# The measurement loop that makes the 219-rule rulebook a MANAGED population
+# rather than a fixed one. Every night, ops/rule-replay-nightly.py scores the
+# prior day's real transcripts for this repo against the rules that were live
+# for each turn -- reusing hooks/rule-pack-preuse-reselection.py's own
+# trigger matcher and ops/gate-lifecycle-report.py's own read_rows()/
+# is_true_positive() rather than a second copy of either. It writes one row
+# per (session, fired rule-signal) plus a summary row to
+# out/rule-replay-nightly.jsonl, and stages -- never files -- defect
+# proposals to out/rule-replay-defect-proposals.jsonl for the two named
+# failure-class signatures (shadow writing-check findings, materially
+# under-delegated sessions); a human morning session reviews and files them
+# through record-defect with its own fresh idempotency_key, same reasoning
+# as this file's own "WHAT IS LEFT FOR A HUMAN" note two steps up.
+step "rule replay (nightly transcript scoring, deterministic, reports only)" \
+    ./.venv/bin/python ops/rule-replay-nightly.py --since-hours 24
+
+# The weekly re-sort report reads that ledger plus gate-lifecycle-report.py's
+# own build() (imported, not duplicated) plus the JIT shadow ledger, and
+# proposes exact ops/config/rule-triage.v1.json / gate-lifecycle.json edits
+# for a PR -- nothing here self-applies. The Monday-only cadence is guarded
+# INSIDE the script itself (same convention bin/notes-sweep-post.sh's own
+# business-hours guard uses), so this step call is unconditional every
+# night and a non-Monday run prints SKIP and exits 0.
+step "rule re-sort (weekly proposals: gate/jit/core moves, reports only)" \
+    ./.venv/bin/python ops/rule-resort-weekly.py --days 7
+
 if [ "$seam_blocked" -gt 0 ]; then
   say "===== $seam_blocked step(s) BLOCKED on a missing canonical seam — not counted as failures ====="
 fi
