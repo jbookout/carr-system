@@ -237,6 +237,13 @@ CONTRAST_TEXT = ("It's not about the schema, it's about the underlying data mode
                   "that the whole export chain depends on.")
 CLEAN_TEXT = ("Fixed the exporter. It wrote to draft because CARR_EXPORT_LIVE was "
               "unset; refresh-rules.sh sets it. Verified: counts match.")
+# A vocab word inside a fence, nowhere else in the message. Only masking (the
+# mask() this check reuses from chat-lint-gate.py's own writing_rules(), which
+# blanks fenced code before matching) keeps this at zero findings; a mutant
+# that scanned the raw prose instead would flag "delve" here and this case
+# would fail to catch it.
+MASKED_VOCAB_TEXT = ("Renamed the stray TODO.\n\n```python\n# TODO: delve into "
+                     "this later\n```\n\nNothing else changed.")
 
 
 def shadow_writing_cases():
@@ -257,6 +264,10 @@ def shadow_writing_cases():
     # Shadow mode ON, clean prose: no row at all (false-positive baseline).
     blocked, rows = run_shadow_case(CLEAN_TEXT, mode="shadow")
     results.append(("shadow-on-clean-no-row", (not blocked) and len(rows) == 0))
+
+    # A vocab word that exists ONLY inside a fence: masking must suppress it.
+    blocked, rows = run_shadow_case(MASKED_VOCAB_TEXT, mode="shadow")
+    results.append(("shadow-on-fenced-vocab-masked", (not blocked) and len(rows) == 0))
 
     # Shadow mode OFF (announce, wrong string) — the check must not even look.
     blocked, rows = run_shadow_case(VOCAB_TEXT, mode="announce")
