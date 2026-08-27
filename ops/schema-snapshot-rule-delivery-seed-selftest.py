@@ -196,6 +196,25 @@ assert "historical activation receipt cardinality constraint differs" in CURRENT
 assert "drop constraint rule_delivery_activation_receipt_target_short_ids_check" in CURRENT_MIGRATION_SOURCE
 assert "check (cardinality(target_short_ids) in (8,9))" in CURRENT_MIGRATION_SOURCE
 assert "requires shadow mode" in CURRENT_MIGRATION_SOURCE
+policy_lock = CURRENT_MIGRATION_SOURCE.index("select p.mode into v_policy_mode")
+rule_lock = CURRENT_MIGRATION_SOURCE.index("perform r.id")
+target_delete = CURRENT_MIGRATION_SOURCE.index(
+    "delete from ops.rule_delivery_activation_target"
+)
+assert policy_lock < rule_lock < target_delete
+for retirement_guard in (
+    "for update;",
+    "join ops.rule_retirement_receipt rr",
+    "join ops.authority_receipt ar",
+    "rr.previous_status='active'",
+    "rr.approval_receipt_id is not null and rr.legacy_admission is null",
+    "rr.approval_receipt_id is null and rr.legacy_admission is not null",
+    "left(successor.id::text,8)='aa411351'",
+    "left(named_successor.id::text,8)='aa411351')=1",
+    "where all_rr.rule_id=r.id)=1",
+    "not absent or exactly retired to aa411351",
+):
+    assert retirement_guard in CURRENT_MIGRATION_SOURCE, retirement_guard
 assert "ops.enforcement_control_catalog" in REFRESH_MIGRATION_SOURCE
 assert "active approved rule and is immutable" in REFRESH_MIGRATION_SOURCE
 assert "hooks/rule-pack-preuse-reselection.py" in REFRESH_MIGRATION_SOURCE

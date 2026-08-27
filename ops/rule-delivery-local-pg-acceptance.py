@@ -69,6 +69,12 @@ def uuid_for(short: str, tail: int = 1) -> str:
     return f"{short}-0000-4000-8000-{tail:012d}"
 
 
+def first_do_block(source: str) -> str:
+    start = source.index("do $$")
+    end = source.index("end $$;", start) + len("end $$;")
+    return source[start:end]
+
+
 def main() -> int:
     dsn = os.environ.get("CARR_LOCAL_PG_DSN")
     if not dsn:
@@ -104,14 +110,107 @@ def main() -> int:
         )
         check("the pre-0363 fixture restores the exact retired ninth target",
               cur.rowcount == 1)
-        # 0363 must refuse a same-ID row whose reviewed activation preimage
-        # drifted, and the failed transaction must not repin any digest.
         migration_0363 = MIGRATION_0363.read_text(encoding="utf-8")
+        transition_0363 = first_do_block(migration_0363)
         activation_victim = sorted(EXPECTED_IDS)[0]
         cur.execute(
             "update ops.rule_delivery_activation_target set map_digest=%s",
             (PRIOR_ACTIVATION_DIGEST,),
         )
+        cur.execute("""insert into actor (slug,kind,display_name)
+                       values ('joe','human','Joe') on conflict (slug) do nothing""")
+        cur.execute("select id from actor where slug='joe'")
+        guard_joe = one(cur)[0]
+
+        # The migration and cutover share the singleton policy row as their
+        # first serialization token. Holding it must prevent even the first
+        # transition block from reaching the target rows.
+        with psycopg.connect(dsn) as lock_conn, lock_conn.cursor() as lock_cur:
+            lock_cur.execute("""select mode from ops.rule_delivery_policy
+                                where singleton for update""")
+            with psycopg.connect(dsn) as contender, contender.cursor() as contender_cur:
+                contender_cur.execute("set local statement_timeout='400ms'")
+                try:
+                    contender_cur.execute(transition_0363, prepare=False)
+                    check("0363 waits behind the cutover policy lock", False,
+                          "transition passed a held policy row")
+                except psycopg.errors.QueryCanceled:
+                    check("0363 waits behind the cutover policy lock", True)
+                finally:
+                    contender.rollback()
+            lock_conn.rollback()
+        cur.execute("""select count(*) from ops.rule_delivery_activation_target
+                        where map_digest=%s""", (PRIOR_ACTIVATION_DIGEST,))
+        check("the blocked 0363 transition changes no target",
+              one(cur)[0] == len(EXPECTED_IDS) + 1)
+
+        # Reproduce the dangerous restore state: the retired short id still has
+        # an active rule but no retirement receipt. The disposable owner bypass
+        # is scoped to fixture insertion only; Production triggers remain live.
+        retired_rule_id = uuid_for(RETIRED_ACTIVATION_ID)
+        successor_rule_id = uuid_for("aa411351")
+        cur.execute("alter table rule disable trigger user")
+        try:
+            cur.execute("""insert into rule
+                         (id,statement,taught_by,status,activated_by,activated_at)
+                         values (%s,'pre-retirement restore fixture',%s,'active',%s,now())""",
+                        (retired_rule_id, guard_joe, guard_joe))
+        finally:
+            cur.execute("alter table rule enable trigger user")
+        try:
+            cur.execute(transition_0363, prepare=False)
+            check("0363 refuses an active retired-target rule", False,
+                  "transition accepted an active unreceipted rule")
+        except psycopg.Error as exc:
+            check("0363 refuses an active retired-target rule",
+                  "not absent or exactly retired to aa411351" in str(exc),
+                  str(exc).splitlines()[0])
+        conn.rollback()
+        cur.execute("delete from rule where id=%s", (retired_rule_id,))
+
+        # The other permitted state is the exact immutable lifecycle receipt
+        # plus its matching Joe authority receipt and named successor.
+        with psycopg.connect(dsn) as receipt_conn, receipt_conn.cursor() as receipt_cur:
+            retired_at = "2026-08-27T00:00:00Z"
+            contract_hash = "1" * 64
+            receipt_cur.execute("""insert into rule (id,statement,taught_by,status)
+                                   values (%s,'retirement successor fixture',%s,'proposed')""",
+                                (successor_rule_id, guard_joe))
+            receipt_cur.execute("""insert into rule
+                       (id,statement,taught_by,status,version,retired_by,retired_at)
+                       values (%s,'receipted retired fixture',%s,'retired',2,%s,%s)""",
+                                (retired_rule_id, guard_joe, guard_joe, retired_at))
+            receipt_cur.execute("""insert into ops.rule_retirement_receipt
+                       (idempotency_key,rule_id,rule_version_before,rule_version_after,
+                        statement_hash,previous_status,actor_id,reason,superseded_by,
+                        legacy_admission,contract_hash,retired_at)
+                       values ('0363-retirement-fixture',%s,1,2,
+                               encode(public.digest('receipted retired fixture','sha256'),'hex'),
+                               'active',%s,'retirement fixture',%s,
+                               'pre-receipt legacy fixture',%s,%s)""",
+                                (retired_rule_id, guard_joe, successor_rule_id,
+                                 contract_hash, retired_at))
+            receipt_cur.execute("""insert into ops.authority_receipt
+                       (idempotency_key,kind,subject_type,subject_id,actor_id,
+                        decision,contract_hash,evidence_refs)
+                       values ('retirement:0363-retirement-fixture','override','rule',
+                               %s,%s,'retired by Joe authority: retirement fixture',%s,
+                               '{}'::text[])""",
+                                (retired_rule_id, guard_joe, contract_hash))
+            receipt_cur.execute(transition_0363, prepare=False)
+            receipt_cur.execute("""select count(*),
+                           count(*) filter (where map_digest=%s),
+                           count(*) filter (where short_id=%s)
+                          from ops.rule_delivery_activation_target""",
+                                (CURRENT_ACTIVATION_DIGEST, RETIRED_ACTIVATION_ID))
+            transitioned = one(receipt_cur)
+            check("0363 accepts the exact receipted retirement",
+                  transitioned == (len(EXPECTED_IDS), len(EXPECTED_IDS), 0),
+                  str(transitioned))
+            receipt_conn.rollback()
+
+        # 0363 must also refuse a same-ID activation row whose reviewed
+        # preimage drifted, without repinning any digest.
         cur.execute(
             """update ops.rule_delivery_activation_target
                   set to_test_ref='drifted same-ID acceptance fixture'

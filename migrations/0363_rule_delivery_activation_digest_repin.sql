@@ -20,10 +20,62 @@ declare
     '57d13061','c66dc739','49533583','557838a5'
   ];
   v_updated bigint;
+  v_policy_mode text;
+  v_retired_rule_count bigint;
 begin
-  if (select mode from ops.rule_delivery_policy where singleton)
-       is distinct from 'shadow' then
+  select p.mode into v_policy_mode
+    from ops.rule_delivery_policy p
+   where p.singleton
+   for update;
+  if v_policy_mode is distinct from 'shadow' then
     raise exception '0363 REFUSED: activation digest repin requires shadow mode';
+  end if;
+
+  -- Serialize in the same policy -> rule order as the cutover, then accept
+  -- either a sanitized rebuild with no rule row or the exact immutable
+  -- retirement receipt that superseded 581cb3fe with aa411351.
+  perform r.id
+    from public.rule r
+   where left(r.id::text,8)='581cb3fe'
+   for update;
+  get diagnostics v_retired_rule_count = row_count;
+  if v_retired_rule_count > 1 then
+    raise exception '0363 REFUSED: retired short id 581cb3fe resolves to % rules',
+      v_retired_rule_count;
+  end if;
+  if v_retired_rule_count = 1 and not exists (
+    select 1
+      from public.rule r
+      join ops.rule_retirement_receipt rr on rr.rule_id=r.id
+      join public.rule successor on successor.id=rr.superseded_by
+      join ops.authority_receipt ar
+        on ar.idempotency_key='retirement:'||rr.idempotency_key
+     where left(r.id::text,8)='581cb3fe'
+       and r.status='retired'
+       and r.retired_by=rr.actor_id
+       and r.retired_at=rr.retired_at
+       and r.version=rr.rule_version_after
+       and rr.rule_version_before+1=rr.rule_version_after
+       and rr.statement_hash=encode(public.digest(r.statement,'sha256'),'hex')
+       and rr.previous_status='active'
+       and (
+         (rr.approval_receipt_id is not null and rr.legacy_admission is null)
+         or
+         (rr.approval_receipt_id is null and rr.legacy_admission is not null)
+       )
+       and left(successor.id::text,8)='aa411351'
+       and (select count(*) from public.rule named_successor
+             where left(named_successor.id::text,8)='aa411351')=1
+       and ar.kind='override'
+       and ar.subject_type='rule'
+       and ar.subject_id=r.id
+       and ar.actor_id=rr.actor_id
+       and ar.contract_hash=rr.contract_hash
+       and (select count(*) from ops.rule_retirement_receipt all_rr
+             where all_rr.rule_id=r.id)=1
+  ) then
+    raise exception
+      '0363 REFUSED: rule 581cb3fe is not absent or exactly retired to aa411351';
   end if;
 
   if (select count(*) from ops.rule_delivery_activation_target)
