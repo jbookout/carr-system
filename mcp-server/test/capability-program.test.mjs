@@ -163,17 +163,22 @@ test("the registry exposes a read context and only human-governed lifecycle writ
   assert.equal(Boolean(TOOLS["complete-capability-project"]?.write), true);
   assert.equal(Boolean(TOOLS["begin-capability-project"]?.write), true);
   assert.equal(Boolean(TOOLS["attest-capability-project"]?.write), true);
-  assert.equal(TOOLS["complete-capability-project"].humanOnly, true);
-  assert.equal(TOOLS["start-capability-project"].humanOnly, true);
-  assert.equal(TOOLS["begin-capability-project"].humanOnly, true);
-  assert.equal(TOOLS["attest-capability-project"].humanOnly, true);
+  // humanOnly LABEL RETIRED (WR-000019 slice S1, 2026-08-27): it was already a
+  // dead label — executeRegisteredTool stopped reading it 2026-08-26 by Joe's
+  // ruling, decision dc57f62d — and this slice removes the stale declaration
+  // from capability-program.js. These are still write:true, human-governed
+  // lifecycle transitions; only the unread flag is gone.
+  assert.equal(TOOLS["complete-capability-project"].humanOnly, undefined);
+  assert.equal(TOOLS["start-capability-project"].humanOnly, undefined);
+  assert.equal(TOOLS["begin-capability-project"].humanOnly, undefined);
+  assert.equal(TOOLS["attest-capability-project"].humanOnly, undefined);
 
   const completion = TOOLS["complete-capability-project"].inputSchema;
   assert.equal(completion.additionalProperties, false);
   assert.equal(completion.required.includes("base_version"), true);
   assert.equal(completion.required.includes("completion_evidence"), true);
   assert.deepEqual(completion.properties.completion_kind.enum, COMPLETION_KINDS);
-  assert.equal(TOOLS["prepare-capability-project"].humanOnly, true);
+  assert.equal(TOOLS["prepare-capability-project"].humanOnly, undefined);
   assert.equal(TOOLS["capability-program"].inputSchema.properties.program_key.const, PROGRAM,
     "the public reader must not select an arbitrary program");
   for (const name of ["start-capability-project", "begin-capability-project", "prepare-capability-project", "attest-capability-project", "complete-capability-project"])

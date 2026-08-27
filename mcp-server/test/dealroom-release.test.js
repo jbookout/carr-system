@@ -58,8 +58,12 @@ test("release 1–5 verbs are registered with human gates on structural creation
     "create-national-market-deal","revert-deal-field"]) {
     assert.ok(TOOLS[name], `${name} must be registered`);
   }
-  assert.equal(TOOLS["create-national-account"].humanOnly, true);
-  assert.equal(TOOLS["create-national-market-deal"].humanOnly, true);
+  // humanOnly LABEL RETIRED (WR-000019 slice S1, 2026-08-27): dead since
+  // executeRegisteredTool stopped reading it 2026-08-26 (decision dc57f62d);
+  // this slice drops the stale declaration from tools.js. Both verbs remain
+  // registered structural-creation writes.
+  assert.equal(TOOLS["create-national-account"].humanOnly, undefined);
+  assert.equal(TOOLS["create-national-market-deal"].humanOnly, undefined);
 });
 
 test("national-account migration keeps the 0061 hierarchy and explicitly assigns Musicologie", async () => {

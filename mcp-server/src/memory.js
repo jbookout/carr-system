@@ -151,7 +151,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
     },
 
     "promote-memory": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Promote one candidate memory after a human confirms it. Requires a fresh memory version; promotion changes recall eligibility, never authority.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, reason: { type: "string" },
@@ -170,7 +170,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
     },
 
     "correct-memory": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Correct a memory without rewriting history. The prior row becomes corrected and a new version carries the replacement statement.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, statement: { type: "string" }, reason: { type: "string" },
@@ -202,7 +202,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
     },
 
     "forget-memory": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Forget a memory by suppressing it from recall while retaining its evidence and audit history. This is not a DELETE.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, reason: { type: "string" },

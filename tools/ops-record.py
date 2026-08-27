@@ -37,6 +37,10 @@ WHAT IT DOES
   health          Read the derived health of every registered service and
                   environment, with the freshness that produced it.
 
+  pr-evidence     Attach recovery_evidence_ref to any incident a merged PR's
+                  title or body names (WR-000019 slice S1). Same carr_jobs
+                  boundary as assess: it can attach evidence, never close.
+
 WHAT IT DELIBERATELY DOES NOT DO
 
   It never invents a service. An unknown --service is refused with the registry
@@ -1717,6 +1721,142 @@ def cmd_assess(args) -> int:
     return 0
 
 
+# ── PR-NAMED RECOVERY EVIDENCE (WR-000019 slice S1, 2026-08-27) ─────────────
+# The gap this closes: recovery_evidence_ref stayed null on almost every
+# non-SEV-1 incident until a human typed something in at close time (or `run`/
+# `assess` happened to touch the same job again). But the incident is often
+# ALREADY fixed by then — a merged PR that names the incident IS the evidence,
+# and until now nothing carried that fact onto the row. `resolve`/`sweep` still
+# do the actual closing; this only makes sure the evidence is sitting there
+# when a human runs one of them, exactly the way assess() above pre-populates
+# it for the run-ledger's own recoveries.
+#
+# THE SAME BOUNDARY AS assess(), REUSED RATHER THAN REINVENTED. connect
+# ("routine") is carr_jobs, and 0117's grant already covers exactly the column
+# this writes (recovery_evidence_ref) — no new grant, no new credential, no
+# new CI secret. carr_jobs cannot write resolved_at or root_cause, so this
+# cannot close, reclassify, or theorise about an incident even if the code
+# tried to; the interlock 0117 built is what makes that a database fact
+# instead of a promise about this file's behaviour.
+#
+# NEVER CLOBBERS. An incident that already carries recovery_evidence_ref (from
+# assess(), a duplicate adjudication, or a human's own resolve --evidence)
+# keeps what it has — a PR mentioning INC-x in passing is corroboration, not a
+# reason to overwrite investigation another writer already recorded.
+INCIDENT_REF_RE = re.compile(r"\bINC-\d{8}-\d{2,}\b")
+
+
+def extract_incident_refs(*texts: str | None) -> list[str]:
+    """Pure. Every distinct INC-<8-digit-day>-<seq> reference named across the
+    given strings (title, body, ...), in first-seen order. No I/O, so this is
+    exercised directly by tools/test-pr-incident-evidence.py without a gh
+    binary, a database, or a network in the loop."""
+    seen: dict[str, None] = {}
+    for text in texts:
+        for match in INCIDENT_REF_RE.findall(text or ""):
+            seen.setdefault(match, None)
+    return list(seen.keys())
+
+
+def pr_evidence_decision(existing_evidence: str | None, state: str, pr_number: int) -> tuple[str, str | None]:
+    """Pure. (action, evidence_ref) for one incident a merged PR names —
+    "attach" carries the ref to write, everything else is a reason to leave
+    the row alone. Factored out so tools/test-pr-incident-evidence.py can
+    prove the never-clobber and never-close rules directly, the same way
+    resolve_preconditions above is tested apart from the connection that
+    executes it."""
+    if state in ("resolved", "reviewed"):
+        return ("skip_closed", None)
+    if existing_evidence:
+        return ("skip_evidenced", None)
+    return ("attach", f"pr:{pr_number}")
+
+
+def _fetch_prs_for_evidence(pr_number: int | None, since_hours: int, repo: str | None) -> list[dict]:
+    """One explicit PR (any state — a pre-merge probe is a legitimate dry run
+    and reports "not merged" rather than erroring), or every PR merged within
+    the trailing window. Same gh-CLI shape as ops/pr-hygiene-check.py's own
+    fetch(), so a reader who knows that one already knows this one."""
+    fields = "number,title,body,url,mergedAt,state"
+    if pr_number is not None:
+        cmd = ["gh", "pr", "view", str(pr_number), "--json", fields]
+    else:
+        cmd = ["gh", "pr", "list", "--state", "merged", "--limit", "100", "--json", fields]
+    if repo:
+        cmd += ["--repo", repo]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    if p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout or "gh failed").strip()[:300])
+    data = json.loads(p.stdout or ("null" if pr_number is not None else "[]"))
+    rows = [data] if pr_number is not None else data
+    if pr_number is None and since_hours > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        rows = [r for r in rows if (merged_at := parse_ts(r.get("mergedAt"))) is not None and merged_at >= cutoff]
+    return rows
+
+
+def cmd_pr_evidence(args) -> int:
+    try:
+        prs = _fetch_prs_for_evidence(args.pr, args.since_hours, args.repo)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"ops-record: could not read pull requests ({type(e).__name__}: {e})",
+              file=sys.stderr)
+        return 1
+
+    attached = already_evidenced = closed_already = not_found = 0
+    with connect("routine") as conn, conn.cursor() as cur:
+        for pr in prs:
+            if pr.get("state") != "MERGED":
+                print(f"  skip  PR #{pr.get('number')} is not merged (state={pr.get('state')})")
+                continue
+            refs = extract_incident_refs(pr.get("title"), pr.get("body"))
+            for ref in refs:
+                cur.execute(
+                    """select recovery_evidence_ref, state from ops.incident where ref = %s""",
+                    (ref,))
+                row = cur.fetchone()
+                if not row:
+                    not_found += 1
+                    print(f"  ?     {ref} — no such incident (named in PR #{pr['number']}, nothing to attach)")
+                    continue
+                existing_evidence, state = row
+                action, evidence_ref = pr_evidence_decision(existing_evidence, state, pr["number"])
+                if action == "skip_closed":
+                    closed_already += 1
+                    print(f"  --    {ref} is already {state}; evidence not needed")
+                    continue
+                if action == "skip_evidenced":
+                    already_evidenced += 1
+                    print(f"  --    {ref} already carries recovery evidence — not overwritten")
+                    continue
+                cur.execute(
+                    """update ops.incident set recovery_evidence_ref = %s
+                        where ref = %s and recovery_evidence_ref is null""",
+                    (evidence_ref, ref))
+                if cur.rowcount:
+                    cur.execute(
+                        """insert into ops.incident_fact (incident_id, text, source_ref)
+                           select id, %s, %s from ops.incident where ref = %s""",
+                        (f"recovery evidence attached: PR #{pr['number']} "
+                         f"\"{(pr.get('title') or '').strip()[:200]}\" merged "
+                         f"{pr.get('mergedAt') or ''} — {pr.get('url') or ''}".strip(),
+                         "ops-record.py pr-evidence", ref))
+                    attached += 1
+                    print(f"  +     {ref}  recovery_evidence_ref = {evidence_ref}")
+                else:
+                    # Lost a race with another writer between the select and the
+                    # update above (assess(), a duplicate adjudication, a human's
+                    # resolve) — the row now has evidence from somewhere, which is
+                    # the same outcome this call was trying to produce.
+                    already_evidenced += 1
+                    print(f"  --    {ref} gained recovery evidence from another writer just now — not overwritten")
+        conn.commit()
+
+    print(f"pr-evidence: {attached} attached · {already_evidenced} already evidenced · "
+          f"{closed_already} already closed · {not_found} not found")
+    return 0
+
+
 def cmd_staging_target(args) -> int:
     try:
         target = staging_worker_target()
@@ -2909,6 +3049,14 @@ def main() -> int:
     a.add_argument("--window-hours", type=int, default=24,
                    help="how far back to look for each job's latest run")
 
+    pe = sub.add_parser("pr-evidence",
+                         help="attach recovery evidence to any incident a merged PR names")
+    pe.add_argument("--pr", type=int, default=None,
+                     help="one explicit PR number; default is every PR merged in --since-hours")
+    pe.add_argument("--since-hours", type=int, default=48,
+                     help="how far back to look for merged PRs when --pr is not given")
+    pe.add_argument("--repo", default=None, help="OWNER/REPO; default is gh's own repo resolution")
+
     args = p.parse_args()
     return {
         "sync-registry": cmd_sync_registry,
@@ -2924,6 +3072,7 @@ def main() -> int:
         "staging-readback-verify": cmd_staging_readback_verify,
         "staging-provider-version": cmd_staging_provider_version,
         "assess": cmd_assess,
+        "pr-evidence": cmd_pr_evidence,
         "resolve": cmd_resolve,
         "sweep": cmd_sweep,
         "settings-change": cmd_settings_change,

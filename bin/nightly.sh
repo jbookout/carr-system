@@ -1224,6 +1224,19 @@ step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 # cleared by 09:06 rather than by the next night.
 step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/ops-record.py assess --environment production
 
+# ── PR-NAMED RECOVERY EVIDENCE (WR-000019 slice S1, Obedience & Autonomy,
+# 2026-08-27) ─────────────────────────────────────────────────────────────
+# A merged PR naming an INC-<id> in its title or body is itself evidence the
+# fix shipped, and until this step existed nothing carried that fact onto the
+# incident row — recovery_evidence_ref stayed null until a human typed it in
+# at close time. Same boundary as the assessment step just above: carr_jobs
+# already holds 0117's grant on recovery_evidence_ref and nothing more, so this
+# can attach evidence and structurally cannot resolve, reclassify, or theorise
+# about the incident it attaches to. `resolve`/`sweep` remain the only close
+# path. --since-hours 36 overlaps this step's own ~24h cadence on purpose, so
+# a PR merged just before or after midnight is never missed by a boundary.
+step "pr recovery evidence (merged PRs -> incident evidence)"  ./.venv/bin/python tools/ops-record.py pr-evidence --since-hours 36
+
 # WHAT IS LEFT FOR A HUMAN. 0293 closes recovered lower-severity collector
 # incidents from their own three-run evidence. It deliberately does not touch:
 #
