@@ -7,8 +7,8 @@
   "triggers": 21
  },
  "generated_from": {
-  "map_sha256": "54ed8c4dce8cd8b1e4c6824a22cd3a5b20987d293c4357a79ba4e1cc2dc59b7f",
-  "triage_sha256": "ec8b6594f3b11c58dd5588d6e9a0c2ffe9d5214be798fdfb3116348f8a1b1053"
+  "map_sha256": "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904",
+  "triage_sha256": "01c051a6a558aa48c73a550b6a015add273052baa215c3fdf21ca23d5ba3c8e3"
  },
  "generated_note": "Compiled by ops/rule-jit-compile.py from ops/config/rule-triage.v1.json's per-rule `detector` fields and ops/config/rule-enforcement-map.json's rule_packs/rule_load_layers. Never hand-edit this file \u2014 run the compiler again after changing either input, and `--check` verifies the two never drift apart.",
  "max_rules_per_trigger": 5,
