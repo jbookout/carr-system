@@ -308,7 +308,14 @@ def main() -> int:
                     refuse("amend_rule_statement succeeded on a retired rule")
                 except psycopg.Error as exc:
                     cur.execute("rollback to savepoint amend_refuses_retired")
-                    if "retired" not in str(exc).lower():
+                    # Deliberately the SPECIFIC retired-rule message, not the
+                    # broader "expected proposed or active" one a few lines
+                    # below it in the function also happens to fire for a
+                    # retired rule (it excludes retired same as superseded) --
+                    # a generic substring match on "retired" would still pass
+                    # with the specific check deleted entirely, since that
+                    # message also interpolates the status word "retired".
+                    if "stays as written" not in str(exc).lower():
                         refuse(f"retired-rule amendment refusal was for the wrong reason: {exc}")
                 cur.execute("release savepoint amend_refuses_retired")
                 cur.execute("reset session authorization")
