@@ -1,10 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 const migration = await readFile(new URL("../../migrations/0336_siep02_rule_delivery_authority.sql", import.meta.url), "utf8");
 const runtime = await readFile(new URL("../../ops/rule-delivery-cutover.py", import.meta.url), "utf8");
 const wrapper = await readFile(new URL("../../bin/rule-delivery-cutover-prod.sh", import.meta.url), "utf8");
+const digestForward = await readFile(new URL("../../migrations/0349_siep02_rule_delivery_map_digest_forward.sql", import.meta.url), "utf8");
+const mapBytes = await readFile(new URL("../../ops/config/rule-enforcement-map.json", import.meta.url));
+const overlay = JSON.parse(await readFile(new URL("../../ops/config/rule-delivery-activation-overlay.v1.json", import.meta.url), "utf8"));
+const currentMapDigest = createHash("sha256").update(mapBytes).digest("hex");
 
 test("cutover attribution is derived from the exact Joe authority login", () => {
   assert.match(migration, /session_user\s*<>\s*'carr_authority_joe'/i);
@@ -40,4 +45,14 @@ test("SIEP-02 does not activate or deploy rule delivery", () => {
   assert.doesNotMatch(migration, /values\s*\([^)]*'enforced'/i);
   assert.doesNotMatch(runtime, /default\s*=\s*["']enforced["']/i);
   assert.match(wrapper, /APPLY=0/);
+});
+
+test("post-rebase map drift advances only the exact nine shadow activation preimages", () => {
+  assert.equal(overlay.base_map_sha256, currentMapDigest);
+  assert.match(digestForward, new RegExp(currentMapDigest));
+  assert.match(digestForward, /mode[^;]+is distinct from 'shadow'/s);
+  assert.match(digestForward, /count\(\*\)[^;]+<> 9/s);
+  assert.match(digestForward, /v_updated not in \(0,9\)/);
+  assert.doesNotMatch(digestForward, /set\s+mode\s*=|'enforced'/i);
+  assert.doesNotMatch(digestForward, /begin;|commit;/i);
 });

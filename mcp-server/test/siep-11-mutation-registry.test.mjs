@@ -170,7 +170,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 496);
+  assert.equal(rows.length, 497);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -178,7 +178,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 487);
+  assert.equal(scripts.length, 488);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -192,6 +192,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   assert.equal(scripts.some(path => path === "ops/githooks/commit-msg"), true);
   for (const path of [
     "ops/capture-verb-reachability.py",
+    "ops/delegation-telemetry-report.py",
     "ops/gate-lifecycle-report.py",
     "ops/rule-triage-apply.py",
     "ops/rule-triage-report.py",
