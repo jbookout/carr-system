@@ -199,7 +199,7 @@ def main() -> int:
     receipts = build_receipts_plan(data, retire_plan) if args.emit_receipts_plan else None
 
     if args.json:
-        out = {"retire_rule_batch": retire_plan}
+        out: dict[str, object] = {"retire_rule_batch": retire_plan}
         if not args.home:
             out["optional_amend_rule_batch"] = amend_plan
         if receipts is not None:

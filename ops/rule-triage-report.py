@@ -91,13 +91,13 @@ def render_merge_families(data: dict) -> list[str]:
     lines.append("")
     lines.append("Family 2 — single-source-of-truth restatement:")
     for rid, target in SECOND_MERGE_FAMILY.items():
-        r = by_id.get(rid)
-        lines.append(f"  GONE-merge {rid} -> {target}: {r['reason']}")
+        r = by_id.get(rid, {})
+        lines.append(f"  GONE-merge {rid} -> {target}: {r.get('reason', '')}")
     lines.append("")
     lines.append("Family 3 — 'capability proven live, not just green tests' restatement:")
     for rid, target in THIRD_MERGE_FAMILY.items():
-        r = by_id.get(rid)
-        lines.append(f"  GONE-merge {rid} -> {target}: {r['reason']}")
+        r = by_id.get(rid, {})
+        lines.append(f"  GONE-merge {rid} -> {target}: {r.get('reason', '')}")
     lines.append("")
     return lines
 
