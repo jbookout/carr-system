@@ -1088,6 +1088,31 @@ sed -e '/^-- Dumped from database version/d' \
     -e '/^\\unrestrict /d' "$TMP" | normalise_eof > "$TMP.clean"
 mv "$TMP.clean" "$TMP"
 
+# THE SIXTH INSTANCE WAS CAUGHT BY HAND; THE SEVENTH IS CAUGHT HERE. Every block
+# above this line was written one at a time, each after a database rebuilt from
+# this file failed a db-gate days later: the role preamble, the control catalog,
+# the guidance registry and retrieval seeds, the rule-delivery policy and
+# targets, the governed execution providers, and now the sealed SIEP manifest.
+# Six blocks, one shape — a migration seeds rows, this snapshot's ledger absorbs
+# the migration so it never replays, and the rows are simply gone. Until now
+# nothing would have noticed the next one.
+#
+# It runs HERE, against the composed artifact and before the write/--check
+# branch, for two reasons. The artifact is the only place holding both halves of
+# the question — the applied-migration ledger and the data statements — so the
+# check reads the exact bytes about to be committed rather than asking
+# production a second question whose answer could differ. And refusing before
+# the write means a rejected run leaves db/schema.sql untouched.
+#
+# IT NEVER ADDS A TABLE. What a table carries into a tracked file stays a
+# reviewed decision, per the rule this file already lives by: a table qualifies
+# because someone read its rows and can say what is in them, never because a
+# migration seeded it. All this does is refuse to let an unclassified one pass
+# in silence.
+if ! "$CATALOG_PY" "$REPO/ops/snapshot-seed-coverage.py" "$REPO" "$TMP"; then
+  exit 1
+fi
+
 if [ "$CHECK" = "1" ]; then
   if [ ! -f "$OUT" ]; then
     echo "schema-snapshot: $OUT does not exist — run bin/schema-snapshot.sh" >&2
