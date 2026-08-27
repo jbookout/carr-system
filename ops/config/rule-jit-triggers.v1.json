@@ -17,7 +17,9 @@
  "triggers": [
   {
    "kind": "bash_family",
-   "packs": [],
+   "packs": [
+    "engineering-git"
+   ],
    "pattern": "\\bgit\\s+push\\b|\\bgh\\s+pr\\s+(?:create|merge)\\b",
    "rule_ids": [
     "173119a8",
@@ -31,7 +33,9 @@
   },
   {
    "kind": "content_regex",
-   "packs": [],
+   "packs": [
+    "vendor-intros"
+   ],
    "pattern": "(?=.*\\b(?:prepare-conversation|log-outreach)\\b)(?=.*\\bvendor\\b)",
    "rule_ids": [
     "83b9a362",
@@ -44,7 +48,9 @@
   },
   {
    "kind": "content_regex",
-   "packs": [],
+   "packs": [
+    "delegation-council"
+   ],
    "pattern": "(?=.*\\bdata.?class\\b)(?=.*\\b(?:scope|widen|widening)\\b)",
    "rule_ids": [
     "df55c398"
@@ -69,7 +75,9 @@
   },
   {
    "kind": "content_regex",
-   "packs": [],
+   "packs": [
+    "delegation-council"
+   ],
    "pattern": "\\bfable\\b",
    "rule_ids": [
     "fb110a39"
@@ -169,7 +177,9 @@
   },
   {
    "kind": "content_regex",
-   "packs": [],
+   "packs": [
+    "joe-comms"
+   ],
    "pattern": "\\bx\\.com\\b|\\btwitter\\.com\\b",
    "rule_ids": [
     "557838a5",
@@ -192,7 +202,9 @@
   },
   {
    "kind": "verb",
-   "packs": [],
+   "packs": [
+    "source-study"
+   ],
    "pattern": "^(WebFetch|WebSearch)$",
    "rule_ids": [
     "2e362970",
@@ -206,7 +218,9 @@
   },
   {
    "kind": "verb",
-   "packs": [],
+   "packs": [
+    "delegation-council"
+   ],
    "pattern": "^Agent$",
    "rule_ids": [
     "185013c6",
@@ -220,7 +234,9 @@
   },
   {
    "kind": "verb",
-   "packs": [],
+   "packs": [
+    "client-deal"
+   ],
    "pattern": "__(new-deal|update-deal|patch-deal-field|reassign-deal|revert-deal-field)$",
    "rule_ids": [
     "51d9f05f",
@@ -234,7 +250,9 @@
   },
   {
    "kind": "verb",
-   "packs": [],
+   "packs": [
+    "vendor-intros"
+   ],
    "pattern": "__(new-vendor|update-vendor|merge-vendor-rows)$",
    "rule_ids": [
     "1f750181",
@@ -248,7 +266,9 @@
   },
   {
    "kind": "verb",
-   "packs": [],
+   "packs": [
+    "client-deal"
+   ],
    "pattern": "__(prepare-conversation|add-deal-note|log-activity|log-outreach)$",
    "rule_ids": [
     "3fa17fa0",
@@ -261,7 +281,9 @@
   },
   {
    "kind": "verb",
-   "packs": [],
+   "packs": [
+    "client-deal"
+   ],
    "pattern": "__(prepare-document|compare-lease-terms|record-executed-lease)$",
    "rule_ids": [
     "412d37d3",
@@ -275,7 +297,9 @@
   },
   {
    "kind": "verb",
-   "packs": [],
+   "packs": [
+    "joe-comms"
+   ],
    "pattern": "__(send_message|reply|forward|create_draft|update_draft)$",
    "rule_ids": [
     "49533583",
@@ -286,7 +310,9 @@
   },
   {
    "kind": "verb",
-   "packs": [],
+   "packs": [
+    "vendor-intros"
+   ],
    "pattern": "__(who-do-we-know|counterparty-history)$",
    "rule_ids": [
     "5f8c661d",

@@ -170,6 +170,9 @@ def compile_triggers(triage: dict, enforcement_map: dict) -> list[dict[str, Any]
     if not isinstance(fallback_narrowing, dict):
         fallback_narrowing = {}
 
+    rule_load_layers = enforcement_map.get("rule_load_layers", {})
+    rule_packs = enforcement_map.get("rule_packs", {})
+
     # 1. seeded detectors: group by (kind, pattern)
     groups: dict[tuple[str, str], set[str]] = {}
     seeded_ids: set[str] = set()
@@ -188,18 +191,22 @@ def compile_triggers(triage: dict, enforcement_map: dict) -> list[dict[str, Any]
     rows: list[dict[str, Any]] = []
     for (kind, pattern), ids in groups.items():
         capped = sorted(ids)[:MAX_RULES_PER_TRIGGER]
+        # The trigger's own packs are inferred from its member rules' existing
+        # pack membership (rule-enforcement-map.json's rule_load_layers) — a
+        # documentation/telemetry aid and the standing-context declared_packs
+        # argument, never a second, hand-typed source of truth.
+        packs = sorted({p for rid in capped
+                        for p in rule_load_layers.get(rid, {}).get("packs", [])})
         rows.append({
             "trigger_id": trigger_id(kind, pattern),
             "kind": kind,
             "pattern": pattern,
-            "packs": [],
+            "packs": packs,
             "rule_ids": capped,
             "source": "seeded_detector",
         })
 
     # 2. pack fallback: JIT rules of a pack with no seeded detector
-    rule_load_layers = enforcement_map.get("rule_load_layers", {})
-    rule_packs = enforcement_map.get("rule_packs", {})
     pack_members: dict[str, list[str]] = {}
     for short, entry in rule_load_layers.items():
         if short not in by_id or by_id[short].get("home") != "jit":
