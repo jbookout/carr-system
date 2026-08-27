@@ -237,13 +237,15 @@ CONTRAST_TEXT = ("It's not about the schema, it's about the underlying data mode
                   "that the whole export chain depends on.")
 CLEAN_TEXT = ("Fixed the exporter. It wrote to draft because CARR_EXPORT_LIVE was "
               "unset; refresh-rules.sh sets it. Verified: counts match.")
-# A vocab word inside a fence, nowhere else in the message. Only masking (the
-# mask() this check reuses from chat-lint-gate.py's own writing_rules(), which
-# blanks fenced code before matching) keeps this at zero findings; a mutant
-# that scanned the raw prose instead would flag "delve" here and this case
-# would fail to catch it.
-MASKED_VOCAB_TEXT = ("Renamed the stray TODO.\n\n```python\n# TODO: delve into "
-                     "this later\n```\n\nNothing else changed.")
+# A vocab word inside INLINE single-backtick code, nowhere else in the
+# message. Triple-fenced code is already removed one step earlier by
+# strip_fences() regardless of masking, so that shape does not actually
+# exercise mask() at all -- caught by a mutation run (masked=prose instead of
+# mask(prose)) that this exact case originally still passed. Only mask()'s
+# own inline-backtick pattern blanks a SINGLE-backtick span, so this is the
+# case that actually depends on mask() running.
+MASKED_VOCAB_TEXT = ("Renamed the helper. The old one was called `delve`, "
+                     "nothing else changed.")
 
 
 def shadow_writing_cases():
