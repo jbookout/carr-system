@@ -5249,14 +5249,36 @@ export const TOOLS = {
 
   "teach": {
     write: true,
-    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
+    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
       personal: { type: "boolean", description: "true = applies to this partner only" },
-      supersedes: { type: "string", description: "rule_id this one replaces; recorded as a link, does not retire it" } },
-      required: ["idempotency_key","statement","human_quote"] },
+      supersedes: { type: "string", description: "rule_id this one replaces; recorded as a link, does not retire it" },
+      enforcement_home: { type: "string", enum: ["gate","jit","core","judgment_advisory"],
+        description: "REQUIRED. Where this rule will be enforced: 'gate' (a deny/stop control — pass carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control — pass why_no_machine)." },
+      carrying_control: { type: "string", description: "REQUIRED when enforcement_home is 'gate'. The control this rule's enforcement will carry — an existing control_key, or the one about to be built." },
+      why_no_machine: { type: "string", description: "REQUIRED when enforcement_home is 'judgment_advisory'. One line: why no mechanical control can carry this rule." } },
+      required: ["idempotency_key","statement","human_quote","enforcement_home"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "teach", args, async () => {
+      // ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10). See the description
+      // above: a clear, named refusal rather than a silent default, so an
+      // existing caller that has not been told about this yet gets an error
+      // that IS the migration path, not a rule quietly filed with no home.
+      const ENFORCEMENT_HOMES = ["gate", "jit", "core", "judgment_advisory"];
+      const enforcementHome = args.enforcement_home;
+      if (!ENFORCEMENT_HOMES.includes(enforcementHome))
+        throw new ToolError({ error: "enforcement_home_required",
+          hint: "pass enforcement_home: one of 'gate' (a deny/stop control will carry it — also pass carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control — also pass why_no_machine)" });
+      const carryingControl = String(args.carrying_control || "").trim();
+      if (enforcementHome === "gate" && !carryingControl)
+        throw new ToolError({ error: "carrying_control_required",
+          hint: "enforcement_home 'gate' means a deny/stop control carries this rule; name it in carrying_control — an existing control_key, or the one about to be built" });
+      const whyNoMachine = String(args.why_no_machine || "").trim();
+      if (enforcementHome === "judgment_advisory" && !whyNoMachine)
+        throw new ToolError({ error: "why_no_machine_required",
+          hint: "enforcement_home 'judgment_advisory' means no mechanical control will ever back this rule; say why not in why_no_machine, one line" });
+
       // A supersedes pointer at a rule that does not exist is a silent lie in the
       // audit trail, so it is checked rather than trusted.
       if (args.supersedes) {
@@ -5286,7 +5308,10 @@ export const TOOLS = {
          values ('rule','human',$1,$2,'captured',$3)`,
         [`rule:${r.rows[0].id}`, args.statement, actor.id]);
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
-        { new: { statement: args.statement, supersedes: args.supersedes || null },
+        { new: { statement: args.statement, supersedes: args.supersedes || null,
+                 enforcement_home: enforcementHome,
+                 carrying_control: enforcementHome === "gate" ? carryingControl : null,
+                 why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null },
           human_quote: args.human_quote, idempotency_key: args.idempotency_key });
       // SCOPE IS ECHOED BACK, added 2026-08-03, because it defaulted silently
       // once and nothing in the response could show it. A rule taught with
@@ -5305,6 +5330,9 @@ export const TOOLS = {
                scope_applied: scopeApplied,
                personal_requested: args.personal === true,
                supersedes: args.supersedes || null,
+               enforcement_home: enforcementHome,
+               carrying_control: enforcementHome === "gate" ? carryingControl : null,
+               why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null,
                ...(scopeMismatch ? { warning:
                  "personal:true was requested but this rule was stored SHARED — activating it " +
                  "will bind BOTH partners, including any wording specific to one of them or to " +
@@ -5688,8 +5716,8 @@ export const TOOLS = {
   // already established that a durable record can be corrected rather than
   // re-litigated; rules simply never got the same affordance.
   "amend-rule": {
-    write: true,
-    description: "Correct the WORDS of a PROPOSED rule in place, keeping its id, created_at, taught_by and quote. THE LINE: amend = same proposed rule, better words; teach + retire = a different rule. Once approved, the exact statement, quote, scope, audience and enforcement preimage are frozen by the database: changing any of them would make an old receipt appear to approve new substance. Correct an ACTIVE rule by teaching and approving the corrected replacement, then retiring the old rule. human_quote is immutable once set and may only be filled when absent on a proposed import. Requires base_version from a fresh read; a conflict is never retried blind.",
+    write: true, authorityOnly: true,
+    description: "Correct the WORDS of a rule in place, keeping its id, created_at, taught_by and quote. THE LINE: amend = same rule, better words; teach + retire = a different rule. A PROPOSED rule's statement, human_quote (fill-only) and scope may all be corrected directly, no authority principal required beyond the write itself. An ACTIVE rule's quote, scope, audience and enforcement preimage stay frozen — changing any of them would make the old approval receipt appear to bless new substance — but its STATEMENT ALONE may now be amended (WR-000019 slice S10) through a Joe-authority-guarded, receipted path (ops.amend_rule_statement): an append-only ops.rule_amendment_receipt hashes the prior words, and the enforced rule keeps reciting under its old approval. To change an active rule's scope, quote or audience, still teach and approve a corrected replacement, then retire this one. Requires base_version from a fresh read; a conflict is never retried blind.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string" },
@@ -5739,9 +5767,41 @@ export const TOOLS = {
       if (!changed.length) throw new ToolError({ error: "no_change",
         hint: "nothing was written; the rule already reads exactly this way" });
 
-      if (row.status === "active")
-        throw new ToolError({ error: "active_rule_approval_frozen", rule_id: args.rule_id,
-          hint: "an enforced rule cannot change substance under its old approval; teach the corrected rule, approve it, and retire this one" });
+      if (row.status === "active") {
+        // The old approval's preimage — quote, scope, audience, enforcement —
+        // stays frozen exactly as before. Only the ONE axis the versioned
+        // amendment path exists to correct (statement) may move; a request
+        // that also touches scope or quote still refuses, same as always.
+        if (changed.includes("scope"))
+          throw new ToolError({ error: "active_rule_scope_frozen", rule_id: args.rule_id,
+            hint: "scope is part of the approval preimage and stays frozen on an active rule; teach the corrected rule, approve it, and retire this one to change scope" });
+        if (changed.includes("human_quote"))
+          throw new ToolError({ error: "active_rule_quote_frozen", rule_id: args.rule_id,
+            hint: "the partner's words are testimony, not prose, and stay fixed once a rule is active" });
+
+        // changed is now exactly ["statement"] — ops.amend_rule_statement,
+        // guarded like ops.approve_rule (Joe authority, refuses a retired
+        // rule), writes the receipt and updates rule.statement atomically.
+        const amended = await c.query(
+          "select ops.amend_rule_statement($1,$2,$3,$4) as result",
+          [args.rule_id, nextStatement, args.idempotency_key, reason]);
+        const result = amended.rows[0]?.result;
+        if (!result || !result.ok)
+          throw new ToolError({ error: "rule_amendment_failed", rule_id: args.rule_id });
+
+        await writeEvent(c, actor, "amend-rule", "rule", args.rule_id, {
+          field: "statement",
+          old: { statement: row.statement },
+          new: { statement: nextStatement },
+          agent_rationale: reason,
+          idempotency_key: args.idempotency_key });
+
+        return { ok: true, rule_id: args.rule_id, status: "active",
+                 changed: ["statement"], version: result.rule_version_after, reason,
+                 replayed: !!result.replayed,
+                 amendment_receipt_id: result.amendment_receipt_id,
+                 note: "amended under Joe authority and receipted; the rule stays active and keeps reciting under its old approval" };
+      }
 
       await c.query("update rule set statement=$1, human_quote=$2, scope=$3 where id=$4",
         [nextStatement, nextQuote, JSON.stringify(nextScope), args.rule_id]);

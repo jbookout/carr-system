@@ -50,7 +50,16 @@ def main() -> int:
           and "before insert or update on rule" in sql
           and "unreceipted_deactivation_refusal" in gate
           and "approved_rule_noop_update_refusal" in gate
-          and "active_rule_approval_frozen" in tools)
+          # WR-000019 slice S10: the blanket "active_rule_approval_frozen"
+          # refusal was replaced by a narrower pair -- scope and quote stay
+          # frozen exactly as before, but the statement now has its own
+          # sanctioned, receipted exception path (migration 0349,
+          # ops.amend_rule_statement) rather than being frozen solid. The
+          # PREIMAGE this check is about is still locked; only the axis
+          # count changed.
+          and "active_rule_scope_frozen" in tools
+          and "active_rule_quote_frozen" in tools
+          and "ops.amend_rule_statement" in tools)
     check("approved admission and control rows are immutable",
           "approved_rule_admission_immutable" in sql
           and "approved_rule_enforcement_point_immutable" in sql

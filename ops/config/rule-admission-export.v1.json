@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "exported_at": "2026-08-27T05:35:26Z",
+  "source": "placeholder-pending-first-export",
+  "rule_count": 0,
+  "rules": {},
+  "note": "WR-000019 slice S10 seeds this file empty. Refresh it for real with: ./bin/sync-rule-admission-prod.sh --export (writes ops/config/rule-admission-export.v1.json from production's ops.rule_admission), then commit the result. ops/rule-classification-parity-check.py compares this file against ops/config/rule-enforcement-map.json and only reports on the overlap it actually finds, so an empty export compares cleanly rather than failing -- it is honest about having synced nothing yet, not a false green."
+}
