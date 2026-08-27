@@ -169,11 +169,11 @@ def main() -> int:
     args = parser.parse_args()
 
     map_data, map_err = load_json(MAP, "rule-enforcement-map.json")
-    if map_err:
+    if map_err or map_data is None:
         print(f"rule-classification-parity: ERROR — {map_err}")
         return 2
     export_data, export_err = load_json(EXPORT, "rule-admission-export.v1.json")
-    if export_err:
+    if export_err or export_data is None:
         print(f"rule-classification-parity: ERROR — {export_err}")
         return 2
 

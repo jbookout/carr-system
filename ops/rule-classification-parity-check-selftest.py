@@ -105,6 +105,19 @@ def case_cli_empty_export_passes():
                      expect_stdout_contains="0/0")
 
 
+def with_rule(export_data: dict, rule_id: str, detail: dict) -> dict:
+    """A deep copy of export_data with one rules[] entry added or replaced.
+
+    A plain `{**EXPORT_BASE, "rules": {**EXPORT_BASE["rules"], ...}}` spread
+    types EXPORT_BASE["rules"] as `object` under mypy (EXPORT_BASE has no
+    declared value type), which cannot be unpacked with `**`; this helper
+    keeps the fixtures readable without fighting the checker over a literal.
+    """
+    out = copy.deepcopy(export_data)
+    out["rules"][rule_id] = detail
+    return out
+
+
 def _run_cli(map_data, export_data, *, expect_rc, expect_stdout_contains=None):
     tmp = tempfile.mkdtemp(prefix="rule-classification-parity-selftest-")
     try:
@@ -149,24 +162,21 @@ def main() -> int:
              expect_ok=True, expect_compared=2),
         case("divergent bucket fails and names the rule",
              MAP_BASE,
-             {**copy.deepcopy(EXPORT_BASE),
-              "rules": {**EXPORT_BASE["rules"],
-                        "aaaaaaaa": {"enforcement_class": "judgment_advisory", "state": "admitted"}}},
+             with_rule(EXPORT_BASE, "aaaaaaaa",
+                       {"enforcement_class": "judgment_advisory", "state": "admitted"}),
              expect_ok=False, expect_mismatch_ids=["aaaaaaaa"]),
         case("human_only in the DB matches a machine-enforced file category",
              MAP_BASE,
-             {**copy.deepcopy(EXPORT_BASE),
-              "rules": {**EXPORT_BASE["rules"],
-                        "aaaaaaaa": {"enforcement_class": "human_only", "state": "admitted"}}},
+             with_rule(EXPORT_BASE, "aaaaaaaa",
+                       {"enforcement_class": "human_only", "state": "admitted"}),
              expect_ok=True, expect_compared=2),
         case("empty export compares cleanly (nothing synced yet is not a failure)",
              MAP_BASE, {"schema_version": 1, "rules": {}},
              expect_ok=True, expect_compared=0),
         case("export names a rule the file map does not classify at all",
              MAP_BASE,
-             {**copy.deepcopy(EXPORT_BASE),
-              "rules": {**EXPORT_BASE["rules"],
-                        "zzzzzzzz": {"enforcement_class": "machine_enforceable", "state": "admitted"}}},
+             with_rule(EXPORT_BASE, "zzzzzzzz",
+                       {"enforcement_class": "machine_enforceable", "state": "admitted"}),
              expect_ok=False),
         case_cli_matching_passes(),
         case_cli_divergent_fails(),
