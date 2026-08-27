@@ -447,6 +447,39 @@ def main() -> int:
                 if receipted_retirement_not_legacy is None or receipted_retirement_not_legacy[0] is not True:
                     refuse("a receipted retirement was recorded as legacy, or lost its approval_receipt_id")
 
+                # The mutual-exclusion CHECK itself, independent of any
+                # function -- a row claiming BOTH an approval receipt AND a
+                # legacy admission is refused at the database layer even for
+                # a direct superuser insert, not merely something ops.retire_rule
+                # happens never to construct.
+                cur.execute(
+                    """select rule_version_before,rule_version_after,statement_hash,previous_status,
+                              actor_id,reason,superseded_by,approval_receipt_id,contract_hash,retired_at
+                         from ops.rule_retirement_receipt where rule_id=%s""",
+                    (rule_id,),
+                )
+                base_row = cur.fetchone()
+                if base_row is None:
+                    refuse("could not read back the base retirement receipt row for the exclusivity probe")
+                cur.execute("savepoint retirement_legacy_excludes_receipt_probe")
+                try:
+                    cur.execute(
+                        """insert into ops.rule_retirement_receipt
+                             (idempotency_key,rule_id,rule_version_before,rule_version_after,statement_hash,
+                              previous_status,actor_id,reason,superseded_by,approval_receipt_id,
+                              legacy_admission,contract_hash,retired_at)
+                           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (f"local-exclusivity-probe-{uuid.uuid4()}", rule_id, *base_row[:8],
+                         "legacy_admission: should never coexist with a real receipt", base_row[8], base_row[9]),
+                    )
+                    refuse("a retirement receipt row claiming BOTH an approval receipt and a "
+                           "legacy_admission marker was accepted")
+                except psycopg.Error as exc:
+                    cur.execute("rollback to savepoint retirement_legacy_excludes_receipt_probe")
+                    if "retirement_legacy_excludes_receipt" not in str(exc):
+                        refuse(f"exclusivity probe refusal was for the wrong reason: {exc}")
+                cur.execute("release savepoint retirement_legacy_excludes_receipt_probe")
+
                 # ---- legacy rule lifecycle (WR-000019 follow-up, migration 0351) ----
                 # 217 of 219 active rules today have no ops.rule_approval_receipt
                 # row: they were taught and activated by hand before the receipt
