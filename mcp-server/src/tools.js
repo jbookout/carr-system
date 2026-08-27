@@ -662,7 +662,32 @@ export function coerceArgsToSchema(schema, args, path = "") {
   return args;
 }
 
-async function versionGuard(client, table, id, baseVersion) {
+// AUTO-REBASE FOR A PURE VERSION-NUMBER RACE (WR-000019 slice S6, CONFLICT
+// TIERING). version_conflict is deliberately "ask the human, never auto-retry"
+// (rule 14181e60) whenever the intervening write touched a field THIS call is
+// also about to touch — that is a real collision and must surface. But most
+// verbs bump `version` on every write regardless of which columns changed, so
+// two callers editing DISJOINT fields (Joe corrects `city` while a nightly
+// sweep updates `salesforce_id`) still collide on version alone even though
+// nothing they wrote actually conflicts. That shape is mechanical bookkeeping,
+// not a judgment call, and this is where it is caught.
+//
+// touchedFields is OPT IN and defaults to null, which preserves every existing
+// caller's exact behaviour (14 sites call this with 3 args; none of them
+// change). Only a caller that can name, up front, exactly which columns its
+// own write is about to set may opt in — passing the wrong set would let a
+// real collision rebase silently, so this is deliberately per-verb, not a
+// blanket default. update-deal is the first (and, for now, only) caller wired
+// this way: its `fields{}` PATCH already computes the exact touched-column set
+// before it needs a version at all.
+export function disjointFromIntervening(touchedFields, interveningEvents) {
+  if (!Array.isArray(touchedFields) || !touchedFields.length) return false;
+  if (!interveningEvents.length) return false; // nothing intervened at all — not a race, just a stale read of nothing
+  const touched = new Set(touchedFields);
+  return interveningEvents.every(row => !row.field || !touched.has(row.field));
+}
+
+async function versionGuard(client, table, id, baseVersion, touchedFields = null) {
   // Every write handler runs inside mcp.js's writer transaction.  Locking the
   // row makes the optimistic check real: a concurrent writer waits, then sees
   // the incremented version instead of letting two same-version writes through.
@@ -696,11 +721,25 @@ async function versionGuard(client, table, id, baseVersion) {
        from event e join actor a on a.id=e.actor_id
        where e.subject_id=$1 and e.recorded_at > $2 order by e.recorded_at desc limit 5`,
       [id, created.rows[0]?.created_at ?? null]);
+    // TRIVIAL RACE: every intervening event's field lies outside this call's
+    // own touched set. Rebase transparently onto the row this transaction
+    // already holds locked (current is fresh and safe to act on — the `for
+    // update` above means nobody else can move it again until this
+    // transaction commits) and hand the caller a receipt instead of a refusal.
+    // SAME-FIELD OR UNDECLARED: unchanged, still asks the human.
+    if (disjointFromIntervening(touchedFields, ev.rows)) {
+      return { version: current, rebased: true, rebase_receipt: {
+        from_base_version: Number(baseVersion), rebased_to_version: current,
+        disjoint_intervening_events: ev.rows.map(row => ({
+          actor: row.actor, verb: row.verb, field: row.field, recorded_at: row.recorded_at })),
+        hint: "version advanced from a write to a different field; re-applied against the current row with no human confirmation needed",
+      } };
+    }
     throw new ToolError({ error: "version_conflict", current_version: current,
       intervening_events: ev.rows,
       hint: "surface this to the human and re-read; NEVER auto-retry" });
   }
-  return current;
+  return { version: current, rebased: false, rebase_receipt: null };
 }
 
 async function config(client, key, fallback) {
@@ -3351,7 +3390,7 @@ export const TOOLS = {
 
   "update-deal": {
     write: true,
-    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a conflict means someone else wrote — ask the human, never retry blind. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
+    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a same-field conflict means someone else wrote the same column — ask the human, never retry blind. A version bump from a DIFFERENT field (someone else's disjoint edit) is rebased automatically and reported back as `rebased`/`rebase_receipt`; nothing about this call's own fields is ever silently changed. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
@@ -3360,7 +3399,6 @@ export const TOOLS = {
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-deal", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
-      await versionGuard(c, "deal", s.id, args.base_version);
       // city and lane joined the list in 0074, when they stopped being source_row
       // passthrough and became real columns. Before that they were unsettable,
       // which is why salesforce-diff could only ever REPORT a city move.
@@ -3370,6 +3408,10 @@ export const TOOLS = {
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // touchedFields = keys: computed BEFORE the guard so a version bump from
+      // some OTHER field can be told apart from a bump on one of THESE fields.
+      // See versionGuard's own comment (CONFLICT TIERING, slice S6).
+      const guard = await versionGuard(c, "deal", s.id, args.base_version, keys);
       const old = (await c.query(`select ${keys.join(",")} from deal where id=$1`, [s.id])).rows[0];
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
       await c.query(`update deal set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
@@ -3377,7 +3419,8 @@ export const TOOLS = {
       for (const k of keys)
         await writeEvent(c, actor, "update-deal", "deal", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
-      return { ok: true, updated: keys };
+      return { ok: true, updated: keys,
+               ...(guard.rebased ? { rebased: true, rebase_receipt: guard.rebase_receipt } : {}) };
     }),
   },
 
@@ -3555,12 +3598,30 @@ export const TOOLS = {
         throw new ToolError({ error: "placeholder_phone", hint: "205-643-6555 is never stored as a contact" });
       if (!args.force_new) {
         const cand = await c.query(
-          `select id, name, email, city from party where merged_into is null and
-             (($1::text is not null and lower(email)=lower($1)) or name % $2)
-           order by similarity(name,$2) desc limit 5`, [args.email || null, args.name]);
-        if (cand.rows.length)
+          `select id, name, email, city,
+                  ($1::text is not null and lower(email)=lower($1)) as exact_email_match
+             from party where merged_into is null and
+               (($1::text is not null and lower(email)=lower($1)) or name % $2)
+           order by exact_email_match desc, similarity(name,$2) desc limit 5`, [args.email || null, args.name]);
+        if (cand.rows.length) {
+          // DECISIVE AUTO-RESOLUTION ONLY (WR-000019 slice S6, CONFLICT TIERING).
+          // The single signal in this query strong enough to resolve without a
+          // human is an EXACT match on a real identifier (email) — never
+          // trigram name similarity alone, which routinely scores two
+          // different real people or orgs as "similar" (that is the whole
+          // reason this query exists). Auto-resolve only when there is
+          // EXACTLY ONE candidate and it is that exact-identifier match;
+          // anything else — multiple candidates, or a candidate that matched
+          // on name similarity only — stays needs_confirm exactly as before.
+          if (cand.rows.length === 1 && cand.rows[0].exact_email_match) {
+            const existing = cand.rows[0];
+            return { ok: true, party_id: existing.id, auto_resolved: true,
+                     reason: "exact email match to an existing party; no duplicate created",
+                     hint: "pass force_new:true to create a separate party anyway (e.g. a shared team inbox)" };
+          }
           return { needs_confirm: true, candidates: cand.rows,
                    hint: "existing similar parties; reuse one, or resubmit force_new:true" };
+        }
       }
       // THE GENERATOR, CLOSED (0059, 2026-08-02). This line used to INSERT an org
       // unconditionally with no lookup, so every contact minted a private copy of
@@ -5416,6 +5477,41 @@ export const TOOLS = {
         "select * from ops.applicable_rules($1,$2,$3)",
         [args.workflow || null,args.surface || null,args.tier || null]);
       return { ok: true, count: r.rows.length, rules: r.rows };
+    },
+  },
+
+  // BATCH REVIEW QUEUE (WR-000019 slice S6). Every pending governance decision
+  // in one payload, so Joe reviews on his own schedule rather than one verb at
+  // a time: rules admitted and waiting on approve-rule, guidance import
+  // batches staged and waiting on decide-guidance-import-batch, retrieval
+  // proposals waiting on approve-retrieval-proposals. Read-only projection —
+  // it opens no new write path and changes nothing. carr_reader (the read-verb
+  // credential) has no grant on `rule` or `retrieval_proposal`, so this reads
+  // through a SECURITY DEFINER function (migration 0345), the same reason
+  // read-execution-environment-providers is a function rather than a direct
+  // multi-table read.
+  "governance-queue": {
+    write: false,
+    description: "Read every pending governance decision in one payload: rules admitted and awaiting approve-rule, guidance import batches staged and awaiting decide-guidance-import-batch, and retrieval proposals awaiting approve-retrieval-proposals — each with enough context to decide. Read-only; grants no authority and performs no decision itself.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    handler: async (c) => {
+      const row = (await c.query("select ops.read_governance_queue() as queue /* governance-queue */")).rows[0];
+      const queue = row?.queue || {};
+      const rules = queue.pending_rule_approvals || [];
+      const batches = queue.pending_guidance_import_batches || [];
+      const proposals = queue.pending_retrieval_proposals || [];
+      return {
+        ok: true,
+        pending_rule_approvals: rules,
+        pending_guidance_import_batches: batches,
+        pending_retrieval_proposals: proposals,
+        counts: {
+          pending_rule_approvals: rules.length,
+          pending_guidance_import_batches: batches.length,
+          pending_retrieval_proposals: proposals.length,
+          total: rules.length + batches.length + proposals.length,
+        },
+      };
     },
   },
 
