@@ -353,8 +353,42 @@ everything else and can run whenever production credentials are at hand.
 - (b) Core compressions: **EXECUTED** — 17 amended with receipts + 3 already at target; live core payload 20,121 chars (~5,748 tokens), 51.5% cut.
 - (c) Guidance Registry: **STAGED AND APPLIED** — batch id b46f9c26-2291-46e5-9ce2-7e843680150f, manifest digest c22151d2ae2a4ecc63d1493e14afbc34f089de2202277dc1b866960d8bf863fd, 208 entries. YOUR TWO CALLS, in order, all required:
   1. decide-guidance-import-batch {"batch_id":"b46f9c26-2291-46e5-9ce2-7e843680150f","manifest_digest":"c22151d2ae2a4ecc63d1493e14afbc34f089de2202277dc1b866960d8bf863fd","reason":"...","idempotency_key":"<fresh uuid>"}
-  2. activate-guidance-registry — the verb's contract asks for the same digest; call after 1 succeeds.
+  2. activate-guidance-registry {"registry_id":"67aa96b6-3cf8-45ce-b73c-6965d36a664c","manifest_digest":"c22151d2ae2a4ecc63d1493e14afbc34f089de2202277dc1b866960d8bf863fd","reason":"...","idempotency_key":"<fresh uuid>"} — call after 1 succeeds.
 - (d) GitHub ruleset review requirement: still your decision, unchanged.
-- (e) The flip: clock started 2026-08-27T10:56Z; eligibility at 168 clean hours (~2026-09-03).
+- (e) The flip: clock started 2026-08-27T10:56Z, but **waiting alone will not deliver an eligibility verdict** — see the correction below.
 - (f) Prod classification export: **EXECUTED** — parity 208/208 green, committed as PR 748.
 - NEW: rotate the neondb_owner database password when convenient — bin/schema-snapshot.sh --check leaked the DSN with password into a session transcript (defect filed, class credential-leaked-by-tool-error-path).
+
+## CORRECTION TO ITEM (e) — 2026-08-27 14:45Z, verified against live state
+
+The clean-week clock is running, but on its current trajectory it cannot
+finish, so nothing useful happens by waiting until 2026-09-03.
+
+Eligibility requires zero unresolved findings. Measured 3.7 hours into the
+new epoch: **all 44 observations recorded at least one missing pack — not one
+clean observation** — accruing findings at about 11.8 per hour, which projects
+to roughly 2,000 open findings by the expected eligibility date. The check
+will report NOT ELIGIBLE on 2026-09-03 and on every date after it, for a
+condition that was already measurable on day one.
+
+Two causes are evidenced and both may contribute:
+
+1. **Sessions do not declare packs.** 37 of the 44 observations show
+   `loaded=[]`, and the 7 that declared some packs still missed others.
+   Shadow mode by design does not force declaration, so an ordinary session
+   generates a finding roughly every time it works.
+2. **The trigger detector over-fires.** One observation named 11 needed
+   packs, including `client-deal` and `vendor-intros`, for a session that
+   touched neither — the keyword sets in `pack_index` are broad enough that
+   reading a document that says "post" or "tour" pulls in a pack.
+
+Filed as **WR-000027** (captured, awaiting triage) with acceptance criteria
+that separate the two causes by measurement before anything is changed, and
+as a defect in the new class
+`gate-clock-started-without-measuring-whether-it-can-finish`.
+
+**Worth keeping separate from the bookkeeping:** zero clean observations in
+3.7 hours is the shadow mechanism working exactly as designed and reporting
+that the scoped selector is not ready to enforce today. That verdict should
+survive whatever is decided about the finding counter. The flip stays yours
+either way.
