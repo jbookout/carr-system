@@ -38,6 +38,7 @@ sys.path.insert(0, str(REPO))
 from lib.control_plane import (EntrypointFailure, EntrypointNotConfigured, deterministic_args,
                                resolve_auto_mode, validate_manifest)  # noqa: E402
 from pipelines.availability_matcher import canary_report  # noqa: E402
+from lib.control_plane_collectors_records import REVERIFICATION_DUE_REASONS  # noqa: E402
 from lib.control_plane_content_fuel import (ContentFuelContractError,
                                             validate_content_fuel_proposal,
                                             validate_rotation_policy)  # noqa: E402
@@ -773,8 +774,18 @@ class RuntimeWorkflowFactCollector:
             subjects = self.input_payload.get('subjects')
             lanes = self.input_payload.get('lanes')
             posts = self.input_payload.get('source_posts')
-            if fact == 'enrichment.reverification_due_nonempty': return isinstance(subjects, list) and bool(subjects) and all(isinstance(x, dict) and x.get('current_verification_status') == 'not_current' and x.get('reverification_due') in {'expired','unstamped_volatile'} for x in subjects)
-            if fact == 'enrichment.exactly_40_prioritized': return isinstance(subjects, list) and len(subjects) == 40 and all(isinstance(x, dict) and isinstance(x.get('priority'), int) for x in subjects)
+            # 'not_recorded' (0387) is a never-verified profile gap (bands
+            # 1-4: no category/city/county/verticals/title/org/email/phone
+            # on file), not a stale record_flag row -- it is exactly as
+            # "not current" as 'expired'/'unstamped_volatile' and must stay
+            # admissible here. Keep this set identical to
+            # lib.control_plane_collectors_records.REVERIFICATION_DUE_REASONS.
+            if fact == 'enrichment.reverification_due_nonempty': return isinstance(subjects, list) and bool(subjects) and all(isinstance(x, dict) and x.get('current_verification_status') == 'not_current' and x.get('reverification_due') in REVERIFICATION_DUE_REASONS for x in subjects)
+            # Name predates 0387: a short week (fewer than 40 eligible
+            # records) is the normal end state as the book gets covered, so
+            # this admits 1..40, not only exactly 40 -- matching
+            # control_plane_collectors_records._values's own relaxation.
+            if fact == 'enrichment.exactly_40_prioritized': return isinstance(subjects, list) and 1 <= len(subjects) <= 40 and all(isinstance(x, dict) and isinstance(x.get('priority'), int) for x in subjects)
             if fact == 'enrichment.reverification_priority_ordered': return isinstance(subjects, list) and bool(subjects) and all(isinstance(x, dict) for x in subjects) and [x.get('priority') for x in subjects] == list(range(1, len(subjects) + 1))
             if fact == 'deal_history.unverified_counterparties_exist': return isinstance(subjects, list) and bool(subjects) and all(isinstance(x, dict) and x.get('verification') == 'unverified' for x in subjects)
             if fact == 'deal_history.slice_size_within_policy':
