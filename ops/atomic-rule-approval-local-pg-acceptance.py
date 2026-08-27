@@ -313,6 +313,25 @@ def main() -> int:
                 cur.execute("release savepoint amend_refuses_retired")
                 cur.execute("reset session authorization")
 
+                # THE TRIGGER'S OWN GUARD, independent of the function: even a
+                # local superuser writing `update rule set statement=...`
+                # directly (never touching ops.amend_rule_statement, so no
+                # matching ops.rule_amendment_receipt row exists) must be
+                # refused by ops.require_rule_admission -- the receipted
+                # function is not a courtesy path, it is the ONLY path.
+                cur.execute("savepoint amend_trigger_refuses_bypass")
+                try:
+                    cur.execute(
+                        "update rule set statement=%s where id=%s",
+                        ("a direct bypass with no amendment receipt", amend_rule_id),
+                    )
+                    refuse("a direct UPDATE changed an active rule's statement with no amendment receipt")
+                except psycopg.Error as exc:
+                    cur.execute("rollback to savepoint amend_trigger_refuses_bypass")
+                    if "immutable" not in str(exc).lower():
+                        refuse(f"direct-bypass refusal was for the wrong reason: {exc}")
+                cur.execute("release savepoint amend_trigger_refuses_bypass")
+
                 cur.execute("savepoint amend_requires_authority")
                 cur.execute("set local role carr_writer")
                 try:
