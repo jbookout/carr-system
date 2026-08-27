@@ -34,6 +34,8 @@ if (( APPLY )); then
 fi
 
 if [[ -z "${NEON_API_KEY:-}" && -f "$HOME/.config/carr/db.env" ]]; then
+  . "$REPO"/bin/routine-credential-env.sh
+  carr_require_sourceable_db_env "rule-delivery-cutover-prod" || exit $?
   set -a; . "$HOME/.config/carr/db.env"; set +a
 fi
 NEONCTL="$REPO/mcp-server/node_modules/.bin/neonctl"

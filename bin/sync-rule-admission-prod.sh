@@ -69,6 +69,8 @@ fi
 
 # Same non-interactive auth and same project pin as bin/migrate-prod.sh.
 if [ -z "${NEON_API_KEY:-}" ] && [ -f "$HOME/.config/carr/db.env" ]; then
+  . "$REPO"/bin/routine-credential-env.sh
+  carr_require_sourceable_db_env "sync-rule-admission-prod" || exit $?
   set -a; . "$HOME/.config/carr/db.env"; set +a
 fi
 if [ -z "${NEON_API_KEY:-}" ]; then

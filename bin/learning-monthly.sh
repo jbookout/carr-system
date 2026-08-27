@@ -29,6 +29,8 @@ mkdir -p "$REPO/out" "$LEARN_DIR"
 # leak into either child clause merely because a caller still has one mounted.
 unset CARR_VAULT
 
+. "$REPO/bin/routine-credential-env.sh"
+carr_require_sourceable_db_env "learning-monthly" || exit $?
 [ -f "$HOME/.config/carr/db.env" ] && { set -a; . "$HOME/.config/carr/db.env"; set +a; }
 jobs_url="${CARR_DB_JOBS_URL:-}"
 unset DATABASE_URL CARR_DB_WRITER_URL CARR_DB_OWNER_URL CARR_DB_CADENCE_URL CARR_IMPORT_DB_URL
