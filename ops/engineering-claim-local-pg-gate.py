@@ -750,6 +750,23 @@ def main() -> int:
                 """update ops.job set next_attempt_at=now()+interval '1 day'
                      where definition_key<>'engineering-slice' and state in ('queued','retry_wait')"""
             )
+            # The supported wrapper can rerun this gate after the committed
+            # concurrency gate, which deliberately leaves reusable Engineering
+            # retry fixtures in the disposable database. Give only this
+            # rollback-only happy path and its successor the deterministic
+            # earliest schedule; their created_at order preserves the intended
+            # first-then-successor claim sequence.
+            # Touching unrelated retries would test their private helpers and
+            # would make fixture isolation look like runtime queue authority.
+            cur.execute(
+                """update ops.job
+                      set scheduled_for=case when id=%s
+                                             then '-infinity'::timestamptz
+                                             else '0001-01-01 00:00:00+00'::timestamptz end
+                     where id=any(%s) and definition_key='engineering-slice'
+                       and state in ('queued','retry_wait')""",
+                (job_id, [job_id, successor_job]),
+            )
             set_local_role(cur, RUNTIME_ROLE)
             if one(cur, "select has_table_privilege(current_user,'ops.job','UPDATE')")[0]:
                 return fail("carr_jobs gained direct UPDATE on ops.job")

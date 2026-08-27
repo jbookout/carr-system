@@ -134,7 +134,7 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             lookup_function = f"ops.scac_mutation_registration_{runtime_version.rsplit('.', 1)[1]}"
             runtime_digest = cur.execute(

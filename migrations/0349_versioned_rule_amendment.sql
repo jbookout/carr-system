@@ -46,8 +46,6 @@
 -- computed by ops.amend_rule_statement itself from the row it holds locked,
 -- never taken as caller input.
 
-begin;
-
 -- ── the append-only amendment ledger ────────────────────────────────────────
 
 create table ops.rule_amendment_receipt (
@@ -517,5 +515,3 @@ begin
     raise exception '0349 FAILED: ops.approve_rule is gone — an unrelated live function was removed';
   end if;
 end $$;
-
-commit;

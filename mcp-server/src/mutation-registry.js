@@ -4,7 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-} from "./scac-mutation-registry.v5.generated.js";
+} from "./scac-mutation-registry.v6.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

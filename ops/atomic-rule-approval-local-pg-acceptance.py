@@ -91,6 +91,21 @@ def main() -> int:
                                'transactional_schema',true,now())""",
                     (control_key,),
                 )
+                # The SIEP-12 epoch snapshot is intentionally fail-closed when
+                # an active rule has no delivery layer. This fixture installs a
+                # real transactional control below, so declare that exact
+                # control-layer delivery before activation; otherwise the
+                # acceptance itself creates an untagged rule and can no longer
+                # settle its deferred epoch triggers.
+                cur.execute(
+                    """insert into ops.rule_load_layer
+                         (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
+                       values (%s,left(%s::text,8),'control','{}'::text[],'shared',
+                               'local atomic acceptance transactional control',
+                               'ops/atomic-rule-approval-local-pg-acceptance.py',
+                               repeat('0',64))""",
+                    (rule_id, rule_id),
+                )
                 cur.execute(
                     """insert into ops.rule_control_binding
                          (rule_id,control_key,statement_hash,binding_contract)
@@ -142,6 +157,7 @@ def main() -> int:
                 # above would conflate two different questions in one fixture.
                 amend_rule_id = uuid.uuid4()
                 amend_control_key = f"local-amend-acceptance-{uuid.uuid4()}"
+                amend_pack = f"local-amend-pack-{uuid.uuid4()}"
                 amend_approve_key = f"local-amend-approve-{uuid.uuid4()}"
                 amend_key = f"local-amend-{uuid.uuid4()}"
                 original_statement = "local exact amendment fixture, before wording fix"
@@ -163,6 +179,31 @@ def main() -> int:
                        values (%s,'local-pg-acceptance','ops/atomic-rule-approval-local-pg-acceptance.py',
                                'transactional_schema',true,now())""",
                     (amend_control_key,),
+                )
+                # This second fixture intentionally remains active after the
+                # first rule is retired. Make it a real pack-backed rule so
+                # SIEP-12 can settle the final deferred policy epoch with one
+                # non-empty pack and no untagged/orphaned delivery rows. The
+                # acceptance therefore proves retirement cleanup without
+                # weakening the live snapshot invariant or manufacturing a
+                # separate rule solely to satisfy the health check.
+                cur.execute(
+                    """insert into ops.rule_pack
+                         (pack,title,description,triggers,source)
+                       values (%s,'Local amendment acceptance',
+                               'Rollback-only active anchor for atomic lifecycle acceptance',
+                               array['local-amendment-acceptance'],
+                               'ops/atomic-rule-approval-local-pg-acceptance.py')""",
+                    (amend_pack,),
+                )
+                cur.execute(
+                    """insert into ops.rule_load_layer
+                         (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
+                       values (%s,left(%s::text,8),'pack',array[%s],'shared',
+                               'local amendment acceptance remains active after retirement test',
+                               'ops/atomic-rule-approval-local-pg-acceptance.py',
+                               repeat('0',64))""",
+                    (amend_rule_id, amend_rule_id, amend_pack),
                 )
                 cur.execute(
                     """insert into ops.rule_control_binding
