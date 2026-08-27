@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Tour report</title>
+    <link rel="stylesheet" href="/share.css">
+    <script src="/share.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#report-list">Skip to report items</a>
+    <main class="shell" aria-labelledby="report-title">
+      <header class="masthead">
+        <p class="eyebrow">CARR Healthcare Real Estate</p>
+        <h1 id="report-title">Tour report</h1>
+        <p id="report-summary" class="summary">Opening your shared report…</p>
+      </header>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <button id="open-tour" type="button" disabled>Open tour</button>
+      <section aria-labelledby="items-title">
+        <h2 id="items-title">Properties</h2>
+        <ol id="report-list" class="report-list" aria-busy="true"></ol>
+      </section>
+      <section id="comment-panel" class="comment-panel" hidden aria-labelledby="comment-title">
+        <h2 id="comment-title">Add a note</h2>
+        <form id="comment-form">
+          <label for="property-ref">Property</label>
+          <select id="property-ref" name="property_ref" required></select>
+          <label for="comment-body">Your note</label>
+          <textarea id="comment-body" name="body" rows="4" maxlength="4000" required></textarea>
+          <button type="submit">Send note</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>
