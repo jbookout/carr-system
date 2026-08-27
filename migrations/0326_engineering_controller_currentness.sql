@@ -25,7 +25,7 @@ exception when others then
 end $$;
 
 create or replace function ops.capability_agent_session_lease_immutable()
-returns trigger language plpgsql set search_path=pg_catalog,ops,public as $$
+returns trigger language plpgsql security definer set search_path=pg_catalog,ops,public as $$
 begin
   if tg_op='UPDATE' and new.lease_expires_at is distinct from old.lease_expires_at then
     raise exception 'capability agent session lease is immutable';
@@ -38,6 +38,34 @@ create trigger capability_agent_session_lease_immutable_before_write
   before update on ops.capability_agent_session for each row
   execute function ops.capability_agent_session_lease_immutable();
 
+-- Actor status is revocable authority, not a lease snapshot.  The row-level
+-- UPDATE lock conflicts with the controller's FOR SHARE authority lock, so an
+-- actor cannot be deactivated or reclassified after binding and before the
+-- worker consumes that binding.
+create or replace function ops.guard_engineering_actor_authority_update()
+returns trigger language plpgsql security definer
+set search_path=pg_catalog,ops,public
+as $$
+begin
+  if (new.active,new.kind,new.slug) is distinct from (old.active,old.kind,old.slug)
+     and exists (
+       select 1 from ops.capability_agent_session s
+       join ops.engineering_execution_envelope e on e.agent_session_id=s.id
+       join ops.job j on j.id=e.job_id
+       where s.executor_actor_id=old.id
+         and j.definition_key='engineering-slice' and j.definition_version=1
+         and j.state='running' and j.lease_token is not null
+         and j.leased_until>clock_timestamp()
+     ) then
+    raise exception 'Engineering actor authority is reserved by a live scoped lease';
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists engineering_actor_authority_guard_before_update on public.actor;
+create trigger engineering_actor_authority_guard_before_update
+  before update on public.actor for each row
+  execute function ops.guard_engineering_actor_authority_update();
 -- Once an Engineering claim is live, the Work Request fields that define its
 -- canonical digest are reserved until the scoped claim succeeds, fails, or
 -- expires. This closes the database-binding to adapter-launch race.
@@ -83,7 +111,8 @@ as $$
            s.lease_expires_at as session_lease_expires_at, s.work_request_id as session_work_request_id,
            s.source_commit_sha as session_source_commit_sha, s.worktree_ref as session_worktree_ref,
            s.scope_ref as session_scope_ref,
-           actor.slug as executor_slug, ops.engineering_admission_source(w.ref) as source
+           actor.slug as executor_slug, actor.active as executor_active,
+           actor.kind as executor_kind, ops.engineering_admission_source(w.ref) as source
       from ops.engineering_execution_envelope e
       join ops.job j on j.id=e.job_id
       join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
@@ -147,7 +176,7 @@ as $$
       and session_work_request_id=work_request_id and session_state in ('claimed','in_progress')
       and session_source_commit_sha=repeat('0',40) and session_worktree_ref='engineering:server-admission'
       and session_scope_ref='slice:'||slice_ref
-      and executor_slug='codex'
+      and executor_active and executor_kind='automation' and executor_slug='codex'
       and envelope->'server_binding'->'authority'->>'read_only'='false'
       and envelope->'server_binding'->'authority'->>'capability_profile'='capability:engineering-repository-write'
       and envelope->'server_binding'->'adapter'->>'surface'='codex_desktop'
@@ -213,19 +242,13 @@ create or replace function ops.engineering_claim_slice(
 language plpgsql security definer set search_path=ops,public,pg_temp
 as $$
 declare v_job_id uuid; v_envelope_id uuid; v_slice_plan_id uuid; v_slice_ref text;
-        v_work_request_id uuid;
-        v_currentness jsonb;
-        v_claim_at timestamptz;
-        v_runway_sufficient boolean;
+        v_work_request_id uuid; v_executor_actor_id uuid;
+        v_currentness jsonb; v_claim_at timestamptz; v_runway_sufficient boolean;
 begin
   if btrim(coalesce(p_worker,''))='' or p_limit is distinct from 1 then raise exception 'worker and exactly one claim are required'; end if;
   if p_lease_seconds is distinct from 960 then raise exception 'engineering controller lease must be 960 seconds'; end if;
-  perform ops.reap_expired_jobs();
-  perform ops.engineering_retire_permanently_ineligible_jobs();
-  -- First lock only the queue row selected by the stable predicate.  Acquire
-  -- the one lineage lock afterwards, then re-read currentness under that lock;
-  -- this avoids unordered multi-lineage advisory locks while closing the
-  -- successor/session race before the lease is written.
+  -- Identifier lookup is deliberately unlocked.  Every authority predicate is
+  -- re-read only after the global session-first lock order below.
   select j.id,e.id,e.slice_plan_id,e.slice_ref,e.work_request_id
     into v_job_id,v_envelope_id,v_slice_plan_id,v_slice_ref,v_work_request_id
     from ops.job j
@@ -237,14 +260,39 @@ begin
      and ops.engineering_envelope_is_executable(e.id,j.id)
      and coalesce((ops.engineering_envelope_currentness(e.id,j.id)
                     ->>'dispatch_runway_sufficient')::boolean,false)
-   order by j.scheduled_for,j.created_at
-   for update of j,d skip locked limit 1;
+   order by j.scheduled_for,j.created_at limit 1;
+  if not found then return; end if;
+  select s.executor_actor_id into v_executor_actor_id
+    from ops.capability_agent_session s
+    join ops.engineering_execution_envelope e on e.agent_session_id=s.id
+   where e.id=v_envelope_id and e.job_id=v_job_id for share of s;
+  if not found then return; end if;
+  perform 1 from public.actor a
+   where a.id=v_executor_actor_id and a.active and a.kind='automation' and a.slug='codex'
+   order by a.id for share;
   if not found then return; end if;
   perform pg_advisory_xact_lock(hashtextextended(
     'engineering-envelope:'||v_slice_plan_id::text||':'||v_slice_ref,0));
+  perform 1 from ops.engineering_execution_envelope e
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+   where e.id=v_envelope_id and e.job_id=v_job_id
+   for key share of e,sp;
+  if not found then return; end if;
   perform 1 from ops.work_request where id=v_work_request_id for share;
   if not found then return; end if;
+  perform 1 from ops.job_definition d
+   where d.key='engineering-slice' and d.version=1 for share;
+  if not found then return; end if;
+  perform 1 from ops.job j
+   where j.id=v_job_id for update;
+  if not found then return; end if;
   v_claim_at:=clock_timestamp();
+  perform 1 from ops.job j
+    join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
+   where j.id=v_job_id and d.enabled and j.definition_key='engineering-slice'
+     and j.definition_version=1 and j.state in ('queued','retry_wait')
+     and j.next_attempt_at<=v_claim_at and j.attempt<j.max_attempts;
+  if not found then return; end if;
   v_currentness:=ops.engineering_envelope_currentness(v_envelope_id,v_job_id);
   select e.expires_at>=v_claim_at+make_interval(secs=>p_lease_seconds)
          and s.lease_expires_at is not null
@@ -254,9 +302,7 @@ begin
     join ops.capability_agent_session s on s.id=e.agent_session_id
    where e.id=v_envelope_id and e.job_id=v_job_id;
   if coalesce((v_currentness->>'eligible')::boolean,false) is not true
-     or coalesce(v_runway_sufficient,false) is not true then
-    return;
-  end if;
+     or coalesce(v_runway_sufficient,false) is not true then return; end if;
   return query with claimed as (
     update ops.job j set state='running',attempt=j.attempt+1,lease_owner=p_worker,
       lease_token=gen_random_uuid(),leased_until=v_claim_at+make_interval(secs=>p_lease_seconds),
@@ -276,28 +322,37 @@ create or replace function ops.engineering_controller_binding(
 )
 returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
 as $$
-declare binding jsonb;
-        lineage_plan uuid;
-        lineage_slice text;
-        lineage_work_request uuid;
-        v_binding_at timestamptz;
+declare binding jsonb; lineage_plan uuid; lineage_slice text; lineage_work_request uuid;
+        v_executor_actor_id uuid; v_binding_at timestamptz;
 begin
-  if p_lease_token is null then
-    return null;
-  end if;
-  select e.slice_plan_id,e.slice_ref,e.work_request_id
-    into lineage_plan,lineage_slice,lineage_work_request
+  if p_lease_token is null then return null; end if;
+  -- Unlocked identifiers first; all mutable authority is re-read after locks.
+  select e.slice_plan_id,e.slice_ref,e.work_request_id,e.agent_session_id
+    into lineage_plan,lineage_slice,lineage_work_request,v_executor_actor_id
     from ops.engineering_execution_envelope e
    where e.id=p_envelope_id and e.job_id=p_job_id;
   if not found then return null; end if;
+  select s.executor_actor_id into v_executor_actor_id
+    from ops.capability_agent_session s
+    join ops.engineering_execution_envelope e on e.agent_session_id=s.id
+   where e.id=p_envelope_id and e.job_id=p_job_id for share of s;
+  if not found then return null; end if;
+  perform 1 from public.actor a
+   where a.id=v_executor_actor_id and a.active and a.kind='automation' and a.slug='codex'
+   order by a.id for share;
+  if not found then return null; end if;
   perform pg_advisory_xact_lock(hashtextextended(
     'engineering-envelope:'||lineage_plan::text||':'||lineage_slice,0));
+  perform 1 from ops.engineering_execution_envelope e
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+   where e.id=p_envelope_id and e.job_id=p_job_id for key share of e,sp;
+  if not found then return null; end if;
   perform 1 from ops.work_request where id=lineage_work_request for share;
   if not found then return null; end if;
+  perform 1 from ops.job where id=p_job_id for share;
+  if not found then return null; end if;
   v_binding_at:=clock_timestamp();
-  if not ops.engineering_envelope_is_executable(p_envelope_id,p_job_id) then
-    return null;
-  end if;
+  if not ops.engineering_envelope_is_executable(p_envelope_id,p_job_id) then return null; end if;
   select jsonb_build_object(
     'envelope_id',e.id::text,'envelope_digest',e.envelope_digest,
     'slice_ref',e.slice_ref,'plan_digest',sp.plan_digest,'slice_plan',sp.plan,
@@ -312,6 +367,7 @@ begin
     join ops.capability_agent_session s on s.id=e.agent_session_id
     join public.actor a on a.id=s.executor_actor_id
    where e.id=p_envelope_id and e.job_id=p_job_id
+     and a.active and a.kind='automation' and a.slug='codex'
      and j.state='running' and j.lease_token=p_lease_token
      and j.leased_until>=v_binding_at+interval '930 seconds';
   return binding;
@@ -409,14 +465,26 @@ begin
      ]),false) then
     raise exception 'engineering receipt is malformed';
   end if;
-  perform pg_advisory_xact_lock(hashtextextended('engineering-envelope:' || e.slice_plan_id::text || ':' || e.slice_ref,0));
-  select * into e from ops.engineering_execution_envelope where id=p_envelope_id for key share;
-  perform 1 from ops.work_request where id=e.work_request_id for share;
-  if not found then raise exception 'engineering Work Request is not current'; end if;
+  -- The identifier lookup above is intentionally unlocked.  From here through
+  -- append we retain the global session -> actor -> lineage lock order.
   select * into s from ops.capability_agent_session where id=e.agent_session_id for update;
   if not found then raise exception 'engineering agent session is not current'; end if;
   session_executor := s.executor_actor_id;
-  select actor.slug into session_slug from public.actor actor where actor.id=s.executor_actor_id;
+  select actor.slug into session_slug
+    from public.actor actor
+   where actor.id=s.executor_actor_id and actor.active and actor.kind='automation' and actor.slug='codex'
+   order by actor.id for share;
+  if not found then raise exception 'engineering executor actor is not current'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('engineering-envelope:' || e.slice_plan_id::text || ':' || e.slice_ref,0));
+  select * into e from ops.engineering_execution_envelope where id=p_envelope_id for key share;
+  if not found or e.agent_session_id is distinct from s.id then
+    raise exception 'engineering envelope or agent session binding changed';
+  end if;
+  select plan_digest,plan into receipt_plan_digest,receipt_plan
+    from ops.engineering_slice_plan where id=e.slice_plan_id for key share;
+  if not found then raise exception 'engineering receipt slice plan is not current'; end if;
+  perform 1 from ops.work_request where id=e.work_request_id for share;
+  if not found then raise exception 'engineering Work Request is not current'; end if;
   select * into j from ops.job where id=e.job_id for update;
   if not found then raise exception 'engineering claim or lease is not current'; end if;
   select * into a from ops.job_attempt
@@ -425,7 +493,7 @@ begin
    for update;
   if not found then raise exception 'engineering claim or lease is not current'; end if;
   -- statement_timestamp() is fixed at function entry and can be stale after a
-  -- lineage/session/job lock wait.  Sample only after all ordered locks.
+  -- session/actor/lineage/job lock wait.  Sample only after all ordered locks.
   v_checked_at := clock_timestamp();
   if j.state is distinct from 'running' or j.lease_token is distinct from p_lease_token
      or j.leased_until is null or j.leased_until<v_checked_at
@@ -435,8 +503,6 @@ begin
   end if;
   if not ops.engineering_envelope_is_executable(e.id,e.job_id) then raise exception 'engineering envelope is no longer executable'; end if;
   if session_executor is null or p_executor_actor_id is distinct from session_executor then raise exception 'engineering receipt executor is not the server-bound agent session'; end if;
-  select plan_digest,plan into receipt_plan_digest,receipt_plan
-    from ops.engineering_slice_plan where id=e.slice_plan_id;
   if not found or p_receipt->>'plan_digest' is distinct from receipt_plan_digest
      or p_receipt->>'envelope_digest' is distinct from e.envelope_digest
      or p_receipt->>'slice_ref' is distinct from e.slice_ref
@@ -802,6 +868,15 @@ begin
   return next_state;
 end $$;
 
+-- The Passport projection serializes this database-owned reviewer stamp, so
+-- the column and its constrained vocabulary must exist before function parse.
+alter table ops.engineering_reviewer_fact
+  add column if not exists contract_version text;
+alter table ops.engineering_reviewer_fact
+  drop constraint if exists engineering_reviewer_fact_contract_version_check;
+alter table ops.engineering_reviewer_fact
+  add constraint engineering_reviewer_fact_contract_version_check
+  check (contract_version is null or contract_version='engineering-review.v1');
 -- The Passport read keeps reviewer ledger wrappers internal while exposing
 -- the persisted actor status/slug needed to reject malformed historical
 -- review rows during closure projection.  The public engineering-passport.v1
@@ -839,6 +914,7 @@ as $$
     'reviewer_facts',coalesce((
       select jsonb_agg(
                to_jsonb(f)||jsonb_build_object(
+                 'contract_version',f.contract_version,
                  'reviewer_actor_active',reviewer.active,
                  'reviewer_actor_slug',reviewer.slug
                ) order by f.created_at
@@ -852,9 +928,13 @@ as $$
 $$;
 
 -- Reviewer evidence is an authority-bearing dependency fact.  carr_writer
+-- Reviewer evidence is an authority-bearing dependency fact.  carr_writer
 -- retains the narrow INSERT surface established by 0310, but the database
 -- independently binds every append to the exact immutable receipt rather
 -- than trusting the MCP validator or a job-local attempt label.
+-- Reviewer facts are stamped only by this trigger. Historical rows without
+-- this database-owned version are insufficient for SIEP replay authority.
+
 create or replace function ops.guard_engineering_reviewer_fact_insert()
 returns trigger language plpgsql security definer
 set search_path=pg_catalog,ops,public
@@ -863,10 +943,12 @@ declare r ops.engineering_slice_receipt%rowtype;
         e ops.engineering_execution_envelope%rowtype;
         sp ops.engineering_slice_plan%rowtype;
         executor_session ops.capability_agent_session%rowtype;
-        executor_slug text;
-        reviewer_slug text;
-        receipt_deviation_refs jsonb;
+        executor_slug text; reviewer_slug text; receipt_deviation_refs jsonb;
+        locked_actor_count integer;
 begin
+  if new.contract_version is not null then
+    raise exception 'engineering reviewer contract version is caller-controlled';
+  end if;
   if not coalesce(ops.engineering_receipt_exact_object(new.fact,array[
        'attempt_id','evidence_refs','is_independent','resolved_deviation_refs',
        'reviewed_deviation_refs','reviewer_ref','session_ref','slice_ref','state'
@@ -884,24 +966,36 @@ begin
      or not coalesce(ops.engineering_receipt_identifier_array(new.fact->'resolved_deviation_refs'),false) then
     raise exception 'engineering reviewer fact is malformed';
   end if;
-
-  select * into r
-    from ops.engineering_slice_receipt
-   where id=new.receipt_id
-   for key share;
+  -- Derive identifiers unlocked, then retain session -> actor -> lineage order.
+  select * into r from ops.engineering_slice_receipt where id=new.receipt_id;
   if not found then raise exception 'engineering reviewer receipt not found'; end if;
+  if new.reviewer_actor_id is not distinct from r.executor_actor_id then
+    raise exception 'engineering reviewer cannot be the receipt executor';
+  end if;
   select * into e from ops.engineering_execution_envelope where id=r.envelope_id;
   if not found then raise exception 'engineering reviewer envelope not found'; end if;
-  select * into sp from ops.engineering_slice_plan where id=e.slice_plan_id;
-  if not found then raise exception 'engineering reviewer slice plan not found'; end if;
-  select * into executor_session from ops.capability_agent_session where id=e.agent_session_id;
+  select * into executor_session from ops.capability_agent_session where id=e.agent_session_id for share;
   if not found then raise exception 'engineering reviewer executor session not found'; end if;
-  select actor.slug into executor_slug
-    from public.actor actor
-   where actor.id=r.executor_actor_id and actor.active;
-  select actor.slug into reviewer_slug
-    from public.actor actor
-   where actor.id=new.reviewer_actor_id and actor.active;
+  perform 1 from public.actor actor
+   where (actor.id=r.executor_actor_id and actor.active and actor.kind='automation' and actor.slug='codex')
+      or (actor.id=new.reviewer_actor_id and actor.active)
+   order by actor.id for share;
+  select count(*) into locked_actor_count from public.actor actor
+   where (actor.id=r.executor_actor_id and actor.active and actor.kind='automation' and actor.slug='codex')
+      or (actor.id=new.reviewer_actor_id and actor.active);
+  if locked_actor_count<>2 then raise exception 'engineering reviewer actor authority is not current'; end if;
+  select actor.slug into executor_slug from public.actor actor where actor.id=r.executor_actor_id;
+  select actor.slug into reviewer_slug from public.actor actor where actor.id=new.reviewer_actor_id;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:'||e.slice_plan_id::text||':'||e.slice_ref,0));
+  select * into e from ops.engineering_execution_envelope where id=r.envelope_id for key share;
+  if not found then raise exception 'engineering reviewer envelope changed'; end if;
+  select * into sp from ops.engineering_slice_plan where id=e.slice_plan_id for key share;
+  if not found then raise exception 'engineering reviewer slice plan not found'; end if;
+  perform 1 from ops.work_request where id=e.work_request_id for share;
+  if not found then raise exception 'engineering reviewer Work Request is not current'; end if;
+  select * into r from ops.engineering_slice_receipt where id=new.receipt_id for key share;
+  if not found then raise exception 'engineering reviewer receipt changed'; end if;
 
   if not coalesce(ops.engineering_receipt_exact_object(r.receipt,array[
        'actual_component_refs','actual_resource_refs','artifact_refs','attribution','attempt_id','checks',
@@ -1133,7 +1227,7 @@ begin
        or (r.receipt->'reset_reconstruction'->'reconstruction_free'='true'::jsonb and
            r.receipt->'reset_reconstruction'->'remediation_action' is distinct from 'null'::jsonb
            and (jsonb_typeof(r.receipt->'reset_reconstruction'->'remediation_action') is distinct from 'string'
-                or not coalesce(btrim(r.receipt->'reset_reconstruction'->>'remediation_action')<>'',false)))
+            or not coalesce(btrim(r.receipt->'reset_reconstruction'->>'remediation_action')<>'',false)))
        or not coalesce(ops.engineering_receipt_exact_object(r.receipt->'executor_claim',array[
             'claim_state','claimed_at','claimed_by'
           ]),false)
@@ -1154,6 +1248,7 @@ begin
      ) then
     raise exception 'engineering reviewer pass requires a complete exact receipt and resolved deviations';
   end if;
+  new.contract_version:='engineering-review.v1';
   return new;
 end $$;
 
@@ -1162,6 +1257,127 @@ drop trigger if exists engineering_reviewer_fact_contract_guard
 create trigger engineering_reviewer_fact_contract_guard
   before insert on ops.engineering_reviewer_fact
   for each row execute function ops.guard_engineering_reviewer_fact_insert();
+-- this migration; pre-0326 bindings remain historical evidence, never replay
+-- authority.
+alter table ops.siep_job_evidence_binding
+  add column if not exists engineering_contract_version text;
+alter table ops.siep_job_evidence_binding
+  drop constraint if exists siep_job_evidence_binding_engineering_contract_check;
+alter table ops.siep_job_evidence_binding
+  add constraint siep_job_evidence_binding_engineering_contract_check
+  check (engineering_contract_version is null or engineering_contract_version='engineering-review.v1');
+
+create or replace function ops.guard_siep_engineering_evidence_binding()
+returns trigger language plpgsql security definer
+set search_path=pg_catalog,ops,public
+as $$
+declare v_envelope_id uuid; v_plan_id uuid; v_slice_ref text; v_work_request_id uuid;
+        v_session_id uuid; v_executor_actor_id uuid; v_reviewer_actor_id uuid;
+        v_actor_count integer;
+begin
+  if new.engineering_contract_version is not null then
+    raise exception 'SIEP Engineering contract version is caller-controlled';
+  end if;
+  -- IDs are read unlocked; every authority condition is re-read after the
+  -- session/actor/lineage/envelope/Work-Request lock chain.
+  select e.id,e.slice_plan_id,e.slice_ref,e.work_request_id,e.agent_session_id,
+         r.executor_actor_id,review.reviewer_actor_id
+    into v_envelope_id,v_plan_id,v_slice_ref,v_work_request_id,v_session_id,
+         v_executor_actor_id,v_reviewer_actor_id
+    from ops.job j
+    join ops.engineering_execution_envelope e on e.job_id=j.id
+    join ops.engineering_slice_receipt r on r.envelope_id=e.id
+    join ops.engineering_reviewer_fact review on review.receipt_id=r.id
+   where j.id=new.job_id and j.definition_key='engineering-slice'
+   order by r.created_at desc,r.id desc limit 1;
+  if not found then raise exception 'SIEP evidence binding requires an Engineering receipt and review'; end if;
+  perform 1 from ops.capability_agent_session s where s.id=v_session_id for share;
+  if not found then raise exception 'SIEP Engineering session is not current'; end if;
+  perform 1 from public.actor a
+   where a.id=any(array[v_executor_actor_id,v_reviewer_actor_id]) and a.active
+   order by a.id for share;
+  select count(*) into v_actor_count from public.actor a
+   where a.id=any(array[v_executor_actor_id,v_reviewer_actor_id]) and a.active;
+  if v_executor_actor_id is null or v_reviewer_actor_id is null or v_executor_actor_id=v_reviewer_actor_id
+     or v_actor_count<>2 then raise exception 'SIEP Engineering actor authority is not current'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:'||v_plan_id::text||':'||v_slice_ref,0));
+  perform 1 from ops.engineering_execution_envelope e
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+   where e.id=v_envelope_id and e.job_id=new.job_id for key share of e,sp;
+  if not found then raise exception 'SIEP Engineering envelope is not current'; end if;
+  perform 1 from ops.work_request where id=v_work_request_id for share;
+  if not found then raise exception 'SIEP Engineering Work Request is not current'; end if;
+  if new.definition_key is distinct from 'engineering-slice'
+     or new.definition_version is distinct from 1
+     or not exists (
+       select 1 from ops.job j
+       join ops.engineering_execution_envelope e on e.job_id=j.id
+       join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id and sp.work_request_id=e.work_request_id
+       join ops.engineering_slice_receipt receipt on receipt.envelope_id=e.id and receipt.work_request_id=e.work_request_id
+       join ops.job_attempt attempt on attempt.id=receipt.job_attempt_id and attempt.job_id=j.id and attempt.attempt=j.attempt and attempt.state='succeeded'
+       join ops.engineering_reviewer_fact review on review.receipt_id=receipt.id and review.work_request_id=receipt.work_request_id and review.slice_ref=receipt.slice_ref
+       join public.actor reviewer on reviewer.id=review.reviewer_actor_id and reviewer.slug='joe' and reviewer.active
+       join ops.siep_package_contract package on package.package_key=new.package_key and package.work_request_id=e.work_request_id
+      where j.id=new.job_id and j.definition_key='engineering-slice' and j.definition_version=1 and j.state='succeeded'
+        and e.state_version=new.work_request_version and sp.work_request_version=new.work_request_version
+        and receipt.outcome='claimed_complete' and review.state='passed'
+        and review.contract_version='engineering-review.v1'
+        and review.reviewer_actor_id<>receipt.executor_actor_id
+        and exists (select 1 from ops.job_receipt jr where jr.job_id=j.id and jr.attempt=j.attempt and jr.kind='completion')
+     ) then
+    raise exception 'SIEP evidence binding requires a 0326-verified Engineering receipt and review';
+  end if;
+  new.engineering_contract_version:='engineering-review.v1';
+  return new;
+end $$;
+
+drop trigger if exists siep_engineering_evidence_binding_contract_guard on ops.siep_job_evidence_binding;
+create trigger siep_engineering_evidence_binding_contract_guard
+  before insert on ops.siep_job_evidence_binding
+  for each row execute function ops.guard_siep_engineering_evidence_binding();
+
+alter function ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)
+  rename to siep_bind_evidence_job_unchecked_0324;
+revoke all on function ops.siep_bind_evidence_job_unchecked_0324(text,integer,text,uuid,uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+create function ops.siep_bind_evidence_job(
+  p_component text,p_base_version integer,p_evidence_kind text,p_job_id uuid,p_idempotency_key uuid
+) returns jsonb language plpgsql security definer set search_path=pg_catalog,ops,public
+as $$
+declare result jsonb; contract_version text;
+begin
+  result:=ops.siep_bind_evidence_job_unchecked_0324(p_component,p_base_version,p_evidence_kind,p_job_id,p_idempotency_key);
+  select b.engineering_contract_version into contract_version from ops.siep_job_evidence_binding b where b.job_id=p_job_id;
+  if contract_version is distinct from 'engineering-review.v1' then
+    raise exception 'historical SIEP Engineering evidence binding is not 0326 verified';
+  end if;
+  return result;
+end $$;
+revoke all on function ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+grant execute on function ops.siep_bind_evidence_job(text,integer,text,uuid,uuid) to carr_authority;
+
+create or replace function ops.siep_current_evidence_digest(
+  p_ledger_kind text,p_ledger_id uuid
+) returns text language sql stable security definer
+set search_path=pg_catalog,ops,public
+as $$
+  select 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(source_row),'sha256'),'hex')
+    from (
+      select jsonb_build_object('receipt',to_jsonb(r),'job',to_jsonb(j),'attempt',to_jsonb(a),
+                                'binding',to_jsonb(b)) source_row
+        from ops.job_receipt r join ops.job j on j.id=r.job_id
+        join ops.job_attempt a on a.job_id=j.id and a.attempt=r.attempt
+        join ops.siep_job_evidence_binding b on b.job_id=j.id
+       where p_ledger_kind='job_receipt' and r.id=p_ledger_id
+         and b.engineering_contract_version='engineering-review.v1'
+      union all select to_jsonb(e) from public.event e
+       where p_ledger_kind='decision_event' and e.id=p_ledger_id
+    ) canonical
+$$;
+revoke all on function ops.siep_current_evidence_digest(text,uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 
 -- Replace the JSON/colliding-attempt dependency predicate from 0311 with an
 -- exact relational lineage check.  Dependency lineage locks serialize this
@@ -1449,6 +1665,7 @@ begin
             and jsonb_typeof(receipt.receipt->'executor_claim'->'claimed_at')='string'
             and btrim(receipt.receipt->'executor_claim'->>'claimed_at')<>''
             and review.state='passed'
+            and review.contract_version='engineering-review.v1'
             and review.fact->>'state'='passed'
             and coalesce(ops.engineering_receipt_exact_object(review.fact,array[
                   'attempt_id','evidence_refs','is_independent','resolved_deviation_refs',
@@ -1522,14 +1739,28 @@ end $$;
 
 -- Preserve 0325's lineage serialization while making malformed JSON authority
 -- fail ineligible instead of throwing during safe successor recovery.
+-- Direct writer admission reaches this BEFORE INSERT trigger.  It therefore
+-- starts with the referenced session and revocable actor authority, not the
+-- lineage lock that session terminalization will later acquire.
 create or replace function ops.guard_engineering_envelope_supersession()
-returns trigger language plpgsql set search_path=pg_catalog,ops,public
+returns trigger language plpgsql security definer set search_path=pg_catalog,ops,public
 as $$
 declare prior ops.engineering_execution_envelope%rowtype;
-        prior_count integer;
+        prior_count integer; v_executor_actor_id uuid;
 begin
+  select s.executor_actor_id into v_executor_actor_id
+    from ops.capability_agent_session s where s.id=new.agent_session_id for share;
+  if not found then raise exception 'engineering envelope session is not current'; end if;
+  perform 1 from public.actor a
+   where a.id=v_executor_actor_id and a.active and a.kind='automation' and a.slug='codex'
+   order by a.id for share;
+  if not found then raise exception 'engineering envelope executor actor is not current'; end if;
   perform pg_advisory_xact_lock(hashtextextended(
     'engineering-envelope:' || new.slice_plan_id::text || ':' || new.slice_ref,0));
+  perform 1 from ops.engineering_slice_plan where id=new.slice_plan_id for key share;
+  if not found then raise exception 'engineering envelope slice plan is not current'; end if;
+  perform 1 from ops.work_request where id=new.work_request_id for share;
+  if not found then raise exception 'engineering envelope Work Request is not current'; end if;
   select count(*) into prior_count from ops.engineering_execution_envelope
    where slice_plan_id=new.slice_plan_id and slice_ref=new.slice_ref;
   if prior_count=0 then
@@ -1537,14 +1768,14 @@ begin
     return new;
   end if;
   if new.supersedes_envelope_id is null then raise exception 'later engineering envelope must name its immutable predecessor'; end if;
-  select * into prior from ops.engineering_execution_envelope where id=new.supersedes_envelope_id;
+  select * into prior from ops.engineering_execution_envelope where id=new.supersedes_envelope_id for key share;
   if not found or prior.slice_plan_id<>new.slice_plan_id or prior.slice_ref<>new.slice_ref
      or prior.accepted_plan_id<>new.accepted_plan_id or prior.work_request_id<>new.work_request_id then
     raise exception 'engineering envelope predecessor is outside the exact slice binding';
   end if;
   if exists (select 1 from ops.engineering_execution_envelope where supersedes_envelope_id=prior.id) then raise exception 'engineering envelope predecessor already has a successor'; end if;
-  if exists (select 1 from ops.job j where j.id=prior.job_id and j.state='running' and j.lease_token is not null and j.leased_until>now()) then raise exception 'leased engineering envelope cannot be superseded'; end if;
-  if prior.expires_at>now()
+  if exists (select 1 from ops.job j where j.id=prior.job_id and j.state='running' and j.lease_token is not null and j.leased_until>clock_timestamp()) then raise exception 'leased engineering envelope cannot be superseded'; end if;
+  if prior.expires_at>clock_timestamp()
      and prior.envelope->'server_binding'->'authority'->>'read_only'='false'
      and exists (select 1 from ops.capability_agent_session s where s.id=prior.agent_session_id and s.state not in ('completed','cancelled'))
      and not exists (select 1 from ops.engineering_slice_receipt r where r.envelope_id=prior.id and r.outcome in ('failed','blocked','reopened')) then
@@ -1751,12 +1982,12 @@ revoke all on function ops.engineering_envelope_is_executable(uuid,uuid,integer)
 drop function if exists ops.engineering_envelope_is_executable(uuid,uuid,integer);
 
 revoke all on function ops.engineering_envelope_currentness(uuid,uuid),
-  ops.engineering_envelope_is_executable(uuid,uuid),
-  ops.engineering_retire_permanently_ineligible_jobs()
+  ops.engineering_envelope_is_executable(uuid,uuid)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.engineering_safe_timestamptz(text),
   ops.capability_agent_session_lease_immutable(),
-  ops.engineering_work_request_currentness_guard()
+  ops.engineering_work_request_currentness_guard(),
+  ops.guard_engineering_actor_authority_update()
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.engineering_receipt_exact_object(jsonb,text[]),
   ops.engineering_receipt_identifier_array(jsonb),
@@ -1765,7 +1996,8 @@ revoke all on function ops.engineering_receipt_exact_object(jsonb,text[]),
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.guard_engineering_reviewer_fact_insert(),
   ops.guard_engineering_envelope_supersession(),
-  ops.guard_engineering_session_terminalization()
+  ops.guard_engineering_session_terminalization(),
+  ops.guard_siep_engineering_evidence_binding()
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.engineering_enqueue_slice_job(text,text,text,text,integer)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
@@ -1776,12 +2008,14 @@ revoke all on function ops.engineering_claim_slice(text,integer,integer),
   ops.engineering_controller_binding(uuid,uuid,uuid),
   ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid),
   ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid),
-  ops.engineering_fail_claim(uuid,uuid,text,text)
+  ops.engineering_fail_claim(uuid,uuid,text,text),
+  ops.engineering_retire_permanently_ineligible_jobs()
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 grant execute on function ops.engineering_claim_slice(text,integer,integer),
   ops.engineering_controller_binding(uuid,uuid,uuid),
   ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid),
-  ops.engineering_fail_claim(uuid,uuid,text,text)
+  ops.engineering_fail_claim(uuid,uuid,text,text),
+  ops.engineering_retire_permanently_ineligible_jobs()
   to carr_jobs;
 grant execute on function ops.engineering_envelope_currentness(uuid,uuid)
   to carr_reader,carr_writer;
@@ -1804,9 +2038,9 @@ begin
 
   for fn in select unnest(array[
     'ops.engineering_envelope_is_executable(uuid,uuid)',
-    'ops.engineering_retire_permanently_ineligible_jobs()',
     'ops.engineering_safe_timestamptz(text)',
     'ops.capability_agent_session_lease_immutable()',
+    'ops.guard_engineering_actor_authority_update()',
     'ops.engineering_receipt_exact_object(jsonb,text[])',
     'ops.engineering_receipt_identifier_array(jsonb)',
     'ops.engineering_work_request_currentness_guard()',
@@ -1815,8 +2049,12 @@ begin
     'ops.guard_engineering_reviewer_fact_insert()',
     'ops.guard_engineering_envelope_supersession()',
     'ops.guard_engineering_session_terminalization()',
+    'ops.guard_siep_engineering_evidence_binding()',
+    'ops.siep_bind_evidence_job_unchecked_0324(text,integer,text,uuid,uuid)',
+    'ops.siep_current_evidence_digest(text,uuid)',
     'ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid)'])
   loop
+
     if exists (
          select 1 from pg_proc p
          cross join lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
@@ -1833,7 +2071,8 @@ begin
     'ops.engineering_claim_slice(text,integer,integer)',
     'ops.engineering_controller_binding(uuid,uuid,uuid)',
     'ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid)',
-    'ops.engineering_fail_claim(uuid,uuid,text,text)'])
+    'ops.engineering_fail_claim(uuid,uuid,text,text)',
+    'ops.engineering_retire_permanently_ineligible_jobs()'])
   loop
     if exists (
          select 1 from pg_proc p
@@ -1877,6 +2116,22 @@ begin
      or has_table_privilege('carr_jobs','ops.job_attempt','INSERT') then
     raise exception '0326 FAILED: Engineering controller least-privilege boundary widened or is incomplete';
   end if;
+  if exists (
+       select 1 from pg_proc p
+       cross join lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+        where p.oid='ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)'::regprocedure
+          and acl.grantee=0 and acl.privilege_type='EXECUTE')
+     or has_function_privilege('carr_reader',
+          'ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)'::regprocedure,'EXECUTE')
+     or has_function_privilege('carr_writer',
+          'ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)'::regprocedure,'EXECUTE')
+     or has_function_privilege('carr_jobs',
+          'ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)'::regprocedure,'EXECUTE')
+     or not has_function_privilege('carr_authority',
+          'ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)'::regprocedure,'EXECUTE') then
+    raise exception '0326 FAILED: SIEP evidence binding authority ACL is widened or incomplete';
+  end if;
+
 end $$;
 
 commit;

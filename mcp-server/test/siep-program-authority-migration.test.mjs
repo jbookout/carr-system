@@ -6,6 +6,10 @@ const migration = fs.readFileSync(
   new URL("../../migrations/0324_siep_program_authority.sql", import.meta.url),
   "utf8",
 );
+const controllerMigration = fs.readFileSync(
+  new URL("../../migrations/0326_engineering_controller_currentness.sql", import.meta.url),
+  "utf8",
+);
 const dbGate = fs.readFileSync(new URL("../../ops/siep-program-local-pg-gate.py", import.meta.url), "utf8");
 const migrationNames = fs.readdirSync(new URL("../../migrations/", import.meta.url))
   .filter((name) => name.endsWith(".sql"))
@@ -143,8 +147,20 @@ test("0324 derives command authority and binds evidence to current immutable fac
   }
   assert.match(migration, /unique\(package_key,ledger_kind,ledger_id\)/);
   assert.match(migration, /SIEP package transitions require exact version plus one/);
+
   assert.match(migration, /idempotency_key_reuse/);
   assert.match(migration, /safe:\[a-z0-9\]/);
+});
+
+test("0326 makes reviewer and SIEP Engineering stamps database-owned and replay-fail-closed", () => {
+  assert.match(controllerMigration, /if new\.contract_version is not null then[\s\S]*?reviewer contract version is caller-controlled[\s\S]*?new\.contract_version:='engineering-review\.v1'/i);
+  assert.match(controllerMigration, /if new\.engineering_contract_version is not null then[\s\S]*?SIEP Engineering contract version is caller-controlled[\s\S]*?new\.engineering_contract_version:='engineering-review\.v1'/i);
+  assert.match(controllerMigration, /siep_bind_evidence_job_unchecked_0324[\s\S]*?historical SIEP Engineering evidence binding is not 0326 verified/i);
+  assert.match(controllerMigration, /reviewer\.slug='joe' and reviewer\.active/i);
+  assert.match(controllerMigration, /order by actor\.id for share/i);
+  assert.match(dbGate, /caller-controlled/);
+  assert.match(dbGate, /historical SIEP Engineering evidence binding is not 0326 verified/);
+  assert.match(dbGate, /valid SIEP evidence binding was not stamped by the database/);
 });
 
 test("the rollback-only DB gate owns exact-set and adversarial behavior", () => {

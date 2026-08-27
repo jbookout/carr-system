@@ -131,7 +131,7 @@ function bindReceiptLineage(row, plan, envelope) {
 
 function reviewerRow(id, receipt_id, slice_ref, state = "passed", created_at = "2026-08-26T00:00:00Z", attempt_id = "attempt:1") {
   return {
-    id, receipt_id, work_request_id: source.work.id.replace(/^wr:/, ""), slice_ref, reviewer_actor_id: "99999999-9999-4999-8999-999999999999", reviewer_actor_active: true, reviewer_actor_slug: "reviewer", reviewer_session_ref: `session:reviewer:${id}`, state, created_at,
+    id, receipt_id, work_request_id: source.work.id.replace(/^wr:/, ""), slice_ref, reviewer_actor_id: "99999999-9999-4999-8999-999999999999", reviewer_actor_active: true, reviewer_actor_slug: "reviewer", contract_version: "engineering-review.v1", reviewer_session_ref: `session:reviewer:${id}`, state, created_at,
     fact: { attempt_id, slice_ref, reviewer_ref: "reviewer:reviewer", session_ref: `session:reviewer:${id}`, state, evidence_refs: state === "passed" ? [{ ref: "evidence:review", redaction_class: "metadata_only", content_digest: `sha256:${"c".repeat(64)}` }] : [], is_independent: true, reviewed_deviation_refs: ["deviation:resolved"], resolved_deviation_refs: ["deviation:resolved"] },
   };
 }
@@ -231,6 +231,10 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
   const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: fakeClaim.envelope_digest, attempt_id: "attempt:1", slice_ref: "slice:one", plan_digest: typed.plan_digest, attribution: {}, planned_resource_refs: [], actual_resource_refs: [], planned_component_refs: [], actual_component_refs: [], checks: [{ check_ref: "check:one" }], artifact_refs: [], evidence_refs: [], deviations: [], source_evidence: {}, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false }, executor_claim: { claimed_by: "codex" }, independent_verification_required: true, outcome: "claimed_complete" };
   const result = await runEngineeringWorker({ c, worker: "engineering-worker", desk: "hermes-desktop", dispatchEnvelope: async (_desk, _envelope, task, options) => { calls.push({ task, options }); return receipt; }, ToolError: Error });
   assert.equal(result.completed, 1);
+  assert.ok(calls.findIndex(sql => typeof sql === "string" && sql.includes("ops.reap_expired_jobs")) <
+    calls.findIndex(sql => typeof sql === "string" && sql.includes("ops.engineering_claim_slice")));
+  assert.ok(calls.findIndex(sql => typeof sql === "string" && sql.includes("ops.engineering_retire_permanently_ineligible_jobs")) <
+    calls.findIndex(sql => typeof sql === "string" && sql.includes("ops.engineering_claim_slice")));
   assert.deepEqual(calls.find(row => row.options)?.options, { fresh: true });
   assert.equal(calls.find(row => row.options)?.task.engineering_plan.plan_digest, typed.plan_digest);
   assert.equal(calls.find(row => row.options)?.task.work_request, typed.work_request.id);

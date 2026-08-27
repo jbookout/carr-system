@@ -345,7 +345,7 @@ function isCanonicalReviewerFact(row, receiptRow, receiptDeviationRefs, requireP
   return exactObject(fact, [
     "attempt_id", "evidence_refs", "is_independent", "resolved_deviation_refs",
     "reviewed_deviation_refs", "reviewer_ref", "session_ref", "slice_ref", "state",
-  ]) && row?.reviewer_actor_active === true && validReviewerRef &&
+  ]) && row?.contract_version === "engineering-review.v1" && row?.reviewer_actor_active === true && validReviewerRef &&
     typeof row.reviewer_actor_id === "string" && row.reviewer_actor_id !== receiptRow.executor_actor_id &&
     fact.attempt_id === receiptRow.attempt_id && fact.slice_ref === receiptRow.slice_ref &&
     ["passed", "failed", "blocked"].includes(fact.state) && row.state === fact.state && fact.is_independent === true &&
@@ -683,7 +683,8 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
     const priorSession = (await c.query(
       `select s.id, s.work_request_id, s.executor_actor_id, s.state, s.scope_ref, s.worktree_ref, s.source_commit_sha,
               actor.slug as executor_slug
-         from ops.capability_agent_session s join actor on actor.id=s.executor_actor_id
+         from ops.capability_agent_session s
+         join actor on actor.id=s.executor_actor_id and actor.active and actor.kind='automation'
         where s.id=$1::uuid for update of s`,
       [priorSessionId],
     )).rows[0];
@@ -711,7 +712,10 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
       [priorSessionId, source.work.id.replace(/^wr:/, "")]);
   }
 
-  const executor = (await c.query("select id, slug from actor where slug=$1", ["codex"])).rows[0];
+  const executor = (await c.query(
+    "select id, slug from actor where slug=$1 and active and kind='automation'",
+    ["codex"],
+  )).rows[0];
   if (!executor) error(ToolError, { error: "engineering_codex_actor_not_provisioned" });
   const sessionResult = await c.query(
     `select id, executor_actor_id, state, lease_expires_at, scope_ref, worktree_ref, source_commit_sha from ops.capability_agent_session
@@ -879,6 +883,11 @@ async function controllerReadback(c, claim, ToolError) {
 // permitted here.
 export async function runEngineeringWorker({ c, worker, desk, dispatchEnvelope, limit = 1, ToolError }) {
   if (typeof dispatchEnvelope !== "function") throw new Error("engineering worker requires the Codex room-bridge dispatcher");
+  // Maintenance runs as separate autocommit statements.  It must not acquire
+  // queue locks inside the scoped claim transaction, whose lock order begins
+  // with the exact capability session and actor authority.
+  await c.query("select ops.reap_expired_jobs()");
+  await c.query("select ops.engineering_retire_permanently_ineligible_jobs()");
   const claims = await claimEngineeringSlice(c, worker, limit);
   const results = [];
   for (const claim of claims) {

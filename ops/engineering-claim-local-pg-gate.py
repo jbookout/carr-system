@@ -68,6 +68,22 @@ def canonical_digest(value) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
+
+def assert_non_codex_admission_refused(cur):
+    """Direct envelope admission must reject a human executor before currentness."""
+    cur.execute("savepoint non_codex_engineering_envelope_admission")
+    try:
+        fixture(cur, executor_slug="joe", executor_kind="human")
+    except psycopg.Error as exc:
+        cur.execute("rollback to savepoint non_codex_engineering_envelope_admission")
+        cur.execute("release savepoint non_codex_engineering_envelope_admission")
+        if "engineering envelope executor actor is not current" not in str(exc):
+            raise RuntimeError(f"non-Codex admission raised the wrong refusal: {exc}") from exc
+    else:
+        cur.execute("rollback to savepoint non_codex_engineering_envelope_admission")
+        cur.execute("release savepoint non_codex_engineering_envelope_admission")
+        raise RuntimeError("non-Codex executor was admitted into an Engineering envelope")
+
 def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_offset: str = "29 minutes", issued_offset: str = "0", slice_refs=None, slice_dependencies=None, executor_slug: str = "codex", executor_kind: str = "automation"):
     token = uuid.uuid4().hex
     joe_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
@@ -544,7 +560,6 @@ def main() -> int:
                 fixture(cur, lambda e: e["server_binding"]["authority"].__setitem__("read_only", True)),
                 fixture(cur, session_state="cancelled"),
                 fixture(cur, session_state="completed"),
-                fixture(cur, executor_slug="joe", executor_kind="human"),
             ]
             invalid_jobs = [row[0] for row in invalid_fixtures] + [overlong_job, low_runway_job]
             for invalid_job, invalid_envelope, *_ in invalid_fixtures:
@@ -560,9 +575,8 @@ def main() -> int:
             low_runway = one(cur, "select ops.engineering_envelope_currentness(%s,%s)", (low_runway_envelope, low_runway_job))[0]
             if low_runway.get("dispatch_runway_sufficient") is not False:
                 return fail(f"low-runway future fixture was not fenced before claim: {low_runway}")
-            if one(cur, "select ops.engineering_envelope_currentness(%s,%s)->>'reason'", (invalid_fixtures[-1][1], invalid_fixtures[-1][0]))[0] != "identity_or_currentness_mismatch":
-                return fail("non-codex executor fixture returned the wrong currentness reason")
-            if one(cur, "select ops.engineering_envelope_currentness(%s,%s)->>'reason'", (invalid_fixtures[-2][1], invalid_fixtures[-2][0]))[0] != "agent_session_not_active":
+            assert_non_codex_admission_refused(cur)
+            if one(cur, "select ops.engineering_envelope_currentness(%s,%s)->>'reason'", (invalid_fixtures[-1][1], invalid_fixtures[-1][0]))[0] != "agent_session_not_active":
                 return fail("completed-session fixture returned the wrong currentness reason")
             lock_probe_session = committed_session_id(dsn)
             if lock_probe_session:
@@ -610,7 +624,6 @@ def main() -> int:
                 "ops.engineering_envelope_is_executable(uuid,uuid)",
                 "ops.engineering_safe_timestamptz(text)",
                 "ops.capability_agent_session_lease_immutable()",
-                "ops.engineering_retire_permanently_ineligible_jobs()",
                 "ops.engineering_receipt_exact_object(jsonb,text[])",
                 "ops.engineering_receipt_identifier_array(jsonb)",
                 "ops.engineering_receipt_identifier_sets_equal(jsonb,jsonb)",
@@ -643,6 +656,7 @@ def main() -> int:
                 "ops.engineering_controller_binding(uuid,uuid,uuid)",
                 "ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid)",
                 "ops.engineering_fail_claim(uuid,uuid,text,text)",
+                "ops.engineering_retire_permanently_ineligible_jobs()",
             ]
             for function in scoped_functions:
                 for role in ("public", "carr_reader", "carr_writer", "carr_authority"):
@@ -667,6 +681,8 @@ def main() -> int:
                 return fail("generic claim_job consumed an Engineering job")
             if cur.execute("select * from ops.claim_job_mode(%s,'shadow',1,300)", ("engineering-generic-mode-negative",)).fetchall():
                 return fail("generic claim_job_mode consumed an Engineering job")
+            cur.execute("select ops.reap_expired_jobs()")
+            cur.execute("select ops.engineering_retire_permanently_ineligible_jobs()")
             expect_lower_claim_lease_refusal(cur)
             expect_multi_limit_refusal(cur, job_id)
 

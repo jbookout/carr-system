@@ -154,7 +154,7 @@ test("0326 makes controller eligibility current, safe to parse, and receipt-race
   assert.match(currentnessRepair, /engineering_retire_permanently_ineligible_jobs/);
   assert.match(currentnessRepair, /'dead_letter'/);
   assert.match(currentnessRepair, /p_limit is distinct from 1/);
-  assert.match(currentnessRepair, /engineering_envelope_is_executable\(e\.id,j\.id\)[\s\S]*dispatch_runway_sufficient[\s\S]*for update of j,d skip locked limit 1/i);
+  assert.match(currentnessRepair, /engineering_envelope_is_executable\(e\.id,j\.id\)[\s\S]*dispatch_runway_sufficient[\s\S]*order by j\.scheduled_for,j\.created_at limit 1/i);
   assert.match(currentnessRepair, /pg_advisory_xact_lock[\s\S]*v_claim_at:=clock_timestamp\(\)[\s\S]*e\.expires_at>=v_claim_at\+make_interval\(secs=>p_lease_seconds\)[\s\S]*s\.lease_expires_at>=v_claim_at\+make_interval\(secs=>p_lease_seconds\)[\s\S]*leased_until=v_claim_at\+make_interval\(secs=>p_lease_seconds\)/i);
   assert.match(currentnessRepair, /create or replace function ops\.engineering_controller_binding[\s\S]*pg_advisory_xact_lock[\s\S]*engineering_envelope_is_executable\(p_envelope_id,p_job_id\)/i);
   assert.match(currentnessRepair, /create or replace function ops\.engineering_work_request_currentness_guard[\s\S]*j\.state='running'[\s\S]*j\.leased_until>=clock_timestamp\(\)/i);
@@ -168,6 +168,10 @@ test("0326 makes controller eligibility current, safe to parse, and receipt-race
   assert.doesNotMatch(currentnessRepair, /drop function(?: if exists)? ops\.engineering_controller_binding\(uuid,uuid,uuid\)/i);
   assert.doesNotMatch(currentnessRepair, /drop function(?: if exists)? ops\.engineering_finalize_slice_receipt\(uuid,uuid,jsonb,text,uuid\)/i);
   assert.match(currentnessRepair, /grant execute on function ops\.engineering_claim_slice\(text,integer,integer\),[\s\S]*ops\.engineering_controller_binding\(uuid,uuid,uuid\),[\s\S]*ops\.engineering_finalize_slice_receipt\(uuid,uuid,jsonb,text,uuid\),[\s\S]*ops\.engineering_fail_claim\(uuid,uuid,text,text\)[\s\S]*to carr_jobs/i);
+  assert.match(currentnessRepair, /create or replace function ops\.guard_engineering_envelope_supersession\(\)\s+returns trigger language plpgsql security definer set search_path=pg_catalog,ops,public/i);
+  assert.match(currentnessRepair, /grant execute on function ops\.engineering_claim_slice\(text,integer,integer\),[\s\S]*?ops\.engineering_retire_permanently_ineligible_jobs\(\)[\s\S]*?to carr_jobs/i);
+  assert.match(currentnessRepair, /'ops\.engineering_fail_claim\(uuid,uuid,text,text\)',[\s\S]*?'ops\.engineering_retire_permanently_ineligible_jobs\(\)'[\s\S]*?scoped Engineering controller ACL is widened or incomplete/i);
+  assert.match(runtime, /ops\.reap_expired_jobs\(\)[\s\S]*?ops\.engineering_retire_permanently_ineligible_jobs\(\)[\s\S]*?claimEngineeringSlice/i);
   assert.doesNotMatch(currentnessRepair, /grant execute on function ops\.engineering_envelope_is_executable\(uuid,uuid,integer\)/i);
   assert.match(currentnessRepair, /ops\.engineering_envelope_is_executable\(e\.id,j\.id\)/);
   assert.match(currentnessRepair, /create or replace function ops\.engineering_finalize_slice_receipt[\s\S]*ops\.engineering_record_slice_receipt[\s\S]*update ops\.job set state='succeeded'/i);
@@ -181,6 +185,24 @@ test("0326 makes controller eligibility current, safe to parse, and receipt-race
   assert.match(currentnessRepair, /grant execute on function ops\.engineering_envelope_currentness\(uuid,uuid\)\s+to carr_reader,carr_writer/i);
   assert.match(currentnessRepair, /has_function_privilege\('carr_jobs',[\s\S]*ops\.complete_job\(uuid,uuid,jsonb,text\)[\s\S]*EXECUTE/i);
   assert.doesNotMatch(currentnessRepair, /grant\s+(?:all|update|insert)\s+on\s+ops\.(?:job|job_attempt)/i);
+  const receiptBody = currentnessRepair.slice(
+    currentnessRepair.indexOf("create or replace function ops.engineering_record_slice_receipt"),
+    currentnessRepair.indexOf("create or replace function ops.engineering_finalize_slice_receipt"),
+  );
+  const receiptLocks = [
+    "from ops.capability_agent_session where id=e.agent_session_id for update",
+    "from public.actor actor",
+    "pg_advisory_xact_lock",
+    "from ops.engineering_execution_envelope where id=p_envelope_id for key share",
+    "from ops.engineering_slice_plan where id=e.slice_plan_id for key share",
+    "from ops.work_request where id=e.work_request_id for share",
+    "select * into j from ops.job",
+    "select * into a from ops.job_attempt",
+    "v_checked_at := clock_timestamp()",
+    "insert into ops.engineering_slice_receipt",
+  ].map(token => receiptBody.indexOf(token));
+  assert.ok(receiptLocks.every(position => position >= 0));
+  assert.deepEqual(receiptLocks, [...receiptLocks].sort((left, right) => left - right));
 });
 
 test("reviewer lineage is pinned to the immutable receipt and unique leaf generation", () => {
@@ -230,4 +252,17 @@ test("Hermes keeps execution controller-only while retaining its existing captur
   const match = mcp.match(/hermes: new Set\(\[([\s\S]*?)\]\)/);
   assert.ok(match, "Hermes write allowlist must remain explicit");
   for (const verb of ["register-engineering-slice-plan", "admit-engineering-slice", "review-engineering-slice"]) assert.doesNotMatch(match[1], new RegExp(`['\"]${verb}['\"]`));
+});
+
+test("0326 reviewer and SIEP authority seams have closed function and trigger boundaries", () => {
+  assert.match(currentnessRepair, /create or replace function ops\.guard_engineering_reviewer_fact_insert\(\)\s+returns trigger[\s\S]*?as \$\$\s*declare[\s\S]*?begin[\s\S]*?if new\.contract_version is not null then[\s\S]*?new\.contract_version:='engineering-review\.v1';[\s\S]*?return new;\s*end \$\$;/i);
+  assert.match(currentnessRepair, /drop trigger if exists engineering_reviewer_fact_contract_guard[\s\S]*?create trigger engineering_reviewer_fact_contract_guard\s+before insert on ops\.engineering_reviewer_fact\s+for each row execute function ops\.guard_engineering_reviewer_fact_insert\(\);/i);
+  assert.match(currentnessRepair, /create or replace function ops\.guard_siep_engineering_evidence_binding\(\)[\s\S]*?if new\.engineering_contract_version is not null then[\s\S]*?new\.engineering_contract_version:='engineering-review\.v1';/i);
+  assert.match(currentnessRepair, /siep_bind_evidence_job_unchecked_0324[\s\S]*?historical SIEP Engineering evidence binding is not 0326 verified/i);
+  assert.match(currentnessRepair, /create or replace function ops\.siep_current_evidence_digest\(\s*p_ledger_kind text,p_ledger_id uuid\s*\)[\s\S]*?engineering_contract_version='engineering-review\.v1'/i);
+  assert.match(currentnessRepair, /revoke all on function ops\.siep_bind_evidence_job_unchecked_0324\(text,integer,text,uuid,uuid\)[\s\S]*?from public,carr_reader,carr_writer,carr_jobs,carr_authority/i);
+  assert.match(currentnessRepair, /revoke all on function ops\.siep_current_evidence_digest\(text,uuid\)[\s\S]*?from public,carr_reader,carr_writer,carr_jobs,carr_authority/i);
+  assert.doesNotMatch(currentnessRepair, /grant execute on function ops\.siep_current_evidence_digest\(text,uuid\)/i);
+  assert.match(currentnessRepair, /'ops\.guard_engineering_actor_authority_update\(\)'[\s\S]*?'ops\.guard_siep_engineering_evidence_binding\(\)'[\s\S]*?'ops\.siep_bind_evidence_job_unchecked_0324\(text,integer,text,uuid,uuid\)'[\s\S]*?'ops\.siep_current_evidence_digest\(text,uuid\)'/i);
+  assert.match(currentnessRepair, /ops\.siep_bind_evidence_job\(text,integer,text,uuid,uuid\)'::regprocedure[\s\S]*?not has_function_privilege\('carr_authority',[\s\S]*?SIEP evidence binding authority ACL is widened or incomplete/i);
 });

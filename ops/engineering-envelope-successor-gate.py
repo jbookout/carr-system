@@ -43,12 +43,13 @@ def sha(char: str) -> str:
 
 def fixture(cur):
     token = uuid.uuid4().hex
-    actor_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
+    joe_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
+    codex_id = one(cur, "select id from actor where slug='codex' and active and kind='automation'")[0]
     document_id = one(
         cur,
         """insert into doctrine_document(slug,title,content_class,visibility,created_by)
              values (%s,'Engineering envelope fixture','reference','shared',%s) returning id""",
-        (f"engineering-envelope-{token}", actor_id),
+        (f"engineering-envelope-{token}", joe_id),
     )[0]
     section_id = one(
         cur,
@@ -60,7 +61,7 @@ def fixture(cur):
         cur,
         """insert into doctrine_revision(section_id,version,actor_id,body,plain_text,content_hash,commit_message)
              values (%s,1,%s,%s,'Engineering envelope fixture',%s,'fixture') returning id""",
-        (section_id, actor_id, Jsonb({"text": "Engineering envelope fixture"}), "a" * 64),
+        (section_id, joe_id, Jsonb({"text": "Engineering envelope fixture"}), "a" * 64),
     )[0]
     work_request_id = one(
         cur,
@@ -92,7 +93,7 @@ def fixture(cur):
         """insert into ops.capability_agent_session
              (work_request_id,executor_actor_id,created_by_actor_id,source_commit_sha,worktree_ref)
              values (%s,%s,%s,%s,'fixture-old') returning id""",
-        (work_request_id, actor_id, actor_id, "e" * 40),
+        (work_request_id, codex_id, joe_id, "e" * 40),
     )[0]
     cur.execute(
         "update ops.capability_agent_session set state='cancelled', cancelled_at=now() where id=%s",
@@ -103,7 +104,7 @@ def fixture(cur):
         """insert into ops.capability_agent_session
              (work_request_id,executor_actor_id,created_by_actor_id,source_commit_sha,worktree_ref)
              values (%s,%s,%s,%s,'fixture-new') returning id""",
-        (work_request_id, actor_id, actor_id, "f" * 40),
+        (work_request_id, codex_id, joe_id, "f" * 40),
     )[0]
     old_job_id = one(
         cur,

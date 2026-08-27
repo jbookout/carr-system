@@ -31,6 +31,19 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROLE = "carr_jobs"
 SUCCESSOR_INSERT_SQL = "insert into ops.engineering_execution_envelope(id,job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,state_version,canonical_record_digest,envelope_digest,envelope,issued_at,expires_at,supersedes_envelope_id,supersession_reason) values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz,%s,'concurrency gate successor')"
 DAG_ENVELOPE_INSERT_SQL = "insert into ops.engineering_execution_envelope(id,job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,state_version,canonical_record_digest,envelope_digest,envelope,issued_at,expires_at) values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)"
+REAPER_RECEIPT_BARRIER = "engineering-controller-reaper-receipt-barrier"
+REAPER_RECEIPT_EXECUTABLE_SQL = f"""
+create or replace function ops.engineering_envelope_is_executable(p_envelope_id uuid,p_job_id uuid)
+returns boolean language plpgsql stable security definer set search_path=pg_catalog,ops,public
+as $$
+begin
+  perform pg_advisory_xact_lock(hashtextextended('{REAPER_RECEIPT_BARRIER}',0));
+  perform pg_sleep(5);
+  return coalesce((ops.engineering_envelope_currentness(p_envelope_id,p_job_id)->>'eligible')::boolean,false);
+end;
+$$
+"""
+
 DELAYED_EXECUTABLE_SQL = """
 create or replace function ops.engineering_envelope_is_executable(p_envelope_id uuid,p_job_id uuid)
 returns boolean language plpgsql stable security definer set search_path=pg_catalog,ops,public
@@ -279,20 +292,33 @@ def refuse_reviewer_fact(cur, *, receipt_id, work_request_id, slice_ref, reviewe
 
 
 def assert_reviewer_fact_guards(cur, complete_fixture, failed_fixture, complete_receipt_id, failed_receipt_id):
-    """Direct carr_writer rows must be canonical, independent, and complete-bound."""
+    """Direct carr_writer rows must be canonical, independently stamped, and complete-bound."""
     complete_work_request_id = one(cur, "select work_request_id from ops.engineering_execution_envelope where id=%s", (complete_fixture[1],))[0]
     failed_work_request_id = one(cur, "select work_request_id from ops.engineering_execution_envelope where id=%s", (failed_fixture[1],))[0]
     complete_slice = complete_fixture[5]
     failed_slice = failed_fixture[5]
     codex_id = complete_fixture[3]
     joe_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
-    inactive_id = one(
-        cur,
-        "insert into actor(slug,kind,display_name,active) values(%s,'human','Engineering inactive reviewer fixture',false) returning id",
-        (f"engineering-inactive-reviewer-{uuid.uuid4().hex}",),
-    )[0]
+    inactive_id = one(cur, "insert into actor(slug,kind,display_name,active) values(%s,'human','Engineering inactive reviewer fixture',false) returning id", (f"engineering-inactive-reviewer-{uuid.uuid4().hex}",))[0]
     executor_session_ref = one(cur, "select envelope#>>'{agent_session,id}' from ops.engineering_execution_envelope where id=%s", (complete_fixture[1],))[0]
     valid_fact = reviewer_fact_payload(complete_slice)
+    cur.execute("set local role carr_writer")
+    prestamped_key = uuid.uuid4()
+    cur.execute("savepoint reviewer_prestamped_contract")
+    try:
+        cur.execute("""insert into ops.engineering_reviewer_fact
+                     (receipt_id,work_request_id,slice_ref,reviewer_actor_id,reviewer_session_ref,state,fact,idempotency_key,contract_version)
+                   values (%s,%s,%s,%s,%s,'passed',%s,%s,'engineering-review.v1')""",
+                    (complete_receipt_id, complete_work_request_id, complete_slice, joe_id, valid_fact["session_ref"], Jsonb(valid_fact), prestamped_key))
+    except psycopg.Error as exc:
+        cur.execute("rollback to savepoint reviewer_prestamped_contract")
+        cur.execute("release savepoint reviewer_prestamped_contract")
+        if "caller-controlled" not in str(exc):
+            raise RuntimeError(f"pre-stamped reviewer contract returned the wrong refusal: {exc}") from exc
+    else:
+        cur.execute("rollback to savepoint reviewer_prestamped_contract")
+        cur.execute("release savepoint reviewer_prestamped_contract")
+        raise RuntimeError("caller-supplied reviewer contract_version was accepted")
     cases = [
         ("reviewer receipt_id mismatch", failed_receipt_id, complete_work_request_id, complete_slice, joe_id, valid_fact),
         ("reviewer work_request mismatch", complete_receipt_id, failed_work_request_id, complete_slice, joe_id, valid_fact),
@@ -305,17 +331,20 @@ def assert_reviewer_fact_guards(cur, complete_fixture, failed_fixture, complete_
         ("reviewer malformed evidence", complete_receipt_id, complete_work_request_id, complete_slice, joe_id, {**valid_fact, "evidence_refs": [{"ref": "evidence:malformed"}]}),
         ("reviewer_ref mismatch", complete_receipt_id, complete_work_request_id, complete_slice, joe_id, {**valid_fact, "reviewer_ref": "reviewer:other"}),
         ("reviewer malformed session", complete_receipt_id, complete_work_request_id, complete_slice, joe_id, reviewer_fact_payload(complete_slice, session_ref="not-a-session")),
-        ("reviewer duplicate reviewed deviation refs", complete_receipt_id, complete_work_request_id, complete_slice, joe_id,
-         {**valid_fact, "reviewed_deviation_refs": ["deviation:duplicate", "deviation:duplicate"]}),
-        ("reviewer duplicate resolved deviation refs", complete_receipt_id, complete_work_request_id, complete_slice, joe_id,
-         {**valid_fact, "resolved_deviation_refs": ["deviation:duplicate", "deviation:duplicate"]}),
+        ("reviewer duplicate reviewed deviation refs", complete_receipt_id, complete_work_request_id, complete_slice, joe_id, {**valid_fact, "reviewed_deviation_refs": ["deviation:duplicate", "deviation:duplicate"]}),
+        ("reviewer duplicate resolved deviation refs", complete_receipt_id, complete_work_request_id, complete_slice, joe_id, {**valid_fact, "resolved_deviation_refs": ["deviation:duplicate", "deviation:duplicate"]}),
         ("reviewer unresolved deviation", complete_receipt_id, complete_work_request_id, complete_slice, joe_id, reviewer_fact_payload(complete_slice, reviewed_deviation_refs=["deviation:unresolved"])),
         ("reviewer passed noncomplete", failed_receipt_id, failed_work_request_id, failed_slice, joe_id, reviewer_fact_payload(failed_slice)),
     ]
-    cur.execute("set local role carr_writer")
     for label, receipt_id, work_request_id, slice_ref, reviewer_actor_id, fact in cases:
-        refuse_reviewer_fact(cur, receipt_id=receipt_id, work_request_id=work_request_id, slice_ref=slice_ref,
-                             reviewer_actor_id=reviewer_actor_id, reviewer_session_ref=fact["session_ref"], fact=fact, label=label)
+        refuse_reviewer_fact(cur, receipt_id=receipt_id, work_request_id=work_request_id, slice_ref=slice_ref, reviewer_actor_id=reviewer_actor_id, reviewer_session_ref=fact["session_ref"], fact=fact, label=label)
+    stamped_fact = reviewer_fact_payload(complete_slice)
+    stamped = one(cur, """insert into ops.engineering_reviewer_fact
+                         (receipt_id,work_request_id,slice_ref,reviewer_actor_id,reviewer_session_ref,state,fact,idempotency_key)
+                       values (%s,%s,%s,%s,%s,'passed',%s,%s) returning contract_version""",
+                  (complete_receipt_id, complete_work_request_id, complete_slice, joe_id, stamped_fact["session_ref"], Jsonb(stamped_fact), uuid.uuid4()))[0]
+    if stamped != "engineering-review.v1":
+        raise RuntimeError("valid reviewer fact was not stamped by the database")
     cur.execute("reset role")
 
 
@@ -422,8 +451,12 @@ def assert_static_contract():
     raw_body = migration[migration.index("create or replace function ops.engineering_record_slice_receipt"):
                          migration.index("create or replace function ops.engineering_finalize_slice_receipt")]
     raw_positions = [
-        raw_body.index("pg_advisory_xact_lock"),
         raw_body.index("from ops.capability_agent_session where id=e.agent_session_id for update"),
+        raw_body.index("from public.actor actor"),
+        raw_body.index("pg_advisory_xact_lock"),
+        raw_body.index("from ops.engineering_execution_envelope where id=p_envelope_id for key share"),
+        raw_body.index("from ops.engineering_slice_plan where id=e.slice_plan_id for key share"),
+        raw_body.index("from ops.work_request where id=e.work_request_id for share"),
         raw_body.index("select * into j from ops.job"),
         raw_body.index("select * into a from ops.job_attempt"),
         raw_body.index("v_checked_at := clock_timestamp()"),
@@ -431,7 +464,7 @@ def assert_static_contract():
         raw_body.index("insert into ops.engineering_slice_receipt"),
     ]
     if raw_positions != sorted(raw_positions):
-        raise RuntimeError("raw receipt validator lost global lineage -> session -> job -> attempt -> clock -> append ordering")
+        raise RuntimeError("raw receipt validator lost session -> actor -> lineage -> envelope/plan -> Work Request -> job -> attempt -> clock -> append ordering")
     if raw_body.count("clock_timestamp()") < 2:
         raise RuntimeError("receipt seam must sample clock_timestamp after locks and again before append")
     if raw_body.index("v_append_at := clock_timestamp()") < raw_body.index("engineering receipt typed contract is invalid"):
@@ -476,6 +509,11 @@ def assert_static_contract():
         raise RuntimeError("database dependency admission does not require one unsuperseded envelope leaf")
     if not re.search(r"create\s+(?:or\s+replace\s+)?function\s+ops\.[A-Za-z0-9_]*(?:review|reviewer|fact)[A-Za-z0-9_]*|create\s+trigger\s+[A-Za-z0-9_]*(?:review|reviewer|fact)[A-Za-z0-9_]*", engineering_migrations, re.I):
         raise RuntimeError("reviewer facts lack a database trigger/guard")
+    reviewer_guard = migration[migration.index("create or replace function ops.guard_engineering_reviewer_fact_insert"):migration.index("drop trigger if exists engineering_reviewer_fact_contract_guard")]
+    if ("actor.id=r.executor_actor_id and actor.active and actor.kind='automation' and actor.slug='codex'" not in reviewer_guard
+            or "actor.id=new.reviewer_actor_id and actor.active" not in reviewer_guard
+            or "order by actor.id for share" not in reviewer_guard):
+        raise RuntimeError("reviewer guard lost deterministic active executor-and-Joe actor locking")
     if "latestReceiptForSlice" not in runtime or "leaves.length !== 1" not in runtime or "successor.supersedes_envelope_id === envelope.id" not in runtime:
         raise RuntimeError("runtime projection/admission does not require one unsuperseded envelope leaf")
     if "row.receipt_id === receiptRow.id" not in runtime:
@@ -691,6 +729,95 @@ def post_wait_expiry_case(conn, dsn, fixture_row, claim):
         raise RuntimeError(f"post-wait expiry returned no deterministic refusal: {result}")
     with conn.cursor() as cur:
         assert_unfinalized(cur, fixture_row, "post-wait expiry")
+    conn.commit()
+
+
+def reaper_receipt_contention_case(conn, dsn, fixture_row, claim):
+    """Maintenance must skip a job locked by the real receipt path."""
+    with conn.cursor() as cur:
+        cur.execute(REAPER_RECEIPT_EXECUTABLE_SQL)
+    conn.commit()
+    expiry = expiry_epoch(conn, fixture_row)
+    result, errors = {}, []
+
+    def receipt_peer():
+        try:
+            with psycopg.connect(dsn) as peer:
+                with peer.cursor() as cur:
+                    cur.execute("set local lock_timeout='12000ms'")
+                    cur.execute("set local statement_timeout='15000ms'")
+                    set_jobs(cur)
+                    try:
+                        receipt(cur, fixture_row, claim, "claimed_complete")
+                    except psycopg.Error as exc:
+                        result["sqlstate"] = exc.sqlstate
+                        result["error"] = str(exc)
+                    else:
+                        result["accepted"] = True
+                peer.rollback()
+        except BaseException as exc:  # surfaced by the main gate thread
+            errors.append(exc)
+
+    peer_thread = Thread(target=receipt_peer, name="engineering-reaper-receipt-peer")
+    peer_thread.start()
+    barrier_seen = False
+    with psycopg.connect(dsn) as maintenance:
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            with maintenance.cursor() as cur:
+                acquired = one(
+                    cur,
+                    "select pg_try_advisory_xact_lock(hashtextextended(%s,0))",
+                    (REAPER_RECEIPT_BARRIER,),
+                )[0]
+            if not acquired:
+                barrier_seen = True
+                break
+            maintenance.rollback()
+            time.sleep(0.05)
+        if not barrier_seen:
+            maintenance.rollback()
+            peer_thread.join(16)
+            raise RuntimeError("receipt did not reach the maintenance contention barrier")
+        wait_past_expiry(expiry)
+        with maintenance.cursor() as cur:
+            cur.execute("set local lock_timeout='300ms'")
+            cur.execute("set local statement_timeout='1500ms'")
+            cur.execute("set local role carr_jobs")
+            cur.execute("select ops.reap_expired_jobs()")
+            cur.execute("select ops.engineering_retire_permanently_ineligible_jobs()")
+            job_state = one(
+                cur,
+                "select state,lease_token,attempt,leased_until<clock_timestamp() from ops.job where id=%s",
+                (fixture_row[0],),
+            )
+            if job_state != ("running", claim[1], claim[2], True):
+                raise RuntimeError(f"maintenance changed the receipt-locked Engineering job: {job_state}")
+            attempt_state = one(
+                cur,
+                "select state,lease_token from ops.job_attempt where job_id=%s and attempt=%s",
+                (fixture_row[0], claim[2]),
+            )
+            if attempt_state != ("running", claim[1]):
+                raise RuntimeError(f"maintenance changed the receipt-locked Engineering attempt: {attempt_state}")
+            if one(cur, "select count(*) from ops.engineering_slice_receipt where envelope_id=%s", (fixture_row[1],))[0] != 0:
+                raise RuntimeError("maintenance bypassed the receipt lock with immutable Engineering evidence")
+            if one(cur, "select count(*) from ops.job_receipt where job_id=%s", (fixture_row[0],))[0] != 0:
+                raise RuntimeError("maintenance bypassed the receipt lock with a job receipt")
+        maintenance.rollback()
+    peer_thread.join(16)
+    if peer_thread.is_alive():
+        raise RuntimeError("reaper-versus-receipt probe exceeded its bounded timeout")
+    if errors:
+        raise RuntimeError("reaper-versus-receipt peer failed") from errors[0]
+    if result.get("accepted") or result.get("sqlstate") in {"55P03", "40P01", "57014"}:
+        raise RuntimeError(f"reaper-versus-receipt returned an unsafe result: {result}")
+    if not result.get("sqlstate"):
+        raise RuntimeError(f"reaper-versus-receipt returned no deterministic expiry refusal: {result}")
+    with conn.cursor() as cur:
+        assert_unfinalized(cur, fixture_row, "reaper-versus-receipt")
+        if one(cur, "select count(*) from ops.job_receipt where job_id=%s", (fixture_row[0],))[0] != 0:
+            raise RuntimeError("reaper-versus-receipt left a job receipt after rollback")
     conn.commit()
 
 
@@ -1049,6 +1176,22 @@ def main():
                 cur.execute("rollback to savepoint engineering_work_request_reservation")
                 cur.execute("release savepoint engineering_work_request_reservation")
                 raise RuntimeError("live Engineering claim did not reserve Work Request currentness")
+            set_jobs(cur)
+            if one(cur, "select ops.engineering_controller_binding(%s,%s,%s) is not null", (good[1], good[0], good_claim[1]))[0] is not True:
+                raise RuntimeError("actor lifecycle fixture could not read the exact live binding")
+            reset_role(cur)
+            cur.execute("savepoint engineering_live_actor_authority")
+            try:
+                cur.execute("update public.actor set active=false where id=%s", (good[3],))
+            except psycopg.Error as exc:
+                cur.execute("rollback to savepoint engineering_live_actor_authority")
+                cur.execute("release savepoint engineering_live_actor_authority")
+                if "reserved by a live scoped lease" not in str(exc):
+                    raise RuntimeError(f"live actor deactivation returned the wrong refusal: {exc}") from exc
+            else:
+                cur.execute("rollback to savepoint engineering_live_actor_authority")
+                cur.execute("release savepoint engineering_live_actor_authority")
+                raise RuntimeError("live Engineering lease allowed actor deactivation")
         conn.commit()
 
         with conn.cursor() as cur:
@@ -1063,6 +1206,16 @@ def main():
                 raise RuntimeError("complete receipt did not finalize the attempt")
             if one(cur, "select kind from ops.job_receipt where job_id=%s order by created_at desc limit 1", (good[0],))[0] != "completion":
                 raise RuntimeError("complete receipt did not append the completion job receipt")
+            cur.execute("savepoint engineering_terminal_actor_authority")
+            cur.execute("""update ops.job set leased_until=clock_timestamp()-interval '1 second'
+                            where definition_key='engineering-slice' and definition_version=1
+                              and state='running' and lease_token is not null
+                              and leased_until>clock_timestamp()""")
+            cur.execute("update public.actor set active=false where id=%s", (good[3],))
+            if one(cur, "select active from public.actor where id=%s", (good[3],))[0] is not False:
+                raise RuntimeError("all Engineering leases terminal or expired did not release actor authority mutation")
+            cur.execute("rollback to savepoint engineering_terminal_actor_authority")
+            cur.execute("release savepoint engineering_terminal_actor_authority")
 
         with conn.cursor() as cur:
             set_jobs(cur)
@@ -1333,6 +1486,17 @@ def main():
                 else:
                     raise RuntimeError("receipt did not wait behind successor trigger")
             successor_conn.rollback()
+
+        # A real receipt holds the ordered authority/job locks while both
+        # maintenance functions run under bounded timeouts and skip the target.
+        with conn.cursor() as cur:
+            reset_role(cur)
+            near_reaper = fixture(cur, lease_offset="4 seconds")
+        conn.commit()
+        with conn.cursor() as cur:
+            near_reaper_claim = manual_near_expiry_claim(cur, near_reaper)
+        conn.commit()
+        reaper_receipt_contention_case(conn, dsn, near_reaper, near_reaper_claim)
 
         # This is deliberately the final production-path call.  The wrapper
         # exists only inside disposable carr_ci and forces the naturally
