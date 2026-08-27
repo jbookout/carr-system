@@ -61,10 +61,11 @@ import sys
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|)\$")
 TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
-ANY_COPY = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\(|FROM\b)", re.M | re.I)
+ANY_COPY = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\b", re.M | re.I)
 
 CREATE_ROUTINE = re.compile(
-    r"create\s+(?:or\s+replace\s+)?function\s+([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)?)\s*\(", re.I)
+    r"create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+"
+    r"([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)?)\s*\(", re.I)
 
 # Statements that NAME a function without invoking it, masked to the END OF THE
 # STATEMENT rather than to the end of one signature. That distinction is the whole
@@ -82,9 +83,11 @@ CREATE_ROUTINE = re.compile(
 # which the migration ever runs. Masking to the semicolon covers a list of any
 # length.
 MENTIONS_ROUTINE = re.compile(
-    r"(?:create\s+(?:or\s+replace\s+)?function|revoke\b[^;]*?\bon\s+function"
-    r"|grant\b[^;]*?\bon\s+function|alter\s+function|drop\s+function"
-    r"|comment\s+on\s+function|security\s+label\b[^;]*?\bon\s+function)[^;]*;", re.I | re.S)
+    r"(?:create\s+(?:or\s+replace\s+)?(?:function|procedure)|revoke\b[^;]*?\bon\s+(?:function|procedure)"
+    r"|grant\b[^;]*?\bon\s+(?:function|procedure)|alter\s+(?:function|procedure)"
+    r"|drop\s+(?:function|procedure)"
+    r"|comment\s+on\s+(?:function|procedure)"
+    r"|security\s+label\b[^;]*?\bon\s+(?:function|procedure))[^;]*;", re.I | re.S)
 
 # A signature inside a quoted string is a NAME too, never a call:
 #     has_function_privilege('carr_writer','ops.record_executed_lease(text,integer)')
@@ -177,7 +180,7 @@ def migration_time_text(sql):
             if name in called:
                 continue
             short = re.escape(name.split(".")[-1])
-            if re.search(r"\b" + short + r"\s*\(", blob, re.I):
+            if re.search(r"\b" + short + r"\s*\(", blob, re.I):  # PERFORM/SELECT/CALL all match
                 called.add(name)
                 executing.extend(bodies)
                 changed = True
@@ -262,7 +265,8 @@ def check_region_boundary(artifact):
     prefix = artifact[:ledger.start()]
     prefix_top, _do_bodies, _routines = split_segments(prefix)
     candidates = [ANY_COPY.search(prefix)]
-    candidates.append(re.search(r"^\s*insert\s+into\s+(?:only\s+)?" + TABLE, prefix_top, re.M | re.I))
+    for pattern in WRITES_ANYWHERE:
+        candidates.append(re.search(r"^\s*" + pattern.pattern, prefix_top, pattern.flags | re.M))
     first = min((c for c in candidates if c), key=lambda c: c.start(), default=None)
     if first:
         return (f"DATA REGION BOUNDARY MOVED: the first data statement in the artifact is "
@@ -278,8 +282,10 @@ def tables_with_data(artifact):
     """Tables the artifact actually carries rows for."""
     region = data_region(artifact)
     found = set()
-    for hit in ANY_COPY.finditer(region):
-        found.add(normalise(hit.group(1)))
+    # ANY_COPY is deliberately NOT used here. WRITES_ANYWHERE already carries a COPY
+    # pattern, so a second scan was a dead path — narrowing it left the whole suite
+    # green, which is how a mutation survived. ANY_COPY earns its keep in
+    # check_region_boundary, where finding the FIRST copy is the whole question.
     for pattern in WRITES_ANYWHERE:
         for hit in re.finditer(r"^\s*(?:with\s+[^;]{0,4000}?\s)?" + pattern.pattern,
                                region, pattern.flags | re.M):
