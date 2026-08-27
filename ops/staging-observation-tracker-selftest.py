@@ -370,12 +370,20 @@ def case_untracked_entries_dropped_from_stored_snapshot():
         noise = os.path.join(repo, "untracked-noise.txt")
         with open(noise, "w") as fh:
             fh.write("untracked at pre-snapshot time\n")
+        # A tracked path already dirty at Pre time. Dropping "??" must not
+        # become dropping everything: this entry is the one the Post diff
+        # genuinely needs, and without it the already-dirty file below would be
+        # wrongly credited to this session. Mutating tracked_only() to return
+        # {} survives an assertion that only counts what is ABSENT.
+        with open(os.path.join(repo, "tracked.txt"), "a") as fh:
+            fh.write("dirty before this session's call\n")
 
         mod.handle(pre_payload(repo, session, call_id), repo=repo)
 
         with open(mod.state_path(session)) as fh:
             stored = json.load(fh)["pending"][call_id]
         no_untracked_stored = not any(code == "??" for code in stored.values())
+        dirty_tracked_stored = stored.get("tracked.txt") == " M"
 
         # The command: stage the previously-untracked file, so its code moves
         # from "??" to "A " between the two snapshots.
@@ -383,10 +391,13 @@ def case_untracked_entries_dropped_from_stored_snapshot():
         mod.handle(post_payload(repo, session, call_id), repo=repo)
 
         observed = observed_for(session)
-        ok = no_untracked_stored and "untracked-noise.txt" in observed
+        ok = (no_untracked_stored and dirty_tracked_stored
+              and "untracked-noise.txt" in observed
+              and "tracked.txt" not in observed)
         if not ok:
             print(f"       stored={stored!r} observed={observed!r} — want no '??' "
-                  f"stored AND the staged path still credited")
+                  f"stored, the dirty tracked path KEPT, the staged path "
+                  f"credited, and the already-dirty path not credited")
         return ok
     finally:
         mod.STATE_DIR = orig_state_dir
@@ -415,17 +426,57 @@ def case_state_file_bounded_in_bytes():
         with open(path) as fh:
             back = json.load(fh)
         kept = list(back["pending"])
-        # `kept == [...]` and not a membership test: the ORDER read back off
-        # disk is the thing under test. Eviction is oldest-first and reads its
-        # order off the dict, so a file that does not preserve insertion order
-        # makes "oldest" mean "alphabetically first" after any reload. That is
-        # exactly what sort_keys=True was doing here until 2026-08-27.
         ok = (size <= mod.MAX_STATE_BYTES
               and back["observed"] == ["kept.py"]
-              and kept == ["middle", "newest"])
+              and "oldest" not in kept
+              and "newest" in kept)
         if not ok:
             print(f"       size={size} cap={mod.MAX_STATE_BYTES} pending={kept!r} "
                   f"observed={back['observed']!r}")
+        return ok
+    finally:
+        mod.STATE_DIR = orig_state_dir
+        shutil.rmtree(observed_dir, ignore_errors=True)
+
+
+def case_eviction_order_survives_a_reload():
+    """THE BUG THE BYTE CAP UNCOVERED. Eviction is oldest-first and reads its
+    order off the dict, so it is only oldest-first if insertion order survives
+    the round-trip through the state FILE -- and json.dump(sort_keys=True) was
+    re-ordering `pending` by call id, which is random. After any reload,
+    "oldest" therefore meant "alphabetically first".
+
+    THE KEYS ARE DELIBERATELY REVERSE-ALPHABETICAL to insertion order. An
+    earlier cut of this fixture used oldest/middle/newest, where the correct
+    survivors happen to be the alphabetically-first two as well -- so it passed
+    with the sorting restored and proved nothing. A mutation run is what caught
+    that; the names are the fix.
+
+    The reload is the whole mechanism: the first write is one Bash call's Pre
+    snapshot, and the eviction under test happens on a LATER call, which reads
+    this file back before touching it."""
+    observed_dir = tempfile.mkdtemp(prefix="sot-state-l-")
+    orig_state_dir = mod.STATE_DIR
+    mod.STATE_DIR = observed_dir
+    try:
+        path = os.path.join(observed_dir, "reloaded.json")
+        fat = {f"some/long/tracked/path/number-{n:06d}.py": " M" for n in range(30000)}
+        first = {"observed": [], "pending": {"zz-oldest": dict(fat),
+                                            "mm-middle": dict(fat)}}
+        mod.write_state_unlocked(path, first)
+
+        # A later Bash call: read the state back off disk, add its own
+        # snapshot, write again. The byte budget must now evict zz-oldest.
+        reloaded = mod.read_state_unlocked(path)
+        reloaded["pending"]["aa-newest"] = dict(fat)
+        mod.write_state_unlocked(path, reloaded)
+
+        with open(path) as fh:
+            kept = list(json.load(fh)["pending"])
+        ok = "zz-oldest" not in kept and "aa-newest" in kept
+        if not ok:
+            print(f"       pending={kept!r} — the oldest entry survived and a "
+                  f"newer one was evicted, so insertion order did not round-trip")
         return ok
     finally:
         mod.STATE_DIR = orig_state_dir
@@ -445,6 +496,7 @@ CASES = [
     ("aged-temp-orphan-swept-by-the-write-path", case_aged_temp_orphan_swept_by_the_write_path),
     ("untracked-entries-dropped-from-stored-snapshot", case_untracked_entries_dropped_from_stored_snapshot),
     ("state-file-bounded-in-bytes", case_state_file_bounded_in_bytes),
+    ("eviction-order-survives-a-reload", case_eviction_order_survives_a_reload),
 ]
 
 
