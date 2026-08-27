@@ -1,4 +1,4 @@
--- Disposable proof for migration 0385. Run after the Tour foundation and Slice
+-- Disposable proof for migration 0390. Run after the Tour foundation and Slice
 -- 2 migrations. It makes no durable record because the final rollback is part
 -- of the proof contract.
 begin;

@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../..");
-const migration = fs.readFileSync(path.join(root, "migrations/0385_tour_property_identity_jurisdiction.sql"), "utf8");
+const migration = fs.readFileSync(path.join(root, "migrations/0390_tour_property_identity_jurisdiction.sql"), "utf8");
 
 test("Slice 3 separates immutable canonical property identity from every external projection", () => {
   assert.match(migration, /^begin;/m);

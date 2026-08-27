@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../..");
-const migration = fs.readFileSync(path.join(root, "migrations/0384_tour_rights_projection_hardening.sql"), "utf8");
+const migration = fs.readFileSync(path.join(root, "migrations/0389_tour_rights_projection_hardening.sql"), "utf8");
 
 test("slice 2 hardening is forward-only and preserves exact provider-policy-receipt lineage", () => {
   assert.match(migration, /^begin;/m);

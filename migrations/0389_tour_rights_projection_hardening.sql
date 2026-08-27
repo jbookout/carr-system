@@ -1,4 +1,4 @@
--- 0384_tour_rights_projection_hardening.sql
+-- 0389_tour_rights_projection_hardening.sql
 -- Forward-only hardening of 0318.  Public projections are draft containers;
 -- a complete, rights-checked fact selection is sealed atomically by one typed
 -- authority command.  No application role retains raw mutation privileges.

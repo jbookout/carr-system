@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Run as the database owner against a database where schema.sql, 0318, and
--- 0384 are applied:
+-- 0389 are applied:
 --   psql "$CARR_CI_DATABASE_URL" -v ON_ERROR_STOP=1 \
 --     -f mcp-server/test/tour-operations-slice2-postgres.sql
 --
@@ -316,7 +316,7 @@ begin
 
   -- Application roles retain no direct table DML on the normalized Tour
   -- records.  The following exact function ACL assertions are the intended
-  -- application seams installed by 0384.
+  -- application seams installed by 0389.
   if has_table_privilege('carr_reader', 'ops.tour_public_projection', 'INSERT')
      or has_table_privilege('carr_writer', 'ops.tour_public_projection', 'INSERT')
      or has_table_privilege('carr_jobs', 'ops.tour_public_projection', 'INSERT')
