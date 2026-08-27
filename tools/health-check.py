@@ -979,8 +979,47 @@ def newest(pattern):
 def age_days(path):
     return (time.time() - os.path.getmtime(path)) / 86400
 
+
+def db_env_parse_failure():
+    """Line number db.env dies on when SOURCED, or None if the whole file parses.
+
+    gate_state() below asks "can THIS KEY be loaded", per watch, and only when a
+    watch has no output. That question cannot be asked at all for a key no watch
+    names, and it is never asked on a healthy night. The failure it was built for
+    is not per-key: zsh aborts the whole `. db.env` at the first bad line, so ONE
+    unquoted DSN silently empties the file for every job on this Mac.
+
+    That is not hypothetical twice over. 2026-08-02 was CARR_DB_JOBS_URL. Then on
+    2026-08-20 CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL — a key no watch here
+    names, so nothing in this file could see it — landed unquoted and closed
+    bin/migrate-prod.sh, the one sanctioned door to production migrations, for
+    six days, for every caller that did not already have NEON_API_KEY exported.
+    This check is file-level and unconditional for exactly that reason: it does
+    not need to know which keys matter.
+
+    `zsh -n` parses and runs nothing, so no value is read, expanded or printed.
+    Only the line number is kept — zsh's message can quote a token from the
+    offending line, and every value in that file is a credential.
+    """
+    if not os.path.exists(DB_ENV):
+        return None
+    probe = subprocess.run(["/bin/zsh", "-n", DB_ENV], capture_output=True, text=True)
+    if probe.returncode == 0:
+        return None
+    found = re.search(r":(\d+):", probe.stderr)
+    return found.group(1) if found else "unknown"
+
+
 rc = 0
 print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — outputs, not schedules")
+_db_env_line = db_env_parse_failure()
+if _db_env_line is not None:
+    print(f"  ⚠︎ {'db.env':<18} UNSOURCEABLE — {DB_ENV} does not parse as shell at line "
+          f"{_db_env_line}. Every job that does `set -a; . db.env` (bin/migrate-prod.sh, "
+          f"bin/nightly.sh, bin/refresh-rules.sh, bin/control-plane-tick.sh and the rest) "
+          f"loses ALL of its keys, not just the bad one, and reports its credential missing. "
+          f"Fix: single-quote that value  · one bad line disables every credential here")
+    rc = 1
 for name, out_pat, max_age, inputs, note in WATCH:
     out = newest(out_pat)
     if not out:
