@@ -403,9 +403,18 @@ def main():
     # rail that surfaces a reminder, exactly the shape the compiler types
     # "procedure" for any enforcement_class == "surfacing" rule, the same
     # transition 3fa422b7 made on 2026-08-23.
+    # constraint 75 -> 73, procedure 79 -> 73, doctrine 13 -> 12, rubric
+    # 37 -> 36, preference 12 -> 11 on 2026-08-27 (WR-000019 rule-retirement
+    # batch, 11 ids retired): e065aa82 (deny_gate) and 937252fb (stop_gate)
+    # each drop one constraint; 14e0408b, 3fa422b7, 581cb3fe, 634a2d94,
+    # 75c2e4c9, and dff58fef (all surfacing) each drop one procedure;
+    # d367188d (doctrine), 8117b414 (rubric), and 006a7eaa (preference) --
+    # the three retired judgment_ambient ids -- each drop one of their
+    # manifest-declared type. No rule was reclassified; every dropped count
+    # is a whole rule leaving the active set, not a type change.
     reviewed_counts = {
-        "constraint": 75, "procedure": 79, "doctrine": 13, "rubric": 37,
-        "preference": 12, "precedent": 3, "example": 0,
+        "constraint": 73, "procedure": 73, "doctrine": 12, "rubric": 36,
+        "preference": 11, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
         not reviewed_errors and not reviewed_compile_errors
@@ -442,7 +451,7 @@ def main():
         "source_manifest_provenance": {
             "path": "audits/guidance-migration-manifest.v1.tsv", "sha256": "a" * 64,
             "manifest": "carr-guidance-migration", "schema_version": "1.0.0",
-            "source_classification": "judgment_ambient", "entry_count": 93,
+            "source_classification": "judgment_ambient", "entry_count": 90,
         },
         "base_inventory": {
             "path": "ops/config/rule-enforcement-map.json", "sha256": "b" * 64,
@@ -471,7 +480,13 @@ def main():
         # manifest entry_count above moves with the TSV that feeds it.
         # 217 -> 218 on 2026-08-23 with rule 3fa422b7, one compiled item.
         # 218 -> 219 on 2026-08-24 with rule 6cfb67f5, one compiled item.
-        and len(activation_manifest["entries"]) == 219
+        # 219 -> 208 on 2026-08-27 (WR-000019 rule-retirement batch): 11
+        # rules left the active set (no splits among them), one compiled
+        # item fewer each. Manifest entry_count above moves 93 -> 90 in the
+        # same change (3 of the 11 retired ids -- 006a7eaa, 8117b414,
+        # d367188d -- were judgment_ambient rows in the TSV; the other 8
+        # were built classes with no manifest row to begin with).
+        and len(activation_manifest["entries"]) == 208
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64
         and registry.activation_manifest_sha256(activation_manifest)

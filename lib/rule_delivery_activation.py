@@ -1,9 +1,14 @@
-"""Validated, policy-aware view of the nine rule-delivery activation changes.
+"""Validated, policy-aware view of the eight rule-delivery activation changes.
 
 The reviewed base map is pinned by the pending situation-curation review.  The
 activation decision therefore lives in a small overlay instead of rewriting
 that reviewed artifact.  Shadow mode returns the base map byte-for-byte in
-meaning; enforced mode changes only the exact reviewed nine controls.
+meaning; enforced mode changes only the exact reviewed eight controls.
+
+581cb3fe was one of the original nine reviewed ids until the WR-000019 batch
+retired it 2026-08-27 (superseded_by aa411351); it is no longer an active
+rule at all, so it dropped out of both EXPECTED_IDS and the checked-in
+overlay's targets in the same change that removed it from the map.
 """
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ REPO = Path(__file__).resolve().parent.parent
 MAP_PATH = REPO / "ops" / "config" / "rule-enforcement-map.json"
 OVERLAY_PATH = REPO / "ops" / "config" / "rule-delivery-activation-overlay.v1.json"
 EXPECTED_IDS = {
-    "25fcddee", "3fa17fa0", "72e06bdf", "581cb3fe", "113b3833",
+    "25fcddee", "3fa17fa0", "72e06bdf", "113b3833",
     "57d13061", "c66dc739", "49533583", "557838a5",
 }
 
@@ -43,8 +48,8 @@ def validate_overlay(base: dict[str, Any], overlay: dict[str, Any],
     if not isinstance(targets, list):
         return errors + ["overlay targets must be a list"]
     ids = [row.get("short_id") for row in targets if isinstance(row, dict)]
-    if len(targets) != 9 or set(ids) != EXPECTED_IDS or len(ids) != len(set(ids)):
-        errors.append("overlay must name the exact nine activation targets once each")
+    if len(targets) != 8 or set(ids) != EXPECTED_IDS or len(ids) != len(set(ids)):
+        errors.append("overlay must name the exact eight activation targets once each")
     scopes = {rid: scope for scope, rule_ids in base.get("active_rule_ids", {}).items()
               for rid in rule_ids}
     for row in targets:
