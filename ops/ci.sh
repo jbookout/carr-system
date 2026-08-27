@@ -1029,18 +1029,25 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
-  # Tour Operations Slice 2 carries database-owned rights, digest, seal, and
-  # ACL invariants that cannot be proved by a text-shape test. Run its
-  # transaction-scoped acceptance proof on the same disposable database after
-  # pending migrations apply; the proof rolls back every fixture row.
-  if [ -f mcp-server/test/tour-operations-slice2-postgres.sql ] &&
-     ! run_quiet "$LOGDIR/tour-operations-slice2-postgres.log" \
-       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
-       -f mcp-server/test/tour-operations-slice2-postgres.sql; then
-    tail -30 "$LOGDIR/tour-operations-slice2-postgres.log" >&2
-    bad migration "Tour Operations Slice 2 PostgreSQL acceptance failed"
-    return
-  fi
+  # Tour Operations carries database-owned rights, identity, route, digest,
+  # ACL, and append-only invariants that cannot be proved by text-shape tests.
+  # Run every slice's transaction-scoped acceptance proof on the same
+  # disposable database after pending migrations apply. Each proof rolls back
+  # every fixture row and must be independently green.
+  local tour_pg_proof tour_pg_log
+  for tour_pg_proof in \
+    mcp-server/test/tour-operations-slice2-postgres.sql \
+    mcp-server/test/tour-property-identity-jurisdiction-postgres.sql \
+    mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql; do
+    [ -f "$tour_pg_proof" ] || continue
+    tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
+    if ! run_quiet "$tour_pg_log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" -f "$tour_pg_proof"; then
+      tail -30 "$tour_pg_log" >&2
+      bad migration "Tour Operations PostgreSQL acceptance failed: $tour_pg_proof"
+      return
+    fi
+  done
 
   # THE GRANTS CANARY, added 2026-08-14. The snapshot is pg_dump --no-acl, so
   # for months this class built a database where the app roles existed and held
