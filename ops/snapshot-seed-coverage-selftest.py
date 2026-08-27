@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Paired suite for ops/snapshot-seed-coverage.py.
 
+REWRITTEN 2026-08-27 after an independent fresh-context review FAILED the first
+version on two blind spots this repository's own migrations already exercised:
+a function defined and then CALLED at migration time (its body was stripped as
+"runtime code"), and row-landing DML that is not the literal words INSERT INTO.
+Every gap that review named has a case below, and the two decisive ones have a
+case built from the real counterexample rather than a synthetic stand-in.
+
 PROVEN TO FAIL, NOT MERELY TO PASS. The check this exercises exists because five
 snapshot traps were each discovered days late by a db-gate in CI. A sixth-instance
 detector that only ever returns clean would be worse than nothing: it would read
@@ -189,6 +196,118 @@ def main():
                                                        "ops.run": "runtime records"}})
         case("a table named only in DDL prose or a function body is not 'carried'",
              module.check(repo, artifact(["0100_biz.sql"])) == [])
+
+        # ---------------------------------------------------------------- G1
+        # THE DECISIVE GAP. A migration defines a function whose body inserts, then
+        # CALLS it. The body is not runtime code here — it ran. Modelled on
+        # migrations/0247_system_rule_scope_binding.sql, which does exactly this and
+        # which the first version of the checker saw as empty.
+        called = ("create function ops.sync_bindings() returns void language plpgsql as $$\n"
+                  "begin\n  insert into ops.rule_control_binding (rule_id) values (1);\nend $$;\n"
+                  "revoke all on function ops.sync_bindings() from public;\n"
+                  "select ops.sync_bindings();\n")
+        repo = build_repo(tmp + "/g1", {"0100_called.sql": called},
+                          {"carried": {}, "excluded": {}})
+        found = module.check(repo, artifact(["0100_called.sql"]))
+        case("a function DEFINED AND CALLED at migration time has its inserts counted",
+             any("ops.rule_control_binding" in f for f in found))
+
+        # The same function, never called: its body is runtime code and must not count.
+        uncalled = ("create function ops.sync_bindings() returns void language plpgsql as $$\n"
+                    "begin\n  insert into ops.rule_control_binding (rule_id) values (1);\nend $$;\n"
+                    "revoke all on function ops.sync_bindings() from public;\n")
+        repo = build_repo(tmp + "/g1b", {"0100_uncalled.sql": uncalled},
+                          {"carried": {}, "excluded": {}})
+        case("a function DEFINED BUT NEVER CALLED does not count as a seed",
+             module.check(repo, artifact(["0100_uncalled.sql"])) == [])
+
+        # REVOKE/GRANT/COMMENT name a function without invoking it. Reading those as
+        # calls made an early draft report 88 seeded tables instead of the real 58.
+        case("REVOKE ON FUNCTION is not read as a call",
+             not any("ops.rule_control_binding" in f
+                     for f in module.check(repo, artifact(["0100_uncalled.sql"]))))
+
+        # Transitively: a called function calling another.
+        chained = ("create function ops.inner() returns void language plpgsql as $$\n"
+                   "begin\n  insert into ops.deep_table (k) values (1);\nend $$;\n"
+                   "create function ops.outer_fn() returns void language plpgsql as $$\n"
+                   "begin\n  perform ops.inner();\nend $$;\n"
+                   "select ops.outer_fn();\n")
+        repo = build_repo(tmp + "/g1c", {"0100_chain.sql": chained},
+                          {"carried": {}, "excluded": {}})
+        case("the called-function closure is transitive (called calls called)",
+             any("ops.deep_table" in f for f in module.check(repo, artifact(["0100_chain.sql"]))))
+
+        # ---------------------------------------------------------------- G2
+        for label, body, table in (
+            ("MERGE", "merge into ops.merged_table t using src s on t.k=s.k "
+                      "when not matched then insert (k) values (s.k);\n", "ops.merged_table"),
+            ("COPY ... FROM", "copy ops.copied_table (k, v) from stdin;\n1\tx\n\\.\n", "ops.copied_table"),
+            ("CREATE TABLE ... AS SELECT",
+             "create table ops.derived_table as select k from ops.source_table;\n", "ops.derived_table"),
+        ):
+            repo = build_repo(tmp + "/g2" + label[:4], {"0100_dml.sql": body},
+                              {"carried": {}, "excluded": {}})
+            case(f"{label} lands rows and is counted as a seed",
+                 any(table in f for f in module.check(repo, artifact(["0100_dml.sql"]))))
+
+        # TEMP tables vanish with the session and can never be in a snapshot. Thirteen
+        # migrations build them for before/after comparison; counting them is a pure
+        # false alarm, and a check that cries wolf gets switched off.
+        temp = ("create temp table _org_before as select id from party;\n"
+                "create temporary table lt_before as select id from lead;\n")
+        repo = build_repo(tmp + "/g2temp", {"0100_temp.sql": temp},
+                          {"carried": {}, "excluded": {}})
+        case("CREATE TEMP TABLE ... AS is NOT counted (scratch, never in a snapshot)",
+             module.check(repo, artifact(["0100_temp.sql"])) == [])
+
+        # ---------------------------------------------------------------- G5
+        repo = build_repo(tmp + "/g5", {"0100_seed.sql": seeding},
+                          {"carried": {}, "excluded": {"ops.widget": "runtime"}})
+        moved = artifact(["0100_seed.sql"]).replace(
+            LEDGER_HEADER, copy_block("public.actor", "(id, slug)") + LEDGER_HEADER, 1)
+        case("a COPY above the ledger refuses, because the data-region boundary moved",
+             any("DATA REGION BOUNDARY MOVED" in f for f in module.check(repo, moved)))
+
+        # ---------------------------------------------------------------- G6
+        repo = build_repo(tmp + "/g6", {"0100_seed.sql": seeding},
+                          {"carried": {}, "excluded": {"ops.widget": "runtime"}})
+        case("a ledger entry with no file on disk is reported, not silently skipped",
+             any("NOT ON DISK" in f for f in
+                 module.check(repo, artifact(["0100_seed.sql", "0999_renamed_away.sql"]))))
+
+        # ---------------------------------------------------------------- G3
+        repo = build_repo(tmp + "/g3", {"0100_seed.sql": seeding},
+                          {"carried": {}, "carried_subset": {"ops.widget": "program rows only"},
+                           "excluded": {},
+                           "carried_subset_must_not_contain": {
+                               "ops.widget": {"sourced captures": r'"ref":\s*"WR-0\d{5}"'}}})
+        clean = artifact(["0100_seed.sql"], [insert_block("ops.widget")])
+        case("a carried_subset table within its declared scope passes",
+             module.check(repo, clean) == [])
+        breached = artifact(["0100_seed.sql"], [
+            '-- CARR APPENDED BLOCK\ninsert into ops.widget select * from '
+            'jsonb_populate_record(null::ops.widget, \'{"ref": "WR-000017"}\'::jsonb);\n\n'])
+        case("a carried_subset render that widens past its scope refuses",
+             any("SCOPE BREACHED" in f for f in module.check(repo, breached)))
+        repo = build_repo(tmp + "/g3b", {"0100_seed.sql": seeding},
+                          {"carried": {"ops.widget": "x"}, "excluded": {},
+                           "carried_subset_must_not_contain": {"ops.widget": {"a": "b"}}})
+        try:
+            module.check(repo, artifact(["0100_seed.sql"], [copy_block("ops.widget")]))
+            case("a scope rule naming a non-subset table is rejected", False)
+        except ValueError:
+            case("a scope rule naming a non-subset table is rejected", True)
+
+        # ---------------------------------------------------------------- G7
+        repo = build_repo(tmp + "/g7", {"0100_seed.sql": seeding},
+                          {"carried": {"ops.widget": ""}, "excluded": {}})
+        try:
+            failures = module.check(repo, artifact(["0100_seed.sql"]))
+            case("a carried entry with an empty reason refuses cleanly, never tracebacks",
+                 any("DECLARED CARRIED BUT ABSENT" in f for f in failures))
+        except KeyError:
+            case("a carried entry with an empty reason refuses cleanly, never tracebacks", False)
 
         # --------------------------------------------------------------- 9b
         # carried_subset: a table carried IN PART by a scoped render. It must be
