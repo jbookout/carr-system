@@ -3,8 +3,6 @@
 -- ledgers.  This migration creates no graph, task, finding, or evidence store
 -- and activates no Production behavior.
 
-begin;
-
 create or replace function ops.siep_evidence_node_digest(p_row jsonb)
 returns text language sql immutable security definer
 set search_path=pg_catalog,ops,public
@@ -550,5 +548,3 @@ begin
     raise exception 'public retained SIEP evidence digest helper execution';
   end if;
 end $$;
-
-commit;

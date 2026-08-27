@@ -3,7 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 
 const migration = fs.readFileSync(
-  new URL("../../migrations/0328_siep06a_evidence_graph.sql", import.meta.url),
+  new URL("../../migrations/0337_siep06a_evidence_graph.sql", import.meta.url),
   "utf8",
 );
 const gate = fs.readFileSync(
@@ -11,7 +11,7 @@ const gate = fs.readFileSync(
   "utf8",
 );
 
-test("0328 is a projection over canonical ledgers, never a shadow graph", () => {
+test("0337 is a projection over canonical ledgers, never a shadow graph", () => {
   assert.match(migration, /create or replace function ops\.siep_read_evidence_graph\(p_component text default null\)/);
   assert.match(migration, /language plpgsql stable security definer/);
   assert.match(migration, /set search_path=pg_catalog,ops,public/);
@@ -20,7 +20,7 @@ test("0328 is a projection over canonical ledgers, never a shadow graph", () => 
   assert.match(migration, /must not create a physical evidence graph/);
 });
 
-test("0328 traverses the exact package-bound engineering and decision lineage", () => {
+test("0337 traverses the exact package-bound engineering and decision lineage", () => {
   for (const relation of [
     "ops.siep_evidence_link",
     "ops.siep_job_evidence_binding",
@@ -44,7 +44,7 @@ test("0328 traverses the exact package-bound engineering and decision lineage", 
   assert.match(migration, /ops\.siep_current_approval/);
 });
 
-test("0328 returns deterministic redacted graph material and reasoned currentness", () => {
+test("0337 returns deterministic redacted graph material and reasoned currentness", () => {
   assert.match(migration, /siep-evidence-graph\.v1/);
   assert.match(migration, /graph_digest/);
   assert.match(migration, /edge_digest/);
@@ -79,7 +79,7 @@ test("0328 returns deterministic redacted graph material and reasoned currentnes
   assert.match(migration, /structural_invalid_link_count/);
 });
 
-test("0328 exposes read authority only to existing runtime bundles", () => {
+test("0337 exposes read authority only to existing runtime bundles", () => {
   assert.match(migration, /revoke all on function ops\.siep_read_evidence_graph\(text\)\s+from public,carr_reader,carr_writer,carr_jobs,carr_authority/);
   assert.match(migration, /grant execute on function ops\.siep_read_evidence_graph\(text\)\s+to carr_reader,carr_writer,carr_jobs,carr_authority/);
   assert.match(migration, /revoke all on function ops\.siep_evidence_node_digest\(jsonb\)/);
