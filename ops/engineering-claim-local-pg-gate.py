@@ -750,6 +750,14 @@ def main() -> int:
                 """update ops.job set next_attempt_at=now()+interval '1 day'
                      where definition_key<>'engineering-slice' and state in ('queued','retry_wait')"""
             )
+            # The supported wrapper reruns this gate after DB programs that may
+            # commit their own eligible Engineering fixtures. Make this
+            # rollback-only happy path unambiguously first without changing
+            # runtime privileges or production queue ordering.
+            cur.execute(
+                "update ops.job set scheduled_for=now()-interval '100 years' where id=%s",
+                (job_id,),
+            )
             set_local_role(cur, RUNTIME_ROLE)
             if one(cur, "select has_table_privilege(current_user,'ops.job','UPDATE')")[0]:
                 return fail("carr_jobs gained direct UPDATE on ops.job")
@@ -774,7 +782,7 @@ def main() -> int:
                 ("engineering-claim-local-acceptance",),
             )
             if claimed[0] != job_id or not isinstance(claimed[1], uuid.UUID) or claimed[2:] != ("engineering-slice", 1):
-                return fail("claim did not return the exact eligible Engineering job and lease")
+                return fail(f"claim did not return the exact eligible Engineering job and lease: {claimed!r}")
             if one(cur, "select state,attempt,lease_owner,lease_token=%s,leased_until>now() from ops.job where id=%s", (claimed[1], job_id)) != (
                     "running", 1, "engineering-claim-local-acceptance", True, True):
                 return fail("claim did not persist one exact running job lease")
