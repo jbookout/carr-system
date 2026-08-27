@@ -45,6 +45,22 @@ PREDICATES = {"facts.all_true": _all_true}
 PROPOSAL_GUARDS = {"weekly_social_no_quote_tweets"}
 
 
+class EntrypointFailure(RuntimeError):
+    """A deterministic entrypoint child exited nonzero.
+
+    Carries the bounded, already-redacted stdout/stderr tails as structured
+    fields so a caller can put them INTO stored failure/dead-letter evidence,
+    instead of losing them to a generic exception's flat ``str(exc)`` cap
+    (rule 1f3a7372: an unattended run must record what it FOUND).
+    """
+
+    def __init__(self, returncode: int, *, stdout_tail: str, stderr_tail: str):
+        super().__init__(f"entrypoint exited {returncode}")
+        self.returncode = returncode
+        self.stdout_tail = stdout_tail
+        self.stderr_tail = stderr_tail
+
+
 def deterministic_args(execution: dict[str, Any], mode: str) -> list[str]:
     """Return the registered command arguments for one deterministic mode.
 

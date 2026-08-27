@@ -35,7 +35,8 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from lib.control_plane import deterministic_args, resolve_auto_mode, validate_manifest  # noqa: E402
+from lib.control_plane import (EntrypointFailure, deterministic_args, resolve_auto_mode,
+                               validate_manifest)  # noqa: E402
 from pipelines.availability_matcher import canary_report  # noqa: E402
 from lib.control_plane_content_fuel import (ContentFuelContractError,
                                             validate_content_fuel_proposal,
@@ -49,6 +50,7 @@ from lib.control_plane_runtime_collectors import RuntimeCanonicalEvidenceCollect
 from lib.control_plane_scheduler_cutover import (CutoverRefusal, scheduler_launchd_rows,
                                                   scheduler_provider_rows,
                                                   scheduler_surface_rows)  # noqa: E402
+from lib.secret_redaction import redacted_tail, sensitive_env_values  # noqa: E402
 
 MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
 SCHEDULER_CUTOVER_REGISTRY_PATH = REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json"
@@ -1007,7 +1009,15 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
     proc = subprocess.run([str(path), *args], cwd=REPO, env=env,
                           input=stdin_text, capture_output=True, text=True, timeout=timeout)
     if proc.returncode:
-        raise RuntimeError(f"entrypoint exited {proc.returncode}")
+        # The child ran uncredentialed (see the env build above), but its
+        # stdout/stderr can still ECHO a secret from a misconfigured call or a
+        # stack trace. known_secrets draws on THIS process's own environment
+        # -- the runner's -- not the child's deliberately-scrubbed one.
+        known_secrets = sensitive_env_values(os.environ)
+        raise EntrypointFailure(
+            proc.returncode,
+            stdout_tail=redacted_tail(proc.stdout, known_secrets=known_secrets),
+            stderr_tail=redacted_tail(proc.stderr, known_secrets=known_secrets))
     return {"entrypoint": execution["entrypoint"], "mode": mode,
             "args": args, "exit_code": proc.returncode,
             "stdout_tail": proc.stdout[-2000:]}
@@ -1217,6 +1227,22 @@ def _post_execution_facts(
         input_payload=input_payload, mode=claim["mode"], **receipt)
 
 
+def _failure_detail(exc: Exception) -> str:
+    """Text stored as ``ops.fail_job``'s ``p_detail`` -- and therefore inside
+    the failure/dead-letter receipt's evidence jsonb.
+
+    An EntrypointFailure carries its own bounded, already-redacted stdout and
+    stderr tails; encode them as JSON so they LAND in the receipt instead of
+    being silently dropped by the flat 1000-character cap every other
+    exception keeps (rule 1f3a7372: a failure receipt that cannot say why is
+    the defect).
+    """
+    if isinstance(exc, EntrypointFailure):
+        return json.dumps({"message": str(exc), "stdout_tail": exc.stdout_tail,
+                           "stderr_tail": exc.stderr_tail}, sort_keys=True)
+    return str(exc)[:1000]
+
+
 def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> dict[str, Any]:
     with connect() as conn, conn.cursor() as cur:
         if mode is None:
@@ -1402,7 +1428,7 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
                                      (job_id,lease,str(exc)[:1000]))
                 else:
                     fail_cur.execute("select ops.fail_job(%s,%s,%s,%s)",
-                                     (job_id,lease,type(exc).__name__,str(exc)[:1000]))
+                                     (job_id,lease,type(exc).__name__,_failure_detail(exc)))
                 state = fail_cur.fetchone()[0]
             conn.commit()
             return {"claimed":1,"job_id":str(job_id),"state":state,
