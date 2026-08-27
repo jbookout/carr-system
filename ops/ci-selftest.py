@@ -659,6 +659,53 @@ def test_mypy_pin_acceptance_is_narrow():
           "the constant and the pin must move together, or the acceptance is a guess")
 
 
+def test_every_test_file_in_the_tree_is_collected():
+    """A test the collector's glob does not match is not a passing test — it is
+    no test at all, and it sits in the tree looking exactly like coverage.
+
+    ops/ci.sh collects with shell globs, and those globs have been narrower than
+    the tree twice. Shell tests under tools/ were "collected by nobody and
+    executed by nothing" until a second loop was added for them. Then three
+    underscore-named Python tests — test_validate_exact_recovery_source,
+    test_staging_recovery_rehearsal and test_displacement_turn_filter — never
+    executed once between being committed and 2026-08-27, because the Python
+    loop globbed only tools/test-*.py.
+
+    Renaming those three would fix the files that exist today and leave the trap
+    armed: test_foo.py is what pytest's own default convention produces, so the
+    next one arrives by habit. This asserts the invariant instead — every
+    test-shaped file in the tree is matched by some loop in ci.sh — so the glob
+    and the tree cannot drift apart again without a red run saying so.
+
+    Deliberately derived from ci.sh's source rather than restating its patterns
+    here: a copy of the globs would be a second contract to keep in sync, which
+    is the same failure one level up."""
+    ci = (REPO / "ops" / "ci.sh").read_text()
+    patterns: list[str] = []
+    for m in re.finditer(r"for t in ([^;]+); do", ci):
+        patterns += m.group(1).split()
+    check("ci.sh's selftest collection globs are readable from source",
+          len(patterns) >= 2, f"found: {patterns}")
+    if not patterns:
+        return
+
+    collected = set()
+    for pat in patterns:
+        collected |= {p.relative_to(REPO).as_posix() for p in REPO.glob(pat)}
+
+    # What any reader of the tree would call a test, in either naming style.
+    on_disk = {p.relative_to(REPO).as_posix() for p in (
+        list((REPO / "tools").glob("test[-_]*.py"))
+        + list((REPO / "tools").glob("test[-_]*.sh"))
+        + list((REPO / "ops").glob("*[-_]selftest.py")))}
+    check("the tree still contains test files to collect", on_disk,
+          "an empty set would make the assertion below vacuously true")
+
+    missed = sorted(on_disk - collected)
+    check("every test file in the tree is collected by a loop in ci.sh",
+          not missed, f"never executed: {', '.join(missed)}")
+
+
 def test_gates_treats_only_78_as_not_configured():
     """Exit 78 in the gates loop must mean "not configured", and nothing else.
 
@@ -755,6 +802,7 @@ def main():
                test_known_gaps_all_expire,
                test_no_env_claims_a_production_hostname,
                test_mypy_pin_acceptance_is_narrow,
+               test_every_test_file_in_the_tree_is_collected,
                test_gates_treats_only_78_as_not_configured,
                test_gates_selftests_have_a_process_group_watchdog):
         try:
