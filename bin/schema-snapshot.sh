@@ -1150,6 +1150,28 @@ then
   exit 1
 fi
 
+# THE NAMED AGENT PROFILE ROSTER — the eighth instance, and the second found by
+# the classification being WRONG rather than silent. It sat excluded on the claim
+# that its readers tolerate an empty set. They do not: bot-brief throws
+# profile_not_found and its hint says "new profiles are a migration", and nothing
+# inserts the table at runtime — agent-profiles.js only UPDATEs. A rebuild
+# without these rows fails the bot brief for every named profile.
+cat >> "$TMP" <<'AGENT_PROFILE_HEADER'
+
+-- CARR NAMED AGENT PROFILES (bin/schema-snapshot.sh) — the seeded roster. No
+-- runtime path creates these; a rebuild without them breaks the bot brief.
+AGENT_PROFILE_HEADER
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'AGENT_PROFILE_ROWS'
+select format(
+  'insert into agent_profile select * from jsonb_populate_record(null::agent_profile, %L::jsonb) on conflict (profile_key) do nothing;',
+  to_jsonb(p)) from agent_profile p order by p.profile_key;
+AGENT_PROFILE_ROWS
+then
+  echo "schema-snapshot: could not render the named agent profiles — nothing written" >&2
+  exit 1
+fi
+
 # THE SIXTH INSTANCE WAS CAUGHT BY HAND; THE SEVENTH IS CAUGHT HERE. Every block
 # above this line was written one at a time, each after a database rebuilt from
 # this file failed a db-gate days later: the role preamble, the control catalog,

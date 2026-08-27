@@ -177,9 +177,19 @@ def scan_sql(sql):
                 else:
                     i += 1
             top.append(" ")
-        elif ch == "'":                                           # string literal, '' escapes
+        elif ch == "'":                                           # string literal
+            # E'...' takes BACKSLASH escapes; a plain literal does not (server
+            # default standard_conforming_strings). Knowing only the '' form let
+            # E'the reviewer\\'s registry' end the literal at the escaped quote, so
+            # the rest of the migration was read inside-out and a plainly top-level
+            # INSERT went unreported. That is the apostrophe class of R4 one escape
+            # form over, and it swallowed real DML rather than only a call.
+            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", "".join(top)))
             i += 1
             while i < n:
+                if escaped and sql[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
                 if sql[i] == "'":
                     if sql.startswith("''", i):
                         i += 2
@@ -200,8 +210,14 @@ def scan_sql(sql):
                 top.append(sql[i:])
                 break
             body = sql[match.end():end]
-            previous = re.search(r"([A-Za-z_]+)\s*$", "".join(top))
+            head = "".join(top)
+            previous = re.search(r"([A-Za-z_]+)\s*$", head)
             keyword = previous.group(1).lower() if previous else ""
+            # `do language plpgsql $$ ... $$` is the same statement as `do $$ ... $$`.
+            # Matching only the bare word left the body blanked as a string literal
+            # and the block invisible.
+            if keyword != "do" and re.search(r"(?:^|;|\s)do\s+language\s+[a-z_]+\s*$", head, re.I):
+                keyword = "do"
             if keyword == "as":
                 headers = list(CREATE_ROUTINE.finditer("".join(top)))
                 if headers:
@@ -320,9 +336,14 @@ def check_region_boundary(artifact):
     # those as data made this check refuse every real snapshot.
     prefix = artifact[:ledger.start()]
     prefix_top, _do_bodies, _routines = scan_sql(prefix)
+    # NOT anchored to the start of a line. Data above the ledger is data wherever
+    # it sits on the line, and the anchor bought nothing: with it and without it the
+    # real artifact is equally clean, so all it did was give a mutation somewhere to
+    # hide. Literals and comments are already gone from prefix_top, so a table merely
+    # NAMED in prose cannot reach here.
     candidates = []
     for pattern in WRITES_ANYWHERE:
-        candidates.append(re.search(r"^\s*" + pattern.pattern, prefix_top, pattern.flags | re.M))
+        candidates.append(re.search(pattern.pattern, prefix_top, pattern.flags | re.M))
     first = min((c for c in candidates if c), key=lambda c: c.start(), default=None)
     if first:
         return (f"DATA REGION BOUNDARY MOVED: the first data statement in the artifact is "

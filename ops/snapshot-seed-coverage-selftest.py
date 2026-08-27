@@ -497,6 +497,108 @@ def main():
         case("adjacent string literals do not shift every boundary after them",
              any("ops.adjacent" in f for f in module.check(repo, artifact(["0100_adj.sql"]))))
 
+        # ---------------------------------------------------------------- R6
+        # E'...' TAKES BACKSLASH ESCAPES; a plain literal does not. Knowing only the
+        # doubled-quote form ended the literal at the escaped quote and read the rest
+        # of the migration inside-out, silencing a plainly top-level INSERT. R4's
+        # apostrophe class, one escape form over, and worse: it swallowed real DML
+        # rather than only a call.
+        repo = build_repo(tmp + "/r6esc",
+                          {"0100_e.sql": "comment on table t is E'the reviewer\\'s registry';\n"
+                                         "insert into ops.new_registry (k) values (1);\n"},
+                          {"carried": {}, "excluded": {}})
+        case("an E-string with a backslash-escaped quote does not silence the migration",
+             any("ops.new_registry" in f for f in module.check(repo, artifact(["0100_e.sql"]))))
+        # A backslash in an ORDINARY literal is a plain character, not an escape.
+        repo = build_repo(tmp + "/r6esc2",
+                          {"0100_p.sql": "comment on table t is 'a plain \\ backslash';\n"
+                                         "insert into ops.plain_after (k) values (1);\n"},
+                          {"carried": {}, "excluded": {}})
+        case("a backslash in an ordinary literal is not read as an escape",
+             any("ops.plain_after" in f for f in module.check(repo, artifact(["0100_p.sql"]))))
+
+        # `do language plpgsql $$ … $$` is the same statement as `do $$ … $$`.
+        repo = build_repo(tmp + "/r6do",
+                          {"0100_d.sql": "do language plpgsql $$\nbegin\n"
+                                         "  insert into ops.other_registry (k) values (1);\nend $$;\n"},
+                          {"carried": {}, "excluded": {}})
+        case("DO LANGUAGE plpgsql is recognised as a DO block, not a string literal",
+             any("ops.other_registry" in f for f in module.check(repo, artifact(["0100_d.sql"]))))
+
+        # NOT equivalent after all. A previous revision of this suite argued that
+        # consuming one character past a closing quote could not be distinguished,
+        # and that was WRONG: when the next character opens a block comment, the
+        # mutant reads the comment's contents as code.
+        repo = build_repo(tmp + "/r6bnd",
+                          {"0100_g.sql": "select 'x'/* insert into ops.ghost_block (k) values (1); */\n"
+                                         "insert into ops.real_one (k) values (1);\n"},
+                          {"carried": {}, "excluded": {"ops.real_one": "runtime"}})
+        case("a block comment opening right after a closing quote stays a comment",
+             module.check(repo, artifact(["0100_g.sql"])) == [])
+
+        # Expression-level branches a wider sweep than ours found unpinned. Each was
+        # confirmed to change the answer before its case was written.
+        repo = build_repo(tmp + "/r6q",
+                          {"0100_q.sql": 'insert into "ops"."quoted_ident" (k) values (1);\n'},
+                          {"carried": {}, "excluded": {"ops.quoted_ident": "runtime"}})
+        case("a double-quoted identifier is normalised to the same table as a bare one",
+             module.check(repo, artifact(["0100_q.sql"])) == [])
+
+        repo = build_repo(tmp + "/r6up",
+                          {"0100_u.sql": "INSERT INTO OPS.UPPER_TABLE (K) VALUES (1);\n"},
+                          {"carried": {}, "excluded": {"ops.upper_table": "runtime"}})
+        case("an UPPERCASE table name folds to the same entry as a lowercase one",
+             module.check(repo, artifact(["0100_u.sql"])) == [])
+
+        # A dollar-quoted STRING (not a routine body, not a DO block) is a literal.
+        # Failing to blank it reads its contents as code.
+        repo = build_repo(tmp + "/r6ds",
+                          {"0100_ds.sql": "select $tag$ insert into ops.ghost_dollar (k) values (1); $tag$;\n"
+                                          "insert into ops.real_dollar (k) values (1);\n"},
+                          {"carried": {}, "excluded": {"ops.real_dollar": "runtime"}})
+        case("a dollar-quoted string literal is blanked, not read as code",
+             module.check(repo, artifact(["0100_ds.sql"])) == [])
+
+        # A routine whose short name is a substring of another must not be dragged
+        # in by the longer one's call.
+        subs = ("create function ops.sync() returns void language plpgsql as $$\n"
+                "begin\n  insert into ops.short_one (k) values (1);\nend $$;\n"
+                "create function ops.sync_all() returns void language plpgsql as $$\n"
+                "begin\n  insert into ops.long_one (k) values (1);\nend $$;\n"
+                "select ops.sync_all();\n")
+        repo = build_repo(tmp + "/r6sub", {"0100_s.sql": subs}, {"carried": {}, "excluded": {}})
+        found = module.check(repo, artifact(["0100_s.sql"]))
+        case("calling the longer routine does not drag in the one whose name it contains",
+             any("ops.long_one" in f for f in found) and not any("ops.short_one" in f for f in found))
+
+        # Whitespace is legal around the schema separator.
+        repo = build_repo(tmp + "/r6sp",
+                          {"0100_sp.sql": "insert into ops . spaced_table (k) values (1);\n"},
+                          {"carried": {}, "excluded": {"ops.spaced_table": "runtime"}})
+        case("whitespace around the schema separator folds to the same table",
+             module.check(repo, artifact(["0100_sp.sql"])) == [])
+
+        # The routine-body keyword is matched case-insensitively: AS and DO are
+        # spelled either way in this corpus.
+        repo = build_repo(tmp + "/r6kw",
+                          {"0100_kw.sql": "CREATE FUNCTION ops.f() RETURNS void LANGUAGE plpgsql AS $$\n"
+                                          "BEGIN\n  insert into ops.upper_kw (k) values (1);\nEND $$;\n"
+                                          "SELECT ops.f();\n"},
+                          {"carried": {}, "excluded": {}})
+        case("an uppercase AS still introduces a routine body",
+             any("ops.upper_kw" in f for f in module.check(repo, artifact(["0100_kw.sql"]))))
+
+        # The boundary check anchors to the start of a line. Without that anchor a
+        # table merely NAMED mid-line above the ledger reads as data and every real
+        # snapshot refuses.
+        repo = build_repo(tmp + "/r6anc", {"0100_seed.sql": seeding},
+                          {"carried": {}, "excluded": {"ops.widget": "runtime"}})
+        midline = artifact(["0100_seed.sql"]).replace(
+            "COMMENT ON FUNCTION",
+            "COMMENT ON TABLE public.client IS 'see insert into public.client for the pattern';\nCOMMENT ON FUNCTION", 1)
+        case("a table named mid-line above the ledger is not read as data",
+             module.check(repo, midline) == [])
+
         # ------------------------------------------------------- SWEEP RESIDUE
         # Found by a mutation sweep over the whole module rather than over the last
         # fix: these two branches could be broken with the entire suite still green.
@@ -527,6 +629,19 @@ def main():
 
         repo_bad = build_repo(tmp + "/mainbad", {"0100_seed.sql": seeding},
                               {"carried": {}, "excluded": {}})
+        # main() FAILING OPEN is the whole risk: bin/schema-snapshot.sh tests only
+        # the exit status, so a zero from the could-not-run path writes the file
+        # when the check never ran. A malformed classification is the cheapest way
+        # to reach that path.
+        broken = build_repo(tmp + "/mainbroken", {"0100_seed.sql": seeding},
+                            {"carried": {"ops.widget": "x"}, "excluded": {"ops.widget": "y"}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc_broken = module.main(["prog", broken, path_clean])
+        case("main() returns NON-ZERO when the check could not run at all",
+             rc_broken != 0)
+        case("main() says why it could not run", "could not run" in err.getvalue())
+
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc_bad = module.main(["prog", repo_bad, path_clean])

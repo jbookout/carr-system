@@ -23,6 +23,7 @@
   "carried": {
     "activity_kind": "closed vocabulary, foreign-key target; bounded vocabulary pg_dump",
     "actor": "internal actor identities (joe, dell, system, automation) that events point at",
+    "agent_profile": "A MIGRATION-SEEDED REGISTRY WITH NO RUNTIME WRITER, and the earlier reason here was wrong on the facts. 0284 seeds the named profiles; nothing inserts the table at runtime — mcp-server/src/agent-profiles.js only UPDATEs, and mcp-server/src/bot-brief.js THROWS profile_not_found when a profile is missing, its own hint saying 'new profiles are a migration'. The previous entry claimed that file tolerates an empty set, which it does not. A rebuild without these rows makes the bot brief fail for every named profile. Read before carrying: profile_key, display_name, a charter of role sentences, status — no client, party, deal or event content. Loud rather than silent, unlike the doctrine registry, but the same wrong-premise shape",
     "client_status": "closed vocabulary; client.status is a foreign key to it",
     "client_type": "closed vocabulary, foreign-key target",
     "contact_state": "closed vocabulary, foreign-key target",
@@ -62,7 +63,6 @@
     "ops.work_request": "CARRIED IN PART, SIEP program rows only: the ops.work_request rows that ops.siep_package_contract.work_request_id points at, restored by the SIEP manifest block in bin/schema-snapshot.sh with the insert guards and seals disabled for the restore and the manifest digest asserted afterwards. Those rows are internal program configuration created by 0324's own literal package list: requester and owner 'joe', no client, party, deal, event, doctrine or credential reference, and their only outbound foreign key is public.actor, which this snapshot already carries. NEVER the sourced captures (WR-000001 onward) - those are operational history."
   },
   "excluded": {
-    "agent_profile": "0284 seeds three unstaffed profiles (builder, designer, reviewer). Three consumers read the table — ops/evidence-activation-db-gate.py, which upserts its own row rather than reading the seed, and mcp-server/src/agent-profiles.js and mcp-server/src/bot-brief.js, which read profiles for display and tolerate an empty set. No gate asserts the seeded three exist. Excluded on that basis rather than on the single-consumer premise the first version of this file recorded.",
     "agent_profile_assignment": "0284's only migration-time insert is an immutability probe; assignments are made at runtime by a ruling, not seeded",
     "campaign": "marketing campaign records — business data",
     "client": "client records — the business data this snapshot exists to keep out of git",
