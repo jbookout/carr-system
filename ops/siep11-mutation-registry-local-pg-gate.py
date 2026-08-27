@@ -114,12 +114,14 @@ def main() -> int:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             catalog = summarize(project(cur))
             successor = cur.execute(
-                "select catalog_projection from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v2'"
+                """select registry_version,catalog_projection from ops.scac_mutation_registry_version
+                    where registry_version>'scac-mutation-registry.v1'
+                    order by registry_version desc limit 1"""
             ).fetchone()
             expected_categories = EXPECTED_CATALOG["categories"] if successor is None else {
-                "secdef_execute": successor[0]["secdef_execute"],
-                "relation_dml": successor[0]["relation_dml"],
-                "column_dml": successor[0]["column_dml"],
+                "secdef_execute": successor[1]["secdef_execute"],
+                "relation_dml": successor[1]["relation_dml"],
+                "column_dml": successor[1]["column_dml"],
                 "job_definitions": EXPECTED_CATALOG["categories"]["job_definitions"],
             }
             if catalog["categories"] != expected_categories:
@@ -133,7 +135,8 @@ def main() -> int:
                     where registry_version='scac-mutation-registry.v1'"""
             ).fetchone()
             digest = version[0]
-            runtime_version = "scac-mutation-registry.v2" if successor is not None else "scac-mutation-registry.v1"
+            runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
+            lookup_function = "ops.scac_mutation_registration_v3" if runtime_version == "scac-mutation-registry.v3" else "ops.scac_mutation_registration_v2"
             runtime_digest = cur.execute(
                 "select registry_digest from ops.scac_mutation_registry_version where registry_version=%s",
                 (runtime_version,),
@@ -246,17 +249,17 @@ def main() -> int:
             for role in ("carr_reader", "carr_writer", "carr_jobs", "carr_authority"):
                 set_local_role(cur, role)
                 answer = cur.execute(
-                    "select ops.scac_mutation_registration_v2(%s,%s)",
+                    f"select {lookup_function}(%s,%s)",
                     (runtime_digest, "mcp-tool:add-loop"),
                 ).fetchone()[0]
                 if answer.get("registered") is not True or answer.get("atomic_database_mediation_operational") is not False:
                     raise RuntimeError(f"{role} did not receive bounded safe registry readback")
                 unknown = cur.execute(
-                    "select ops.scac_mutation_registration_v2(%s,%s)",
+                    f"select {lookup_function}(%s,%s)",
                     (runtime_digest, "mcp-tool:not-reviewed"),
                 ).fetchone()[0]
                 mismatch = cur.execute(
-                    "select ops.scac_mutation_registration_v2(%s,%s)",
+                    f"select {lookup_function}(%s,%s)",
                     ("sha256:" + "0" * 64, "mcp-tool:add-loop"),
                 ).fetchone()[0]
                 if unknown != {"reason": "unknown_ingress", "registered": False,

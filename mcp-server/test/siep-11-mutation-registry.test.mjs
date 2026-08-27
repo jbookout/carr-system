@@ -13,15 +13,15 @@ import {
   mcpInventory,
   parsePlistXml,
   registryDigest,
-  REGISTRY_V2_VERSION,
+  REGISTRY_V3_VERSION,
   renderMigration,
   renderRuntimeProjection,
-  renderSuccessorRegistrySql,
+  renderSIEP13RegistrySql,
+  SIEP13_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
   validateLaunchdAuthorityCatalogs,
   workflowDefinitionInventory,
 } from "../../ops/scac-mutation-inventory.mjs";
-import { renderPolicyEpochMigration } from "../../ops/scac-policy-epoch-sql.mjs";
 import {
   assertClosedTopLevel,
   assertRegisteredOperation,
@@ -39,6 +39,10 @@ const generatedV2 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v2.generated.js", import.meta.url), "utf8");
 const successorMigration = fs.readFileSync(
   new URL("../../migrations/0339_siep12_policy_epoch.sql", import.meta.url), "utf8");
+const generatedV3 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v3.generated.js", import.meta.url), "utf8");
+const v3Migration = fs.readFileSync(
+  new URL("../../migrations/0341_siep13_forward_mutation_registry.sql", import.meta.url), "utf8");
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory();
@@ -54,21 +58,26 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   assert.equal(new Set(rows.map(row => row.schema_digest)).has(undefined), false);
 });
 
-test("sealed v1 stays historical while live source and DB projections advance exactly to v2", () => {
+test("sealed v1/v2 stay historical while live source and DB projections advance exactly to v3", () => {
   const rows = fullInventory();
   assert.equal(crypto.createHash("sha256").update(migration).digest("hex"),
     "b8e6f76ab926eae7cc2ee64a9505be7fa4d65837c48a9bcf4c040c6dad6fc714");
   assert.match(generated,
     /SCAC_MUTATION_REGISTRY_DIGEST = "d821ab892e4f9aeb97c4dfc040fd9e072c5d009685b1521fd463cc8268df5038"/);
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV2.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+    JSON.parse(generatedV3.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
   assert.match(generated, /SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry\.v1"/);
-  assert.equal(generatedV2, renderRuntimeProjection(rows, {
-    version: REGISTRY_V2_VERSION, dbCatalogBaseline: SIEP12_DB_CATALOG_BASELINE,
+  assert.equal(crypto.createHash("sha256").update(successorMigration).digest("hex"),
+    "23cc10c2074afea130142486c131eef6096d55e36bd3cbb1fc52e0c67a6daaeb");
+  assert.equal(crypto.createHash("sha256").update(generatedV2).digest("hex"),
+    "8775f50745dacd234a0b399ab705404abb65fddd4b29fbea55f8f0d3e753f1af");
+  assert.equal(generatedV3, renderRuntimeProjection(rows, {
+    version: REGISTRY_V3_VERSION, dbCatalogBaseline: SIEP13_DB_CATALOG_BASELINE,
   }));
-  assert.equal(successorMigration, renderPolicyEpochMigration(renderSuccessorRegistrySql(rows)));
+  assert.equal(v3Migration, renderSIEP13RegistrySql(rows));
   assert.match(successorMigration, /scac-mutation-registry\.v1/);
   assert.match(successorMigration, /scac-mutation-registry\.v2/);
+  assert.match(v3Migration, /scac-mutation-registry\.v3/);
 });
 
 test("unknown, changed, and open operation contracts refuse deterministically", async () => {
@@ -119,7 +128,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 491);
+  assert.equal(rows.length, 492);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -127,7 +136,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 482);
+  assert.equal(scripts.length, 483);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);

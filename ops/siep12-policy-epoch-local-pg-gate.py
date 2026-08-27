@@ -149,15 +149,18 @@ def main() -> int:
             ).fetchone()
             if v2 is None or v2[0] != expected_v2 or any(v2[4:]):
                 raise RuntimeError(f"v2 registry is missing, drifted, or authority-expanding: {v2!r}")
+            current_projection = cur.execute(
+                "select catalog_projection from ops.scac_mutation_registry_version order by registry_version desc limit 1"
+            ).fetchone()[0]
             catalog = summarize(project(cur))
             role_authority = project_role_authority(cur)
-            if {key: role_authority[key] for key in ("count", "digest")} != v2[3]["role_authority"]:
-                raise RuntimeError(f"live DB role authority differs from sealed v2: {role_authority!r}")
+            if {key: role_authority[key] for key in ("count", "digest")} != current_projection["role_authority"]:
+                raise RuntimeError(f"live DB role authority differs from current sealed registry: {role_authority!r}")
             expected_catalog = {
                 "categories": {
-                    "secdef_execute": v2[3]["secdef_execute"],
-                    "relation_dml": v2[3]["relation_dml"],
-                    "column_dml": v2[3]["column_dml"],
+                    "secdef_execute": current_projection["secdef_execute"],
+                    "relation_dml": current_projection["relation_dml"],
+                    "column_dml": current_projection["column_dml"],
                     "job_definitions": {
                         "count": 26,
                         "digest": "sha256:77f78187fa6c79c864ae6f33d8ac53ca983fbfc62d6eddf824373f26afb67407",
@@ -166,12 +169,21 @@ def main() -> int:
                 "combined": catalog["combined"],
             }
             if catalog["categories"] != expected_catalog["categories"]:
-                raise RuntimeError(f"live DB capability census differs from sealed v2: {catalog!r}")
+                raise RuntimeError(f"live DB capability census differs from current sealed registry: {catalog!r}")
             lookup = cur.execute(
                 "select ops.scac_mutation_registration_v2(%s,'mcp-tool:standing-context')", (expected_v2,)
             ).fetchone()[0]
             if not lookup["registered"] or lookup["registry_version"] != "scac-mutation-registry.v2":
-                raise RuntimeError(f"exact v2 lookup refused the sealed registry: {lookup!r}")
+                v2_integrity = cur.execute(
+                    """select v.entry_count,count(e.*),v.entry_set_digest,
+                              'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key),''),'UTF8'),'sha256'),'hex'),
+                              coalesce(bool_or(e.entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex')),false)
+                         from ops.scac_mutation_registry_version v
+                         left join ops.scac_mutation_registry_entry e on e.registry_version=v.registry_version
+                        where v.registry_version='scac-mutation-registry.v2'
+                        group by v.entry_count,v.entry_set_digest"""
+                ).fetchone()
+                raise RuntimeError(f"exact v2 lookup refused the sealed registry: {lookup!r}; integrity={v2_integrity!r}")
             downgrade = cur.execute(
                 "select ops.scac_mutation_registration_v2(%s,'mcp-tool:standing-context')", (V1_DIGEST,)
             ).fetchone()[0]
@@ -198,8 +210,9 @@ def main() -> int:
                 raise RuntimeError(f"empty reconstructed policy did not fail closed: {unavailable!r}")
             seed_reviewed_rule_projection(cur)
             current = cur.execute("select epoch,epoch_digest,schema_highest_migration from ops.scac_policy_epoch").fetchone()
-            if current is None or current[0] != 1 or current[2] != "0339_siep12_policy_epoch.sql":
-                raise RuntimeError(f"reviewed rule projection did not bootstrap exact epoch 1: {current!r}")
+            highest_schema = cur.execute("select max(filename collate \"C\") from public.schema_migrations").fetchone()[0]
+            if current is None or current[0] != 1 or current[2] != highest_schema:
+                raise RuntimeError(f"reviewed rule projection did not bootstrap exact epoch 1 at current schema: {current!r}")
             accepted = cur.execute(
                 "select ops.scac_policy_epoch_status(%s,%s)", (current[0], current[1])
             ).fetchone()[0]
@@ -300,7 +313,7 @@ def main() -> int:
             ).fetchone()[0]
             if rights:
                 raise RuntimeError("runtime role gained raw policy epoch table privileges")
-        print("siep12-policy-epoch-local-pg-gate passed: v1 preserved; v2 exact; epoch chain, stale/future/equivocation, monotonic source transition, ledger SHA, and least privilege verified")
+        print("siep12-policy-epoch-local-pg-gate passed: v1/v2 preserved; successor-aware epoch chain, stale/future/equivocation, monotonic source transition, ledger SHA, and least privilege verified")
         return 0
     except Exception as exc:  # noqa: BLE001 - one-line CI failure
         return fail(str(exc))
