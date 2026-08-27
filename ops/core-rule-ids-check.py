@@ -14,12 +14,22 @@ inventory loop alongside the other map checks.
 import importlib.util
 import os
 import sys
+import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location(
+
+
+def _load_module(name: str, path: str) -> types.ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None, \
+        f"could not build a module spec for {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+sync_core_rule_ids = _load_module(
     "sync_core_rule_ids", os.path.join(HERE, "sync-core-rule-ids.py"))
-sync_core_rule_ids = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(sync_core_rule_ids)
 
 
 def main(argv=None):

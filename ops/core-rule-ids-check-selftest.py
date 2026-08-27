@@ -16,16 +16,25 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
-_spec = importlib.util.spec_from_file_location(
-    "sync_core_rule_ids", os.path.join(HERE, "sync-core-rule-ids.py"))
-sync_core_rule_ids = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(sync_core_rule_ids)
 
-FAILURES = []
+def _load_module(name: str, path: str) -> types.ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None, \
+        f"could not build a module spec for {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+sync_core_rule_ids = _load_module(
+    "sync_core_rule_ids", os.path.join(HERE, "sync-core-rule-ids.py"))
+
+FAILURES: list[str] = []
 
 
 def check(name, condition):
@@ -127,10 +136,8 @@ def test_real_repository_pair_is_currently_in_sync():
     """The one assertion that actually matters day to day: the real checked-in
     pair passes right now. ops/core-rule-ids-check.py (run bare, no args) is
     what ops/ci.sh's inventory loop actually invokes against this repo."""
-    real_check = importlib.util.spec_from_file_location(
+    module = _load_module(
         "core_rule_ids_check", os.path.join(HERE, "core-rule-ids-check.py"))
-    module = importlib.util.module_from_spec(real_check)
-    real_check.loader.exec_module(module)
     rc = module.main([])
     check("the real ops/config/rule-triage.v1.json and "
           "mcp-server/src/core-rule-ids.js are in sync right now", rc == 0)

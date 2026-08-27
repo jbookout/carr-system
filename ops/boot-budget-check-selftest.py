@@ -12,23 +12,32 @@ THE ONE THING THIS FILE MUST PROVE, per WR-000019 slice S11's own acceptance
 criterion: a synthetic overage actually fails the check, and the failure
 message instructs consolidation rather than a budget raise.
 """
+import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
-import shutil
+import types
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(REPO)
 sys.path.insert(0, REPO)
 
-import importlib.util
-_spec = importlib.util.spec_from_file_location(
-    "boot_budget_check", os.path.join(REPO, "ops", "boot-budget-check.py"))
-boot_budget_check = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(boot_budget_check)
 
-FAILURES = []
+def _load_module(name: str, path: str) -> types.ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None, \
+        f"could not build a module spec for {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+boot_budget_check = _load_module(
+    "boot_budget_check", os.path.join(REPO, "ops", "boot-budget-check.py"))
+
+FAILURES: list[str] = []
 
 
 def check(name, condition):
