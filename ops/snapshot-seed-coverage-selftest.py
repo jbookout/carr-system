@@ -69,6 +69,16 @@ def copy_block(table, columns="(a, b)"):
     return f"COPY {table} {columns} FROM stdin;\n1\tvalue\n\\.\n\n\n"
 
 
+def empty_copy_block(table, columns="(a, b)"):
+    """The shape pg_dump --data-only emits for a table holding NO rows.
+
+    The header is identical to a block with rows. Matching it proved the table was
+    considered, never that anything was carried, so a carried table emptied in
+    production read as present.
+    """
+    return f"COPY {table} {columns} FROM stdin;\n\\.\n\n\n"
+
+
 def insert_block(table):
     return f"-- CARR APPENDED BLOCK\ninsert into {table} (a) values ('x') on conflict do nothing;\n\n"
 
@@ -736,6 +746,61 @@ def main():
             case("a table in two buckets is rejected whichever pair it is", False)
         except ValueError:
             case("a table in two buckets is rejected whichever pair it is", True)
+
+    # -------------------------------------------------------------------- 9b
+    # Carried-presence must be a ROW test, not a NAME test. pg_dump --data-only
+    # emits the COPY header for a table with no rows, so an emptied carried table
+    # used to pass clean -- this file's own trap arriving by deletion. Found by the
+    # sixth independent review, reproduced against the real artifact by deleting the
+    # 8 rows of deal_phase and the 2 of retrieval_ranking_policy and leaving their
+    # headers, which changed the output by nothing at all.
+    with tempfile.TemporaryDirectory() as tmp:
+        carried_widget = {"carried": {"ops.widget": "vocabulary a rebuild needs"}, "excluded": {}}
+        repo = build_repo(tmp + "/rows", {"0100_seed.sql": seeding}, carried_widget)
+
+        found = module.check(repo, artifact(["0100_seed.sql"], [copy_block("ops.widget")]))
+        case("negative control: a carried table with rows in its COPY block passes",
+             found == [])
+
+        found = module.check(repo, artifact(["0100_seed.sql"], [empty_copy_block("ops.widget")]))
+        case("a carried table whose COPY block is EMPTY refuses, because a header "
+             "carries nothing", len(found) == 1 and "DECLARED CARRIED BUT ABSENT" in found[0]
+             and "ops.widget" in found[0])
+        case("the emptied-table refusal does not claim to know the database state",
+             found and "no longer holds the rows" not in found[0])
+
+        # Row text arriving as a jsonb string literal is DATA. The appended blocks
+        # pass whole rows this way, and reading the region raw let an `insert into`
+        # inside one of those literals register as a table being present -- the
+        # apostrophe class of finding 4, one region over.
+        # party is SEEDED by the migration and EXCLUDED as business data, so if the
+        # literal's text registered as a statement the artifact would look like it
+        # had widened into business data -- the one outcome the snapshot's whole
+        # design prevents. A table that is merely unclassified could not show this:
+        # nothing fires for it, so the mutant would survive the case.
+        both = ("create table ops.widget (k text);\n"
+                "insert into ops.widget (k) values ('alpha');\n"
+                "insert into party (name) values ('acme');\n")
+        repo_both = build_repo(tmp + "/lit", {"0100_seed.sql": both},
+                               {"carried": {"ops.widget": "vocabulary a rebuild needs"},
+                                "excluded": {"party": "business data"}})
+        literal = ("-- CARR APPENDED BLOCK\n"
+                   "insert into ops.widget select * from jsonb_populate_record("
+                   "null::ops.widget, '{\"note\": \"replaces insert into party values (1)\"}'"
+                   "::jsonb) on conflict do nothing;\n\n")
+        found = module.check(repo_both, artifact(["0100_seed.sql"], [literal]))
+        case("row text inside a jsonb literal is data, not a statement, so it "
+             "cannot make an excluded table look present", found == [])
+
+        # The optional OR REPLACE clause decides whether a body is attributed to its
+        # routine or folded into always-executing top-level text. Deleting it left
+        # every case green while real detection went from 90 tables to 170.
+        defined_not_called = ("create or replace function ops.g() returns void language plpgsql as $$\n"
+                              "begin\n  insert into ops.only_in_body (k) values ('x');\nend $$;\n")
+        case("a routine defined with CREATE OR REPLACE and never called is not a seed",
+             "ops.only_in_body" not in module.written_tables(defined_not_called))
+        case("the same routine IS a seed once the migration calls it",
+             "ops.only_in_body" in module.written_tables(defined_not_called + "select ops.g();\n"))
 
     # -------------------------------------------------------------------- 10
     # The live classification must actually cover the live tree, or the check

@@ -61,6 +61,7 @@ import sys
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|)\$")
 TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
+COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin\s*;", re.I | re.M)
 
 CREATE_ROUTINE = re.compile(
     r"create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+"
@@ -355,19 +356,69 @@ def check_region_boundary(artifact):
     return None
 
 
+def copy_blocks(region):
+    """Every COPY ... FROM stdin block: its table, whether it holds rows, its span.
+
+    pg_dump --data-only emits the COPY HEADER for a table that holds no rows at
+    all, so matching the header proves the table was considered and never that
+    anything was carried. Counting the block is what makes the carried direction a
+    ROW test instead of a NAME test. Without it a carried table emptied in
+    production passes clean, which is this file's own trap arriving by deletion
+    rather than by omission -- and three of the tables it would hide (deal_phase,
+    ops.guidance_registry, retrieval_ranking_policy) are ones whose emptiness has
+    already turned a db-gate red.
+
+    The span is returned so the caller can take the block OUT before scanning. COPY
+    data is not SQL: an apostrophe in a data row would send a literal scanner
+    inside-out over everything after it, which is finding 4 one region over.
+    """
+    blocks = []
+    for head in COPY_BLOCK.finditer(region):
+        end = region.find("\n\\.", head.end())
+        stop = len(region) if end == -1 else end + 3
+        body = region[head.end():end] if end != -1 else region[head.end():]
+        blocks.append((normalise(head.group(1)),
+                       any(line.strip() for line in body.split("\n")),
+                       head.start(), stop))
+    return blocks
+
+
+def _blank(text, spans):
+    """Replace spans with whitespace, keeping newlines so line structure survives."""
+    parts, cursor = [], 0
+    for start, stop in sorted(spans):
+        if start < cursor:
+            continue
+        parts.append(text[cursor:start])
+        parts.append(re.sub(r"[^\n]", " ", text[start:stop]))
+        cursor = stop
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def tables_with_data(artifact):
-    """Tables the artifact actually carries rows for."""
+    """Tables the artifact actually carries ROWS for.
+
+    Two passes, and each one can change an answer. COPY blocks are counted, because
+    a header above an empty block carries nothing. Everything else is read from
+    SCANNED text, because the blocks bin/schema-snapshot.sh appends pass whole rows
+    as jsonb string literals: an `insert into party` occurring inside one of those
+    literals is row DATA, not a statement, and reading the region raw let it
+    register as a table being present.
+    """
     region = data_region(artifact)
-    found = set()
-    # WRITES_ANYWHERE carries the COPY form, so there is no separate COPY scan. An
-    # earlier version kept one, and a mutation sweep proved it dead twice over: first
-    # here, then again in check_region_boundary once that grew its own loop over the
-    # same patterns. A second scanner that cannot change an answer is not redundancy,
-    # it is a place for a mutation to hide.
-    for pattern in WRITES_ANYWHERE:
-        for hit in re.finditer(r"^\s*(?:with\s+[^;]{0,4000}?\s)?" + pattern.pattern,
-                               region, pattern.flags | re.M):
-            found.add(normalise(hit.group(1)))
+    found, spans = set(), []
+    for name, rows, start, stop in copy_blocks(region):
+        if rows:
+            found.add(name)
+        spans.append((start, stop))
+    top, do_bodies, routines = scan_sql(_blank(region, spans))
+    segments = [top, *do_bodies]
+    for bodies in routines.values():
+        segments.extend(bodies)
+    for segment in segments:
+        for pattern in WRITES_ANYWHERE:
+            found.update(normalise(hit.group(1)) for hit in pattern.finditer(segment))
     return found
 
 
@@ -436,8 +487,10 @@ def check(repo, artifact_text):
                 f"DECLARED CARRIED BUT ABSENT: {table}\n"
                 f"    {rel_config} says this snapshot carries it, and it is not in the artifact.\n"
                 f"    Reason on file: {carried.get(table, subset.get(table, '(none recorded)'))}\n"
-                f"    Either its block in bin/schema-snapshot.sh stopped emitting, or the source\n"
-                f"    database no longer holds the rows. A rebuild would come up short.")
+                f"    Its block in bin/schema-snapshot.sh is not emitting rows for it, so a\n"
+                f"    rebuild from this file would come up short. This check reads the ARTIFACT\n"
+                f"    and never the database, so it cannot tell you whether production still\n"
+                f"    holds the rows — do not read it as saying they are gone.")
 
     for table in sorted(excluded):
         if table in present:
