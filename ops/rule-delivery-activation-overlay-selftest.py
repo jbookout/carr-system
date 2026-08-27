@@ -34,7 +34,7 @@ if shadow != base:
 changed = {rid for rid in base["rule_controls"]
            if base["rule_controls"][rid] != enforced["rule_controls"][rid]}
 if changed != EXPECTED_IDS:
-    failures.append(f"enforced mode changed {sorted(changed)}, not the exact nine")
+    failures.append(f"enforced mode changed {sorted(changed)}, not the exact eight")
 for rid in EXPECTED_IDS:
     row = enforced["rule_controls"][rid]
     if (row.get("control"), row.get("enforcement_class")) != ("pack_delivery", "stop_gate"):
@@ -42,7 +42,7 @@ for rid in EXPECTED_IDS:
 
 mutated = copy.deepcopy(overlay)
 mutated["targets"].pop()
-expect("missing target", validate_overlay(base, mutated, base_bytes), "exact nine")
+expect("missing target", validate_overlay(base, mutated, base_bytes), "exact eight")
 mutated = copy.deepcopy(overlay)
 mutated["targets"][0]["pack"] = "joe-comms"
 expect("wrong pack", validate_overlay(base, mutated, base_bytes), "single-pack")

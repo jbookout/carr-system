@@ -11,11 +11,6 @@
       "reason": "No existing check confirmed this session."
     },
     {
-      "rule": "581cb3fe",
-      "rule_name": "CEO seat operating contract: every finding gets DONE/FILED/DECIDED/DECLINED",
-      "reason": "rule_controls lists session_task_rail/conduct_stop (state supply only); a hard disposition check does not yet exist despite being clearly specifiable."
-    },
-    {
       "rule": "590b11e1",
       "rule_name": "No metric without a bound action (health rows must name the response)",
       "reason": "rule_controls lists post_action_verification/completion_evidence, but that checks task-completion claims, not metric-authoring shape -- mismatch; a direct diff-time check is concrete and buildable."
