@@ -25,9 +25,10 @@ import importlib.util
 import json
 import os
 import pathlib
-import shutil
 import sys
 import tempfile
+import contextlib
+import io
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -260,6 +261,96 @@ def main():
                           {"carried": {}, "excluded": {}})
         case("CREATE TEMP TABLE ... AS is NOT counted (scratch, never in a snapshot)",
              module.check(repo, artifact(["0100_temp.sql"])) == [])
+
+        # ---------------------------------------------------------------- R2
+        # A privilege statement may list MANY functions. Masking only the first left
+        # the rest looking like calls, and 49 of 153 live detections were routine
+        # bodies admitted that way. Modelled on 0153_control_plane_resilience.sql.
+        grant_list = ("create function ops.record_obs() returns void language plpgsql as $$\n"
+                      "begin\n  insert into ops.provider_observation (k) values (1);\nend $$;\n"
+                      "create function ops.put_cache() returns void language plpgsql as $$\n"
+                      "begin\n  insert into ops.cognition_result_cache (k) values (1);\nend $$;\n"
+                      "grant execute on function\n  ops.record_obs(),\n  ops.put_cache()\nto carr_jobs;\n")
+        repo = build_repo(tmp + "/r2a", {"0100_grants.sql": grant_list},
+                          {"carried": {}, "excluded": {}})
+        case("a comma-continued GRANT ON FUNCTION list is not read as calls",
+             module.check(repo, artifact(["0100_grants.sql"])) == [])
+
+        quoted_sig = ("create function ops.record_lease() returns void language plpgsql as $$\n"
+                      "begin\n  insert into lease (k) values (1);\nend $$;\n"
+                      "do $$\nbegin\n"
+                      "  if not has_function_privilege('carr_writer','ops.record_lease()','execute')\n"
+                      "  then raise exception 'missing'; end if;\nend $$;\n")
+        repo = build_repo(tmp + "/r2b", {"0100_quoted.sql": quoted_sig},
+                          {"carried": {}, "excluded": {}})
+        case("a signature inside a quoted string is a name, not a call",
+             module.check(repo, artifact(["0100_quoted.sql"])) == [])
+
+        for label, body, table in (
+            ("INSERT INTO ONLY", "insert into only ops.parent_table (k) values (1);\n", "ops.parent_table"),
+            ("COPY with no column list", "copy ops.bare_copy from stdin;\n1\n\\.\n", "ops.bare_copy"),
+        ):
+            repo = build_repo(tmp + "/r2" + label[:6], {"0100_dml.sql": body},
+                              {"carried": {}, "excluded": {}})
+            case(f"{label} names the real table",
+                 any(table in f for f in module.check(repo, artifact(["0100_dml.sql"]))))
+
+        repo = build_repo(tmp + "/r2cte", {"0100_seed.sql": seeding},
+                          {"carried": {"ops.widget": "bounded config"}, "excluded": {}})
+        cte = artifact(["0100_seed.sql"],
+                       ["-- CARR APPENDED BLOCK\nwith s as (select 1) insert into ops.widget (a) "
+                        "select 1 from s on conflict do nothing;\n\n"])
+        case("a carried table emitted behind a CTE still reads as present",
+             module.check(repo, cte) == [])
+
+        repo = build_repo(tmp + "/r2dead", {"0100_seed.sql": seeding},
+                          {"carried": {}, "excluded": {"ops.widget": "runtime",
+                                                       "ops.long_gone": "nothing writes this any more"}})
+        case("a classification entry nothing seeds any more is reported, not left to rot",
+             any("NO LONGER APPLIES" in f and "ops.long_gone" in f
+                 for f in module.check(repo, artifact(["0100_seed.sql"]))))
+
+        repo = build_repo(tmp + "/r2bound", {"0100_seed.sql": seeding},
+                          {"carried": {}, "excluded": {"ops.widget": "runtime"}})
+        above = artifact(["0100_seed.sql"]).replace(
+            LEDGER_HEADER, "insert into public.client (id) values (1);\n\n" + LEDGER_HEADER, 1)
+        case("an INSERT above the ledger refuses; the boundary is not COPY-only",
+             any("DATA REGION BOUNDARY MOVED" in f for f in module.check(repo, above)))
+
+        # ---------------------------------------------------------------- MAIN
+        # main() is the ONLY surface bin/schema-snapshot.sh consumes. Testing check()
+        # alone let a mutant that returns 0 unconditionally, or swallows the stderr
+        # payload, pass all 34 cases while the guard refused nothing.
+        repo = build_repo(tmp + "/mainok", {"0100_seed.sql": seeding},
+                          {"carried": {}, "excluded": {"ops.widget": "runtime"}})
+        path_clean = os.path.join(tmp, "clean.sql")
+        open(path_clean, "w").write(artifact(["0100_seed.sql"]))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc_clean = module.main(["prog", repo, path_clean])
+        case("main() returns 0 and says nothing when the snapshot is sound",
+             rc_clean == 0 and err.getvalue() == "")
+
+        repo_bad = build_repo(tmp + "/mainbad", {"0100_seed.sql": seeding},
+                              {"carried": {}, "excluded": {}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc_bad = module.main(["prog", repo_bad, path_clean])
+        text = err.getvalue()
+        case("main() returns NON-ZERO on a finding, so the generator actually stops",
+             rc_bad != 0)
+        case("main() writes the refusal and the table name to stderr",
+             "REFUSING" in text and "ops.widget" in text)
+        # Wrapped: a broken argc guard makes main() index past the end of argv, and
+        # an uncaught traceback here would take the whole suite down instead of
+        # reporting one failed case.
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc_args = module.main(["prog", repo])
+            case("main() refuses a wrong argument count instead of proceeding", rc_args != 0)
+        except Exception:                                    # noqa: BLE001 - any crash is a fail
+            case("main() refuses a wrong argument count instead of proceeding", False)
 
         # ---------------------------------------------------------------- G5
         repo = build_repo(tmp + "/g5", {"0100_seed.sql": seeding},
