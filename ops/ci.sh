@@ -381,6 +381,30 @@ check_contract() {
     run_quiet "$LOGDIR/contract-$(basename "$t").log" node --test "$t" \
       || { failures="$failures $t"; tail -20 "$LOGDIR/contract-$(basename "$t").log" >&2; }
   done
+  # THE CONSUMER-SIDE RECEIPT, and it belongs in THIS class rather than in gates
+  # (WR-000006, 2026-08-23 council). gates is repository content only — no
+  # machine state, no network, no database — which is what makes a bare runner
+  # and Joe's Mac agree. This probe is the opposite by design: it calls the
+  # DEPLOYED verb to prove a normal session can still file a block, which is the
+  # dead end that cost hours on 2026-08-23. Putting a network call in gates would
+  # make that class SKIP on every runner, and a check that always skips is
+  # decorative.
+  #
+  # 78 IS HONOURED HERE for the same reason the gates loop honours it: a runner
+  # has no local token and no database credential, and a red mark for "not
+  # configured" teaches people to scroll past. The reason is printed every run,
+  # so reduced coverage is visible rather than silent.
+  if [ -f ops/capture-verb-reachability.py ]; then
+    run_quiet "$LOGDIR/contract-capture-verb.log" "$PY" ops/capture-verb-reachability.py
+    crc=$?
+    if [ "$crc" -eq 78 ]; then
+      printf '        \033[33mnot run\033[0m  capture-verb-reachability — %s\n' \
+        "$(tail -1 "$LOGDIR/contract-capture-verb.log" 2>/dev/null)" >&2
+    elif [ "$crc" -ne 0 ]; then
+      failures="$failures ops/capture-verb-reachability.py"
+      tail -20 "$LOGDIR/contract-capture-verb.log" >&2
+    fi
+  fi
   if [ -n "$failures" ]; then
     bad contract "contract checks failed:$failures"
   else
