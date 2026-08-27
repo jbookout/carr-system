@@ -15,7 +15,7 @@ REFRESH_MIGRATION_SOURCE = (
     ROOT / "migrations" / "0332_refresh_rule_delivery_activation_preimage.sql"
 ).read_text(encoding="utf-8")
 CURRENT_MIGRATION_SOURCE = (
-    ROOT / "migrations" / "0350_rule_delivery_activation_digest_repin.sql"
+    ROOT / "migrations" / "0363_rule_delivery_activation_digest_repin.sql"
 ).read_text(encoding="utf-8")
 POLICY_MIGRATION = "0291_rule_delivery_layers.sql"
 CUTOVER_MIGRATION = "0317_atomic_rule_delivery_cutover.sql"
@@ -24,7 +24,7 @@ SECOND_REFRESH_MIGRATION = "0348_pr_only_main_ruleset_control.sql"
 SECOND_REFRESH_MIGRATION_SOURCE = (
     ROOT / "migrations" / "0348_pr_only_main_ruleset_control.sql"
 ).read_text(encoding="utf-8")
-CURRENT_MIGRATION = "0350_rule_delivery_activation_digest_repin.sql"
+CURRENT_MIGRATION = "0363_rule_delivery_activation_digest_repin.sql"
 POLICY_MARKER = "-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh)"
 TARGET_POST_MARKER = (
     "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0332 (bin/schema-snapshot.sh)"
@@ -38,10 +38,13 @@ TARGET_POST_0348_MARKER = (
 OLD_DIGEST = "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a"
 DIGEST = "c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997"
 THIRD_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
-CURRENT_DIGEST = "b513180786cf7212877870ab3bc14c03bb78b17b3397eb6ee474187a152b13f2"
+CURRENT_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
 EXPECTED_TARGETS = [
     "25fcddee", "3fa17fa0", "72e06bdf", "581cb3fe", "113b3833",
     "57d13061", "c66dc739", "49533583", "557838a5",
+]
+CURRENT_EXPECTED_TARGETS = [
+    short_id for short_id in EXPECTED_TARGETS if short_id != "581cb3fe"
 ]
 
 
@@ -146,14 +149,19 @@ assert "hooks/rule-pack-preuse-reselection.py" in post_block
 assert "ops/rule-pack-preuse-reselection-selftest.py" in post_block
 assert "hooks/rule-pack-preuse-reselection.py" not in pre_block
 assert "ops/rule-pack-preuse-reselection-selftest.py" not in pre_block
-assert [row[0] for row in snapshot_targets] == EXPECTED_TARGETS
+expected_snapshot_targets = (
+    CURRENT_EXPECTED_TARGETS if current_ledger_applied else EXPECTED_TARGETS
+)
+assert [row[0] for row in snapshot_targets] == expected_snapshot_targets
 expected_snapshot_digest = (
     CURRENT_DIGEST if current_ledger_applied
     else THIRD_DIGEST if second_refresh_ledger_applied
     else DIGEST if refresh_ledger_applied
     else OLD_DIGEST
 )
-assert [row[-1] for row in snapshot_targets] == [expected_snapshot_digest] * 9
+assert [row[-1] for row in snapshot_targets] == (
+    [expected_snapshot_digest] * len(expected_snapshot_targets)
+)
 assert re.findall(r"^\s*\('([0-9a-f]{8})'", MIGRATION_SOURCE, re.M)[:9] == EXPECTED_TARGETS
 assert OLD_DIGEST in REFRESH_MIGRATION_SOURCE and DIGEST in REFRESH_MIGRATION_SOURCE
 assert THIRD_DIGEST in SECOND_REFRESH_MIGRATION_SOURCE
@@ -163,6 +171,17 @@ assert "requires shadow mode" in REFRESH_MIGRATION_SOURCE
 assert CURRENT_DIGEST in CURRENT_MIGRATION_SOURCE
 assert THIRD_DIGEST in CURRENT_MIGRATION_SOURCE
 assert all(short_id in CURRENT_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
+assert "delete from ops.rule_delivery_activation_target" in CURRENT_MIGRATION_SOURCE
+assert CURRENT_MIGRATION_SOURCE.count("581cb3fe") >= 2
+assert "create or replace function ops.set_rule_delivery_mode(" in CURRENT_MIGRATION_SOURCE
+assert "activation target set is not exactly eight" in CURRENT_MIGRATION_SOURCE
+assert "return query select p_mode,8::bigint,v_receipt" in CURRENT_MIGRATION_SOURCE
+assert "activation target set is not exactly nine" not in CURRENT_MIGRATION_SOURCE
+assert "return query select p_mode,9::bigint,v_receipt" not in CURRENT_MIGRATION_SOURCE
+assert "revoke all on function ops.set_rule_delivery_mode" in CURRENT_MIGRATION_SOURCE
+assert "historical activation receipt cardinality constraint differs" in CURRENT_MIGRATION_SOURCE
+assert "drop constraint rule_delivery_activation_receipt_target_short_ids_check" in CURRENT_MIGRATION_SOURCE
+assert "check (cardinality(target_short_ids) in (8,9))" in CURRENT_MIGRATION_SOURCE
 assert "requires shadow mode" in CURRENT_MIGRATION_SOURCE
 assert "ops.enforcement_control_catalog" in REFRESH_MIGRATION_SOURCE
 assert "active approved rule and is immutable" in REFRESH_MIGRATION_SOURCE
@@ -184,7 +203,7 @@ for guarded_field in (
     "t.to_test_ref", "t.map_digest",
 ):
     assert CURRENT_MIGRATION_SOURCE.count(guarded_field) >= 2, (
-        f"0350 must bind and post-assert the complete activation preimage: {guarded_field}"
+        f"0363 must bind and post-assert the complete activation preimage: {guarded_field}"
     )
 assert policy_ledger_applied == policy_seeded, (
     "the shadow rule-delivery bootstrap must appear exactly when 0291 is in "

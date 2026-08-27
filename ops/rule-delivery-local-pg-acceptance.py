@@ -33,13 +33,14 @@ from lib.rule_delivery_activation import EXPECTED_IDS, load_validated  # noqa:E4
 REPO = Path(__file__).resolve().parent.parent
 MAP = REPO / "ops" / "config" / "rule-enforcement-map.json"
 PY = REPO / ".venv" / "bin" / "python"
-MIGRATION_0350 = REPO / "migrations" / "0350_rule_delivery_activation_digest_repin.sql"
+MIGRATION_0363 = REPO / "migrations" / "0363_rule_delivery_activation_digest_repin.sql"
 PRIOR_ACTIVATION_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
-CURRENT_ACTIVATION_DIGEST = "b513180786cf7212877870ab3bc14c03bb78b17b3397eb6ee474187a152b13f2"
+CURRENT_ACTIVATION_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
 )
+RETIRED_ACTIVATION_ID = "581cb3fe"
 
 FAILURES: list[str] = []
 
@@ -85,9 +86,27 @@ def main() -> int:
     store_scope_by_id[synthetic_dell] = "dell"
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        # 0350 must refuse a same-ID row whose reviewed activation preimage
+        cur.execute(
+            """insert into ops.rule_delivery_activation_target
+                 (short_id,expected_scope,expected_pack,
+                  from_control,from_enforcement_class,from_implementation_ref,
+                  from_test_ref,to_control,to_enforcement_class,
+                  to_implementation_ref,to_test_ref,map_digest)
+               values
+                 (%s,'shared','delegation-council',
+                  'session_boot','surfacing',
+                  'hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js',
+                  'command:python3 hooks/gate-integrity.py --selftest',
+                  'pack_delivery','stop_gate',
+                  'hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py',
+                  %s,%s)""",
+            (RETIRED_ACTIVATION_ID, ACTIVATION_TO_TEST_REF, PRIOR_ACTIVATION_DIGEST),
+        )
+        check("the pre-0363 fixture restores the exact retired ninth target",
+              cur.rowcount == 1)
+        # 0363 must refuse a same-ID row whose reviewed activation preimage
         # drifted, and the failed transaction must not repin any digest.
-        migration_0350 = MIGRATION_0350.read_text(encoding="utf-8")
+        migration_0363 = MIGRATION_0363.read_text(encoding="utf-8")
         activation_victim = sorted(EXPECTED_IDS)[0]
         cur.execute(
             "update ops.rule_delivery_activation_target set map_digest=%s",
@@ -100,13 +119,13 @@ def main() -> int:
             (activation_victim,),
         )
         try:
-            cur.execute(migration_0350, prepare=False)
-            check("0350 refuses a drifted same-ID activation preimage", False,
+            cur.execute(migration_0363, prepare=False)
+            check("0363 refuses a drifted same-ID activation preimage", False,
                   "migration accepted the drifted row")
         except psycopg.Error as exc:
             check(
-                "0350 refuses a drifted same-ID activation preimage",
-                "expected nine exact reviewed activation preimage rows" in str(exc),
+                "0363 refuses a drifted same-ID activation preimage",
+                "expected the exact reviewed nine-row activation preimage" in str(exc),
                 str(exc).splitlines()[0],
             )
         conn.rollback()
@@ -115,7 +134,13 @@ def main() -> int:
                 where map_digest=%s""",
             (PRIOR_ACTIVATION_DIGEST,),
         )
-        check("a refused 0350 repin changes no target digest", one(cur)[0] == 9)
+        check("a refused 0363 repin changes no target digest", one(cur)[0] == len(EXPECTED_IDS) + 1)
+        cur.execute(
+            "delete from ops.rule_delivery_activation_target where short_id=%s",
+            (RETIRED_ACTIVATION_ID,),
+        )
+        check("the post-0363 fixture removes exactly the retired target",
+              cur.rowcount == 1)
         cur.execute(
             """update ops.rule_delivery_activation_target
                   set map_digest=%s,
@@ -124,6 +149,15 @@ def main() -> int:
             (CURRENT_ACTIVATION_DIGEST, ACTIVATION_TO_TEST_REF, sorted(EXPECTED_IDS)),
         )
 
+        check("the post-0363 fixture restores all eight current target digests",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (CURRENT_ACTIVATION_DIGEST,),
+        )
+        check("the restored post-0363 fixture is the exact current eight",
+              one(cur)[0] == len(EXPECTED_IDS))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")
         cur.execute("select id from actor where slug='joe'")
@@ -269,9 +303,9 @@ def main() -> int:
         check("the backfill runs clean again once the store and map agree",
               result.returncode == 0, result.stderr.strip()[-300:])
 
-        # ── policy and nine controls move in one guarded transaction ─────────
+        # ── policy and eight controls move in one guarded transaction ─────────
         admission = run("tools/sync-rule-admission.py", dsn)
-        check("the admission sync builds the nine-control preimage",
+        check("the admission sync builds the eight-control preimage",
               admission.returncode == 0, admission.stderr.strip()[-500:])
         digest = load_validated()[1]["base_map_sha256"]
         try:
@@ -286,7 +320,7 @@ def main() -> int:
                 "rule-delivery cutover refused: " + str(exc).splitlines()[0]
             ) from None
         cutover = one(cur)
-        check("cutover reports the exact nine", cutover[0] == "enforced" and cutover[1] == 9)
+        check("cutover reports the exact eight", cutover[0] == "enforced" and cutover[1] == len(EXPECTED_IDS))
         cur.execute("select mode from ops.rule_delivery_policy")
         check("cutover flips policy to enforced", one(cur)[0] == "enforced")
         cur.execute("""select count(*) from ops.rule_enforcement_point ep
@@ -294,7 +328,7 @@ def main() -> int:
                       where left(r.id::text,8)=any(%s) and ep.control_key='pack_delivery'
                         and ep.enforcement_class='stop_gate' and ep.installed""",
                     (sorted(EXPECTED_IDS),))
-        check("cutover installs pack_delivery/stop_gate on all nine", one(cur)[0] == 9)
+        check("cutover installs pack_delivery/stop_gate on all eight", one(cur)[0] == len(EXPECTED_IDS))
 
         admission = run("tools/sync-rule-admission.py", dsn)
         check("a future admission sync is policy-aware", admission.returncode == 0,
@@ -303,7 +337,7 @@ def main() -> int:
                        join rule r on r.id=ep.rule_id
                       where left(r.id::text,8)=any(%s) and ep.control_key='pack_delivery'
                         and ep.enforcement_class='stop_gate'""", (sorted(EXPECTED_IDS),))
-        check("an enforced sync does not revert the nine controls", one(cur)[0] == 9)
+        check("an enforced sync does not revert the eight controls", one(cur)[0] == len(EXPECTED_IDS))
 
         try:
             cur.execute("update ops.rule_delivery_policy set mode='shadow' where singleton")
@@ -315,12 +349,12 @@ def main() -> int:
         cur.execute("""select * from ops.set_rule_delivery_mode(
                        'shadow','local-pg-acceptance','rollback fixture',%s)""", (digest,))
         rollback = one(cur)
-        check("rollback reports the exact nine", rollback[0] == "shadow" and rollback[1] == 9)
+        check("rollback reports the exact eight", rollback[0] == "shadow" and rollback[1] == len(EXPECTED_IDS))
         cur.execute("""select count(*) from ops.rule_enforcement_point ep
                        join rule r on r.id=ep.rule_id
                       where left(r.id::text,8)=any(%s) and ep.control_key='session_boot'
                         and ep.enforcement_class='surfacing'""", (sorted(EXPECTED_IDS),))
-        check("rollback restores all nine session_boot rows", one(cur)[0] == 9)
+        check("rollback restores all eight session_boot rows", one(cur)[0] == len(EXPECTED_IDS))
         cur.execute("select count(*) from ops.rule_delivery_activation_receipt")
         check("cutover and rollback each leave an append-only receipt", one(cur)[0] == 2)
 
