@@ -120,6 +120,38 @@ def normalise(table):
     return table[len("public."):] if table.startswith("public.") else table
 
 
+def _tail(parts, count):
+    """The last `count` characters of an accumulated buffer, without joining it.
+
+    THE CALLER ASKS FOR MORE CHARACTERS THAN THE TEST INSPECTS, on purpose. The
+    E-string pattern reads two characters, so a 2-character tail looks sufficient
+    and is not: truncation turns whatever preceded them into START OF STRING, and
+    the pattern's own `^` alternative then matches where the full buffer refused.
+    "E_b_cE\n" is one -- the real buffer has an alphanumeric before the final E so
+    the test is false, while its last two characters "E\n" make it true. Python's
+    `$` also matches before a trailing newline, which puts the interesting
+    characters up to three back. A 300,000-case fuzz over both forms diverges 650
+    times at two characters and zero times at three; four is that with margin.
+
+    WHY THIS EXISTS AND IS NOT A MICRO-OPTIMISATION. The E-string test below looks
+    at two characters, and used to reach them with "".join(top) -- rebuilding the
+    entire accumulated buffer once per string literal. db/schema.sql holds 23,696
+    of them, so the pass was quadratic in artifact size: 1.5s at 0.5MB, 7.4s at
+    1MB, 28.9s at 1.5MB, and the artifact is 2.3MB and grows with every migration.
+    That is not merely slow. ops/ci.sh gives each gate selftest
+    CI_SELFTEST_TIMEOUT_SECONDS, and on exit 124 it sets gates_timed_out and
+    BREAKS -- abandoning every remaining gate selftest in the class, not just this
+    one. A check that eventually times out takes the rest of the class with it.
+    """
+    out, size = [], 0
+    for chunk in reversed(parts):
+        out.append(chunk)
+        size += len(chunk)
+        if size >= count:
+            break
+    return "".join(reversed(out))[-count:]
+
+
 def _scanned(body):
     """A nested body, run through the same scan and flattened.
 
@@ -185,7 +217,7 @@ def scan_sql(sql):
             # the rest of the migration was read inside-out and a plainly top-level
             # INSERT went unreported. That is the apostrophe class of R4 one escape
             # form over, and it swallowed real DML rather than only a call.
-            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", "".join(top)))
+            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", _tail(top, 4)))
             i += 1
             while i < n:
                 if escaped and sql[i] == "\\" and i + 1 < n:
@@ -336,15 +368,25 @@ def check_region_boundary(artifact):
     # full of CREATE FUNCTION bodies whose own INSERTs start a line, and reading
     # those as data made this check refuse every real snapshot.
     prefix = artifact[:ledger.start()]
-    prefix_top, _do_bodies, _routines = scan_sql(prefix)
+    # DO BODIES ARE INCLUDED AND ROUTINE BODIES ARE NOT, and the asymmetry is the
+    # whole point. A DO block above the ledger RUNS on a rebuild, so rows it lands
+    # are data sitting outside the region tables_with_data can see -- invisible to
+    # both checks at once. This is not hypothetical: bin/schema-snapshot.sh emits
+    # the CARR ROLE PREAMBLE as a DO block above the ledger, so the construct is
+    # already there and only its contents have been harmless. A routine body above
+    # the ledger is a DEFINITION; the DDL half of the artifact is full of them and
+    # reading their INSERTs as data made an earlier version refuse every real
+    # snapshot.
+    prefix_top, prefix_dos, _routines = scan_sql(prefix)
     # NOT anchored to the start of a line. Data above the ledger is data wherever
     # it sits on the line, and the anchor bought nothing: with it and without it the
     # real artifact is equally clean, so all it did was give a mutation somewhere to
     # hide. Literals and comments are already gone from prefix_top, so a table merely
     # NAMED in prose cannot reach here.
     candidates = []
-    for pattern in WRITES_ANYWHERE:
-        candidates.append(re.search(pattern.pattern, prefix_top, pattern.flags | re.M))
+    for segment in [prefix_top, *prefix_dos]:
+        for pattern in WRITES_ANYWHERE:
+            candidates.append(re.search(pattern.pattern, segment, pattern.flags | re.M))
     first = min((c for c in candidates if c), key=lambda c: c.start(), default=None)
     if first:
         return (f"DATA REGION BOUNDARY MOVED: the first data statement in the artifact is "
