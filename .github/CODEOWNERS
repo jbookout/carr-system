@@ -1,0 +1,12 @@
+# CODEOWNERS — enforcement paths (WR-000019 slice S2)
+#
+# Changes under these paths touch gate/hook logic or machine config-as-code
+# and require review from the repo owner. GitHub requests review from the
+# listed owner automatically on any PR that modifies a matching path; whether
+# that review is REQUIRED before merge depends on the repo's branch
+# protection / ruleset configuration (see rulesets check in slice S2 notes —
+# as of this slice, "main: CI must be green" enforces required status checks
+# only, not a code-owner review requirement).
+
+/hooks/ @jbookout
+/ops/config/ @jbookout
