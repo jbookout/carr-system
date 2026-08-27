@@ -205,9 +205,21 @@ def case_nightly_chain_actually_calls_it():
     # The preflight list and the step call are different lines; a rename that
     # updates one and not the other is exactly what this asserts against.
     preflight = chain.count("ops/staging-observed-prune.py") >= 2
-    ok = launched and preflight
+
+    # AND IT RUNS BEFORE THE BACKUP. The first cut of this step sat beside the
+    # hook telemetry rollup near the bottom of the chain, because both price
+    # the enforcement stack -- one in latency, one in bytes. Tidy, and the
+    # wrong order: the encrypted backup is the LAST step and it writes a dump,
+    # so a full disk failed the backup and then freed 3.2GB immediately
+    # afterwards. Reclamation has to precede the steps that need the space,
+    # and "it is in the file somewhere" does not say that.
+    prune_at = chain.index('step "staging-observed prune')
+    backup_at = chain.index('step "encrypted backup')
+    before_backup = prune_at < backup_at
+    ok = launched and preflight and before_backup
     if not ok:
-        print(f"       launched={launched} preflight_listed={preflight}")
+        print(f"       launched={launched} preflight_listed={preflight} "
+              f"before_backup={before_backup}")
     return ok
 
 
