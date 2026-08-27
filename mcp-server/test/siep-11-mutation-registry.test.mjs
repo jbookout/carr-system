@@ -58,15 +58,15 @@ const v5Migration = fs.readFileSync(
 const generatedV6 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v6.generated.js", import.meta.url), "utf8");
 const v6Migration = fs.readFileSync(
-  new URL("../../migrations/0351_siep16_forward_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0357_siep16_forward_mutation_registry.sql", import.meta.url), "utf8");
 const generatedV7 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v7.generated.js", import.meta.url), "utf8");
 const v7Migration = fs.readFileSync(
-  new URL("../../migrations/0353_siep16_integrated_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0359_siep16_integrated_mutation_registry.sql", import.meta.url), "utf8");
 const generatedV8 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v8.generated.js", import.meta.url), "utf8");
 const v8Migration = fs.readFileSync(
-  new URL("../../migrations/0356_siep17_forward_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0362_siep17_forward_mutation_registry.sql", import.meta.url), "utf8");
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory();
@@ -103,9 +103,9 @@ test("sealed v1-v7 stay immutable historical evidence after the v8 successor", (
     ["mcp-server/src/scac-mutation-registry.v4.generated.js", generatedV4],
     ["migrations/0347_siep15_forward_mutation_registry.sql", v5Migration],
     ["mcp-server/src/scac-mutation-registry.v5.generated.js", generatedV5],
-    ["migrations/0351_siep16_forward_mutation_registry.sql", v6Migration],
+    ["migrations/0357_siep16_forward_mutation_registry.sql", v6Migration],
     ["mcp-server/src/scac-mutation-registry.v6.generated.js", generatedV6],
-    ["migrations/0353_siep16_integrated_mutation_registry.sql", v7Migration],
+    ["migrations/0359_siep16_integrated_mutation_registry.sql", v7Migration],
     ["mcp-server/src/scac-mutation-registry.v7.generated.js", generatedV7],
   ]);
   for (const [path, contents] of historicalArtifacts)

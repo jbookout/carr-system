@@ -71,8 +71,6 @@
 -- receipt-bound ENFORCEMENT compiler). The acceptance additions below assert
 -- this explicitly rather than assuming it.
 
-begin;
-
 -- ── legacy admission marker columns ─────────────────────────────────────────
 
 alter table ops.rule_retirement_receipt add column legacy_admission text;
@@ -446,5 +444,3 @@ begin
     raise exception '0351 FAILED: ops.rule_amendment_reaches is gone — an unrelated live function was removed';
   end if;
 end $$;
-
-commit;
