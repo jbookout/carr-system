@@ -168,6 +168,7 @@ export function verifyCapabilityToken(input) {
     signed_payload_digest: payloadDigest,
     challenge_digest: token.challenge_digest,
     principal_digest: token.principal_digest,
+    device_ref: token.device_ref,
     device_key_digest: token.device_key_digest,
     facts_digest: token.facts_digest,
     workload_digest: token.workload_digest,
