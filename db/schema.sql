@@ -692,6 +692,7 @@ declare
   v_prior_hash text;
   v_new_hash text;
   v_new_statement text;
+  v_legacy_note text;
   v_contract jsonb;
   v_contract_hash text;
   v_amended_at timestamptz;
@@ -733,7 +734,7 @@ begin
     return jsonb_build_object('ok',true,'replayed',true,'rule_id',p_rule_id,
       'rule_version_before',v_prior.rule_version_before,
       'rule_version_after',v_prior.rule_version_after,
-      'amendment_receipt_id',v_prior.id);
+      'amendment_receipt_id',v_prior.id,'legacy_admission',v_prior.legacy_admission);
   end if;
 
   select * into v_rule from rule where id=p_rule_id for update;
@@ -751,18 +752,23 @@ begin
     raise exception 'rule % amendment is a no-op: the new statement hashes identically to the current one',p_rule_id;
   end if;
 
+  -- (0351) Purely descriptive here: unlike ops.retire_rule, nothing below
+  -- branches on v_legacy_note -- it is recorded whenever it applies, never
+  -- required.
+  v_legacy_note := ops.legacy_rule_admission_note(v_rule.id,v_rule.status,v_rule.activated_at);
+
   v_amended_at := now();
   v_contract := jsonb_build_object(
     'rule_id',v_rule.id,'rule_version_before',v_rule.version,'rule_version_after',v_rule.version+1,
     'prior_statement_hash',v_prior_hash,'new_statement_hash',v_new_hash,
-    'actor_id',v_actor_id,'rationale',btrim(p_reason),'amended_at',v_amended_at);
+    'actor_id',v_actor_id,'rationale',btrim(p_reason),'legacy_admission',v_legacy_note,'amended_at',v_amended_at);
   v_contract_hash := encode(digest(v_contract::text,'sha256'),'hex');
 
   insert into ops.rule_amendment_receipt
     (idempotency_key,rule_id,rule_version_before,rule_version_after,prior_statement_hash,
-     new_statement,new_statement_hash,amended_by,rationale,contract_hash,amended_at)
+     new_statement,new_statement_hash,amended_by,rationale,legacy_admission,contract_hash,amended_at)
   values (p_idempotency_key,v_rule.id,v_rule.version,v_rule.version+1,v_prior_hash,
-          v_new_statement,v_new_hash,v_actor_id,btrim(p_reason),v_contract_hash,v_amended_at)
+          v_new_statement,v_new_hash,v_actor_id,btrim(p_reason),v_legacy_note,v_contract_hash,v_amended_at)
   returning * into v_receipt;
 
   insert into ops.authority_receipt
@@ -775,7 +781,7 @@ begin
 
   return jsonb_build_object('ok',true,'replayed',false,'rule_id',v_rule.id,
     'rule_version_before',v_rule.version,'rule_version_after',v_rule.version+1,
-    'amendment_receipt_id',v_receipt.id);
+    'amendment_receipt_id',v_receipt.id,'legacy_admission',v_receipt.legacy_admission);
 end $$;
 
 
@@ -783,7 +789,7 @@ end $$;
 -- Name: FUNCTION amend_rule_statement(p_rule_id uuid, p_new_statement text, p_idempotency_key text, p_reason text); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.amend_rule_statement(p_rule_id uuid, p_new_statement text, p_idempotency_key text, p_reason text) IS 'Guarded like ops.approve_rule and ops.retire_rule: Joe-authority actor only, refuses a retired rule, writes an immutable ops.rule_amendment_receipt hashing the PRIOR statement, then updates rule.statement atomically. human_quote/scope/taught_by/personal_to/supersedes and every activation/retirement field are untouched. Wired by the amend-rule verb for the ACTIVE-rule case only; a still-PROPOSED rule keeps its existing direct-update amend-in-place path, which never required Joe authority.';
+COMMENT ON FUNCTION ops.amend_rule_statement(p_rule_id uuid, p_new_statement text, p_idempotency_key text, p_reason text) IS 'Guarded like ops.approve_rule and ops.retire_rule: Joe-authority actor only, refuses a retired rule, writes an immutable ops.rule_amendment_receipt hashing the PRIOR statement, then updates rule.statement atomically. human_quote/scope/taught_by/personal_to/supersedes and every activation/retirement field are untouched. (0351) Records legacy_admission via the same shared predicate ops.retire_rule uses, though this function never required a receipt to run -- ops.require_rule_admission''s strict immutability branch only engages once a receipt exists, so a legacy rule was already amendable; this only names that fact honestly in the ledger.';
 
 
 --
@@ -7256,6 +7262,36 @@ end $$;
 
 
 --
+-- Name: legacy_rule_admission_note(uuid, text, timestamp with time zone); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.legacy_rule_admission_note(p_rule_id uuid, p_status text, p_activated_at timestamp with time zone) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+  select case
+    when p_status is distinct from 'active' then null
+    when exists (select 1 from ops.rule_approval_receipt where rule_id=p_rule_id) then null
+    when not exists (select 1 from ops.rule_approval_receipt) then
+      'legacy_admission: rule '||p_rule_id||' carries no approval receipt and the approval-receipt system has never issued one; accepted as predating the ledger'
+    when p_activated_at is not null
+         and p_activated_at < (select min(created_at) from ops.rule_approval_receipt) then
+      'legacy_admission: rule '||p_rule_id||' was activated at '||p_activated_at::text||
+      ', before the approval-receipt system''s earliest receipt at '||
+      (select min(created_at) from ops.rule_approval_receipt)::text||
+      '; it predates the receipt cutover and carries none'
+    else null
+  end
+$$;
+
+
+--
+-- Name: FUNCTION legacy_rule_admission_note(p_rule_id uuid, p_status text, p_activated_at timestamp with time zone); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.legacy_rule_admission_note(p_rule_id uuid, p_status text, p_activated_at timestamp with time zone) IS 'Shared legacy predicate for ops.retire_rule and ops.amend_rule_statement (0351). Non-null only for an ACTIVE rule with no ops.rule_approval_receipt row that also predates the receipt system''s own cutover (or predates a receipt system that has never issued any receipt at all). An active, receiptless rule that postdates the cutover returns null -- that is a real defect, not a historical fact, and both callers keep refusing it exactly as before.';
+
+
+--
 -- Name: nightly_availability_canary_live_job(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -8636,6 +8672,104 @@ begin
   select count(*) into n from transitioned;
   return n;
 end $$;
+
+
+--
+-- Name: reclassify_legacy_rule_admission(uuid, text, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  v_actor_slug text;
+  v_actor_id uuid;
+  v_rule rule%rowtype;
+  v_admission ops.rule_admission%rowtype;
+  v_prior ops.rule_admission_reclassification_receipt%rowtype;
+  v_receipt ops.rule_admission_reclassification_receipt%rowtype;
+  v_legacy_note text;
+  v_contract jsonb;
+  v_contract_hash text;
+begin
+  v_actor_slug := ops.authority_actor_slug();
+  if v_actor_slug<>'joe' then
+    raise exception 'legacy admission reclassification requires Joe authority';
+  end if;
+  select id into v_actor_id from actor
+   where slug=v_actor_slug and kind='human' and active;
+  if v_actor_id is null then raise exception 'Joe authority actor is not active'; end if;
+  if btrim(coalesce(p_reason,''))='' or p_idempotency_key is null then
+    raise exception 'reclassification reason and idempotency key are required';
+  end if;
+  if p_new_class not in ('machine_enforceable','judgment_advisory','human_only') then
+    raise exception 'unknown enforcement class %',p_new_class;
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('rule-reclassification:'||p_idempotency_key::text,0));
+  select * into v_prior from ops.rule_admission_reclassification_receipt
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if v_prior.rule_id is distinct from p_rule_id
+       or v_prior.enforcement_class_after is distinct from p_new_class
+       or v_prior.reason is distinct from btrim(p_reason)
+       or v_prior.actor_id is distinct from v_actor_id then
+      raise exception 'reclassification idempotency key was reused with different input';
+    end if;
+    return jsonb_build_object('ok',true,'replayed',true,'rule_id',p_rule_id,
+      'enforcement_class',v_prior.enforcement_class_after,
+      'reclassification_receipt_id',v_prior.id);
+  end if;
+
+  select * into v_rule from rule where id=p_rule_id for update;
+  if not found then raise exception 'rule % not found',p_rule_id; end if;
+  if v_rule.status<>'active' then
+    raise exception 'rule % is %, only an active rule''s admission is reclassified here',p_rule_id,v_rule.status;
+  end if;
+  if exists (select 1 from ops.rule_approval_receipt where rule_id=v_rule.id) then
+    raise exception 'rule % carries an approval receipt; its class is bound to the receipt and does not move through the legacy path',p_rule_id;
+  end if;
+  v_legacy_note := ops.legacy_rule_admission_note(v_rule.id,v_rule.status,v_rule.activated_at);
+  if v_legacy_note is null then
+    raise exception 'rule % is not a legacy admission; reclassification refused',p_rule_id;
+  end if;
+
+  select * into v_admission from ops.rule_admission where rule_id=v_rule.id for update;
+  if not found then raise exception 'rule % has no admission row',p_rule_id; end if;
+  if v_admission.enforcement_class=p_new_class then
+    raise exception 'rule % is already classified %; a no-op reclassification is refused',p_rule_id,p_new_class;
+  end if;
+
+  v_contract := jsonb_build_object(
+    'rule_id',v_rule.id,'enforcement_class_before',v_admission.enforcement_class,
+    'enforcement_class_after',p_new_class,'actor_id',v_actor_id,
+    'reason',btrim(p_reason),'legacy_admission',v_legacy_note);
+  v_contract_hash := encode(digest(v_contract::text,'sha256'),'hex');
+
+  insert into ops.rule_admission_reclassification_receipt
+    (idempotency_key,rule_id,enforcement_class_before,enforcement_class_after,
+     actor_id,reason,legacy_admission,contract_hash)
+  values (p_idempotency_key,v_rule.id,v_admission.enforcement_class,p_new_class,
+          v_actor_id,btrim(p_reason),v_legacy_note,v_contract_hash)
+  returning * into v_receipt;
+
+  update ops.rule_admission set enforcement_class=p_new_class
+   where rule_id=v_rule.id;
+
+  return jsonb_build_object('ok',true,'replayed',false,'rule_id',v_rule.id,
+    'enforcement_class_before',v_receipt.enforcement_class_before,
+    'enforcement_class',p_new_class,
+    'reclassification_receipt_id',v_receipt.id,
+    'legacy_admission',v_receipt.legacy_admission);
+end $$;
+
+
+--
+-- Name: FUNCTION reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text) IS 'Joe-authority-guarded correction of a LEGACY active rule''s admission enforcement_class (0352). Requires ops.legacy_rule_admission_note to prove the rule predates the receipt system; a receipted rule refuses (its class is bound to the receipt). Append-only receipt records before, after, and the legacy fact.';
 
 
 --
@@ -11190,6 +11324,7 @@ declare
   v_prior ops.rule_retirement_receipt%rowtype;
   v_receipt ops.rule_retirement_receipt%rowtype;
   v_approval_id uuid;
+  v_legacy_note text;
   v_contract jsonb;
   v_contract_hash text;
   v_retired_at timestamptz;
@@ -11229,7 +11364,7 @@ begin
     end if;
     return jsonb_build_object('ok',true,'replayed',true,'rule_id',p_rule_id,
       'previous_status',v_prior.previous_status,'status','retired',
-      'retirement_receipt_id',v_prior.id);
+      'retirement_receipt_id',v_prior.id,'legacy_admission',v_prior.legacy_admission);
   end if;
 
   select * into v_rule from rule where id=p_rule_id for update;
@@ -11251,7 +11386,13 @@ begin
        and statement_hash=encode(digest(v_rule.statement,'sha256'),'hex')
      order by created_at desc limit 1;
     if v_approval_id is null then
-      raise exception 'active rule % lacks its exact approval receipt',v_rule.id;
+      -- (0351) Not every receiptless active rule is a defect: 217 of 219
+      -- were activated before the receipt system existed at all. Fall
+      -- through to the shared legacy predicate before refusing outright.
+      v_legacy_note := ops.legacy_rule_admission_note(v_rule.id,v_rule.status,v_rule.activated_at);
+      if v_legacy_note is null then
+        raise exception 'active rule % lacks its exact approval receipt',v_rule.id;
+      end if;
     end if;
   end if;
 
@@ -11263,14 +11404,14 @@ begin
     'statement_hash',encode(digest(v_rule.statement,'sha256'),'hex'),
     'previous_status',v_rule.status,'actor_id',v_actor_id,
     'reason',btrim(p_reason),'superseded_by',p_superseded_by,
-    'approval_receipt_id',v_approval_id,'retired_at',v_retired_at);
+    'approval_receipt_id',v_approval_id,'legacy_admission',v_legacy_note,'retired_at',v_retired_at);
   v_contract_hash := encode(digest(v_contract::text,'sha256'),'hex');
   insert into ops.rule_retirement_receipt
     (idempotency_key,rule_id,rule_version_before,rule_version_after,statement_hash,previous_status,
-     actor_id,reason,superseded_by,approval_receipt_id,contract_hash,retired_at)
+     actor_id,reason,superseded_by,approval_receipt_id,legacy_admission,contract_hash,retired_at)
   values (p_idempotency_key,v_rule.id,v_rule.version,v_rule.version+1,
           encode(digest(v_rule.statement,'sha256'),'hex'),v_rule.status,
-          v_actor_id,btrim(p_reason),p_superseded_by,v_approval_id,v_contract_hash,v_retired_at)
+          v_actor_id,btrim(p_reason),p_superseded_by,v_approval_id,v_legacy_note,v_contract_hash,v_retired_at)
   returning * into v_receipt;
   insert into ops.authority_receipt
     (idempotency_key,kind,subject_type,subject_id,actor_id,decision,contract_hash,evidence_refs)
@@ -11283,8 +11424,15 @@ begin
   if not found then raise exception 'rule % retirement raced',v_rule.id; end if;
   return jsonb_build_object('ok',true,'replayed',false,'rule_id',v_rule.id,
     'previous_status',v_rule.status,'status','retired',
-    'retirement_receipt_id',v_receipt.id);
+    'retirement_receipt_id',v_receipt.id,'legacy_admission',v_receipt.legacy_admission);
 end $$;
+
+
+--
+-- Name: FUNCTION retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) IS 'Joe-authority-guarded retirement. An ACTIVE rule normally requires its exact ops.rule_approval_receipt; (0351) an active rule with none is still accepted when ops.legacy_rule_admission_note proves it predates the receipt system, and the retirement receipt records that fact in legacy_admission instead of an approval_receipt_id. A rule that postdates the cutover and still lacks a receipt keeps failing -- this is not a general relaxation.';
 
 
 --
@@ -17597,6 +17745,33 @@ COMMENT ON TABLE ops.rule_admission IS 'Normalized authority contract for one ru
 
 
 --
+-- Name: rule_admission_reclassification_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_admission_reclassification_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid CONSTRAINT rule_admission_reclassification_receip_idempotency_key_not_null NOT NULL,
+    rule_id uuid NOT NULL,
+    enforcement_class_before text CONSTRAINT rule_admission_reclassificati_enforcement_class_before_not_null NOT NULL,
+    enforcement_class_after text CONSTRAINT rule_admission_reclassificatio_enforcement_class_after_not_null NOT NULL,
+    actor_id uuid NOT NULL,
+    reason text NOT NULL,
+    legacy_admission text CONSTRAINT rule_admission_reclassification_recei_legacy_admission_not_null NOT NULL,
+    contract_hash text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT reclassification_class_vocabulary CHECK ((enforcement_class_after = ANY (ARRAY['machine_enforceable'::text, 'judgment_advisory'::text, 'human_only'::text]))),
+    CONSTRAINT reclassification_is_a_change CHECK ((enforcement_class_before <> enforcement_class_after))
+);
+
+
+--
+-- Name: TABLE rule_admission_reclassification_receipt; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.rule_admission_reclassification_receipt IS 'Append-only ledger of legacy admission reclassifications (0352). Only an ACTIVE rule with no ops.rule_approval_receipt row that predates the receipt system (ops.legacy_rule_admission_note non-null) can be reclassified, and only by Joe authority. legacy_admission is NOT NULL by design: a receipted rule''s class is bound to its approval receipt and never moves through this path.';
+
+
+--
 -- Name: rule_amendment_receipt; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -17614,8 +17789,10 @@ CREATE TABLE ops.rule_amendment_receipt (
     contract_hash text NOT NULL,
     amended_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    legacy_admission text,
     CONSTRAINT rule_amendment_receipt_contract_hash_check CHECK ((contract_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT rule_amendment_receipt_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT rule_amendment_receipt_legacy_admission_check CHECK (((legacy_admission IS NULL) OR (btrim(legacy_admission) <> ''::text))),
     CONSTRAINT rule_amendment_receipt_new_hash_check CHECK ((new_statement_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT rule_amendment_receipt_new_statement_check CHECK ((btrim(new_statement) <> ''::text)),
     CONSTRAINT rule_amendment_receipt_not_noop CHECK ((prior_statement_hash <> new_statement_hash)),
@@ -17631,6 +17808,13 @@ CREATE TABLE ops.rule_amendment_receipt (
 --
 
 COMMENT ON TABLE ops.rule_amendment_receipt IS 'Append-only ledger of statement-only amendments to an already-taught rule (proposed or active). Each row hashes the PRIOR statement (tamper-evident chain) and records the new text, the Joe-authority actor, and the rationale. human_quote, scope, taught_by and every activation/retirement field are untouched by this path -- see ops.amend_rule_statement.';
+
+
+--
+-- Name: COLUMN rule_amendment_receipt.legacy_admission; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.rule_amendment_receipt.legacy_admission IS 'Null for the ordinary amendment path (proposed rule, or an active rule carrying an approval receipt). Populated only when ops.amend_rule_statement amended an ACTIVE rule that has no ops.rule_approval_receipt row because it predates the receipt system entirely -- see ops.legacy_rule_admission_note. amend_rule_statement never required a receipt to function; this column exists purely so the ledger names the legacy fact rather than staying silent about it.';
 
 
 --
@@ -17860,15 +18044,25 @@ CREATE TABLE ops.rule_retirement_receipt (
     contract_hash text NOT NULL,
     retired_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT active_retirement_has_approval CHECK (((previous_status <> 'active'::text) OR (approval_receipt_id IS NOT NULL))),
+    legacy_admission text,
+    CONSTRAINT active_retirement_has_approval CHECK (((previous_status <> 'active'::text) OR (approval_receipt_id IS NOT NULL) OR (legacy_admission IS NOT NULL))),
+    CONSTRAINT retirement_legacy_excludes_receipt CHECK (((legacy_admission IS NULL) OR (approval_receipt_id IS NULL))),
     CONSTRAINT rule_retirement_receipt_check CHECK ((rule_version_after = (rule_version_before + 1))),
     CONSTRAINT rule_retirement_receipt_contract_hash_check CHECK ((contract_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT rule_retirement_receipt_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT rule_retirement_receipt_legacy_admission_check CHECK (((legacy_admission IS NULL) OR (btrim(legacy_admission) <> ''::text))),
     CONSTRAINT rule_retirement_receipt_previous_status_check CHECK ((previous_status = ANY (ARRAY['proposed'::text, 'active'::text]))),
     CONSTRAINT rule_retirement_receipt_reason_check CHECK ((btrim(reason) <> ''::text)),
     CONSTRAINT rule_retirement_receipt_rule_version_before_check CHECK ((rule_version_before > 0)),
     CONSTRAINT rule_retirement_receipt_statement_hash_check CHECK ((statement_hash ~ '^[0-9a-f]{64}$'::text))
 );
+
+
+--
+-- Name: COLUMN rule_retirement_receipt.legacy_admission; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.rule_retirement_receipt.legacy_admission IS 'Null for the ordinary receipted retirement path. Populated only when ops.retire_rule accepted an ACTIVE rule that has no ops.rule_approval_receipt row because it predates the receipt system entirely (see ops.legacy_rule_admission_note) -- records the rule''s activation time and the receipt-system cutover it predates, so the tamper-evident chain shows what actually happened rather than implying a receipt that never existed.';
 
 
 --
@@ -30157,6 +30351,22 @@ ALTER TABLE ONLY ops.rule_admission
 
 
 --
+-- Name: rule_admission_reclassification_receipt rule_admission_reclassification_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission_reclassification_receipt
+    ADD CONSTRAINT rule_admission_reclassification_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: rule_admission_reclassification_receipt rule_admission_reclassification_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission_reclassification_receipt
+    ADD CONSTRAINT rule_admission_reclassification_receipt_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: rule_amendment_receipt rule_amendment_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -34678,6 +34888,13 @@ CREATE TRIGGER provider_observation_append_only BEFORE DELETE OR UPDATE ON ops.p
 
 
 --
+-- Name: rule_admission_reclassification_receipt refuse_rule_admission_reclassification_rewrite; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER refuse_rule_admission_reclassification_rewrite BEFORE DELETE OR UPDATE ON ops.rule_admission_reclassification_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
+
+
+--
 -- Name: run reject_fabricated_drill_row; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -36841,6 +37058,22 @@ ALTER TABLE ONLY ops.rule_admission
 
 ALTER TABLE ONLY ops.rule_admission
     ADD CONSTRAINT rule_admission_guidance_intake_id_fkey FOREIGN KEY (guidance_intake_id) REFERENCES ops.guidance_intake(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_admission_reclassification_receipt rule_admission_reclassification_receipt_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission_reclassification_receipt
+    ADD CONSTRAINT rule_admission_reclassification_receipt_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: rule_admission_reclassification_receipt rule_admission_reclassification_receipt_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission_reclassification_receipt
+    ADD CONSTRAINT rule_admission_reclassification_receipt_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id);
 
 
 --
@@ -40051,6 +40284,7 @@ revoke all on function ops.read_execution_environment_providers() from public;
 revoke all on function ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) from public;
 revoke all on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) from public;
 revoke all on function ops.reap_expired_jobs() from public;
+revoke all on function ops.reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text) from public;
 revoke all on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
 revoke all on function ops.record_calendar_prebrief_verified_envelope(p_job_id uuid, p_lease uuid, p_challenge_id uuid, p_scheduled_for timestamp with time zone, p_window_starts_at timestamp with time zone, p_window_ends_at timestamp with time zone, p_allowlist_revision_id uuid, p_allowlist_digest text, p_calendar_keys text[], p_observed_calendar_keys text[], p_events jsonb, p_destination text, p_collector_key_fingerprint text, p_signature_sha256 text, p_collector_version text) from public;
@@ -40850,6 +41084,7 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_jobs;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
+grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
@@ -40949,6 +41184,7 @@ grant execute on function ops.read_staging_forward_fix_rehearsal_declaration(p_i
 grant execute on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) to carr_jobs;
 grant execute on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
+grant execute on function ops.reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text) to carr_authority;
 grant execute on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
 grant execute on function ops.record_calendar_prebrief_verified_envelope(p_job_id uuid, p_lease uuid, p_challenge_id uuid, p_scheduled_for timestamp with time zone, p_window_starts_at timestamp with time zone, p_window_ends_at timestamp with time zone, p_allowlist_revision_id uuid, p_allowlist_digest text, p_calendar_keys text[], p_observed_calendar_keys text[], p_events jsonb, p_destination text, p_collector_key_fingerprint text, p_signature_sha256 text, p_collector_version text) to carr_calendar_prebrief_attestors;
@@ -41016,6 +41252,7 @@ grant execute on function ops.siep_terminal_status() to carr_reader;
 grant execute on function ops.siep_terminal_status() to carr_writer;
 grant execute on function ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) to carr_writer;
+grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_writer;
@@ -41348,6 +41585,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0345_governance_queue_projection.sql	c1788dd8ee23d7a7a6dfc88b17d4a11c67a9ad5057c8bb97e3112035863be3ba	2026-08-27 10:45:14.153307+00
 0348_pr_only_main_ruleset_control.sql	ab901c8e528109bb56375403f0ebb350758678079d7727c9ba24042b0d0bbcdb	2026-08-27 11:28:27.687848+00
 0349_versioned_rule_amendment.sql	4fb76045cf8ce46ba793a90d0582e6b095a17ba63edf57e91c548e7850ba37f0	2026-08-27 11:28:27.939452+00
+0351_legacy_rule_lifecycle_admission.sql	59439e1a12c035e61578b85c765d7bbd131bf555b95bbecd49c6d675b5c4d808	2026-08-27 12:11:30.871136+00
+0352_legacy_admission_reclassification_and_staging_authority.sql	0e93b3974bd6d808049e52f36878fd4939388f2f47fa59c40f5afd756a249e62	2026-08-27 12:11:30.95728+00
 \.
 
 
@@ -42221,7 +42460,7 @@ insert into ops.siep_component_alias select * from jsonb_populate_record(null::o
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-14", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-15", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-16", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26"}'::jsonb) on conflict do nothing;
-select pg_catalog.setval('ops.work_request_ref_seq', 23, true);
+select pg_catalog.setval('ops.work_request_ref_seq', 24, true);
 alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
 alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
 alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
