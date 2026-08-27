@@ -76,7 +76,7 @@ def build_repo(tmp, migrations, classification):
     return str(root)
 
 
-FAILURES = []
+FAILURES: list[str] = []
 
 
 def case(name, ok):
