@@ -12,6 +12,7 @@ import {
   runEngineeringWorker,
   admitEngineeringSlice,
   recordEngineeringReview,
+  engineeringRuntimeTools,
 } from "../src/engineering-runtime.js";
 
 const digest = value => canonicalDigest(value);
@@ -139,6 +140,20 @@ function reviewerRow(id, receipt_id, slice_ref, state = "passed", created_at = "
 test("canonical digest is stable across object key order and matches SHA-256", () => {
   assert.equal(canonicalDigest({ b: 2, a: 1 }), canonicalDigest({ a: 1, b: 2 }));
   assert.equal(canonicalDigest({ a: 1 }), "sha256:015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862");
+});
+
+test("passport source is readable before an initial slice plan is registered", async () => {
+  const tools = engineeringRuntimeTools({ withEnvelope: async (_c, _a, _verb, _args, fn) => fn(), writeEvent: async () => {}, ToolError: EngineeringToolError });
+  const sourcePayload = { work_request: source.work, accepted_plan: source.plan };
+  const c = { query: async (sql, params) => {
+    assert.match(sql, /ops\.engineering_admission_source/);
+    assert.deepEqual(params, ["WR-301"]);
+    return { rows: [{ source: sourcePayload }] };
+  } };
+  const result = await tools["engineering-passport-source"].handler(c, actor, { work_request: "WR-301" });
+  assert.equal(result.schema_version, "engineering-passport-source.v1");
+  assert.deepEqual(result.work_request, source.work);
+  assert.deepEqual(result.accepted_plan_revision, source.plan);
 });
 
 test("server builds a fresh Codex envelope and receipt binding rejects wrong attempt", () => {
