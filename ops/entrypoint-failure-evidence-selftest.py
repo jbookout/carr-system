@@ -295,6 +295,137 @@ def main() -> int:
           "S3cretPW1" not in stored_detail
           and "ghp_1234567890ABCDEFghijklmnopqrstuvwxyz" not in stored_detail)  # ci-secret-scan: allow — synthetic fixture proving redaction; no real credential
 
+    # ---- exit 78 (EX_CONFIG): NOT A FAILURE ------------------------------
+    #
+    # Measured 2026-08-27: notes-sweep-hourly's canary exits 78 every window
+    # because ~/.config/carr/notes-canary.env has never existed on this Mac.
+    # bin/nightly.sh and every other launchd chain already read 78 as SKIP,
+    # never FAIL (this repo's standing EX_CONFIG convention); run_once did
+    # not, and burned the job's retry budget on a gap no retry could close.
+    # Rule 88e9b5eb: "not authorized" and "not possible" are different
+    # findings and must never be reported as the same one.
+
+    def not_configured_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv, 78, "notes-sweep: probing config\n",
+            "notes canary config must be 0600")
+
+    module.subprocess.run = not_configured_run
+    try:
+        try:
+            module._execute_deterministic(workflow, {}, 30, "live")
+            not_configured = None
+        except module.EntrypointNotConfigured as exc:
+            not_configured = exc
+    finally:
+        module.subprocess.run = original_run
+    check("exit 78 raises EntrypointNotConfigured, not the generic EntrypointFailure",
+          not_configured is not None and type(not_configured) is module.EntrypointNotConfigured)
+    check("EntrypointNotConfigured is still an EntrypointFailure (shared tail-capture code, not a duplicate)",
+          not_configured is not None and isinstance(not_configured, module.EntrypointFailure))
+    check("EntrypointNotConfigured records the fixed EX_CONFIG return code",
+          not_configured is not None and not_configured.returncode == 78)
+    check("EntrypointNotConfigured carries the entrypoint's own message on its stderr tail",
+          not_configured is not None
+          and "notes canary config must be 0600" in not_configured.stderr_tail)
+
+    def secret_not_configured_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv, 78, "normal probe line",
+            "postgres://svc_user:S3cretPW1@db.internal:5432/carr\nconfig missing")  # ci-secret-scan: allow — synthetic fixture proving redaction; no real credential
+
+    module.subprocess.run = secret_not_configured_run
+    try:
+        try:
+            module._execute_deterministic(workflow, {}, 30, "live")
+            not_configured_secret = None
+        except module.EntrypointNotConfigured as exc:
+            not_configured_secret = exc
+    finally:
+        module.subprocess.run = original_run
+    check("EntrypointNotConfigured's tails are redacted before storage, exactly like any other exit code",
+          not_configured_secret is not None
+          and "S3cretPW1" not in not_configured_secret.stderr_tail  # ci-secret-scan: allow — synthetic fixture proving redaction; no real credential
+          and "[REDACTED]" in not_configured_secret.stderr_tail)
+
+    # Regression guard for the special-case added above: an ordinary failure
+    # (exit 1) must still raise the plain EntrypointFailure and go through
+    # the unchanged ops.fail_job path, never ops.skip_job.
+    def exit1_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "boom")
+
+    module.subprocess.run = exit1_run
+    try:
+        try:
+            module._execute_deterministic(workflow, {}, 30, "live")
+            plain_failure = None
+        except module.EntrypointFailure as exc:
+            plain_failure = exc
+    finally:
+        module.subprocess.run = original_run
+    check("exit 1 still raises the plain EntrypointFailure, never EntrypointNotConfigured",
+          plain_failure is not None and type(plain_failure) is module.EntrypointFailure
+          and plain_failure.returncode == 1)
+
+    not_configured_detail = module._failure_detail(not_configured) if not_configured else ""
+    not_configured_decoded = json.loads(not_configured_detail) if not_configured_detail else {}
+    check("_failure_detail encodes EntrypointNotConfigured as JSON with both tails, same shape as EntrypointFailure",
+          not_configured_decoded.get("message") == "entrypoint exited 78 (not configured)"
+          and "notes canary config must be 0600" in not_configured_decoded.get("stderr_tail", ""))
+
+    # ---- run_once end to end: exit 78 lands as skipped, not dead-lettered --
+
+    class SkipRunOnceCursor(RunOnceCursor):
+        def execute(self, sql, args=()):
+            self.conn.calls.append((sql, args))
+            if sql.startswith("select * from ops.claim_job("):
+                self._last = claim_row
+            elif sql.startswith("select ops.skip_job("):
+                self.conn.skip_job_calls.append(args)
+                self._last = ("skipped",)
+            elif sql.startswith("select ops.fail_job("):
+                self.conn.fail_job_calls.append(args)
+                self._last = ("dead_lettered",)
+            else:
+                raise AssertionError(f"unexpected SQL in fixture: {sql}")
+
+    class SkipRunOnceConnection(RunOnceConnection):
+        def __init__(self):
+            super().__init__()
+            self.skip_job_calls: list = []
+
+        def cursor(self):
+            return SkipRunOnceCursor(self)
+
+    skip_conn = SkipRunOnceConnection()
+    original_connect = getattr(module, "connect")
+    original_evaluate_stage = getattr(module, "evaluate_stage")
+    setattr(module, "connect", lambda: skip_conn)
+    setattr(module, "evaluate_stage", lambda *_a, **_k: True)
+    module.subprocess.run = not_configured_run
+    try:
+        skip_result = module.run_once(manifest, "worker")
+    finally:
+        setattr(module, "connect", original_connect)
+        setattr(module, "evaluate_stage", original_evaluate_stage)
+        module.subprocess.run = original_run
+
+    check("run_once reports the skipped state and EntrypointNotConfigured class for exit 78, never dead_lettered",
+          skip_result.get("state") == "skipped"
+          and skip_result.get("failure_class") == "EntrypointNotConfigured"
+          and skip_conn.rollbacks == 1)
+    check("run_once routes exit 78 through ops.skip_job, never ops.fail_job -- no retry budget spent, no dead-letter",
+          len(skip_conn.skip_job_calls) == 1 and not skip_conn.fail_job_calls
+          and skip_conn.skip_job_calls[0][0] == claim_row[0]
+          and skip_conn.skip_job_calls[0][1] == claim_row[1])
+
+    skipped_stored_detail = (skip_conn.skip_job_calls[0][2]
+                             if skip_conn.skip_job_calls else "")
+    skipped_stored = json.loads(skipped_stored_detail) if skipped_stored_detail else {}
+    check("the not-configured message lands in ops.skip_job's p_detail as valid, redacted JSON",
+          skipped_stored.get("message") == "entrypoint exited 78 (not configured)"
+          and "notes canary config must be 0600" in skipped_stored.get("stderr_tail", ""))
+
     print(f"\nentrypoint-failure-evidence-selftest: {total-len(failures)}/{total} passed")
     return 1 if failures else 0
 
