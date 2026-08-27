@@ -167,6 +167,14 @@ case "$RULE_DELIVERY_REFRESH_APPLIED" in
   *) echo "schema-snapshot: could not read the rule-delivery refresh ledger state" >&2; exit 1 ;;
 esac
 
+RULE_DELIVERY_RULESET_CONTROL_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0348_pr_only_main_ruleset_control.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_RULESET_CONTROL_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery ruleset-control ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -807,6 +815,27 @@ if [ "$RULE_DELIVERY_CUTOVER_APPLIED" = t ]; then
   # 0332 must rebuild the old rows so the pending guarded refresh can still
   # match all nine.  Only a ledger that already carries 0332 gets new refs.
   if [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then
+  if [ "$RULE_DELIVERY_RULESET_CONTROL_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_POST_0348'
+-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0348 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('581cb3fe','shared','delegation-council','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218')
+on conflict (short_id) do nothing;
+
+RULE_DELIVERY_ACTIVATION_TARGETS_POST_0348
+  else
 cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_POST_0332'
 -- CARR RULE DELIVERY ACTIVATION TARGETS POST-0332 (bin/schema-snapshot.sh) — exact reviewed cutover config.
 insert into ops.rule_delivery_activation_target
@@ -826,6 +855,7 @@ values
 on conflict (short_id) do nothing;
 
 RULE_DELIVERY_ACTIVATION_TARGETS_POST_0332
+  fi
   else
 cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_PRE_0332'
 -- CARR RULE DELIVERY ACTIVATION TARGETS PRE-0332 (bin/schema-snapshot.sh) — exact reviewed cutover config.

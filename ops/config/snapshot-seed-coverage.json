@@ -90,6 +90,7 @@
     "ops.release": "release history — runtime records",
     "ops.release_approval_receipt": "per-act receipts — runtime evidence, never configuration",
     "ops.rule_admission": "per-rule admission history",
+    "ops.rule_admission_reclassification_receipt": "0352's append-only ledger of legacy admission reclassifications, written only when Joe's authority calls the function; governance audit history, correctly empty on a rebuild.",
     "ops.rule_approval_lifecycle_anchor": "per-rule lifecycle anchors — rule history",
     "ops.rule_approval_receipt": "per-rule approval receipts — rule history, the same category the file already refuses for rule_control_binding",
     "ops.rule_control_binding": "per-rule history, not bounded internal control configuration; bin/schema-snapshot.sh names this table by name as one never to add",

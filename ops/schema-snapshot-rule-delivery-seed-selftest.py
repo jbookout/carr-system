@@ -17,6 +17,10 @@ REFRESH_MIGRATION_SOURCE = (
 POLICY_MIGRATION = "0291_rule_delivery_layers.sql"
 CUTOVER_MIGRATION = "0317_atomic_rule_delivery_cutover.sql"
 REFRESH_MIGRATION = "0332_refresh_rule_delivery_activation_preimage.sql"
+SECOND_REFRESH_MIGRATION = "0348_pr_only_main_ruleset_control.sql"
+SECOND_REFRESH_MIGRATION_SOURCE = (
+    ROOT / "migrations" / "0348_pr_only_main_ruleset_control.sql"
+).read_text(encoding="utf-8")
 POLICY_MARKER = "-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh)"
 TARGET_POST_MARKER = (
     "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0332 (bin/schema-snapshot.sh)"
@@ -24,8 +28,12 @@ TARGET_POST_MARKER = (
 TARGET_PRE_MARKER = (
     "-- CARR RULE DELIVERY ACTIVATION TARGETS PRE-0332 (bin/schema-snapshot.sh)"
 )
+TARGET_POST_0348_MARKER = (
+    "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0348 (bin/schema-snapshot.sh)"
+)
 OLD_DIGEST = "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a"
 DIGEST = "c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997"
+THIRD_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
 EXPECTED_TARGETS = [
     "25fcddee", "3fa17fa0", "72e06bdf", "581cb3fe", "113b3833",
     "57d13061", "c66dc739", "49533583", "557838a5",
@@ -96,6 +104,9 @@ cutover_ledger_applied = bool(
 refresh_ledger_applied = bool(
     re.search(rf"^{re.escape(REFRESH_MIGRATION)}\t", SNAPSHOT, re.M)
 )
+second_refresh_ledger_applied = bool(
+    re.search(rf"^{re.escape(SECOND_REFRESH_MIGRATION)}\t", SNAPSHOT, re.M)
+)
 snapshot_targets = snapshot_target_rows(SNAPSHOT)
 
 assert "RULE_DELIVERY_APPLIED" in GENERATOR
@@ -106,6 +117,7 @@ assert f"filename='{CUTOVER_MIGRATION}'" in GENERATOR
 assert 'if [ "$RULE_DELIVERY_CUTOVER_APPLIED" = t ]; then' in GENERATOR
 assert "RULE_DELIVERY_REFRESH_APPLIED" in GENERATOR
 assert f"filename='{REFRESH_MIGRATION}'" in GENERATOR
+assert f"filename='{SECOND_REFRESH_MIGRATION}'" in GENERATOR
 assert 'if [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then' in GENERATOR
 assert "insert into ops.rule_delivery_policy (singleton,mode,changed_by,reason)" in GENERATOR
 assert "values (true,'shadow','schema-snapshot'," in GENERATOR
@@ -114,6 +126,8 @@ assert target_ids(GENERATOR, TARGET_POST_MARKER) == EXPECTED_TARGETS
 assert target_digests(GENERATOR, TARGET_POST_MARKER) == [DIGEST] * 9
 assert target_ids(GENERATOR, TARGET_PRE_MARKER) == EXPECTED_TARGETS
 assert target_digests(GENERATOR, TARGET_PRE_MARKER) == [OLD_DIGEST] * 9
+assert target_ids(GENERATOR, TARGET_POST_0348_MARKER) == EXPECTED_TARGETS
+assert target_digests(GENERATOR, TARGET_POST_0348_MARKER) == [THIRD_DIGEST] * 9
 post_block = GENERATOR.split(TARGET_POST_MARKER, 1)[1].split(
     "on conflict (short_id) do nothing;", 1
 )[0]
@@ -125,10 +139,16 @@ assert "ops/rule-pack-preuse-reselection-selftest.py" in post_block
 assert "hooks/rule-pack-preuse-reselection.py" not in pre_block
 assert "ops/rule-pack-preuse-reselection-selftest.py" not in pre_block
 assert [row[0] for row in snapshot_targets] == EXPECTED_TARGETS
-expected_snapshot_digest = DIGEST if refresh_ledger_applied else OLD_DIGEST
+expected_snapshot_digest = (
+    THIRD_DIGEST if second_refresh_ledger_applied
+    else DIGEST if refresh_ledger_applied
+    else OLD_DIGEST
+)
 assert [row[-1] for row in snapshot_targets] == [expected_snapshot_digest] * 9
 assert re.findall(r"^\s*\('([0-9a-f]{8})'", MIGRATION_SOURCE, re.M)[:9] == EXPECTED_TARGETS
 assert OLD_DIGEST in REFRESH_MIGRATION_SOURCE and DIGEST in REFRESH_MIGRATION_SOURCE
+assert THIRD_DIGEST in SECOND_REFRESH_MIGRATION_SOURCE
+assert all(short_id in SECOND_REFRESH_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
 assert all(short_id in REFRESH_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
 assert "requires shadow mode" in REFRESH_MIGRATION_SOURCE
 assert "ops.enforcement_control_catalog" in REFRESH_MIGRATION_SOURCE
