@@ -1,4 +1,4 @@
--- 0364 — heaviness stops reading the plan's wording.
+-- 0384 — heaviness stops reading the plan's wording.
 --
 -- ops.heavy_build_classification() built its signal text from the Work Request's
 -- title, desired outcome and acceptance criteria AND from the proposed plan's
