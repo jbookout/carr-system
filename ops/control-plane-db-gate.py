@@ -324,13 +324,21 @@ def main() -> int:
                 if fetchone_required(cur.fetchone(), f"PUBLIC collector read {relation}")[0]:
                     fail(f"PUBLIC can read collector projection {relation}")
 
-            # An expired or unstamped re-verification queue is not a current
-            # verified queue.  A model input must therefore refuse it instead
-            # of relabeling its provenance as verification.
+            # An expired, unstamped, or never-recorded re-verification queue
+            # is not a current verified queue.  A model input must therefore
+            # refuse it instead of relabeling its provenance as verification.
+            # 0387 added bands 1-4 (active vendors/leads/clients with a
+            # never-filled profile field -- no category/city/county/
+            # verticals/title/org/email/phone on file): those rows carry no
+            # record_flag at all, so 'not_recorded' is their honest,
+            # DISTINCT reason -- never 'expired'/'unstamped_volatile' (both
+            # of which claim a stale record_flag exists) and never silently
+            # folded into either. Keep this allowlist identical to
+            # lib.control_plane_collectors_records.REVERIFICATION_DUE_REASONS.
             cur.execute("""
                 select count(*) from public.v_control_plane_enrichment_queue
                  where current_verification_status='verified'
-                    or reverification_due not in ('expired','unstamped_volatile')
+                    or reverification_due not in ('expired','unstamped_volatile','not_recorded')
             """)
             if fetchone_required(cur.fetchone(), "enrichment truthfulness")[0] != 0:
                 fail("expired verification evidence is represented as current verified evidence")

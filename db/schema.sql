@@ -1989,10 +1989,10 @@ CREATE TABLE ops.job (
     CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
     CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
     CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
-    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
+    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text, 'skipped'::text]))),
     CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
     CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
-    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
+    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text, 'skipped'::text])) OR (ended_at IS NOT NULL)))
 );
 
 
@@ -13075,6 +13075,45 @@ end $_$;
 
 
 --
+-- Name: skip_job(uuid, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.skip_job(p_job_id uuid, p_lease_token uuid, p_detail text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if not found or j.state <> 'running' or j.lease_token <> p_lease_token
+     or j.leased_until < now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  -- NOT A FAILURE. This is terminal on the attempt that just ran, always --
+  -- never the fail_job/timeout_job branch that checks attempt < max_attempts
+  -- and routes back through retry_wait. A missing credential does not
+  -- self-heal on a timer, so spending retry budget on it only delays the
+  -- honest dead_lettered outcome a real failure deserves, and this job never
+  -- reaches dead_lettered for this reason at all.
+  --
+  -- last_failure_class/last_failure_detail are deliberately left untouched:
+  -- those columns are read as failure evidence elsewhere (0308's health
+  -- view), and a not-configured run is not that. The message lives only in
+  -- the immutable 'skipped' receipt below, where a reader has to ask for it
+  -- by name instead of tripping over it in a failure surface.
+  update ops.job_attempt set state='skipped',ended_at=now(),detail=p_detail
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  update ops.job set state='skipped',ended_at=now(),
+         lease_owner=null,lease_token=null,leased_until=null,updated_at=now()
+   where id=j.id;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,'skipped',concat('skipped:',j.id,':',j.attempt),
+           jsonb_build_object('detail',p_detail));
+  return 'skipped';
+end $$;
+
+
+--
 -- Name: sourced_heavy_build_review_target(text, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -13472,14 +13511,15 @@ end $$;
 --
 
 CREATE FUNCTION ops.standing_guidance(p_actor text, p_workflow text DEFAULT NULL::text, p_surface text DEFAULT NULL::text, p_tier text DEFAULT NULL::text) RETURNS TABLE(source_rule_id uuid, statement text, human_quote text, taught_by text, personal_to text, scope jsonb, guidance_type text, is_constitution boolean)
-    LANGUAGE sql STABLE
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public', 'pg_temp'
     AS $$
   select r.id,r.statement,r.human_quote,teacher.display_name,owner.slug,g.scope,
          g.guidance_type,g.is_constitution
     from ops.v_guidance_current g
-    join rule r on r.id=g.source_rule_id and r.status='active'
-    join actor teacher on teacher.id=r.taught_by
-    left join actor owner on owner.id=r.personal_to
+    join public.rule r on r.id=g.source_rule_id and r.status='active'
+    join public.actor teacher on teacher.id=r.taught_by
+    left join public.actor owner on owner.id=r.personal_to
    where exists (
            select 1
              from ops.v_guidance_registry_state s
@@ -13496,6 +13536,13 @@ CREATE FUNCTION ops.standing_guidance(p_actor text, p_workflow text DEFAULT NULL
      )
    order by g.is_constitution desc,r.personal_to nulls first,r.created_at,r.id
 $$;
+
+
+--
+-- Name: FUNCTION standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) IS 'Reader-facing active Guidance Registry projection. SECURITY DEFINER with a fixed search_path so carr_reader can consume the sanctioned projection without receiving direct public.rule or public.actor table access.';
 
 
 --
@@ -17155,7 +17202,7 @@ CREATE TABLE ops.job_attempt (
     CONSTRAINT job_attempt_cost_usd_check CHECK (((cost_usd IS NULL) OR (cost_usd >= (0)::numeric))),
     CONSTRAINT job_attempt_input_tokens_check CHECK (((input_tokens IS NULL) OR (input_tokens >= 0))),
     CONSTRAINT job_attempt_output_tokens_check CHECK (((output_tokens IS NULL) OR (output_tokens >= 0))),
-    CONSTRAINT job_attempt_state_check CHECK ((state = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text])))
+    CONSTRAINT job_attempt_state_check CHECK ((state = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text])))
 );
 
 
@@ -17217,7 +17264,7 @@ CREATE TABLE ops.job_receipt (
     receipt_ref text NOT NULL,
     evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT job_receipt_kind_check CHECK ((kind = ANY (ARRAY['completion'::text, 'failure'::text, 'timeout'::text, 'dead_letter'::text, 'approval'::text, 'override'::text])))
+    CONSTRAINT job_receipt_kind_check CHECK ((kind = ANY (ARRAY['completion'::text, 'failure'::text, 'timeout'::text, 'dead_letter'::text, 'approval'::text, 'override'::text, 'skipped'::text])))
 );
 
 
@@ -40347,6 +40394,7 @@ revoke all on function ops.siep_request_digest(p_request jsonb) from public;
 revoke all on function ops.siep_resolve_package(p_component text) from public;
 revoke all on function ops.siep_terminal_status() from public;
 revoke all on function ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) from public;
+revoke all on function ops.skip_job(p_job_id uuid, p_lease_token uuid, p_detail text) from public;
 revoke all on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_preimage(p_work_request_id uuid, p_plan_id uuid, p_plan_acceptance_receipt_id uuid, p_criterion_results jsonb, p_evidence_refs jsonb, p_outcome text, p_blocker_code text, p_result_summary text, p_observed_minutes integer, p_interaction_surface text, p_heavy_session_used boolean, p_manual_context_transfers integer) from public;
@@ -41200,8 +41248,8 @@ grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observ
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
 grant execute on function ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_program5_forward_fix_verifiers;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
 grant execute on function ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
@@ -41253,6 +41301,7 @@ grant execute on function ops.siep_terminal_status() to carr_jobs;
 grant execute on function ops.siep_terminal_status() to carr_reader;
 grant execute on function ops.siep_terminal_status() to carr_writer;
 grant execute on function ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.skip_job(p_job_id uuid, p_lease_token uuid, p_detail text) to carr_jobs;
 grant execute on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) to carr_writer;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
@@ -41593,6 +41642,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0354_authority_event_ledger_grant.sql	4a1464fd5b8f42cd89895d7344c7f7156791e5c88e44740e991beb33661c1d28	2026-08-27 13:45:57.014435+00
 0355_rename_cognition_control_to_installed_reality.sql	348df25a24014ba1d2f096a0ea88aadd2575ad2f387801b3339afc13849b24d3	2026-08-27 14:09:26.564721+00
 0363_rule_delivery_activation_digest_repin.sql	03133d0627cf63d2a0a2a7dd8a392065bc19ba17d56d0b2cfabd3dbccafdcb65	2026-08-27 18:56:57.366645+00
+0382_standing_guidance_reader_boundary.sql	a6ffe5f29e9224f263b0c6a90c414b4828915a5ed3265e52e8fadbe31ef8c2bc	2026-08-27 20:40:05.019334+00
+0383_control_plane_not_configured_state.sql	f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa	2026-08-27 20:40:05.784788+00
 \.
 
 

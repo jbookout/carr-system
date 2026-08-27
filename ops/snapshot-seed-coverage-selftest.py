@@ -25,6 +25,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import contextlib
@@ -67,6 +68,16 @@ def artifact(applied, data_blocks=()):
 
 def copy_block(table, columns="(a, b)"):
     return f"COPY {table} {columns} FROM stdin;\n1\tvalue\n\\.\n\n\n"
+
+
+def empty_copy_block(table, columns="(a, b)"):
+    """The shape pg_dump --data-only emits for a table holding NO rows.
+
+    The header is identical to a block with rows. Matching it proved the table was
+    considered, never that anything was carried, so a carried table emptied in
+    production read as present.
+    """
+    return f"COPY {table} {columns} FROM stdin;\n\\.\n\n\n"
 
 
 def insert_block(table):
@@ -736,6 +747,122 @@ def main():
             case("a table in two buckets is rejected whichever pair it is", False)
         except ValueError:
             case("a table in two buckets is rejected whichever pair it is", True)
+
+    # -------------------------------------------------------------------- 9b
+    # Carried-presence must be a ROW test, not a NAME test. pg_dump --data-only
+    # emits the COPY header for a table with no rows, so an emptied carried table
+    # used to pass clean -- this file's own trap arriving by deletion. Found by the
+    # sixth independent review, reproduced against the real artifact by deleting the
+    # 8 rows of deal_phase and the 2 of retrieval_ranking_policy and leaving their
+    # headers, which changed the output by nothing at all.
+    with tempfile.TemporaryDirectory() as tmp:
+        carried_widget = {"carried": {"ops.widget": "vocabulary a rebuild needs"}, "excluded": {}}
+        repo = build_repo(tmp + "/rows", {"0100_seed.sql": seeding}, carried_widget)
+
+        found = module.check(repo, artifact(["0100_seed.sql"], [copy_block("ops.widget")]))
+        case("negative control: a carried table with rows in its COPY block passes",
+             found == [])
+
+        found = module.check(repo, artifact(["0100_seed.sql"], [empty_copy_block("ops.widget")]))
+        case("a carried table whose COPY block is EMPTY refuses, because a header "
+             "carries nothing", len(found) == 1 and "DECLARED CARRIED BUT ABSENT" in found[0]
+             and "ops.widget" in found[0])
+        case("the emptied-table refusal does not claim to know the database state",
+             found and "no longer holds the rows" not in found[0])
+
+        # Row text arriving as a jsonb string literal is DATA. The appended blocks
+        # pass whole rows this way, and reading the region raw let an `insert into`
+        # inside one of those literals register as a table being present -- the
+        # apostrophe class of finding 4, one region over.
+        # party is SEEDED by the migration and EXCLUDED as business data, so if the
+        # literal's text registered as a statement the artifact would look like it
+        # had widened into business data -- the one outcome the snapshot's whole
+        # design prevents. A table that is merely unclassified could not show this:
+        # nothing fires for it, so the mutant would survive the case.
+        both = ("create table ops.widget (k text);\n"
+                "insert into ops.widget (k) values ('alpha');\n"
+                "insert into party (name) values ('acme');\n")
+        repo_both = build_repo(tmp + "/lit", {"0100_seed.sql": both},
+                               {"carried": {"ops.widget": "vocabulary a rebuild needs"},
+                                "excluded": {"party": "business data"}})
+        literal = ("-- CARR APPENDED BLOCK\n"
+                   "insert into ops.widget select * from jsonb_populate_record("
+                   "null::ops.widget, '{\"note\": \"replaces insert into party values (1)\"}'"
+                   "::jsonb) on conflict do nothing;\n\n")
+        found = module.check(repo_both, artifact(["0100_seed.sql"], [literal]))
+        case("row text inside a jsonb literal is data, not a statement, so it "
+             "cannot make an excluded table look present", found == [])
+
+        # The optional OR REPLACE clause decides whether a body is attributed to its
+        # routine or folded into always-executing top-level text. Deleting it left
+        # every case green while real detection went from 90 tables to 170.
+        defined_not_called = ("create or replace function ops.g() returns void language plpgsql as $$\n"
+                              "begin\n  insert into ops.only_in_body (k) values ('x');\nend $$;\n")
+        case("a routine defined with CREATE OR REPLACE and never called is not a seed",
+             "ops.only_in_body" not in module.written_tables(defined_not_called))
+        case("the same routine IS a seed once the migration calls it",
+             "ops.only_in_body" in module.written_tables(defined_not_called + "select ops.g();\n"))
+
+    # -------------------------------------------------------------------- 9c
+    # A DO BLOCK ABOVE THE LEDGER EXECUTES ON A REBUILD. check_region_boundary
+    # threw its do_bodies away, and tables_with_data never reads above the ledger,
+    # so rows landed by such a block were invisible to BOTH checks at once - the
+    # excluded-but-present direction silently disarmed. Not hypothetical:
+    # bin/schema-snapshot.sh emits the CARR ROLE PREAMBLE as a DO block above the
+    # ledger, so the construct is already in the real artifact and only its
+    # contents have been harmless. Found by the seventh independent review.
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = build_repo(tmp + "/do", {"0100_seed.sql": seeding},
+                          {"carried": {}, "excluded": {"ops.widget": "runtime data"}})
+
+        preamble = ("do $$\nbegin\n"
+                    "  insert into party (name) values ('acme');\n"
+                    "end $$;\n\n")
+        found = module.check(repo, preamble + artifact(["0100_seed.sql"]))
+        case("a DO block above the ledger that lands rows moves the data-region "
+             "boundary and refuses",
+             any("DATA REGION BOUNDARY" in f for f in found))
+
+        # The negative control that keeps this from becoming a false alarm: a
+        # routine DEFINITION above the ledger is DDL, not data. The DDL half is
+        # full of function bodies whose own INSERTs start a line, and reading them
+        # as data made an earlier version refuse every real snapshot.
+        definition = ("create function public.later() returns void language plpgsql\n"
+                      "    as $$\nbegin\n  insert into party (name) values ('x');\nend $$;\n\n")
+        case("negative control: a routine DEFINITION above the ledger is DDL and "
+             "does not move the boundary",
+             module.check(repo, definition + artifact(["0100_seed.sql"])) == [])
+
+        # THE E-STRING TAIL. The scan reads two characters to decide whether a
+        # literal takes backslash escapes, and used to reach them by rejoining the
+        # whole buffer once per literal - quadratic, 37s on the real artifact.
+        # Shortening the window is the obvious fix and is wrong at two characters:
+        # truncation turns what preceded them into START OF STRING and the
+        # pattern's own ^ alternative fires where the full buffer refused.
+        # THROUGH THE REAL CALL PATH, not through _tail with a hardcoded width. A
+        # case that passes its own window length cannot see the window the scanner
+        # actually uses, so shortening it back to two survived that case untouched.
+        # This drives the scanner instead. `case` ends a line with an alphanumeric
+        # before its final e, so the full buffer says "not an E-string" and a
+        # two-character view says it is. Believing the shorter view makes the
+        # backslash an escape, the literal runs on to the NEXT quote, and the
+        # insert after it disappears.
+        swallowed = ("do $$\nbegin\n"
+                     "  insert into ops.before_it (k) values ('a');\n"
+                     "  if x = case\n"
+                     "'a\\' then\n"
+                     "  end if;\n"
+                     "  insert into ops.after_it (k) values ('b');\n"
+                     "end $$;\n")
+        landed = module.written_tables(swallowed)
+        case("a plain literal after a line ending in 'case' does not swallow the "
+             "statement after it", "ops.after_it" in landed and "ops.before_it" in landed)
+        escaped_call = ("create function ops.h() returns void language plpgsql as $$\n"
+                        "begin\n  -- E'the reviewer\\'s registry' must not swallow the call\n"
+                        "  insert into ops.landed (k) values (E'a\\'b');\nend $$;\n"
+                        "select ops.h();\n")
+        case("an E-string with a backslash-escaped quote still leaves the call visible",
+             "ops.landed" in module.written_tables(escaped_call))
 
     # -------------------------------------------------------------------- 10
     # The live classification must actually cover the live tree, or the check

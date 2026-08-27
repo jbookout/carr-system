@@ -61,6 +61,7 @@ import sys
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|)\$")
 TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
+COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin\s*;", re.I | re.M)
 
 CREATE_ROUTINE = re.compile(
     r"create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+"
@@ -117,6 +118,38 @@ def normalise(table):
     """public.foo and foo are the same table; ops.foo is not."""
     table = table.replace('"', "").replace(" ", "").lower()
     return table[len("public."):] if table.startswith("public.") else table
+
+
+def _tail(parts, count):
+    """The last `count` characters of an accumulated buffer, without joining it.
+
+    THE CALLER ASKS FOR MORE CHARACTERS THAN THE TEST INSPECTS, on purpose. The
+    E-string pattern reads two characters, so a 2-character tail looks sufficient
+    and is not: truncation turns whatever preceded them into START OF STRING, and
+    the pattern's own `^` alternative then matches where the full buffer refused.
+    "E_b_cE\n" is one -- the real buffer has an alphanumeric before the final E so
+    the test is false, while its last two characters "E\n" make it true. Python's
+    `$` also matches before a trailing newline, which puts the interesting
+    characters up to three back. A 300,000-case fuzz over both forms diverges 650
+    times at two characters and zero times at three; four is that with margin.
+
+    WHY THIS EXISTS AND IS NOT A MICRO-OPTIMISATION. The E-string test below looks
+    at two characters, and used to reach them with "".join(top) -- rebuilding the
+    entire accumulated buffer once per string literal. db/schema.sql holds 23,696
+    of them, so the pass was quadratic in artifact size: 1.5s at 0.5MB, 7.4s at
+    1MB, 28.9s at 1.5MB, and the artifact is 2.3MB and grows with every migration.
+    That is not merely slow. ops/ci.sh gives each gate selftest
+    CI_SELFTEST_TIMEOUT_SECONDS, and on exit 124 it sets gates_timed_out and
+    BREAKS -- abandoning every remaining gate selftest in the class, not just this
+    one. A check that eventually times out takes the rest of the class with it.
+    """
+    out, size = [], 0
+    for chunk in reversed(parts):
+        out.append(chunk)
+        size += len(chunk)
+        if size >= count:
+            break
+    return "".join(reversed(out))[-count:]
 
 
 def _scanned(body):
@@ -184,7 +217,7 @@ def scan_sql(sql):
             # the rest of the migration was read inside-out and a plainly top-level
             # INSERT went unreported. That is the apostrophe class of R4 one escape
             # form over, and it swallowed real DML rather than only a call.
-            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", "".join(top)))
+            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", _tail(top, 4)))
             i += 1
             while i < n:
                 if escaped and sql[i] == "\\" and i + 1 < n:
@@ -335,15 +368,25 @@ def check_region_boundary(artifact):
     # full of CREATE FUNCTION bodies whose own INSERTs start a line, and reading
     # those as data made this check refuse every real snapshot.
     prefix = artifact[:ledger.start()]
-    prefix_top, _do_bodies, _routines = scan_sql(prefix)
+    # DO BODIES ARE INCLUDED AND ROUTINE BODIES ARE NOT, and the asymmetry is the
+    # whole point. A DO block above the ledger RUNS on a rebuild, so rows it lands
+    # are data sitting outside the region tables_with_data can see -- invisible to
+    # both checks at once. This is not hypothetical: bin/schema-snapshot.sh emits
+    # the CARR ROLE PREAMBLE as a DO block above the ledger, so the construct is
+    # already there and only its contents have been harmless. A routine body above
+    # the ledger is a DEFINITION; the DDL half of the artifact is full of them and
+    # reading their INSERTs as data made an earlier version refuse every real
+    # snapshot.
+    prefix_top, prefix_dos, _routines = scan_sql(prefix)
     # NOT anchored to the start of a line. Data above the ledger is data wherever
     # it sits on the line, and the anchor bought nothing: with it and without it the
     # real artifact is equally clean, so all it did was give a mutation somewhere to
     # hide. Literals and comments are already gone from prefix_top, so a table merely
     # NAMED in prose cannot reach here.
     candidates = []
-    for pattern in WRITES_ANYWHERE:
-        candidates.append(re.search(pattern.pattern, prefix_top, pattern.flags | re.M))
+    for segment in [prefix_top, *prefix_dos]:
+        for pattern in WRITES_ANYWHERE:
+            candidates.append(re.search(pattern.pattern, segment, pattern.flags | re.M))
     first = min((c for c in candidates if c), key=lambda c: c.start(), default=None)
     if first:
         return (f"DATA REGION BOUNDARY MOVED: the first data statement in the artifact is "
@@ -355,19 +398,69 @@ def check_region_boundary(artifact):
     return None
 
 
+def copy_blocks(region):
+    """Every COPY ... FROM stdin block: its table, whether it holds rows, its span.
+
+    pg_dump --data-only emits the COPY HEADER for a table that holds no rows at
+    all, so matching the header proves the table was considered and never that
+    anything was carried. Counting the block is what makes the carried direction a
+    ROW test instead of a NAME test. Without it a carried table emptied in
+    production passes clean, which is this file's own trap arriving by deletion
+    rather than by omission -- and three of the tables it would hide (deal_phase,
+    ops.guidance_registry, retrieval_ranking_policy) are ones whose emptiness has
+    already turned a db-gate red.
+
+    The span is returned so the caller can take the block OUT before scanning. COPY
+    data is not SQL: an apostrophe in a data row would send a literal scanner
+    inside-out over everything after it, which is finding 4 one region over.
+    """
+    blocks = []
+    for head in COPY_BLOCK.finditer(region):
+        end = region.find("\n\\.", head.end())
+        stop = len(region) if end == -1 else end + 3
+        body = region[head.end():end] if end != -1 else region[head.end():]
+        blocks.append((normalise(head.group(1)),
+                       any(line.strip() for line in body.split("\n")),
+                       head.start(), stop))
+    return blocks
+
+
+def _blank(text, spans):
+    """Replace spans with whitespace, keeping newlines so line structure survives."""
+    parts, cursor = [], 0
+    for start, stop in sorted(spans):
+        if start < cursor:
+            continue
+        parts.append(text[cursor:start])
+        parts.append(re.sub(r"[^\n]", " ", text[start:stop]))
+        cursor = stop
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def tables_with_data(artifact):
-    """Tables the artifact actually carries rows for."""
+    """Tables the artifact actually carries ROWS for.
+
+    Two passes, and each one can change an answer. COPY blocks are counted, because
+    a header above an empty block carries nothing. Everything else is read from
+    SCANNED text, because the blocks bin/schema-snapshot.sh appends pass whole rows
+    as jsonb string literals: an `insert into party` occurring inside one of those
+    literals is row DATA, not a statement, and reading the region raw let it
+    register as a table being present.
+    """
     region = data_region(artifact)
-    found = set()
-    # WRITES_ANYWHERE carries the COPY form, so there is no separate COPY scan. An
-    # earlier version kept one, and a mutation sweep proved it dead twice over: first
-    # here, then again in check_region_boundary once that grew its own loop over the
-    # same patterns. A second scanner that cannot change an answer is not redundancy,
-    # it is a place for a mutation to hide.
-    for pattern in WRITES_ANYWHERE:
-        for hit in re.finditer(r"^\s*(?:with\s+[^;]{0,4000}?\s)?" + pattern.pattern,
-                               region, pattern.flags | re.M):
-            found.add(normalise(hit.group(1)))
+    found, spans = set(), []
+    for name, rows, start, stop in copy_blocks(region):
+        if rows:
+            found.add(name)
+        spans.append((start, stop))
+    top, do_bodies, routines = scan_sql(_blank(region, spans))
+    segments = [top, *do_bodies]
+    for bodies in routines.values():
+        segments.extend(bodies)
+    for segment in segments:
+        for pattern in WRITES_ANYWHERE:
+            found.update(normalise(hit.group(1)) for hit in pattern.finditer(segment))
     return found
 
 
@@ -436,8 +529,10 @@ def check(repo, artifact_text):
                 f"DECLARED CARRIED BUT ABSENT: {table}\n"
                 f"    {rel_config} says this snapshot carries it, and it is not in the artifact.\n"
                 f"    Reason on file: {carried.get(table, subset.get(table, '(none recorded)'))}\n"
-                f"    Either its block in bin/schema-snapshot.sh stopped emitting, or the source\n"
-                f"    database no longer holds the rows. A rebuild would come up short.")
+                f"    Its block in bin/schema-snapshot.sh is not emitting rows for it, so a\n"
+                f"    rebuild from this file would come up short. This check reads the ARTIFACT\n"
+                f"    and never the database, so it cannot tell you whether production still\n"
+                f"    holds the rows — do not read it as saying they are gone.")
 
     for table in sorted(excluded):
         if table in present:
