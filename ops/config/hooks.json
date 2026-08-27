@@ -1,7 +1,7 @@
 {
   "PreToolUse": [
     {
-      "matcher": "Bash",
+      "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*",
       "hooks": [
         {
           "type": "command",
