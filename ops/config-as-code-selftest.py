@@ -291,12 +291,20 @@ def main():
         # A selftest must assert the same thing everywhere; the real role is
         # restored after the block instead.
         mod.IS_PRIMARY = True
+        # The definition-only mechanism is pinned with a SYNTHETIC entry since
+        # the 2026-08-26 cutover released the real tick plist from the hold
+        # (decision f4af0c87); tick_released below pins that release itself.
+        tick_released = "com.carr.control-plane-tick.plist" not in mod.DEFINITION_ONLY
+        original_definition_only = dict(mod.DEFINITION_ONLY)
+        mod.DEFINITION_ONLY["com.carr.synthetic-definition-only.plist"] = (
+            "synthetic hold for the selftest"
+        )
         definition_only_plist = {
-            "Label": "com.carr.control-plane-tick",
+            "Label": "com.carr.synthetic-definition-only",
             "ProgramArguments": ["/usr/bin/true"],
             "RunAtLoad": False,
         }
-        (launchd / "com.carr.control-plane-tick.plist").write_bytes(
+        (launchd / "com.carr.synthetic-definition-only.plist").write_bytes(
             plistlib.dumps(definition_only_plist)
         )
         failing_plist = {
@@ -342,9 +350,11 @@ def main():
                 ["launchctl", "bootout", f"gui/{os.getuid()}/com.carr.synthetic-load-failure"],
                 capture_output=True, text=True, check=False)
         mod.IS_PRIMARY = original_primary
+        mod.DEFINITION_ONLY.clear()
+        mod.DEFINITION_ONLY.update(original_definition_only)
         launchd_dir_created = Path(mod.LAUNCHD_SRC).is_dir()
         definition_only_absent = not (
-            Path(mod.LAUNCHD_SRC) / "com.carr.control-plane-tick.plist"
+            Path(mod.LAUNCHD_SRC) / "com.carr.synthetic-definition-only.plist"
         ).exists()
 
         # THE TWO SCHEDULED-TASK GUARDS LANDED WITHOUT COVERAGE (PR 430). Both
@@ -555,9 +565,11 @@ def main():
          and "launchd com.carr.literal-comment-token.plist" in token_comment_drift_output),
         ("LaunchAgent load failure and idempotent retry both stay nonzero",
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
-        ("definition-only control-plane tick is not installed before cutover",
+        ("definition-only hold skips a held plist without installing it",
          definition_only_absent
-         and "SKIP  com.carr.control-plane-tick.plist (definition only:" in launchd_out.getvalue()),
+         and "SKIP  com.carr.synthetic-definition-only.plist (definition only:" in launchd_out.getvalue()),
+        ("control-plane tick released from definition-only hold (cutover 2026-08-26)",
+         tick_released),
         ("fresh install creates the LaunchAgents directory",
          launchd_dir_created),
         # THE PLIST PARSE CHECK MOVED OUT, to ops/launchd-plist-portable-selftest.py.

@@ -238,10 +238,13 @@ SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 # config-as-code reconciles the rest of the machine.  These adapters have their
 # own evidence/approval cutover gates; installing one early would turn a source
 # artifact into an active schedule before those gates pass.
-DEFINITION_ONLY = {
-    "com.carr.control-plane-tick.plist": (
-        "awaits accepted shadow/canary evidence and cutover approval"
-    ),
+DEFINITION_ONLY: dict[str, str] = {
+    # com.carr.control-plane-tick.plist held here until 2026-08-26: its gate was
+    # "accepted shadow/canary evidence and cutover approval". Joe approved the
+    # cutover that evening (decision f4af0c87, "Yes I approve cutover") with the
+    # first accepted shadow receipt on record; the wrapper pins --mode shadow,
+    # so installing activates evidence production only — legacy schedules keep
+    # running until each workflow's replacement is accepted at its own tier.
 }
 
 # A LaunchAgent that invokes this installer cannot unload its own label and

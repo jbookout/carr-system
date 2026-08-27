@@ -298,6 +298,17 @@ def has_carr_path_marker(value):
     return any(marker in candidate for marker in CARR_PATH_MARKERS)
 
 
+def is_checkout_path(value):
+    """True when cwd is this hook's checkout, regardless of clone basename."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        checkout = os.path.realpath(REPO)
+        return os.path.commonpath((checkout, os.path.realpath(value))) == checkout
+    except (OSError, ValueError):
+        return False
+
+
 def transcript_is_carr(recs):
     """Safe fallback when a global Stop payload omits cwd.
 
@@ -321,7 +332,10 @@ def payload_is_carr(payload, recs):
     """Use cwd when supplied; fall back only when the runtime truly omits it."""
     cwd = payload.get("cwd") or payload.get("working_directory") or payload.get("workingDirectory")
     if isinstance(cwd, str) and cwd.strip():
-        return has_carr_path_marker(cwd)
+        # CI and verifier clones need not be named ``carr-system``. The hook's
+        # own checkout is authoritative scope; the marker retains support for
+        # canonical and worktree paths when a copied/global hook is invoked.
+        return is_checkout_path(cwd) or has_carr_path_marker(cwd)
     return transcript_is_carr(recs)
 
 
