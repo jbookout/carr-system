@@ -459,6 +459,52 @@ test("reconciliation reads provide a guarded Salesforce key and verify a closed 
   );
 });
 
+// CONFLICT TIERING (WR-000019 slice S6). A pure version-number race — the
+// intervening write touched a DIFFERENT field than this call's own patch — is
+// rebased transparently instead of surfaced to a human; a same-field race
+// still refuses exactly as before (proven above).
+test("update-deal auto-rebases a disjoint-field version race and still surfaces a same-field one", async () => {
+  const db = new FakeClient();
+
+  const first = await call("update-deal", db, actors.joe, {
+    idempotency_key: "rebase-city", deal: "Deal Alpha", base_version: 1,
+    fields: { city: "Daphne" },
+  });
+  assert.deepEqual(first, { ok: true, updated: ["city"] });
+  assert.equal(db.deals.get(ids.deal).version, 2);
+
+  // Dell read the deal at version 1, before Joe's city edit landed, and now
+  // patches a COMPLETELY DIFFERENT field. This is the trivial race: nothing
+  // Dell wrote conflicts with what Joe wrote.
+  const rebased = await call("update-deal", db, actors.dell, {
+    idempotency_key: "rebase-notes", deal: "Deal Alpha", base_version: 1,
+    fields: { notes_path: "notes/deal-alpha.md" },
+  });
+  assert.equal(rebased.ok, true);
+  assert.deepEqual(rebased.updated, ["notes_path"]);
+  assert.equal(rebased.rebased, true);
+  assert.equal(rebased.rebase_receipt.from_base_version, 1);
+  assert.equal(rebased.rebase_receipt.rebased_to_version, 2);
+  assert.equal(rebased.rebase_receipt.disjoint_intervening_events.length, 1);
+  assert.equal(rebased.rebase_receipt.disjoint_intervening_events[0].field, "city");
+  // BOTH edits actually landed — the rebase re-applied Dell's patch against
+  // the current row rather than dropping it or overwriting Joe's.
+  assert.equal(db.deals.get(ids.deal).city, "Daphne");
+  assert.equal(db.deals.get(ids.deal).notes_path, "notes/deal-alpha.md");
+  assert.equal(db.deals.get(ids.deal).version, 3);
+
+  // A THIRD stale caller touching the SAME field city changed (city again)
+  // must still surface a real version_conflict — the tiering never widens to
+  // cover an actual same-field collision.
+  await assert.rejects(
+    call("update-deal", db, actors.joe, {
+      idempotency_key: "same-field-conflict", deal: "Deal Alpha", base_version: 1,
+      fields: { city: "Mobile" },
+    }),
+    error => error?.payload?.error === "version_conflict",
+  );
+});
+
 test("cursor round-trips the pg wire timestamp format (microseconds + offset) without JS Date", async () => {
   const db = new FakeClient();
   // Exactly what @neondatabase/serverless hands back for a timestamptz —
