@@ -75,6 +75,32 @@ def deterministic_args(execution: dict[str, Any], mode: str) -> list[str]:
     return list(selected)
 
 
+def resolve_auto_mode(canary_contract: dict[str, Any] | None,
+                       acceptance_rows: list[dict[str, Any]]) -> str:
+    """Resolve one workflow's HIGHEST mode tier permitted by the acceptance ladder.
+
+    This is the same ladder ``ops.enqueue_job`` enforces (migration 0332),
+    reimplemented as a pure function so ``tick --mode auto`` can pick a tier to
+    try without a database round trip per candidate.  The database guard stays
+    authoritative; a wrong resolution here only causes a refused enqueue, never
+    an unguarded one.
+
+    ``canary_contract`` is a workflow's ``execution.canary`` object (or None/
+    missing, as for every cognition workflow).  ``acceptance_rows`` is the raw
+    ``ops.workflow_acceptance`` row set for the workflow's current definition
+    version, each item shaped ``{"mode": ..., "status": ...}``.
+    """
+    accepted = {row.get("mode") for row in acceptance_rows if row.get("status") == "accepted"}
+    canary_disabled = isinstance(canary_contract, dict) and canary_contract.get("enabled") is False
+    if canary_disabled:
+        return "live" if "shadow" in accepted else "shadow"
+    if "canary" in accepted:
+        return "live"
+    if "shadow" in accepted:
+        return "canary"
+    return "shadow"
+
+
 def evaluate_predicate(decision: dict[str, Any], context: dict[str, Any]) -> bool:
     """Evaluate one registry decision without involving a model or scheduler.
 

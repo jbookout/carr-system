@@ -35,7 +35,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from lib.control_plane import deterministic_args, validate_manifest  # noqa: E402
+from lib.control_plane import deterministic_args, resolve_auto_mode, validate_manifest  # noqa: E402
 from pipelines.availability_matcher import canary_report  # noqa: E402
 from lib.control_plane_content_fuel import (ContentFuelContractError,
                                             validate_content_fuel_proposal,
@@ -382,6 +382,53 @@ def enqueue_due(manifest: dict[str, Any], instant: datetime,
             cur.execute("select (ops.enqueue_job(%s,%s,%s,%s,%s,%s)).id",
                         (key,version,instant,json.dumps(payload),idem,mode))
             rows.append({"workflow": key, "job_id": str(cur.fetchone()[0])})
+        conn.commit()
+    return rows
+
+
+def _resolve_auto_modes(cur: Any, due: list[dict[str, Any]]) -> dict[str, str]:
+    """Look up each due workflow's own acceptance ladder tier, per workflow.
+
+    One query per workflow keeps this legible; ``due`` is bounded by cron
+    matches for a single minute, never the whole manifest.
+    """
+    resolved: dict[str, str] = {}
+    for workflow in due:
+        key, version = workflow["key"], workflow["version"]
+        cur.execute(
+            "select mode,status from ops.workflow_acceptance "
+            "where workflow_key=%s and workflow_version=%s",
+            (key, version),
+        )
+        acceptance_rows = [{"mode": row[0], "status": row[1]} for row in cur.fetchall()]
+        canary_contract = workflow.get("execution", {}).get("canary")
+        resolved[key] = resolve_auto_mode(canary_contract, acceptance_rows)
+    return resolved
+
+
+def enqueue_due_auto(manifest: dict[str, Any], instant: datetime) -> list[dict[str, str]]:
+    """Enqueue every due workflow at its own ladder-resolved tier.
+
+    Unlike ``enqueue_due``, which pins one mode for the whole batch, each
+    workflow here is resolved independently from its own acceptance evidence.
+    ``ops.enqueue_job`` (migration 0332) remains the authoritative guard: a
+    stale or wrong resolution here only produces a refused enqueue for that
+    one workflow, never an ungated one.
+    """
+    due = due_workflows(manifest, instant)
+    rows: list[dict[str, str]] = []
+    with connect() as conn, conn.cursor() as cur:
+        resolved = _resolve_auto_modes(cur, due)
+        for workflow in due:
+            key, version = workflow["key"], workflow["version"]
+            mode = resolved[key]
+            if mode == "canary" and workflow.get("execution", {}).get("kind") == "deterministic":
+                deterministic_args(workflow["execution"], mode)
+            idem = f"schedule:{mode}:{key}:v{version}:{instant.isoformat()}"
+            payload = {"workflow_key": key, "scheduled_for": instant.isoformat()}
+            cur.execute("select (ops.enqueue_job(%s,%s,%s,%s,%s,%s)).id",
+                        (key,version,instant,json.dumps(payload),idem,mode))
+            rows.append({"workflow": key, "job_id": str(cur.fetchone()[0]), "mode": mode})
         conn.commit()
     return rows
 
@@ -1429,10 +1476,18 @@ def inspect_job(job_id: str) -> dict[str, Any]:
 
 
 def tick(manifest: dict[str,Any],max_jobs: int=4,mode: str="shadow") -> dict[str,Any]:
-    scheduled=enqueue_due(manifest,parse_instant(None),mode)
+    if mode=="auto":
+        # Each due workflow already carries its own resolved tier on its job
+        # row; claiming must not filter to one mode the way single-mode tick
+        # does, or it would only ever run whichever tier happened first.
+        scheduled=enqueue_due_auto(manifest,parse_instant(None))
+        run_mode=None
+    else:
+        scheduled=enqueue_due(manifest,parse_instant(None),mode)
+        run_mode=mode
     runs=[]
     for _ in range(max_jobs):
-        result=run_once(manifest,f"tick:{os.getpid()}",mode=mode)
+        result=run_once(manifest,f"tick:{os.getpid()}",mode=run_mode)
         if result.get("claimed")==0:
             break
         runs.append(result)
@@ -1454,7 +1509,7 @@ def main() -> int:
     inspect_parser.add_argument("--job-id",required=True)
     tick_parser=sub.add_parser("tick")
     tick_parser.add_argument("--max-jobs",type=int,default=4)
-    tick_parser.add_argument("--mode",choices=("shadow","canary","live"),default="shadow")
+    tick_parser.add_argument("--mode",choices=("shadow","canary","live","auto"),default="shadow")
     args = parser.parse_args()
     manifest = load_manifest()
     if args.command == "validate": result: Any = {"ok":True,"workflows":len(manifest["workflows"])}
