@@ -63,6 +63,9 @@ class CardFake {
     if (String(text).includes("pending_sourced_work_request_outcome_feedback")) return { rows: this.mode === "pending" ? [{
       ...acceptedB, outcome: acceptedB.outcome, proposed_at: "2026-08-16T02:00:00Z",
     }] : [] };
+    // The card also asks who actually performed each authority act, joining the
+    // receipts to public.tool_call by idempotency key. No acts in this fixture.
+    if (String(text).includes("acting-identity")) return { rows: [] };
     if (!String(text).includes("work_request_card")) throw new Error(`unexpected query: ${text}`);
     const history = this.mode === "b" ? [acceptedA, acceptedB] : [acceptedA];
     return { rows: [{ ref: "WR-000001", title: "Sourced routine", desired_outcome: "Routine is usable", acceptance_criteria: [],
