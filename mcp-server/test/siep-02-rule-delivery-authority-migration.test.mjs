@@ -6,8 +6,7 @@ import { readFile } from "node:fs/promises";
 const migration = await readFile(new URL("../../migrations/0364_siep02_rule_delivery_authority.sql", import.meta.url), "utf8");
 const runtime = await readFile(new URL("../../ops/rule-delivery-cutover.py", import.meta.url), "utf8");
 const wrapper = await readFile(new URL("../../bin/rule-delivery-cutover-prod.sh", import.meta.url), "utf8");
-const digestForward = await readFile(new URL("../../migrations/0374_siep02_rule_delivery_map_digest_forward.sql", import.meta.url), "utf8");
-const digestIntegrated = await readFile(new URL("../../migrations/0378_siep02_rule_delivery_map_digest_integrated.sql", import.meta.url), "utf8");
+const controllerSuccessor = await readFile(new URL("../../migrations/0363_rule_delivery_activation_digest_repin.sql", import.meta.url), "utf8");
 const mapBytes = await readFile(new URL("../../ops/config/rule-enforcement-map.json", import.meta.url));
 const overlay = JSON.parse(await readFile(new URL("../../ops/config/rule-delivery-activation-overlay.v1.json", import.meta.url), "utf8"));
 const currentMapDigest = createHash("sha256").update(mapBytes).digest("hex");
@@ -38,7 +37,8 @@ test("the Production caller has no owner credential or caller attribution input"
   assert.doesNotMatch(runtime, /--changed-by|args\.changed_by/);
   assert.match(runtime, /set_rule_delivery_mode\(%s,%s,%s\)/);
   assert.match(runtime, /ops\.rule_delivery_cutover_preflight\(%s::uuid\[\]\)/);
-  assert.doesNotMatch(runtime, /from retrieval_proposal|from ops\.rule_delivery_activation_target/i);
+  assert.doesNotMatch(runtime, /from retrieval_proposal/i);
+  assert.match(runtime, /array_agg\(short_id order by short_id\)/i);
   assert.match(runtime, /from ops\.rule_delivery_policy where singleton/);
 });
 
@@ -48,15 +48,15 @@ test("SIEP-02 does not activate or deploy rule delivery", () => {
   assert.match(wrapper, /APPLY=0/);
 });
 
-test("forward-only map successors advance only the exact nine shadow activation preimages", () => {
+test("the controller successor owns the exact nine-to-eight shadow transition", () => {
   assert.equal(overlay.base_map_sha256, currentMapDigest);
-  assert.match(digestForward, /0bd85004ed17b2da8aa42cbff0e4b3546fafee0c28df2969e2cebbf412fcc7ec/);
-  assert.match(digestIntegrated, new RegExp(currentMapDigest));
-  for (const successor of [digestForward, digestIntegrated]) {
-    assert.match(successor, /mode[^;]+is distinct from 'shadow'/s);
-    assert.match(successor, /count\(\*\)[^;]+<> 9/s);
-    assert.match(successor, /v_updated not in \(0,9\)/);
-    assert.doesNotMatch(successor, /set\s+mode\s*=|'enforced'/i);
-    assert.doesNotMatch(successor, /begin;|commit;/i);
-  }
+  assert.match(controllerSuccessor, new RegExp(currentMapDigest));
+  assert.match(controllerSuccessor, /v_prior constant text := '4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'/);
+  assert.match(controllerSuccessor, /cardinality\(v_prior_ids\)/);
+  assert.match(controllerSuccessor, /cardinality\(v_ids\)/);
+  assert.match(controllerSuccessor, /mode[^;]+is distinct from 'shadow'/s);
+  assert.match(controllerSuccessor, /short_id\s*=\s*'581cb3fe'/);
+  assert.match(controllerSuccessor, /return query select p_mode,8::bigint,v_receipt/);
+  assert.doesNotMatch(controllerSuccessor,
+    /update\s+ops\.rule_delivery_policy[\s\S]*?set\s+mode\s*=\s*'enforced'/i);
 });

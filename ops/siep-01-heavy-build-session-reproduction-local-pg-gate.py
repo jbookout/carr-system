@@ -17,7 +17,11 @@ from typing import Any, NoReturn
 import psycopg
 from psycopg.types.json import Jsonb
 
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
 from gate_runtime_role import rollback_only_connection, set_local_role
+from lib.rule_delivery_activation import EXPECTED_IDS
 
 
 def load_program6_gate() -> Any:
@@ -685,7 +689,12 @@ def main() -> int:
                           (select array_agg(short_id order by short_id)
                              from ops.rule_delivery_activation_target)"""
             ).fetchone()
-            if rules_before != rules_after or rules_after[0] != "shadow" or rules_after[1] != 9:
+            if (
+                rules_before != rules_after
+                or rules_after[0] != "shadow"
+                or rules_after[1] != len(EXPECTED_IDS)
+                or list(rules_after[2]) != sorted(EXPECTED_IDS)
+            ):
                 refuse(f"SIEP-01 touched 0321 scoped delivery state: {rules_before} -> {rules_after}")
 
         print(

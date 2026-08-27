@@ -110,9 +110,9 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 NAME_RE = re.compile(r"^\d{4}[a-z]?_[a-z0-9_]+\.sql$")
 OUTER_TRANSACTION_MIGRATION = "0339_"
 # Production's immutable ledger and the canonical schema snapshot already bind
-# this one historical artifact byte-for-byte. It predates enforcement of the
-# outer-transaction scanner on its merge lane; allow only its exact recorded
-# digest so the scanner cannot become a general transaction-control bypass.
+# these historical artifacts byte-for-byte. They predate enforcement of the
+# outer-transaction scanner on their merge lanes; allow only their exact
+# recorded digests so the scanner cannot become a general bypass.
 HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS = {
     "0344_demote_evidence_activation_bookkeeping.sql":
         "50e2b885db6b92e0a24f0a90fad7b48449f347007d8683c27adf0a4be1a75def",
@@ -124,6 +124,16 @@ HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS = {
         "4fb76045cf8ce46ba793a90d0582e6b095a17ba63edf57e91c548e7850ba37f0",
     "0351_legacy_rule_lifecycle_admission.sql":
         "59439e1a12c035e61578b85c765d7bbd131bf555b95bbecd49c6d675b5c4d808",
+}
+# Controller PR #763 deliberately keeps one explicit transaction around its
+# nine-to-eight activation transition, function replacement, grants, and
+# receipt readback. Preserve the independently reviewed source artifact exactly
+# rather than rewriting it during SIEP integration. This is separate from the
+# five Production-applied historical artifacts above: an unreviewed filename or
+# one-byte change still refuses before any SQL executes.
+REVIEWED_TRANSACTION_CONTROL_ARTIFACTS = {
+    "0363_rule_delivery_activation_digest_repin.sql":
+        "03133d0627cf63d2a0a2a7dd8a392065bc19ba17d56d0b2cfabd3dbccafdcb65",
 }
 TRANSACTION_CONTROL_RE = re.compile(
     r"(?is)^\s*(?:(?:begin|commit|end|rollback|abort)\b|"
@@ -270,8 +280,12 @@ def load_migrations() -> list[tuple[str, str, str]]:
             # sealed mutation-registry successor, and the resulting policy
             # epoch one transaction. An internal COMMIT would expose schema
             # with the old epoch before the runner records the file hash.
+            reviewed_transaction_digest = (
+                HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS.get(p.name)
+                or REVIEWED_TRANSACTION_CONTROL_ARTIFACTS.get(p.name)
+            )
             if p.name >= OUTER_TRANSACTION_MIGRATION and contains_transaction_control(sql) \
-                    and HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS.get(p.name) != digest:
+                    and reviewed_transaction_digest != digest:
                 fail(
                     f"{p.name} contains explicit transaction control; migrations from "
                     f"{OUTER_TRANSACTION_MIGRATION} onward must use the runner's single transaction"

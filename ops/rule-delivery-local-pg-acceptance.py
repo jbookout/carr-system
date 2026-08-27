@@ -468,7 +468,7 @@ def main() -> int:
         finally:
             cur.execute("reset session authorization")
         check("Joe reads only the typed aggregate cutover preflight",
-              preflight == ("shadow", 9, 0, 0, 0, 0), str(preflight))
+              preflight == ("shadow", len(EXPECTED_IDS), 0, 0, 0, 0), str(preflight))
 
         # A scope-only corruption used to pass both the backfill and audit.
         victim = synthetic_dell

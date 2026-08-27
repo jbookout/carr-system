@@ -179,12 +179,29 @@ def test_historical_transaction_artifact_is_exact() -> None:
     check("one-byte drift cannot reuse any historical grandfather", drift_refused)
 
 
+def test_reviewed_controller_transaction_artifact_is_exact() -> None:
+    artifacts = migrate.REVIEWED_TRANSACTION_CONTROL_ARTIFACTS
+    expected_name = "0363_rule_delivery_activation_digest_repin.sql"
+    sql = (REPO / "migrations" / expected_name).read_text(encoding="utf-8")
+    digest = hashlib.sha256(sql.encode()).hexdigest()
+    changed_digest = hashlib.sha256((sql + "\n-- drift probe").encode()).hexdigest()
+    check("the reviewed controller transaction allowlist is one exact artifact",
+          set(artifacts) == {expected_name}
+          and not set(artifacts) & set(migrate.HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS))
+    check("the controller digest equals its reviewed source artifact",
+          artifacts.get(expected_name) == digest
+          and migrate.contains_transaction_control(sql))
+    check("one-byte drift cannot reuse the controller transaction review",
+          artifacts.get(expected_name) != changed_digest)
+
+
 def main() -> int:
     print("migrate-precondition-selftest")
     test_table_shape()
     test_probe_is_checked_before_the_file_runs()
     test_source_enforces_the_contract()
     test_historical_transaction_artifact_is_exact()
+    test_reviewed_controller_transaction_artifact_is_exact()
     print()
     print(f"migrate-precondition-selftest: {len(PASS)}/{len(PASS) + len(FAIL)} passed")
     if FAIL:
