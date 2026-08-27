@@ -1600,9 +1600,10 @@
     "3a9dbafd": {
       "category": "post_action_verification",
       "enforcement_class": "stop_gate",
-      "binding_moment": "a reply to a partner carrying a bare id",
-      "control": "chat_lint",
-      "exceptions": "code fences, where an id is the literal thing being run"
+      "binding_moment": "a reply to a partner carrying a bare id, caught at Stop before the turn ends -- the block holds the turn open until the id is explained",
+      "control": "conduct_stop",
+      "exceptions": "code fences, where an id is the literal thing being run",
+      "note": "Reassigned 2026-08-27 (map correction, found during WR-000019 S8): bare-id detection moved OUT of chat_lint and INTO conduct-stop-gate.py's bare_id_hits() (hooks/conduct_patterns.py BARE_ID patterns, ID_EXPLAINED exemption) on 2026-08-22 -- chat-lint-gate.py's own docstring records the retirement and keeps bare_id_findings() only as a dead import shim. The live path is a blocking {\"decision\":\"block\"} at Stop, so this entry's old chat_lint pointer (whose failure mode is deferred, non-blocking surfacing) understated the enforcement that actually runs."
     },
     "e4d965d9": {
       "category": "judgment_advisory",
