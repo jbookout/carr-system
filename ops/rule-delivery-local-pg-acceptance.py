@@ -172,31 +172,89 @@ def main() -> int:
         # plus its matching Joe authority receipt and named successor.
         with psycopg.connect(dsn) as receipt_conn, receipt_conn.cursor() as receipt_cur:
             retired_at = "2026-08-27T00:00:00Z"
-            contract_hash = "1" * 64
+            activated_at = "2000-01-01T00:00:00Z"
             receipt_cur.execute("""insert into rule (id,statement,taught_by,status)
                                    values (%s,'retirement successor fixture',%s,'proposed')""",
                                 (successor_rule_id, guard_joe))
             receipt_cur.execute("""insert into rule
-                       (id,statement,taught_by,status,version,retired_by,retired_at)
-                       values (%s,'receipted retired fixture',%s,'retired',2,%s,%s)""",
-                                (retired_rule_id, guard_joe, guard_joe, retired_at))
+                       (id,statement,taught_by,status,version,activated_by,activated_at,
+                        retired_by,retired_at)
+                       values (%s,'receipted retired fixture',%s,'retired',2,%s,%s,%s,%s)""",
+                                (retired_rule_id, guard_joe, guard_joe, activated_at,
+                                 guard_joe, retired_at))
+            receipt_cur.execute(
+                """select ops.legacy_rule_admission_note(%s,'active',%s::timestamptz)""",
+                (retired_rule_id, activated_at),
+            )
+            legacy_admission = one(receipt_cur)[0]
+            check("the retirement fixture has the canonical legacy admission",
+                  legacy_admission is not None)
+            receipt_cur.execute(
+                """select encode(public.digest(jsonb_build_object(
+                       'rule_id',%s::uuid,
+                       'rule_version_before',1,
+                       'rule_version_after',2,
+                       'statement_hash',encode(public.digest(
+                           'receipted retired fixture','sha256'),'hex'),
+                       'previous_status','active',
+                       'actor_id',%s::uuid,
+                       'reason','retirement fixture',
+                       'superseded_by',%s::uuid,
+                       'approval_receipt_id',null::uuid,
+                       'legacy_admission',%s::text,
+                       'retired_at',%s::timestamptz
+                     )::text,'sha256'),'hex')""",
+                (retired_rule_id, guard_joe, successor_rule_id,
+                 legacy_admission, retired_at),
+            )
+            contract_hash = one(receipt_cur)[0]
+
+            # Internal equality is insufficient: a made-up hash shared by both
+            # ledgers must still fail because it was not derived from the exact
+            # canonical Joe-authorized retirement contract.
+            receipt_cur.execute("savepoint malformed_retirement")
             receipt_cur.execute("""insert into ops.rule_retirement_receipt
                        (idempotency_key,rule_id,rule_version_before,rule_version_after,
                         statement_hash,previous_status,actor_id,reason,superseded_by,
-                        legacy_admission,contract_hash,retired_at)
+                        legacy_admission,contract_hash,retired_at,created_at)
                        values ('0363-retirement-fixture',%s,1,2,
                                encode(public.digest('receipted retired fixture','sha256'),'hex'),
-                               'active',%s,'retirement fixture',%s,
-                               'pre-receipt legacy fixture',%s,%s)""",
+                               'active',%s,'retirement fixture',%s,%s,%s,%s,%s)""",
                                 (retired_rule_id, guard_joe, successor_rule_id,
-                                 contract_hash, retired_at))
+                                 legacy_admission, "1" * 64, retired_at, retired_at))
             receipt_cur.execute("""insert into ops.authority_receipt
                        (idempotency_key,kind,subject_type,subject_id,actor_id,
-                        decision,contract_hash,evidence_refs)
+                        decision,contract_hash,evidence_refs,created_at)
                        values ('retirement:0363-retirement-fixture','override','rule',
                                %s,%s,'retired by Joe authority: retirement fixture',%s,
-                               '{}'::text[])""",
-                                (retired_rule_id, guard_joe, contract_hash))
+                               '{}'::text[],%s)""",
+                                (retired_rule_id, guard_joe, "1" * 64, retired_at))
+            try:
+                receipt_cur.execute(transition_0363, prepare=False)
+                check("0363 refuses an internally consistent fabricated retirement hash",
+                      False, "transition accepted a fabricated retirement contract")
+            except psycopg.Error as exc:
+                check("0363 refuses an internally consistent fabricated retirement hash",
+                      "not absent or exactly retired to aa411351" in str(exc),
+                      str(exc).splitlines()[0])
+            receipt_cur.execute("rollback to savepoint malformed_retirement")
+
+            receipt_cur.execute("""insert into ops.rule_retirement_receipt
+                       (idempotency_key,rule_id,rule_version_before,rule_version_after,
+                        statement_hash,previous_status,actor_id,reason,superseded_by,
+                        legacy_admission,contract_hash,retired_at,created_at)
+                       values ('0363-retirement-fixture',%s,1,2,
+                               encode(public.digest('receipted retired fixture','sha256'),'hex'),
+                               'active',%s,'retirement fixture',%s,%s,%s,%s,%s)""",
+                                (retired_rule_id, guard_joe, successor_rule_id,
+                                 legacy_admission, contract_hash, retired_at, retired_at))
+            receipt_cur.execute("""insert into ops.authority_receipt
+                       (idempotency_key,kind,subject_type,subject_id,actor_id,
+                        decision,contract_hash,evidence_refs,created_at)
+                       values ('retirement:0363-retirement-fixture','override','rule',
+                               %s,%s,'retired by Joe authority: retirement fixture',%s,
+                               '{}'::text[],%s)""",
+                                (retired_rule_id, guard_joe, contract_hash, retired_at))
             receipt_cur.execute(transition_0363, prepare=False)
             receipt_cur.execute("""select count(*),
                            count(*) filter (where map_digest=%s),

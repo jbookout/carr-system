@@ -47,6 +47,7 @@ begin
     select 1
       from public.rule r
       join ops.rule_retirement_receipt rr on rr.rule_id=r.id
+      join public.actor retirement_actor on retirement_actor.id=rr.actor_id
       join public.rule successor on successor.id=rr.superseded_by
       join ops.authority_receipt ar
         on ar.idempotency_key='retirement:'||rr.idempotency_key
@@ -58,11 +59,51 @@ begin
        and rr.rule_version_before+1=rr.rule_version_after
        and rr.statement_hash=encode(public.digest(r.statement,'sha256'),'hex')
        and rr.previous_status='active'
+       and retirement_actor.slug='joe'
+       and retirement_actor.kind='human'
+       and retirement_actor.active
+       and rr.reason=btrim(rr.reason)
+       and rr.created_at=rr.retired_at
        and (
-         (rr.approval_receipt_id is not null and rr.legacy_admission is null)
+         (rr.approval_receipt_id is not null
+          and rr.legacy_admission is null
+          and exists (
+            select 1
+              from ops.rule_approval_receipt approval
+             where approval.id=rr.approval_receipt_id
+               and approval.rule_id=r.id
+               and approval.statement_hash=rr.statement_hash
+               and (
+                 approval.rule_version=rr.rule_version_before
+                 or exists (
+                   select 1
+                     from ops.rule_approval_lifecycle_anchor anchor
+                    where anchor.approval_receipt_id=approval.id
+                      and anchor.rule_id=r.id
+                      and anchor.rule_version_after=rr.rule_version_before
+                      and anchor.statement_hash=approval.statement_hash
+                 )
+               )
+          ))
          or
-         (rr.approval_receipt_id is null and rr.legacy_admission is not null)
+         (rr.approval_receipt_id is null
+          and rr.legacy_admission is not null
+          and rr.legacy_admission=
+                ops.legacy_rule_admission_note(r.id,'active',r.activated_at))
        )
+       and rr.contract_hash=encode(public.digest(jsonb_build_object(
+             'rule_id',r.id,
+             'rule_version_before',rr.rule_version_before,
+             'rule_version_after',rr.rule_version_after,
+             'statement_hash',rr.statement_hash,
+             'previous_status',rr.previous_status,
+             'actor_id',rr.actor_id,
+             'reason',rr.reason,
+             'superseded_by',rr.superseded_by,
+             'approval_receipt_id',rr.approval_receipt_id,
+             'legacy_admission',rr.legacy_admission,
+             'retired_at',rr.retired_at
+           )::text,'sha256'),'hex')
        and left(successor.id::text,8)='aa411351'
        and (select count(*) from public.rule named_successor
              where left(named_successor.id::text,8)='aa411351')=1
@@ -71,6 +112,12 @@ begin
        and ar.subject_id=r.id
        and ar.actor_id=rr.actor_id
        and ar.contract_hash=rr.contract_hash
+       and ar.decision='retired by Joe authority: '||rr.reason
+       and ar.evidence_refs=case
+             when rr.approval_receipt_id is null then '{}'::text[]
+             else array[rr.approval_receipt_id::text]
+           end
+       and ar.created_at=rr.retired_at
        and (select count(*) from ops.rule_retirement_receipt all_rr
              where all_rr.rule_id=r.id)=1
   ) then
