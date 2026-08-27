@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -29,10 +30,42 @@ DESK_SPEC_PATH = REPO / "ops" / "config" / "engineering-codex-desk.v1.json"
 # registry-location override.  This fixed per-user registry is part of the
 # local adapter identity, just like the fixed desk name below.
 DEDICATED_REGISTRY_PATH = Path.home() / ".config" / "carr" / "hermes-desks.json"
+DISPATCH_MINIMUM_RUNWAY = timedelta(seconds=930)
 
 
 class DispatchRefusal(RuntimeError):
     pass
+
+
+def _canonical_utc_second(value: object) -> datetime:
+    """Accept only the exact server timestamp representation in an envelope."""
+    if not isinstance(value, str):
+        raise DispatchRefusal("engineering envelope authority expiry is malformed")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise DispatchRefusal("engineering envelope authority expiry is malformed") from exc
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise DispatchRefusal("engineering envelope authority expiry is malformed")
+    return parsed
+
+
+def _require_dispatch_runway(envelope: dict, claim_lease_expires_at: object) -> None:
+    """Refuse unless every authority can outlive the fixed 900s timeout."""
+    if not isinstance(envelope, dict):
+        raise DispatchRefusal("engineering envelope is malformed")
+    expiry = _canonical_utc_second(envelope.get("expires_at"))
+    agent_session = envelope.get("agent_session")
+    if not isinstance(agent_session, dict):
+        raise DispatchRefusal("engineering envelope agent session is malformed")
+    session_expiry = _canonical_utc_second(agent_session.get("lease_expires_at"))
+    if session_expiry != expiry:
+        raise DispatchRefusal("engineering envelope and session expiry do not match")
+    claim_expiry = _canonical_utc_second(claim_lease_expires_at)
+    checked_at = datetime.now(timezone.utc)
+    if (expiry - checked_at < DISPATCH_MINIMUM_RUNWAY
+            or claim_expiry - checked_at < DISPATCH_MINIMUM_RUNWAY):
+        raise DispatchRefusal("engineering envelope authority runway is insufficient")
 
 
 def _safe_child_env() -> dict[str, str]:
@@ -149,6 +182,9 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
     envelope = request["envelope"]
     if envelope.get("server_binding", {}).get("adapter", {}).get("surface") != "codex_desktop":
         raise DispatchRefusal("engineering envelope does not select the Codex desktop adapter")
+    # Reject malformed authority before contract parsing, and repeat the same
+    # check directly beside dispatch below as the final launch boundary.
+    _require_dispatch_runway(envelope, task.get("claim_lease_expires_at"))
     if not isinstance(slice_row, dict) or not isinstance(task.get("slice_ref"), str):
         raise DispatchRefusal("engineering controller task has no exact slice")
     if (not isinstance(plan, dict) or not isinstance(plan.get("work_request"), dict)
@@ -158,7 +194,11 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
     packet = engineering_passport.build_engineering_slice_packet(envelope, plan, task["slice_ref"])
     if packet["slice_ref"] != slice_row.get("slice_ref") or task.get("plan_digest") != packet["plan_digest"]:
         raise DispatchRefusal("engineering controller task does not match its accepted packet")
-    row = dispatch_fn(request["desk"], _prompt(packet, task), env=_safe_child_env(), fresh=True)
+    _require_dispatch_runway(envelope, task.get("claim_lease_expires_at"))
+    # The database lease deadline is controller authority, not model input; it
+    # must be checked at launch but excluded from the packet/task digest.
+    prompt_task = {key: value for key, value in task.items() if key != "claim_lease_expires_at"}
+    row = dispatch_fn(request["desk"], _prompt(packet, prompt_task), env=_safe_child_env(), fresh=True)
     if not isinstance(row, dict) or row.get("status") != "completed":
         status = row.get("status") if isinstance(row, dict) else "invalid"
         raise DispatchRefusal(f"engineering desk dispatch did not complete: {status}")
