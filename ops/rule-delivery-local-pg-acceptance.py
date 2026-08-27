@@ -33,6 +33,13 @@ from lib.rule_delivery_activation import EXPECTED_IDS, load_validated  # noqa:E4
 REPO = Path(__file__).resolve().parent.parent
 MAP = REPO / "ops" / "config" / "rule-enforcement-map.json"
 PY = REPO / ".venv" / "bin" / "python"
+MIGRATION_0350 = REPO / "migrations" / "0350_rule_delivery_activation_digest_repin.sql"
+PRIOR_ACTIVATION_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
+CURRENT_ACTIVATION_DIGEST = "b513180786cf7212877870ab3bc14c03bb78b17b3397eb6ee474187a152b13f2"
+ACTIVATION_TO_TEST_REF = (
+    "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
+    "ops/rule-pack-preuse-reselection-selftest.py"
+)
 
 FAILURES: list[str] = []
 
@@ -78,6 +85,45 @@ def main() -> int:
     store_scope_by_id[synthetic_dell] = "dell"
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        # 0350 must refuse a same-ID row whose reviewed activation preimage
+        # drifted, and the failed transaction must not repin any digest.
+        migration_0350 = MIGRATION_0350.read_text(encoding="utf-8")
+        activation_victim = sorted(EXPECTED_IDS)[0]
+        cur.execute(
+            "update ops.rule_delivery_activation_target set map_digest=%s",
+            (PRIOR_ACTIVATION_DIGEST,),
+        )
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set to_test_ref='drifted same-ID acceptance fixture'
+                where short_id=%s""",
+            (activation_victim,),
+        )
+        try:
+            cur.execute(migration_0350, prepare=False)
+            check("0350 refuses a drifted same-ID activation preimage", False,
+                  "migration accepted the drifted row")
+        except psycopg.Error as exc:
+            check(
+                "0350 refuses a drifted same-ID activation preimage",
+                "expected nine exact reviewed activation preimage rows" in str(exc),
+                str(exc).splitlines()[0],
+            )
+        conn.rollback()
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (PRIOR_ACTIVATION_DIGEST,),
+        )
+        check("a refused 0350 repin changes no target digest", one(cur)[0] == 9)
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s,
+                      to_test_ref=%s
+                where short_id=any(%s)""",
+            (CURRENT_ACTIVATION_DIGEST, ACTIVATION_TO_TEST_REF, sorted(EXPECTED_IDS)),
+        )
+
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")
         cur.execute("select id from actor where slug='joe'")

@@ -14,9 +14,6 @@ MIGRATION_SOURCE = (ROOT / "migrations" / "0317_atomic_rule_delivery_cutover.sql
 REFRESH_MIGRATION_SOURCE = (
     ROOT / "migrations" / "0332_refresh_rule_delivery_activation_preimage.sql"
 ).read_text(encoding="utf-8")
-RULESET_MIGRATION_SOURCE = (
-    ROOT / "migrations" / "0348_pr_only_main_ruleset_control.sql"
-).read_text(encoding="utf-8")
 CURRENT_MIGRATION_SOURCE = (
     ROOT / "migrations" / "0350_rule_delivery_activation_digest_repin.sql"
 ).read_text(encoding="utf-8")
@@ -27,7 +24,6 @@ SECOND_REFRESH_MIGRATION = "0348_pr_only_main_ruleset_control.sql"
 SECOND_REFRESH_MIGRATION_SOURCE = (
     ROOT / "migrations" / "0348_pr_only_main_ruleset_control.sql"
 ).read_text(encoding="utf-8")
-RULESET_MIGRATION = SECOND_REFRESH_MIGRATION
 CURRENT_MIGRATION = "0350_rule_delivery_activation_digest_repin.sql"
 POLICY_MARKER = "-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh)"
 TARGET_POST_MARKER = (
@@ -42,7 +38,6 @@ TARGET_POST_0348_MARKER = (
 OLD_DIGEST = "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a"
 DIGEST = "c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997"
 THIRD_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
-RULESET_DIGEST = THIRD_DIGEST
 CURRENT_DIGEST = "b513180786cf7212877870ab3bc14c03bb78b17b3397eb6ee474187a152b13f2"
 EXPECTED_TARGETS = [
     "25fcddee", "3fa17fa0", "72e06bdf", "581cb3fe", "113b3833",
@@ -117,9 +112,6 @@ refresh_ledger_applied = bool(
 second_refresh_ledger_applied = bool(
     re.search(rf"^{re.escape(SECOND_REFRESH_MIGRATION)}\t", SNAPSHOT, re.M)
 )
-ruleset_ledger_applied = bool(
-    re.search(rf"^{re.escape(RULESET_MIGRATION)}\t", SNAPSHOT, re.M)
-)
 current_ledger_applied = bool(
     re.search(rf"^{re.escape(CURRENT_MIGRATION)}\t", SNAPSHOT, re.M)
 )
@@ -157,7 +149,7 @@ assert "ops/rule-pack-preuse-reselection-selftest.py" not in pre_block
 assert [row[0] for row in snapshot_targets] == EXPECTED_TARGETS
 expected_snapshot_digest = (
     CURRENT_DIGEST if current_ledger_applied
-    else RULESET_DIGEST if ruleset_ledger_applied
+    else THIRD_DIGEST if second_refresh_ledger_applied
     else DIGEST if refresh_ledger_applied
     else OLD_DIGEST
 )
@@ -168,10 +160,8 @@ assert THIRD_DIGEST in SECOND_REFRESH_MIGRATION_SOURCE
 assert all(short_id in SECOND_REFRESH_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
 assert all(short_id in REFRESH_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
 assert "requires shadow mode" in REFRESH_MIGRATION_SOURCE
-assert RULESET_DIGEST in RULESET_MIGRATION_SOURCE
-assert all(short_id in RULESET_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
-assert "requires shadow mode" in RULESET_MIGRATION_SOURCE
 assert CURRENT_DIGEST in CURRENT_MIGRATION_SOURCE
+assert THIRD_DIGEST in CURRENT_MIGRATION_SOURCE
 assert all(short_id in CURRENT_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
 assert "requires shadow mode" in CURRENT_MIGRATION_SOURCE
 assert "ops.enforcement_control_catalog" in REFRESH_MIGRATION_SOURCE
@@ -186,6 +176,15 @@ for guarded_field in (
 ):
     assert REFRESH_MIGRATION_SOURCE.count(guarded_field) >= 2, (
         f"0332 must bind and post-assert the complete activation preimage: {guarded_field}"
+    )
+for guarded_field in (
+    "t.expected_scope", "t.expected_pack", "t.from_control",
+    "t.from_enforcement_class", "t.from_implementation_ref", "t.from_test_ref",
+    "t.to_control", "t.to_enforcement_class", "t.to_implementation_ref",
+    "t.to_test_ref", "t.map_digest",
+):
+    assert CURRENT_MIGRATION_SOURCE.count(guarded_field) >= 2, (
+        f"0350 must bind and post-assert the complete activation preimage: {guarded_field}"
     )
 assert policy_ledger_applied == policy_seeded, (
     "the shadow rule-delivery bootstrap must appear exactly when 0291 is in "
