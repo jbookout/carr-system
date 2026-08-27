@@ -24,7 +24,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.rule_delivery_preuse import (  # noqa:E402
     PACK, RECEIPT_SCHEMA, canonical, digest, receipt_id,
-    scheduled_rule_ids as _scheduled_rule_ids,
+    scheduled_rule_ids as _scheduled_rule_ids, valid_local_identity,
 )
 from lib.rule_delivery_shadow import (  # noqa:E402
     WINDOW_SOURCE_PATHS, file_sha256, source_sha256,
@@ -91,8 +91,7 @@ def _run_selector(ids: list[str], runner: Callable) -> dict:
 
 def _validate_selector(response: dict, ids: list[str]):
     identity = response.get("identity")
-    if not isinstance(identity, dict) or not all(_nonempty(identity.get(key)) for key in (
-            "agent_principal_id", "runtime_principal", "sponsoring_human_id")):
+    if not valid_local_identity(identity):
         raise RuntimeError("selector identity is incomplete")
     delivery = response.get("rule_delivery")
     if (not isinstance(delivery, dict)

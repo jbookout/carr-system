@@ -22,6 +22,7 @@ def load(name: str, path: Path):
 
 
 rail = load("rule_pack_preuse_reselection", REPO / "hooks/rule-pack-preuse-reselection.py")
+contract = load("rule_delivery_preuse_test", REPO / "lib/rule_delivery_preuse.py")
 drift = load("rule_pack_drift_preuse_test", REPO / "hooks/rule-pack-drift-gate.py")
 
 
@@ -47,7 +48,9 @@ SOURCE_DIGEST = rail.source_sha256(REPO)
 
 
 def selector_result(*, mode: str = "shadow", ids: list[str] | None = None,
-                    declared: list[str] | None = None, unknown: list[str] | None = None) -> dict:
+                    declared: list[str] | None = None, unknown: list[str] | None = None,
+                    agent: str = "joe-local", runtime: str | None = None,
+                    sponsor: str = "joe") -> dict:
     wanted = EXPECTED_IDS if ids is None else ids
     block = {
         "mode": mode,
@@ -60,9 +63,9 @@ def selector_result(*, mode: str = "shadow", ids: list[str] | None = None,
         "ok": True,
         "identity": {
             "organization_tenant_id": "carr-internal",
-            "sponsoring_human_id": "joe",
-            "agent_principal_id": "joe-local",
-            "runtime_principal": "joe-local",
+            "sponsoring_human_id": sponsor,
+            "agent_principal_id": agent,
+            "runtime_principal": agent if runtime is None else runtime,
             "personal_brain_scope": "joe-personal",
             "personal_scope_source": "verified_grant_sponsor",
             "session_capability_profile": "sponsored_agent",
@@ -107,8 +110,8 @@ def payload(*, tool: str = "Bash", background: object = True,
         "tool_name": tool,
         "tool_use_id": "tool-exact",
         "tool_input": {
-            "command": "until test -f /tmp/ready; do sleep 5; done",
-            "description": "wait for source-owned readiness",
+            "command": "sleep 5",
+            "description": "wait",
             "run_in_background": background,
         },
     }
@@ -165,6 +168,42 @@ check("receipt carries every dynamic member and full binding text",
       and all(item["statement"].startswith("binding scheduled rule") for item in row["rules"]),
       row.get("rules"))
 
+dell_output = rail.process(
+    payload(), runner=Runner(selector_result(agent="dell-local", sponsor="dell")))
+check("sanctioned Dell local identity receives the same rail",
+      receipt(dell_output)["identity"] == {
+          "agent_principal_id": "dell-local",
+          "runtime_principal": "dell-local",
+          "sponsoring_human_id": "dell",
+      }, receipt(dell_output).get("identity"))
+
+check("Dell receipt passes the exact receipt validator",
+      contract.validate_receipt(receipt(dell_output), repo=REPO))
+identity_cases = [
+    ("mismatched local sponsor", {
+        "agent_principal_id": "joe-local", "runtime_principal": "joe-local",
+        "sponsoring_human_id": "dell",
+    }),
+    ("mismatched runtime and agent", {
+        "agent_principal_id": "joe-local", "runtime_principal": "codex",
+        "sponsoring_human_id": "joe",
+    }),
+    ("unknown local identity", {
+        "agent_principal_id": "some-local", "runtime_principal": "some-local",
+        "sponsoring_human_id": "joe",
+    }),
+    ("non-string local identity", {
+        "agent_principal_id": ["joe-local"], "runtime_principal": "joe-local",
+        "sponsoring_human_id": "joe",
+    }),
+]
+for label, identity in identity_cases:
+    forged = copy.deepcopy(row)
+    forged["identity"] = identity
+    forged["receipt_id"] = contract.receipt_id(forged)
+    check(f"{label} receipt is rejected even with a recomputed receipt id",
+          not contract.validate_receipt(forged, repo=REPO), forged)
+
 # Exact booleans and exact tool names only. Text and nested values never fire it.
 for label, candidate in [
     ("false", False), ("string true", "true"), ("integer one", 1),
@@ -197,6 +236,10 @@ bad_cases = [
     ("extra declared pack", Runner(selector_result(
         declared=["scheduled-automation", "engineering-git"]))),
     ("missing rule", Runner(selector_result(ids=EXPECTED_IDS[:-1]))),
+    ("mismatched local sponsor", Runner(selector_result(sponsor="dell"))),
+    ("mismatched runtime and agent", Runner(selector_result(runtime="codex"))),
+    ("unknown local identity", Runner(selector_result(
+        agent="some-local", sponsor="joe"))),
 ]
 for label, fake in bad_cases:
     failed = rail.process(payload(), runner=fake)
@@ -230,6 +273,24 @@ def codex_tool_call(tool: str = "functions.exec") -> dict:
         "type": "function_call", "call_id": "tool-exact", "name": tool,
         "arguments": json.dumps(before["tool_input"], sort_keys=True,
                                 separators=(",", ":")),
+        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-exact"},
+    }}
+
+
+def codex_custom_tool_call(*, name: str = "exec", wrapper: str = "response_item",
+                           raw: object | None = None) -> dict:
+    tool_input = before["tool_input"] if raw is None else raw
+    if wrapper == "event_msg":
+        return {"type": "event_msg", "payload": {
+            "type": "custom_tool_call", "name": name,
+            "arguments": tool_input,
+        }}
+    return {"type": "response_item", "payload": {
+        "type": "custom_tool_call", "id": "ctc-exact", "status": "completed",
+        "call_id": "tool-exact", "name": name,
+        "input": (json.dumps(tool_input, sort_keys=True, separators=(",", ":"))
+                  if not isinstance(tool_input, str) else tool_input),
+        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-exact"},
     }}
 
 
@@ -257,6 +318,56 @@ mode, loaded, _ = drift.delivery_state([
 ])
 check("Codex Bash alias receives and proves the same receipt",
       mode == "shadow" and loaded == ["scheduled-automation"], (mode, loaded))
+
+TRIGGERS, MEMBERS = drift.load_packs()
+for label, records in [
+    ("Claude success", claude_records),
+    ("Codex function success", codex_records),
+    ("Codex response-item custom exec success",
+     [codex_custom_tool_call(), codex_context(context(codex_output))]),
+]:
+    evaluated = drift.evaluate(records, TRIGGERS, MEMBERS)
+    check(f"{label} structurally requires and loads scheduled automation",
+          evaluated["needed"] == ["scheduled-automation"]
+          and evaluated["loaded"] == ["scheduled-automation"]
+          and evaluated["missing"] == [], evaluated)
+
+custom_needed = drift.evaluate([codex_custom_tool_call()], TRIGGERS, MEMBERS)
+check("Codex custom-tool background call structurally requires scheduled automation",
+      custom_needed["needed"] == ["scheduled-automation"]
+      and custom_needed["loaded"] == []
+      and custom_needed["missing"] == ["scheduled-automation"], custom_needed)
+
+for label, records in [
+    ("Claude no receipt", [claude_tool_call()]),
+    ("Claude selector failure", [claude_tool_call(), {
+        "type": "attachment", "sessionId": "session-exact",
+        "attachment": {
+            "type": "hook_additional_context", "hookEvent": "PreToolUse",
+            "hookName": "PreToolUse:Bash", "toolUseID": "tool-exact",
+            "content": [rail.FAILURE_CONTEXT],
+        },
+    }]),
+    ("Codex function no receipt", [codex_tool_call()]),
+    ("Codex response-item custom exec no receipt", [codex_custom_tool_call()]),
+    ("Codex event custom exec_command cannot claim an uncorrelated receipt",
+     [codex_custom_tool_call(name="exec_command", wrapper="event_msg"),
+      codex_context(context(codex_output))]),
+]:
+    evaluated = drift.evaluate(records, TRIGGERS, MEMBERS)
+    check(f"{label} stays needed and missing",
+          evaluated["needed"] == ["scheduled-automation"]
+          and evaluated["loaded"] == []
+          and evaluated["missing"] == ["scheduled-automation"], evaluated)
+
+for label, record in [
+    ("unknown custom alias", codex_custom_tool_call(name="other")),
+    ("unstructured custom wrapper prose", codex_custom_tool_call(
+        raw="tools.exec_command({run_in_background: true})")),
+]:
+    evaluated = drift.evaluate([record], TRIGGERS, MEMBERS)
+    check(f"{label} does not create a structured background requirement",
+          evaluated["needed"] == [] and evaluated["missing"] == [], evaluated)
 
 for label, records in [
     ("copied user context", [claude_tool_call(), {

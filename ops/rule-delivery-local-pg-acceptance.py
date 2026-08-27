@@ -28,7 +28,7 @@ from pathlib import Path
 import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lib.rule_delivery_activation import EXPECTED_IDS  # noqa:E402
+from lib.rule_delivery_activation import EXPECTED_IDS, load_validated  # noqa:E402
 
 REPO = Path(__file__).resolve().parent.parent
 MAP = REPO / "ops" / "config" / "rule-enforcement-map.json"
@@ -227,7 +227,7 @@ def main() -> int:
         admission = run("tools/sync-rule-admission.py", dsn)
         check("the admission sync builds the nine-control preimage",
               admission.returncode == 0, admission.stderr.strip()[-500:])
-        digest = "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a"
+        digest = load_validated()[1]["base_map_sha256"]
         try:
             cur.execute("""select * from ops.set_rule_delivery_mode(
                            'enforced','local-pg-acceptance','seven-day evidence fixture',%s)""",

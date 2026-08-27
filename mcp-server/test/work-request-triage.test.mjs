@@ -47,9 +47,17 @@ test("review-and-triage performs only captured-to-triaged and writes one audit e
   assert.equal(JSON.parse(event.params[7]).classification, "operational");
 });
 
-test("review-and-triage refuses nonhuman, extras, stale versions, and same-key mutation", async () => {
-  const nonhuman = await rejected(() => executeRegisteredTool(new TriageFake(), BOT, "review-and-triage", structuredClone(ARGS)));
-  assert.equal(nonhuman.error, "human_only");
+test("review-and-triage admits a machine actor, and still refuses extras, stale versions, and same-key mutation", async () => {
+  // JOE'S RULING 2026-08-26 (decision dc57f62d): nothing in this system is
+  // human-only. This assertion is INVERTED rather than deleted, so restoring
+  // the gate fails here instead of passing quietly — a removed test would let
+  // the refusal creep back unnoticed, which is the failure mode the ruling was
+  // about. Everything else this test pins is unchanged: the caller-authority,
+  // field-validation and optimistic-concurrency refusals are NOT authority
+  // checks and must keep firing for every actor.
+  const db = new TriageFake();
+  const machine = await executeRegisteredTool(db, BOT, "review-and-triage", structuredClone(ARGS));
+  assert.equal(machine.state, "triaged");
   for (const extra of [{ state: "ready" }, { executor: "codex" }, { approval: "yes" }]) {
     const db = new TriageFake(); const out = await rejected(() => executeRegisteredTool(db, JOE, "review-and-triage", { ...ARGS, ...extra }));
     assert.ok(["caller_authority_field_forbidden", "invalid_triage_fields"].includes(out.error)); assert.equal(db.calls.length, 0);

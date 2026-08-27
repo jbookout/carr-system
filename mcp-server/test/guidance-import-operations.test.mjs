@@ -49,9 +49,13 @@ test("a non-human actor cannot decide or deactivate the typed guidance registry"
     ["deactivate-guidance-registry", { idempotency_key: "deactivation-denied", registry_id: REGISTRY_ID, manifest_digest: DIGEST, reason: "fixture" }],
   ]) {
     const db = new AuthorityDb();
-    const out = await rejected(() => executeRegisteredTool(db, AGENT, name, args));
-    assert.equal(out.error, "human_only", name);
-    assert.equal(db.calls.length, 0, name);
+    // INVERTED (Joe's ruling 2026-08-26, decision dc57f62d): authority no
+    // longer refuses these, so the agent must now REACH the handler. Whatever
+    // stops it after that is fixture shape, never human_only.
+    let out;
+    try { await executeRegisteredTool(db, AGENT, name, args); }
+    catch (error) { out = error.payload; }
+    assert.notEqual(out?.error, "human_only", name);
   }
 });
 

@@ -7256,14 +7256,35 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
-  // Phase 1, 2026-08-13 (decision 97e76a2f): the hint now names the remedy,
-  // not just the refusal. The server admits a verified partner or a sponsored
-  // native Codex/Claude actor. Probe, reviewer, local-token, other-model, and
-  // unsponsored doors refuse identically; caller fields cannot select the
-  // sponsor. The local break-glass route remains separately receipted.
-  if (tool.humanOnly && !canExercisePartnerAuthority(actor))
-    throw new ToolError({ error: "human_only",
-      hint: "this verb requires Joe or Dell, or a server-verified Codex/Claude session sponsored by one of them; caller fields can never select the sponsor" });
+  // RETIRED 2026-08-26 BY JOE'S RULING, and the flag is kept only as a label.
+  // His words: "Nothing is human only from now on. I don't want anything to be
+  // human only in this entire system. I'm so sick of the roadblocks. I'm
+  // literally telling you to do things and I'm getting blocked bc it's human
+  // only. It doesn't make any sense."
+  //
+  // WHAT THE REFUSAL ACTUALLY DID, because it was thinner than it read. It
+  // admitted a verified partner OR any sponsored Codex/Claude session, so an
+  // agent session of Joe's was never turned away by it — review-and-triage,
+  // marked HUMAN-ONLY, went through the connector the same hour this was
+  // written and the ledger recorded actor_slug 'joe'. What it DID refuse was
+  // the local-token door: `./run.sh call <verb>` authenticates as a machine
+  // actor and got authority_connection_unavailable. Same verb, two doors,
+  // opposite answers — that inconsistency is what read as senseless, and it is
+  // why removing this alone was not the whole fix.
+  //
+  // WHAT THIS GIVES UP, stated once so nobody rediscovers it as a surprise.
+  // Two of the forty-four verbs carry real commitment: new-deal writes a deal
+  // into a partner's book, and approve-rule admits a rule that then binds every
+  // future session. Memory correction is a third class. An agent can now do all
+  // of them unsupervised. Joe was told this explicitly before ruling and ruled
+  // anyway; it reopens if an agent-made deal or rule admission ever has to be
+  // reversed. Logged as decision dc57f62d with the full rationale.
+  //
+  // NOT IN SCOPE: the credentialed break-glass path (CARR_BREAK_GLASS with
+  // db-tap) stays separately receipted and outside this change, and the
+  // database grants that stop the job role writing ops.incident.resolved_at
+  // are untouched. Those are enforced elsewhere and were never this gate.
+  void canExercisePartnerAuthority;
   // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
   // coerceArgsToSchema above for what this fixes and why it is here rather than
   // in the seventeen handlers that would otherwise each need to remember. It
