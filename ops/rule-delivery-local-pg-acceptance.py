@@ -223,9 +223,13 @@ def main() -> int:
         check("the backfill runs clean again once the store and map agree",
               result.returncode == 0, result.stderr.strip()[-300:])
 
-        # ── policy and nine controls move in one guarded transaction ─────────
+        # ── policy and the reviewed controls move in one guarded transaction ─
+        # The reviewed set was nine until the WR-000019 batch retired 581cb3fe;
+        # counting EXPECTED_IDS instead of a literal keeps this file honest
+        # through the next retirement, which is what broke it this time.
+        targets = len(EXPECTED_IDS)
         admission = run("tools/sync-rule-admission.py", dsn)
-        check("the admission sync builds the nine-control preimage",
+        check("the admission sync builds the reviewed control preimage",
               admission.returncode == 0, admission.stderr.strip()[-500:])
         digest = load_validated()[1]["base_map_sha256"]
         try:
@@ -240,7 +244,8 @@ def main() -> int:
                 "rule-delivery cutover refused: " + str(exc).splitlines()[0]
             ) from None
         cutover = one(cur)
-        check("cutover reports the exact nine", cutover[0] == "enforced" and cutover[1] == 9)
+        check("cutover reports the exact reviewed set",
+              cutover[0] == "enforced" and cutover[1] == targets)
         cur.execute("select mode from ops.rule_delivery_policy")
         check("cutover flips policy to enforced", one(cur)[0] == "enforced")
         cur.execute("""select count(*) from ops.rule_enforcement_point ep
@@ -248,7 +253,8 @@ def main() -> int:
                       where left(r.id::text,8)=any(%s) and ep.control_key='pack_delivery'
                         and ep.enforcement_class='stop_gate' and ep.installed""",
                     (sorted(EXPECTED_IDS),))
-        check("cutover installs pack_delivery/stop_gate on all nine", one(cur)[0] == 9)
+        check("cutover installs pack_delivery/stop_gate on every reviewed rule",
+              one(cur)[0] == targets)
 
         admission = run("tools/sync-rule-admission.py", dsn)
         check("a future admission sync is policy-aware", admission.returncode == 0,
@@ -257,7 +263,8 @@ def main() -> int:
                        join rule r on r.id=ep.rule_id
                       where left(r.id::text,8)=any(%s) and ep.control_key='pack_delivery'
                         and ep.enforcement_class='stop_gate'""", (sorted(EXPECTED_IDS),))
-        check("an enforced sync does not revert the nine controls", one(cur)[0] == 9)
+        check("an enforced sync does not revert the reviewed controls",
+              one(cur)[0] == targets)
 
         try:
             cur.execute("update ops.rule_delivery_policy set mode='shadow' where singleton")
@@ -269,12 +276,14 @@ def main() -> int:
         cur.execute("""select * from ops.set_rule_delivery_mode(
                        'shadow','local-pg-acceptance','rollback fixture',%s)""", (digest,))
         rollback = one(cur)
-        check("rollback reports the exact nine", rollback[0] == "shadow" and rollback[1] == 9)
+        check("rollback reports the exact reviewed set",
+              rollback[0] == "shadow" and rollback[1] == targets)
         cur.execute("""select count(*) from ops.rule_enforcement_point ep
                        join rule r on r.id=ep.rule_id
                       where left(r.id::text,8)=any(%s) and ep.control_key='session_boot'
                         and ep.enforcement_class='surfacing'""", (sorted(EXPECTED_IDS),))
-        check("rollback restores all nine session_boot rows", one(cur)[0] == 9)
+        check("rollback restores every reviewed session_boot row",
+              one(cur)[0] == targets)
         cur.execute("select count(*) from ops.rule_delivery_activation_receipt")
         check("cutover and rollback each leave an append-only receipt", one(cur)[0] == 2)
 
