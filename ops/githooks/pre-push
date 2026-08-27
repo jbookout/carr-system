@@ -203,10 +203,35 @@ EOF
     #   migration  — ONLY when the diff touches migrations/. The class is 33s
     #                hosted and needs a throwaway Postgres, so it SKIPs on a
     #                laptop; adding it unconditionally would buy a skip line.
-    FLOOR_CLASSES="pushfloor,secret,freshness"
+    #
+    # SPACE-SEPARATED, NOT COMMA-SEPARATED, and the separator is the whole bug.
+    #
+    # ci.sh accepts either — its usage line says "comma- or space-separated" —
+    # but it has only accepted COMMAS since the push-floor change that taught
+    # `--only` to split them. Before that, `--only` was a plain assignment, so a
+    # comma list arrived as ONE token and ci.sh refused it with
+    # "no such class: pushfloor,secret,freshness,migration".
+    #
+    # That skew is not hypothetical and it is not self-healing. THIS HOOK IS
+    # ALWAYS CANONICAL'S, because core.hooksPath is one shared path for every
+    # worktree on the machine, while ci.sh is resolved from REPO_ROOT — the tree
+    # actually being pushed. So a worktree branched from a commit older than that
+    # change runs TODAY'S hook against THAT DAY'S ci.sh, and every push from it is
+    # refused for a class name that does not exist. Observed 2026-08-26: the
+    # refusal reads as a quality failure and tells the caller to iterate on the
+    # failing class with `ops/ci.sh --only`, which cannot work, because the class
+    # it names is the joined string. The natural next move is CARR_SKIP_CI=1
+    # without running anything, which is how a broken hook becomes a habit of
+    # skipping the floor.
+    #
+    # Spaces work on BOTH versions: the old assignment leaves the string intact
+    # and ci.sh's `for _want in $ONLY` splits it on whitespace; the new one runs
+    # tr over a string with no commas and changes nothing. Verified against both
+    # parsers before this was written. Do not "tidy" these back into commas.
+    FLOOR_CLASSES="pushfloor secret freshness"
     if [ -n "$CARR_CI_RANGE" ] \
         && git diff --name-only "$CARR_CI_RANGE" 2>/dev/null | grep -q '^migrations/'; then
-      FLOOR_CLASSES="$FLOOR_CLASSES,migration"
+      FLOOR_CLASSES="$FLOOR_CLASSES migration"
     fi
 
     if [ -n "$CARR_CI_RANGE" ]; then
