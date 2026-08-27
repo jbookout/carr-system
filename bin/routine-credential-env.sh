@@ -81,9 +81,11 @@ carr_load_routine_db_env() {
 # file and worked.  Aug 26 has both clean applies and a session stuck at the
 # source line.
 #
-# ONE COPY, because a manual path and an automated path that do the same job must
-# be the same code (rule a8c55a47) — and seven inlined copies of this is six
-# chances for the wording to drift.
+# ONE COPY, because of the rule that a manual path and an automated path doing
+# the same job must be the same code (a8c55a47) — seven inlined copies of this
+# is six chances for the wording to drift.  That rule was itself taught off this
+# very file: db.env is named in its body as the config with two parsers and two
+# opposite quoting contracts, which cost two days of silent outage in August.
 #
 # `zsh -n` parses and runs NOTHING: no connection, no expansion, no value
 # printed.  The probe output is captured and never echoed — zsh quotes a token
