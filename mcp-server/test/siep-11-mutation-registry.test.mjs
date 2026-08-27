@@ -16,13 +16,18 @@ import {
   registryDigest,
   REGISTRY_V7_VERSION,
   REGISTRY_V8_VERSION,
+  REGISTRY_V9_VERSION,
   replaceExactlyOnce,
   renderRuntimeProjection,
   renderSIEP16IntegratedRegistrySql,
   renderSIEP17ForwardRegistrySql,
+  renderSIEP18ForwardRegistrySql,
   sha256,
   SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
   SIEP17_FORWARD_DB_CATALOG_BASELINE,
+  SIEP18_FORWARD_DB_CATALOG_BASELINE,
+  SIEP18_MONITOR_ARTIFACT_SHA256,
+  SIEP18_PRE_V9_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
   validateLaunchdAuthorityCatalogs,
   workflowDefinitionInventory,
@@ -68,6 +73,12 @@ const generatedV8 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v8.generated.js", import.meta.url), "utf8");
 const v8Migration = fs.readFileSync(
   new URL("../../migrations/0380_siep17_forward_mutation_registry.sql", import.meta.url), "utf8");
+const generatedV9 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v9.generated.js", import.meta.url), "utf8");
+const v9Migration = fs.readFileSync(
+  new URL("../../migrations/0385_siep18_forward_mutation_registry.sql", import.meta.url), "utf8");
+const siep18MonitorMigration = fs.readFileSync(
+  new URL("../../migrations/0384_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 
 test("successor generation refuses absent or ambiguous predecessor markers", () => {
   assert.equal(replaceExactlyOnce("before marker after", "marker", "successor", "unit"),
@@ -99,7 +110,7 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   assert.equal(governanceQueue.classification_authorizing, false);
 });
 
-test("sealed v1-v7 stay immutable historical evidence after the v8 successor", () => {
+test("sealed v1-v8 stay immutable historical evidence after the v9 successor", () => {
   const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal, v5: v5Seal,
     v6: v6Seal } = HISTORICAL_REGISTRY_SEALS;
   const historicalArtifacts = new Map([
@@ -117,6 +128,8 @@ test("sealed v1-v7 stay immutable historical evidence after the v8 successor", (
     ["mcp-server/src/scac-mutation-registry.v6.generated.js", generatedV6],
     ["migrations/0377_siep16_integrated_mutation_registry.sql", v7Migration],
     ["mcp-server/src/scac-mutation-registry.v7.generated.js", generatedV7],
+    ["migrations/0380_siep17_forward_mutation_registry.sql", v8Migration],
+    ["mcp-server/src/scac-mutation-registry.v8.generated.js", generatedV8],
   ]);
   for (const [path, contents] of historicalArtifacts)
     assert.equal(sha256(contents), HISTORICAL_REGISTRY_ARTIFACT_SHA256[path], `${path} changed after seal`);
@@ -144,20 +157,17 @@ test("sealed v1-v7 stay immutable historical evidence after the v8 successor", (
     assert.match(v7Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
 });
 
-test("v8 forward successor seals v7, advances the measured catalog, and preserves the runtime boundary", () => {
-  const rows = fullInventory();
+test("sealed v8 predecessor remains exact after source inventory advances", () => {
   const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal, v5: v5Seal,
-    v6: v6Seal, v7: v7Seal } = HISTORICAL_REGISTRY_SEALS;
-  assert.equal(generatedV8, renderRuntimeProjection(rows, {
-    version: REGISTRY_V8_VERSION, dbCatalogBaseline: SIEP17_FORWARD_DB_CATALOG_BASELINE,
-  }));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV8.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
-  assert.equal(v8Migration, renderSIEP17ForwardRegistrySql(rows));
-  const expectedV8EntryCount = rows.length + SIEP17_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count +
-    SIEP17_FORWARD_DB_CATALOG_BASELINE.relation_dml.count +
-    SIEP17_FORWARD_DB_CATALOG_BASELINE.column_dml.count;
-  assert.match(v8Migration, new RegExp(`'sha256:[0-9a-f]{64}',${expectedV8EntryCount},${rows.length},`));
+    v6: v6Seal, v7: v7Seal, v8: v8Seal } = HISTORICAL_REGISTRY_SEALS;
+  assert.equal(sha256(v8Migration),
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0380_siep17_forward_mutation_registry.sql"]);
+  assert.equal(sha256(generatedV8),
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["mcp-server/src/scac-mutation-registry.v8.generated.js"]);
+  assert.equal(JSON.parse(generatedV8.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]),
+    v8Seal.digest.slice("sha256:".length));
+  assert.match(v8Migration,
+    new RegExp(`'${v8Seal.digest}',${v8Seal.entryCount},${v8Seal.sourceEntryCount},`));
   assert.match(v8Migration, /scac-mutation-registry\.v8/);
   assert.match(v8Migration, /scac_mutation_catalog_v7_live_at_seal\(\)/);
   assert.match(v8Migration, /scac_mutation_registry_v7_seal_available\(\)/);
@@ -166,6 +176,47 @@ test("v8 forward successor seals v7, advances the measured catalog, and preserve
   for (const seal of [v1Seal, v2Seal, v3Seal, v4Seal, v5Seal, v6Seal, v7Seal])
     assert.match(v8Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
   assert.match(v8Migration, /,true,true,false,false,false,false,false\);/i);
+});
+
+test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () => {
+  const rows = fullInventory();
+  const seals = Object.values(HISTORICAL_REGISTRY_SEALS);
+  assert.equal(generatedV9, renderRuntimeProjection(rows, {
+    version: REGISTRY_V9_VERSION, dbCatalogBaseline: SIEP18_FORWARD_DB_CATALOG_BASELINE,
+  }));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    JSON.parse(generatedV9.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.equal(v9Migration, renderSIEP18ForwardRegistrySql(rows));
+  const expectedEntryCount = rows.length + SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count +
+    SIEP18_FORWARD_DB_CATALOG_BASELINE.relation_dml.count +
+    SIEP18_FORWARD_DB_CATALOG_BASELINE.column_dml.count;
+  assert.equal(rows.length, 755);
+  assert.equal(expectedEntryCount, 1326);
+  assert.equal(sha256(siep18MonitorMigration), SIEP18_MONITOR_ARTIFACT_SHA256);
+  assert.equal(SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 270);
+  assert.equal(SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count -
+    SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 4);
+  assert.match(v9Migration,
+    /observed_count<>270 or observed_digest<>'sha256:e8cd8701015f49fcfd254a618803f3559892cdc77dc28b5acac85ed8795ed307'/);
+  assert.match(v9Migration, /Refuse before creating any v9 function/);
+  for (const selfEffect of [
+    /scac_mutation_registry_v8_seal_available\(\)/,
+    /scac_mutation_registration_v9\(text,text\)/,
+    /scac_mutation_catalog_v9_current\(\)/,
+    /scac_policy_epoch_snapshot_v8\(\)/,
+  ])
+    assert.match(v9Migration, selfEffect);
+  assert.match(v9Migration, new RegExp(`'sha256:[0-9a-f]{64}',${expectedEntryCount},${rows.length},`));
+  assert.match(v9Migration, /scac_mutation_catalog_v8_live_at_seal\(\)/);
+  assert.match(v9Migration, /scac_mutation_registry_v8_seal_available\(\)/);
+  assert.match(v9Migration, /scac_mutation_catalog_v9_current\(\)/);
+  assert.match(v9Migration, /registry\.registry_version='scac-mutation-registry\.v9'/);
+  assert.match(v9Migration, /\(grant_snapshot->>'entry_count'\)::integer=297/);
+  assert.match(v9Migration,
+    /grant_snapshot->>'grant_digest'='sha256:0f04a50d8bc65e2dcc765b1981ab1d5091c809570f0a773db3f5c6e2b9d43501'/);
+  assert.doesNotMatch(v9Migration, /measured_pending_v9_binding/);
+  for (const seal of seals)
+    assert.match(v9Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
 });
 
 test("unknown, changed, and open operation contracts refuse deterministically", async () => {
@@ -216,7 +267,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 509);
+  assert.equal(rows.length, 512);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -224,7 +275,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 500);
+  assert.equal(scripts.length, 503);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -286,7 +337,7 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 28);
+  assert.equal(workflows.length, 29);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 5);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
@@ -296,12 +347,12 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const backup = workflows.find(row => row.source_locator === ".github/workflows/backup-nightly.yml");
   assert.equal(backup.delegates_to.includes("shell:aws-s3api-put-object"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
-  assert.equal(launchd.length, 23);
+  assert.equal(launchd.length, 24);
   assert.equal(launchd.every(row => row.launchd_label && row.trigger_contract_digest &&
     row.program_arguments_digest && row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:")) &&
     row.classification_authorizing === false), true);
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
-    .filter(ref => ref.startsWith("ops.service_environment:")).length, 24);
+    .filter(ref => ref.startsWith("ops.service_environment:")).length, 25);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
   assert.deepEqual(launchd.flatMap(row => row.physical_authority_refs)

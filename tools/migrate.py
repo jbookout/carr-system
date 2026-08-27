@@ -125,15 +125,19 @@ HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS = {
     "0351_legacy_rule_lifecycle_admission.sql":
         "59439e1a12c035e61578b85c765d7bbd131bf555b95bbecd49c6d675b5c4d808",
 }
-# Controller PR #763 deliberately keeps one explicit transaction around its
-# nine-to-eight activation transition, function replacement, grants, and
-# receipt readback. Preserve the independently reviewed source artifact exactly
-# rather than rewriting it during SIEP integration. This is separate from the
-# five Production-applied historical artifacts above: an unreviewed filename or
-# one-byte change still refuses before any SQL executes.
+# Controller PRs #763, #766, and #768 deliberately keep explicit transactions around
+# their atomic control-plane changes and receipt readbacks. Preserve the
+# independently reviewed source artifacts exactly rather than rewriting them
+# during SIEP integration. These are separate from the five Production-applied
+# historical artifacts above: an unreviewed filename or one-byte change still
+# refuses before any SQL executes.
 REVIEWED_TRANSACTION_CONTROL_ARTIFACTS = {
     "0363_rule_delivery_activation_digest_repin.sql":
         "03133d0627cf63d2a0a2a7dd8a392065bc19ba17d56d0b2cfabd3dbccafdcb65",
+    "0382_standing_guidance_reader_boundary.sql":
+        "a6ffe5f29e9224f263b0c6a90c414b4828915a5ed3265e52e8fadbe31ef8c2bc",
+    "0383_control_plane_not_configured_state.sql":
+        "f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa",
 }
 TRANSACTION_CONTROL_RE = re.compile(
     r"(?is)^\s*(?:(?:begin|commit|end|rollback|abort)\b|"

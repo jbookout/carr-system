@@ -181,18 +181,25 @@ def test_historical_transaction_artifact_is_exact() -> None:
 
 def test_reviewed_controller_transaction_artifact_is_exact() -> None:
     artifacts = migrate.REVIEWED_TRANSACTION_CONTROL_ARTIFACTS
-    expected_name = "0363_rule_delivery_activation_digest_repin.sql"
-    sql = (REPO / "migrations" / expected_name).read_text(encoding="utf-8")
-    digest = hashlib.sha256(sql.encode()).hexdigest()
-    changed_digest = hashlib.sha256((sql + "\n-- drift probe").encode()).hexdigest()
-    check("the reviewed controller transaction allowlist is one exact artifact",
-          set(artifacts) == {expected_name}
+    expected_names = {
+        "0363_rule_delivery_activation_digest_repin.sql",
+        "0382_standing_guidance_reader_boundary.sql",
+        "0383_control_plane_not_configured_state.sql",
+    }
+    check("the reviewed controller transaction allowlist is three exact artifacts",
+          set(artifacts) == expected_names
           and not set(artifacts) & set(migrate.HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS))
-    check("the controller digest equals its reviewed source artifact",
-          artifacts.get(expected_name) == digest
-          and migrate.contains_transaction_control(sql))
-    check("one-byte drift cannot reuse the controller transaction review",
-          artifacts.get(expected_name) != changed_digest)
+    exact = True
+    drift_refused = True
+    for name in expected_names:
+        sql = (REPO / "migrations" / name).read_text(encoding="utf-8")
+        digest = hashlib.sha256(sql.encode()).hexdigest()
+        changed_digest = hashlib.sha256((sql + "\n-- drift probe").encode()).hexdigest()
+        exact = exact and artifacts.get(name) == digest \
+            and migrate.contains_transaction_control(sql)
+        drift_refused = drift_refused and artifacts.get(name) != changed_digest
+    check("each controller digest equals its reviewed source artifact", exact)
+    check("one-byte drift cannot reuse any controller transaction review", drift_refused)
 
 
 def main() -> int:

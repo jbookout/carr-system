@@ -233,13 +233,15 @@ end $fn$;
 
 create or replace function ops.scac_reference_monitor_state()
 returns jsonb language plpgsql stable security definer set search_path=pg_catalog,public,ops as $fn$
-declare grant_snapshot jsonb; mode_state jsonb; latest ops.scac_policy_epoch%rowtype;
+declare grant_snapshot jsonb; mode_state jsonb; epoch_chain jsonb;
+        latest ops.scac_policy_epoch%rowtype;
         registry ops.scac_mutation_registry_version%rowtype; missing_guards integer;
         unsupported_writable integer;
         relation_digest text; column_digest text; grant_state text; guard_state text;
 begin
   grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
   mode_state:=ops.scac_reference_monitor_mode();
+  epoch_chain:=ops.scac_policy_epoch_chain_state();
   select * into latest from ops.scac_policy_epoch order by epoch desc limit 1;
   select * into registry from ops.scac_mutation_registry_version
     where registry_version=latest.registry_version;
@@ -273,15 +275,18 @@ begin
   with runtime_roles as (
     select oid from pg_roles where rolname in ('carr_writer','carr_jobs','carr_authority')
   ), unsupported as (
-    select distinct c.oid from pg_class c
+    select distinct c.oid from pg_class c join pg_namespace n on n.oid=c.relnamespace
     cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
-    where c.relkind in ('v','m','f') and
+    where n.nspname not in ('pg_catalog','information_schema') and
+      c.relkind in ('v','m','f') and
       (a.grantee=0 or a.grantee in(select oid from runtime_roles))
       and a.privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE')
     union
     select distinct c.oid from pg_attribute att join pg_class c on c.oid=att.attrelid
+    join pg_namespace n on n.oid=c.relnamespace
     cross join lateral aclexplode(att.attacl) a
-    where c.relkind in ('v','m','f') and att.attnum>0 and not att.attisdropped and
+    where n.nspname not in ('pg_catalog','information_schema') and
+      c.relkind in ('v','m','f') and att.attnum>0 and not att.attisdropped and
       (a.grantee=0 or a.grantee in(select oid from runtime_roles))
       and a.privilege_type in ('INSERT','UPDATE')
   ) select count(*) into unsupported_writable from unsupported;
@@ -289,12 +294,19 @@ begin
     when missing_guards=0 then 'complete' else 'incomplete' end;
   return jsonb_build_object('schema_version','scac-reference-monitor-state.v1',
     'monitor_state',case when grant_state='current' and guard_state='complete'
+      and coalesce((epoch_chain->>'valid')::boolean,false)
+      and (epoch_chain->>'current_epoch')::bigint=latest.epoch
+      and epoch_chain->>'current_epoch_digest'=latest.epoch_digest
       and mode_state->>'integrity_state'<>'invalid_fail_closed' then 'current'
       else 'unavailable' end,
     'grant_state',grant_state,'grant_digest',grant_snapshot->>'grant_digest',
     'guard_state',guard_state,'missing_guard_count',missing_guards,
     'unsupported_writable_relation_count',unsupported_writable,
     'mode',mode_state->>'mode','mode_integrity_state',mode_state->>'integrity_state',
+    'policy_epoch_state',case when coalesce((epoch_chain->>'valid')::boolean,false)
+      and (epoch_chain->>'current_epoch')::bigint=latest.epoch
+      and epoch_chain->>'current_epoch_digest'=latest.epoch_digest
+      then 'current' else 'invalid_or_unavailable' end,
     'policy_epoch',latest.epoch,'policy_epoch_digest',latest.epoch_digest,
     'registry_version',latest.registry_version,'registry_digest',latest.registry_digest,
     'direct_database_grant_cutover',false,'production_enforcement_active',false);

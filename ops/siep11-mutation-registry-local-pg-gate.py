@@ -44,20 +44,23 @@ def refusal(cur, query: str, params: tuple, fragment: str) -> None:
 
 
 def validate_launchd_authority_refs(
-    cur, expected_launchd: list[tuple], expected_service_launchd: list[tuple[str, str, str]]
+    cur, registry_version: str, expected_launchd: list[tuple],
+    expected_service_launchd: list[tuple[str, str, str]],
 ) -> None:
     authority_refs = cur.execute(
         """select e.ingress_key,e.contract->>'source_locator',ref.value
              from ops.scac_mutation_registry_entry e
              cross join lateral jsonb_array_elements_text(e.contract->'physical_authority_refs') ref(value)
             where e.ingress_kind='workflow_entrypoint'
-              and e.registry_version='scac-mutation-registry.v1'
+              and e.registry_version=%s
               and e.contract ? 'physical_authority_refs'
-            order by e.ingress_key,ref.value"""
+            order by e.ingress_key,ref.value""",
+        (registry_version,),
     ).fetchall()
     service_refs = [row for row in authority_refs if row[2].startswith("ops.service_environment:")]
     legacy_refs = [row for row in authority_refs if row[2].startswith("ops.legacy_schedule_launchd_contract:")]
-    if len(service_refs) != 24 or len(legacy_refs) != 3:
+    if len(service_refs) != len(expected_service_launchd) or \
+       len(legacy_refs) != len(expected_launchd):
         raise RuntimeError(f"unexpected launchd physical authority reference counts {authority_refs!r}")
     actual_service_launchd = [tuple(row) for row in cur.execute(
         """select s.key,se.environment,se.deploy_mechanism,s.retired_at is not null
@@ -134,7 +137,7 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             lookup_function = f"ops.scac_mutation_registration_{runtime_version.rsplit('.', 1)[1]}"
             runtime_digest = cur.execute(
@@ -169,7 +172,9 @@ def main() -> int:
             ).fetchone()[0]:
                 raise RuntimeError("registry contains authority-expanding or malformed rows")
 
-            validate_launchd_authority_refs(cur, expected_launchd, expected_service_launchd)
+            validate_launchd_authority_refs(
+                cur, runtime_version, expected_launchd, expected_service_launchd
+            )
 
             cur.execute("savepoint wrong_service_path_probe")
             cur.execute(
@@ -178,7 +183,9 @@ def main() -> int:
                        and se.deploy_mechanism='ops/launchd/com.carr.rules-refresh.plist'"""
             )
             try:
-                validate_launchd_authority_refs(cur, expected_launchd, expected_service_launchd)
+                validate_launchd_authority_refs(
+                    cur, runtime_version, expected_launchd, expected_service_launchd
+                )
             except RuntimeError:
                 pass
             else:
@@ -193,7 +200,9 @@ def main() -> int:
                        and se.environment='production'"""
             )
             try:
-                validate_launchd_authority_refs(cur, expected_launchd, expected_service_launchd)
+                validate_launchd_authority_refs(
+                    cur, runtime_version, expected_launchd, expected_service_launchd
+                )
             except RuntimeError:
                 pass
             else:
@@ -204,7 +213,9 @@ def main() -> int:
             cur.execute("savepoint retired_service_probe")
             cur.execute("update ops.service set retired_at=now() where key='rules-refresh'")
             try:
-                validate_launchd_authority_refs(cur, expected_launchd, expected_service_launchd)
+                validate_launchd_authority_refs(
+                    cur, runtime_version, expected_launchd, expected_service_launchd
+                )
             except RuntimeError:
                 pass
             else:
@@ -223,7 +234,9 @@ def main() -> int:
                       from ops.service where key='siep11-rogue'"""
             )
             try:
-                validate_launchd_authority_refs(cur, expected_launchd, expected_service_launchd)
+                validate_launchd_authority_refs(
+                    cur, runtime_version, expected_launchd, expected_service_launchd
+                )
             except RuntimeError:
                 pass
             else:
@@ -237,7 +250,9 @@ def main() -> int:
                     where surface_id='nightly-record-layer.launchd.v1'"""
             )
             try:
-                validate_launchd_authority_refs(cur, expected_launchd, expected_service_launchd)
+                validate_launchd_authority_refs(
+                    cur, runtime_version, expected_launchd, expected_service_launchd
+                )
             except RuntimeError:
                 pass
             else:
