@@ -23,6 +23,26 @@ class InputUnavailable(RuntimeError):
         super().__init__(f"input unavailable for {builder_key}: {reason}")
 
 
+class NoEligibleRecords(RuntimeError):
+    """The named builder's canonical queue is genuinely empty right now.
+
+    Distinct from InputUnavailable: this is not malformed, missing, or
+    contradictory evidence -- it is the queue's honest "no eligible records"
+    state. contact-enrichment-weekly.SKILL.md and
+    deal-history-research-weekly.SKILL.md both name this as the normal end
+    state once the book is covered ("reports done and stops finding work"),
+    not a failure. A caller must route this to a clean skip, the same
+    terminal outcome EntrypointNotConfigured gets, never to ops.fail_job or
+    a dead letter (rule 88e9b5eb: "not authorized" and "not possible" are
+    different findings and must never be reported as the same one -- this is
+    a third, equally distinct finding: "not needed right now").
+    """
+
+    def __init__(self, builder_key: str):
+        self.builder_key = builder_key
+        super().__init__(f"no eligible records for {builder_key}: queue is empty")
+
+
 class EvidenceCollector(Protocol):
     """The only I/O seam used by input builders.
 
@@ -187,7 +207,7 @@ def build_input(manifest: Mapping[str, Any], builder_key: str, collector: Eviden
     workflow, contract = _registered_workflow(manifest, builder_key, workflow_key)
     try:
         raw_evidence = list(collector.collect(builder_key=builder_key, workflow_key=workflow["key"]))
-    except InputUnavailable:
+    except (InputUnavailable, NoEligibleRecords):
         raise
     except Exception as exc:
         raise InputUnavailable(builder_key, f"read-only collector failed: {type(exc).__name__}") from exc

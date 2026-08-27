@@ -42,7 +42,7 @@ from lib.control_plane_content_fuel import (ContentFuelContractError,
                                             validate_content_fuel_proposal,
                                             validate_rotation_policy)  # noqa: E402
 from lib.control_plane_facts import CompositeFactCollector, evaluate_stage, fact_envelope  # noqa: E402
-from lib.control_plane_inputs import build_input  # noqa: E402
+from lib.control_plane_inputs import NoEligibleRecords, build_input  # noqa: E402
 from lib.control_plane_proposal_contracts import (ProposalContractError,
                                                   validate_proposal_contract)  # noqa: E402
 from lib.control_plane_runner import BudgetExceeded, CognitionDispatcher, due_workflows  # noqa: E402
@@ -1432,12 +1432,16 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
             # Start a fresh transaction and fail only if the committed lease
             # still owns the job; an expired/reaped token is correctly refused.
             with conn.cursor() as fail_cur:
-                if isinstance(exc, EntrypointNotConfigured):
+                if isinstance(exc, (EntrypointNotConfigured, NoEligibleRecords)):
                     # NOT A FAILURE (rule 88e9b5eb). ops.skip_job is terminal
                     # on this attempt unconditionally -- it never checks
                     # attempt against max_attempts the way ops.fail_job does,
-                    # so a missing credential never burns retry budget and
-                    # never reaches dead_lettered.
+                    # so a missing credential (EntrypointNotConfigured) or a
+                    # genuinely empty canonical queue (NoEligibleRecords --
+                    # 0387: contact-enrichment-weekly and
+                    # deal-history-research-weekly both report "done" and
+                    # stop finding work once the book is covered) never
+                    # burns retry budget and never reaches dead_lettered.
                     fail_cur.execute("select ops.skip_job(%s,%s,%s)",
                                      (job_id,lease,_failure_detail(exc)))
                 elif isinstance(exc,(subprocess.TimeoutExpired,TimeoutError)):
