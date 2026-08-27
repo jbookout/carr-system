@@ -316,6 +316,7 @@ def test_tracked_bootstrap_registers_one_unseated_exact_desk_and_wrapper_has_no_
     assert "CARR_ENGINEERING_NODE" not in wrapper and "CARR_ENGINEERING_DESK" not in wrapper
     assert 'NODE="/opt/homebrew/opt/node@22/bin/node"' in wrapper
     assert wrapper.index('engineering_dispatch_adapter.py" --preflight') < wrapper.index("carr_load_routine_db_env")
+    assert 'engineering_dispatch_adapter.py" --preflight >/dev/null' in wrapper
     assert 'const DESK = "engineering-codex"' in runner
     assert runner.index("await preflightDedicatedDesk()") < runner.index("new Pool")
     assert "DEDICATED_REGISTRY_PATH" in adapter_source

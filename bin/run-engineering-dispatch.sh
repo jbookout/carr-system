@@ -14,7 +14,11 @@ PYTHON="$REPO/.venv/bin/python"
 # choose code or a target that will later receive the jobs capability.
 [[ -x "$NODE" ]] || { print -ru2 -- "engineering-dispatch: fixed Node 22 executable is required"; exit 78; }
 [[ -x "$PYTHON" ]] || { print -ru2 -- "engineering-dispatch: repository Python is required"; exit 78; }
-"$PYTHON" "$REPO/tools/room-bridge/engineering_dispatch_adapter.py" --preflight
+# The bridge consumes stdout as one exact JSON controller readback. The
+# preflight's successful desk description would create a second JSON document
+# and make the bridge reject a healthy response as malformed. Refusals still
+# reach stderr and retain the pre-credential fail-closed boundary.
+"$PYTHON" "$REPO/tools/room-bridge/engineering_dispatch_adapter.py" --preflight >/dev/null
 
 source "$REPO/bin/routine-credential-env.sh"
 carr_clear_routine_db_env
