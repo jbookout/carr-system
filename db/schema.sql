@@ -3764,29 +3764,30 @@ CREATE FUNCTION ops.engineering_claim_slice(p_worker text, p_limit integer DEFAU
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
 begin
-  if btrim(coalesce(p_worker,''))='' or p_limit is distinct from 1
-     or p_lease_seconds is null or p_lease_seconds<1 then
-    raise exception 'worker, exactly one claim and positive lease are required';
+  if btrim(coalesce(p_worker,''))='' or p_limit < 1 or p_lease_seconds < 1 then
+    raise exception 'worker, positive limit and positive lease are required';
   end if;
   perform ops.reap_expired_jobs();
   return query
   with candidate as (
     select j.id
       from ops.job j
-      join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
+      join ops.job_definition d
+        on d.key=j.definition_key and d.version=j.definition_version
       join ops.engineering_execution_envelope e on e.job_id=j.id
      where d.enabled and j.definition_key='engineering-slice'
        and j.definition_version=1 and j.state in ('queued','retry_wait')
-       and j.next_attempt_at<=now() and j.attempt<j.max_attempts
-       and ops.engineering_envelope_is_executable(e.id,j.id,p_lease_seconds+60)
+       and j.next_attempt_at <= now()
      order by j.scheduled_for,j.created_at
      for update of j,d skip locked limit p_limit
   ), claimed as (
     update ops.job j set
-      state='running',attempt=j.attempt+1,lease_owner=p_worker,lease_token=gen_random_uuid(),
+      state='running',attempt=j.attempt+1,lease_owner=p_worker,
+      lease_token=gen_random_uuid(),
       leased_until=now()+make_interval(secs=>p_lease_seconds),
       started_at=coalesce(j.started_at,now()),updated_at=now()
-    from candidate c where j.id=c.id returning j.*
+    from candidate c where j.id=c.id
+    returning j.*
   ), attempts as (
     insert into ops.job_attempt as claimed_attempt(job_id,attempt,lease_owner,lease_token,state)
     select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
@@ -3794,39 +3795,35 @@ begin
   )
   select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
          d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
-    from claimed c join ops.job_definition d
-      on d.key=c.definition_key and d.version=c.definition_version
+    from claimed c
+    join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version
     join attempts a on a.job_id=c.id;
 end $$;
 
 
 --
--- Name: engineering_controller_binding(uuid, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+-- Name: engineering_controller_binding(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
-CREATE FUNCTION ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid, p_lease_token uuid) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
+CREATE FUNCTION ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'ops', 'public'
     AS $$
-declare binding jsonb;
-begin
-  if p_lease_token is null
-     or not ops.engineering_envelope_is_executable(p_envelope_id,p_job_id) then return null; end if;
   select jsonb_build_object(
-    'envelope_id',e.id::text,'envelope_digest',e.envelope_digest,
-    'slice_ref',e.slice_ref,'plan_digest',sp.plan_digest,'slice_plan',sp.plan,
-    'executor_actor',jsonb_build_object('id',a.id::text,'slug',a.slug),
-    'agent_session_id',s.id::text
-  ) into binding
+    'envelope_id', e.id::text,
+    'envelope_digest', e.envelope_digest,
+    'slice_ref', e.slice_ref,
+    'plan_digest', sp.plan_digest,
+    'slice_plan', sp.plan,
+    'executor_actor', jsonb_build_object('id', a.id::text, 'slug', a.slug),
+    'agent_session_id', s.id::text
+  )
     from ops.engineering_execution_envelope e
-    join ops.job j on j.id=e.job_id
     join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
     join ops.capability_agent_session s on s.id=e.agent_session_id
     join public.actor a on a.id=s.executor_actor_id
-   where e.id=p_envelope_id and e.job_id=p_job_id and j.state='running'
-     and j.lease_token=p_lease_token and j.leased_until>statement_timestamp();
-  return binding;
-end $$;
+   where e.id=p_envelope_id and e.job_id=p_job_id;
+$$;
 
 
 --
@@ -3946,134 +3943,6 @@ end $_$;
 
 
 --
--- Name: engineering_envelope_is_executable(uuid, uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.engineering_envelope_is_executable(p_envelope_id uuid, p_job_id uuid, p_minimum_remaining_seconds integer DEFAULT 60) RETURNS boolean
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $_$
-declare lineage_plan uuid;
-        lineage_slice text;
-begin
-  if p_minimum_remaining_seconds < 0 then return false; end if;
-  select e.slice_plan_id,e.slice_ref into lineage_plan,lineage_slice
-    from ops.engineering_execution_envelope e
-   where e.id=p_envelope_id and e.job_id=p_job_id;
-  if not found then return false; end if;
-  perform pg_advisory_xact_lock(hashtextextended(
-    'engineering-envelope:' || lineage_plan::text || ':' || lineage_slice,0));
-  return exists (
-    select 1
-      from ops.engineering_execution_envelope e
-      join ops.job j on j.id=e.job_id
-      join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
-      join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
-      join ops.work_request w on w.id=e.work_request_id
-      join ops.capability_agent_session s on s.id=e.agent_session_id
-      join public.actor a on a.id=s.executor_actor_id
-      cross join lateral (select ops.engineering_admission_source(w.ref) as source) current_source
-     where e.id=p_envelope_id and j.id=p_job_id
-       and d.enabled and j.definition_key='engineering-slice'
-       and j.definition_version=1 and j.mode='shadow'
-       and j.payload->>'work_request'=w.ref
-       and j.payload->>'slice_ref'=e.slice_ref
-       and j.payload->>'plan_digest'=sp.plan_digest
-       and j.payload->>'generation' ~ '^[1-9][0-9]*$'
-       and current_source.source is not null
-       and current_source.source->'work_request'->>'id'='wr:' || e.work_request_id::text
-       and (current_source.source->'work_request'->>'version')::integer=e.state_version
-       and current_source.source->'work_request'->>'canonical_record_digest'=e.canonical_record_digest
-       and current_source.source->'accepted_plan'->>'record_id'=e.accepted_plan_id::text
-       and current_source.source->'accepted_plan'->>'digest'=sp.accepted_plan_hash
-       and sp.work_request_id=e.work_request_id
-       and sp.accepted_plan_id=e.accepted_plan_id
-       and sp.work_request_version=e.state_version
-       and s.work_request_id=e.work_request_id
-       and s.state not in ('completed','cancelled')
-       and a.active and a.kind='automation' and a.slug='codex'
-       -- The packet's expiry is caller-controlled JSON.  Parse it only through
-       -- PostgreSQL's non-throwing validator, then bind it exactly to the
-       -- immutable expiry column before any lease or attempt can be created.
-       and case when pg_input_is_valid(e.envelope->>'expires_at','timestamp with time zone')
-                then (e.envelope->>'expires_at')::timestamptz=e.expires_at
-                else false end
-       and e.expires_at>statement_timestamp()+make_interval(secs=>p_minimum_remaining_seconds)
-       and (j.state<>'running' or (j.lease_token is not null
-            and j.leased_until>statement_timestamp()
-            and e.expires_at>j.leased_until+make_interval(secs=>p_minimum_remaining_seconds)))
-       and e.envelope->'server_binding'->'authority'->>'read_only'='false'
-       and e.envelope->'server_binding'->'authority'->>'capability_profile'=
-           'capability:engineering-repository-write'
-       and e.envelope->'server_binding'->'adapter'->>'surface'='codex_desktop'
-       and e.envelope->'request'->'allowed_actions'=
-           '["repository:create-worktree","repository:create-branch","repository:write-declared-scope","repository:run-checks","repository:commit","repository:push-branch","repository:open-pr"]'::jsonb
-       and not exists (select 1 from ops.engineering_execution_envelope successor
-                        where successor.supersedes_envelope_id=e.id)
-       and not exists (select 1 from ops.engineering_slice_receipt receipt
-                        where receipt.envelope_id=e.id)
-  );
-end $_$;
-
-
---
--- Name: engineering_slice_receipt; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.engineering_slice_receipt (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    job_attempt_id uuid NOT NULL,
-    envelope_id uuid NOT NULL,
-    work_request_id uuid NOT NULL,
-    slice_ref text NOT NULL,
-    attempt_id text NOT NULL,
-    executor_actor_id uuid NOT NULL,
-    receipt_digest text NOT NULL,
-    outcome text NOT NULL,
-    receipt jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT engineering_slice_receipt_attempt_id_check CHECK ((attempt_id ~ '^attempt:[1-9][0-9]*$'::text)),
-    CONSTRAINT engineering_slice_receipt_outcome_check CHECK ((outcome = ANY (ARRAY['claimed_complete'::text, 'failed'::text, 'blocked'::text, 'reopened'::text]))),
-    CONSTRAINT engineering_slice_receipt_receipt_check CHECK ((jsonb_typeof(receipt) = 'object'::text)),
-    CONSTRAINT engineering_slice_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
-    CONSTRAINT engineering_slice_receipt_slice_ref_check CHECK ((btrim(slice_ref) <> ''::text))
-);
-
-
---
--- Name: engineering_finalize_slice_receipt(uuid, uuid, jsonb, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.engineering_finalize_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) RETURNS ops.engineering_slice_receipt
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-declare e ops.engineering_execution_envelope%rowtype;
-        row ops.engineering_slice_receipt%rowtype;
-        terminal_state text;
-begin
-  select * into e from ops.engineering_execution_envelope where id=p_envelope_id;
-  if not found then raise exception 'engineering envelope not found'; end if;
-  select * into row from ops.engineering_record_slice_receipt(
-    p_envelope_id,p_lease_token,p_receipt,p_receipt_digest,p_executor_actor_id);
-  if row.outcome='claimed_complete' then
-    if not ops.complete_job(e.job_id,p_lease_token,
-      jsonb_build_object('engineering_receipt_id',row.id,'receipt_digest',p_receipt_digest),
-      'engineering:' || row.id::text) then
-      raise exception 'engineering completion did not transition the claimed job';
-    end if;
-  else
-    terminal_state:=ops.fail_job(e.job_id,p_lease_token,'engineering_' || row.outcome,
-      'typed engineering receipt reported non-complete outcome');
-    if terminal_state not in ('retry_wait','dead_lettered') then
-      raise exception 'engineering failure did not transition the claimed job';
-    end if;
-  end if;
-  return row;
-end $$;
-
-
---
 -- Name: engineering_passport_facts(text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -4104,6 +3973,30 @@ $$;
 
 
 --
+-- Name: engineering_slice_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.engineering_slice_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_attempt_id uuid NOT NULL,
+    envelope_id uuid NOT NULL,
+    work_request_id uuid NOT NULL,
+    slice_ref text NOT NULL,
+    attempt_id text NOT NULL,
+    executor_actor_id uuid NOT NULL,
+    receipt_digest text NOT NULL,
+    outcome text NOT NULL,
+    receipt jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT engineering_slice_receipt_attempt_id_check CHECK ((attempt_id ~ '^attempt:[1-9][0-9]*$'::text)),
+    CONSTRAINT engineering_slice_receipt_outcome_check CHECK ((outcome = ANY (ARRAY['claimed_complete'::text, 'failed'::text, 'blocked'::text, 'reopened'::text]))),
+    CONSTRAINT engineering_slice_receipt_receipt_check CHECK ((jsonb_typeof(receipt) = 'object'::text)),
+    CONSTRAINT engineering_slice_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT engineering_slice_receipt_slice_ref_check CHECK ((btrim(slice_ref) <> ''::text))
+);
+
+
+--
 -- Name: engineering_record_slice_receipt(uuid, uuid, jsonb, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -4118,24 +4011,20 @@ declare e ops.engineering_execution_envelope%rowtype;
 begin
   select * into e from ops.engineering_execution_envelope where id=p_envelope_id;
   if not found then raise exception 'engineering envelope not found'; end if;
-  if not ops.engineering_envelope_is_executable(e.id,e.job_id) then
-    raise exception 'engineering envelope is no longer executable';
-  end if;
-  select executor_actor_id into session_executor from ops.capability_agent_session
-   where id=e.agent_session_id;
+  select executor_actor_id into session_executor
+    from ops.capability_agent_session where id=e.agent_session_id;
   if session_executor is null or p_executor_actor_id is distinct from session_executor then
     raise exception 'engineering receipt executor is not the server-bound agent session';
   end if;
-  select attempt_row.* into a from ops.job_attempt attempt_row
-    join ops.job j on j.id=attempt_row.job_id
+  select attempt_row.* into a
+    from ops.job_attempt attempt_row join ops.job j on j.id=attempt_row.job_id
    where attempt_row.job_id=e.job_id and attempt_row.attempt=j.attempt
      and attempt_row.lease_token=p_lease_token and attempt_row.state='running'
-     and j.state='running' and j.lease_token=p_lease_token
-     and j.leased_until>statement_timestamp() for update;
+   for update;
   if not found then raise exception 'engineering claim or lease is not current'; end if;
-  if p_receipt->>'envelope_digest'<>e.envelope_digest
-     or p_receipt->>'slice_ref'<>e.slice_ref
-     or p_receipt->>'attempt_id'<>('attempt:' || a.attempt)
+  if p_receipt->>'envelope_digest' <> e.envelope_digest
+     or p_receipt->>'slice_ref' <> e.slice_ref
+     or p_receipt->>'attempt_id' <> ('attempt:' || a.attempt)
      or p_receipt->>'outcome' not in ('claimed_complete','failed','blocked','reopened') then
     raise exception 'engineering receipt is not bound to the claimed envelope';
   end if;
@@ -4478,8 +4367,9 @@ declare prior ops.engineering_execution_envelope%rowtype;
         prior_count integer;
 begin
   perform pg_advisory_xact_lock(hashtextextended(
-    'engineering-envelope:' || new.slice_plan_id::text || ':' || new.slice_ref,0));
-  select count(*) into prior_count from ops.engineering_execution_envelope
+    'engineering-envelope:' || new.slice_plan_id::text || ':' || new.slice_ref, 0));
+  select count(*) into prior_count
+    from ops.engineering_execution_envelope
    where slice_plan_id=new.slice_plan_id and slice_ref=new.slice_ref;
   if prior_count=0 then
     if new.supersedes_envelope_id is not null then
@@ -4490,7 +4380,8 @@ begin
   if new.supersedes_envelope_id is null then
     raise exception 'later engineering envelope must name its immutable predecessor';
   end if;
-  select * into prior from ops.engineering_execution_envelope where id=new.supersedes_envelope_id;
+  select * into prior from ops.engineering_execution_envelope
+   where id=new.supersedes_envelope_id;
   if not found or prior.slice_plan_id<>new.slice_plan_id or prior.slice_ref<>new.slice_ref
      or prior.accepted_plan_id<>new.accepted_plan_id or prior.work_request_id<>new.work_request_id then
     raise exception 'engineering envelope predecessor is outside the exact slice binding';
@@ -4499,53 +4390,12 @@ begin
               where supersedes_envelope_id=prior.id) then
     raise exception 'engineering envelope predecessor already has a successor';
   end if;
-  if exists (select 1 from ops.job j where j.id=prior.job_id and j.state='running'
-              and j.lease_token is not null and j.leased_until>now()) then
-    raise exception 'leased engineering envelope cannot be superseded';
-  end if;
   if prior.expires_at>now()
      and coalesce((prior.envelope->'server_binding'->'authority'->>'read_only')::boolean,true)=false
-     and exists (select 1 from ops.capability_agent_session s where s.id=prior.agent_session_id
-                   and s.state not in ('completed','cancelled'))
      and not exists (select 1 from ops.engineering_slice_receipt r
                       where r.envelope_id=prior.id and r.outcome in ('failed','blocked','reopened')) then
     raise exception 'current executable engineering envelope cannot be superseded';
   end if;
-  return new;
-end $$;
-
-
---
--- Name: guard_engineering_session_terminalization(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.guard_engineering_session_terminalization() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-declare lineage record;
-begin
-  if new.state not in ('completed','cancelled') or new.state=old.state then
-    return new;
-  end if;
-  for lineage in
-    select distinct e.slice_plan_id,e.slice_ref
-     from ops.engineering_execution_envelope e
-     where e.agent_session_id=old.id
-     order by e.slice_plan_id,e.slice_ref
-  loop
-    perform pg_advisory_xact_lock(hashtextextended(
-      'engineering-envelope:' || lineage.slice_plan_id::text || ':' || lineage.slice_ref,0));
-    if exists (
-      select 1 from ops.engineering_execution_envelope e
-      join ops.job j on j.id=e.job_id
-       where e.agent_session_id=old.id and e.slice_plan_id=lineage.slice_plan_id
-         and e.slice_ref=lineage.slice_ref and j.state='running'
-         and j.lease_token is not null and j.leased_until>statement_timestamp()
-    ) then
-      raise exception 'engineering session terminalization deferred while its dispatch lease is live';
-    end if;
-  end loop;
   return new;
 end $$;
 
@@ -10194,930 +10044,6 @@ end $$;
 
 
 --
--- Name: siep_acquire_lane_lock(text, text, integer, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_acquire_lane_lock(p_component text, p_session_ref text, p_lease_seconds integer, p_idempotency_key uuid) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $_$
-declare k text; aid uuid; tok uuid; current_lock ops.siep_lane_lock%rowtype;
-        c ops.siep_package_contract%rowtype; w ops.work_request%rowtype;
-        prior ops.siep_command_receipt%rowtype; request_digest text; result jsonb;
-begin
-  k:=ops.siep_resolve_package(p_component);
-  select * into c from ops.siep_package_contract where package_key=k;
-  select id into aid from public.actor where slug='system' and active;
-  if k is null or aid is null
-     or coalesce(p_session_ref,'') !~ '^session:[a-zA-Z0-9._:-]{1,240}$' or p_lease_seconds not between 60 and 3600
-     or p_idempotency_key is null then raise exception 'bounded typed SIEP lane lock fields are required'; end if;
-  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-package:'||k,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-lane:'||c.lane_key,0));
-  request_digest:=ops.siep_request_digest(jsonb_build_object(
-    'package_key',k,'session_ref',p_session_ref,'lease_seconds',p_lease_seconds));
-  if exists(select 1 from ops.siep_evidence_link where idempotency_key=p_idempotency_key) then
-    raise exception 'idempotency_key_reuse: SIEP evidence key cannot be reused for a command';
-  end if;
-  select * into prior from ops.siep_command_receipt where idempotency_key=p_idempotency_key;
-  if found then
-    if prior.verb<>'acquire_lane' or prior.package_key<>k or prior.request_digest<>request_digest then
-      raise exception 'idempotency_key_reuse: SIEP lane-lock inputs changed';
-    end if;
-    return prior.result||jsonb_build_object('replayed',true);
-  end if;
-  select * into w from ops.work_request where id=c.work_request_id for update;
-  select * into current_lock from ops.siep_lane_lock where lane_key=c.lane_key for update;
-  if current_lock.lane_key is not null and current_lock.expires_at>now() then
-    raise exception 'SIEP lane % is already locked by another lease',c.lane_key;
-  end if;
-  if current_lock.lane_key is not null and current_lock.package_key<>k and exists(
-    select 1 from ops.siep_package_contract pc join ops.work_request pw on pw.id=pc.work_request_id
-     where pc.package_key=current_lock.package_key and pw.state not in ('ready','confirmed_closed')
-  ) then raise exception 'SIEP lane recovery must resume the prior nonterminal package'; end if;
-  if exists(select 1 from ops.siep_package_contract pc join ops.work_request pw on pw.id=pc.work_request_id
-     where pc.lane_key=c.lane_key and pc.package_key<>k
-       and pw.state not in ('ready','confirmed_closed')) then
-    raise exception 'SIEP lane has another nonterminal package requiring recovery';
-  end if;
-  if w.state not in ('ready','claimed','in_progress','verification','awaiting_release','released') then raise exception 'SIEP package cannot acquire a lane in state %',w.state; end if;
-  tok:=gen_random_uuid();
-  insert into ops.siep_lane_lock(lane_key,package_key,work_request_version,holder_actor_id,executor_tier,session_ref,lease_token,expires_at,idempotency_key)
-  values(c.lane_key,k,w.version,aid,c.minimum_executor_tier,p_session_ref,tok,now()+make_interval(secs=>p_lease_seconds),p_idempotency_key)
-  on conflict(lane_key) do update set package_key=excluded.package_key,work_request_version=excluded.work_request_version,
-    holder_actor_id=excluded.holder_actor_id,executor_tier=excluded.executor_tier,
-    session_ref=excluded.session_ref,lease_token=excluded.lease_token,acquired_at=now(),expires_at=excluded.expires_at,idempotency_key=excluded.idempotency_key;
-  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,agent_rationale,idempotency_key)
-  values(now(),aid,'siep-acquire-lane-lock','work_request',w.id,'lane_lock',null,
-    jsonb_build_object('package_key',k,
-      'session_digest','sha256:'||encode(public.digest(p_session_ref,'sha256'),'hex'),
-      'lease_seconds',p_lease_seconds,
-      'lane_key',c.lane_key,'work_request_version',w.version),
-    'system','typed SIEP lane acquisition',null);
-  select jsonb_build_object('lane_key',c.lane_key,'package_key',k,'work_request_version',w.version,
-    'lease_digest','sha256:'||encode(public.digest(lease_token::text,'sha256'),'hex'),
-    'expires_at',expires_at) into result
-    from ops.siep_lane_lock where lane_key=c.lane_key and package_key=k;
-  insert into ops.siep_command_receipt(idempotency_key,verb,package_key,request_digest,result,recorded_actor_id)
-  values(p_idempotency_key,'acquire_lane',k,request_digest,result,aid);
-  -- The raw lease token is a one-time delivery secret.  Exact replay remains a
-  -- no-op and returns the stable safe result, never a shared-role token oracle.
-  return result||jsonb_build_object('lease_token',tok,'replayed',false);
-end $_$;
-
-
---
--- Name: siep_append_only_guard(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_append_only_guard() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops'
-    AS $$
-begin
-  raise exception 'SIEP program contracts, dependencies, aliases, and evidence links are append-only';
-end $$;
-
-
---
--- Name: siep_attach_evidence(text, text, uuid, text, text, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_attach_evidence(p_component text, p_evidence_kind text, p_ledger_id uuid, p_ledger_kind text, p_evidence_digest text, p_note text, p_idempotency_key uuid) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $_$
-declare k text; aid uuid; prior ops.siep_evidence_link%rowtype; eid uuid; actor_slug text;
-        w ops.work_request%rowtype; c ops.siep_package_contract%rowtype;
-        source_row jsonb; source_at timestamptz;
-        server_digest text;
-begin
-  k:=ops.siep_resolve_package(p_component);
-  if k is null or p_idempotency_key is null or p_note !~ '^safe:[a-z0-9][a-z0-9:_./-]*$' or char_length(p_note)>300 then
-    raise exception 'known SIEP package, safe reference, and UUID idempotency key are required';
-  end if;
-  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
-  select * into prior from ops.siep_evidence_link where idempotency_key=p_idempotency_key;
-  if found then
-    if (prior.package_key,prior.evidence_kind,prior.ledger_kind,prior.ledger_id,prior.evidence_digest,prior.note)
-       is distinct from (k,p_evidence_kind,p_ledger_kind,p_ledger_id,p_evidence_digest,p_note) then
-      raise exception 'idempotency_key_reuse: SIEP evidence inputs changed';
-    end if;
-    return jsonb_build_object('id',prior.id,'package_key',prior.package_key,'replayed',true);
-  end if;
-  if exists(select 1 from ops.siep_command_receipt where idempotency_key=p_idempotency_key) then
-    raise exception 'idempotency_key_reuse: SIEP command key cannot be reused for evidence';
-  end if;
-  select w0.* into w from ops.work_request w0 join ops.siep_package_contract pc on pc.work_request_id=w0.id where pc.package_key=k for share;
-  select * into c from ops.siep_package_contract where package_key=k;
-  case p_ledger_kind
-    when 'job_receipt' then
-      select system_actor.id,jsonb_build_object('receipt',to_jsonb(r),'job',to_jsonb(j),
-                                                'attempt',to_jsonb(ja),'binding',to_jsonb(b)),r.created_at
-        into aid,source_row,source_at
-        from ops.job_receipt r join ops.job j on j.id=r.job_id
-        join ops.job_attempt ja on ja.job_id=j.id and ja.attempt=r.attempt
-        join ops.siep_job_evidence_binding b on b.job_id=j.id
-        join public.actor system_actor on system_actor.slug='system' and system_actor.active
-       where r.id=p_ledger_id and j.payload->>'work_request'=w.ref
-         and j.state='succeeded' and ja.state='succeeded'
-         and j.attempt=r.attempt and r.kind='completion'
-         and b.package_key=k and b.work_request_version=w.version
-         and b.manifest_digest=ops.siep_manifest_digest()
-         and b.evidence_kind=p_evidence_kind
-         and b.definition_key=j.definition_key and b.definition_version=j.definition_version;
-    when 'decision_event' then
-      select e.actor_id,to_jsonb(e),e.occurred_at into aid,source_row,source_at
-        from public.event e where e.id=p_ledger_id and e.verb='siep-joe-decision'
-          and e.new_value->>'package_key'=k;
-    else source_row:=null;
-  end case;
-  if source_row is null or aid is null then raise exception 'evidence target is not a valid package-bound canonical fact'; end if;
-  if source_at>now()+interval '1 minute' then raise exception 'future SIEP evidence is refused'; end if;
-  if source_at < (case when p_evidence_kind in ('joe_approval','joe_go_no_go') then w.captured_at
-                       else coalesce(w.claimed_at,w.captured_at) end) then
-    raise exception 'stale SIEP evidence predates the package execution boundary';
-  end if;
-  server_digest:=ops.siep_current_evidence_digest(p_ledger_kind,p_ledger_id);
-  if p_evidence_digest is distinct from server_digest then raise exception 'SIEP evidence digest does not match its canonical ledger row'; end if;
-  if p_ledger_kind='job_receipt' and not (
-       source_row#>>'{job,definition_key}'='engineering-slice'
-       and source_row#>>'{job,definition_version}'='1'
-       and source_row#>>'{job,payload,manifest_digest}'=ops.siep_manifest_digest()
-     ) then
-    raise exception 'SIEP evidence requires the fixed package-purpose verifier contract';
-  end if;
-  select slug into actor_slug from public.actor where id=aid;
-  if p_evidence_kind in ('joe_approval','joe_go_no_go')
-     and (session_user<>'carr_authority_joe' or p_ledger_kind<>'decision_event' or actor_slug<>'joe') then
-    raise exception 'Joe approval evidence requires the authenticated Joe authority session and a package-bound Joe decision';
-  end if;
-  if p_evidence_kind in ('joe_approval','joe_go_no_go') and not (
-       source_row#>>'{new_value,package_key}'=k
-       and source_row#>>'{new_value,gate}'=p_evidence_kind
-       and source_row#>>'{new_value,manifest_digest}'=ops.siep_manifest_digest()
-       and source_row#>>'{new_value,decision}'=case when p_evidence_kind='joe_go_no_go' then 'go' else 'approved' end
-     ) then raise exception 'Joe approval evidence requires an exact positive typed decision'; end if;
-  if p_evidence_kind in ('independent_review','live_readback','zero_unresolved_findings',
-                         'zero_blockers','two_clean_audit_cycles') then
-    if session_user<>'carr_authority_joe' then
-      raise exception 'SIEP independent and terminal evidence requires the authenticated Joe authority session';
-    end if;
-    select id into aid from public.actor where slug='joe' and active;
-    if aid is null or w.executor_actor='joe' then
-      raise exception 'independent authority evidence requires active Joe distinct from the package executor';
-    end if;
-  end if;
-  if p_evidence_kind not in ('joe_approval','joe_go_no_go') and not (
-       p_ledger_kind='job_receipt' and source_row#>>'{receipt,evidence,status}'='pass'
-       and source_row#>>'{receipt,evidence,operation}'=
-         case when p_evidence_kind='two_clean_audit_cycles' then 'clean_audit_cycle' else p_evidence_kind end
-     ) then raise exception 'SIEP evidence requires a successful package-bound lease completion receipt'; end if;
-  if p_evidence_kind='source' and coalesce(source_row#>>'{receipt,evidence,commit_sha}','') !~ '^[0-9a-f]{40,64}$'
-    then raise exception 'source evidence requires a commit-bound receipt'; end if;
-  if p_evidence_kind='tests' and coalesce(source_row#>>'{receipt,evidence,result_digest}','') !~ '^sha256:[0-9a-f]{64}$'
-    then raise exception 'test evidence requires a result-bound receipt'; end if;
-  if p_evidence_kind in ('readback','live_readback')
-     and coalesce(source_row#>>'{receipt,evidence,target_ref}','') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
-    then raise exception 'readback evidence requires a typed target'; end if;
-  if p_evidence_kind='rollback'
-     and coalesce(source_row#>>'{receipt,evidence,recovery_ref}','') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
-    then raise exception 'rollback evidence requires a typed recovery reference'; end if;
-  if p_evidence_kind='independent_review'
-     and coalesce(source_row#>>'{receipt,evidence,reviewed_artifact_digest}','') !~ '^sha256:[0-9a-f]{64}$'
-    then raise exception 'independent review requires an authority-attested artifact-bound receipt'; end if;
-  if p_evidence_kind in ('zero_unresolved_findings','zero_blockers') and not (
-       source_row#>>'{receipt,evidence,count}'='0'
-       and coalesce(source_row#>>'{receipt,evidence,baseline_digest}','') ~ '^sha256:[0-9a-f]{64}$'
-     ) then raise exception 'zero-state evidence requires a baseline-bound canonical zero count'; end if;
-  if p_evidence_kind='material_fix' and not (
-       coalesce(source_row#>>'{receipt,evidence,commit_sha}','') ~ '^[0-9a-f]{40,64}$'
-     ) then raise exception 'material-fix evidence requires a commit-bound receipt';
-  end if;
-  if p_evidence_kind='two_clean_audit_cycles' and not (
-    (source_row#>>'{receipt,evidence,cycle}') in ('1','2')
-    and (source_row#>>'{receipt,evidence,unresolved_count}')='0'
-    and (source_row#>>'{receipt,evidence,blocker_count}')='0'
-    and coalesce(source_row#>>'{receipt,evidence,baseline_digest}','') ~ '^sha256:[0-9a-f]{64}$'
-    and coalesce(source_row#>>'{receipt,evidence,run_id}','') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-  ) then raise exception 'clean audit evidence must be a zero-finding zero-blocker canonical cycle'; end if;
-  insert into ops.siep_evidence_link(package_key,evidence_kind,ledger_kind,ledger_id,work_request_version,
-    manifest_digest,evidence_digest,note,linked_actor_id,attested_session_principal,source_observed_at,idempotency_key)
-  values(k,p_evidence_kind,p_ledger_kind,p_ledger_id,w.version,ops.siep_manifest_digest(),
-    p_evidence_digest,p_note,aid,session_user,source_at,p_idempotency_key)
-  returning id into eid;
-  return jsonb_build_object('id',eid,'package_key',k,'replayed',false);
-end $_$;
-
-
---
--- Name: siep_bind_evidence_job(text, integer, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_bind_evidence_job(p_component text, p_base_version integer, p_evidence_kind text, p_job_id uuid, p_idempotency_key uuid) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-declare k text; w ops.work_request%rowtype; existing ops.siep_job_evidence_binding%rowtype;
-        aid uuid; result jsonb;
-begin
-  if session_user<>'carr_authority_joe' then
-    raise exception 'SIEP evidence binding requires the authenticated Joe authority session';
-  end if;
-  k:=ops.siep_resolve_package(p_component);
-  if k is null or p_base_version is null or p_job_id is null or p_idempotency_key is null
-     or p_evidence_kind not in ('source','tests','migration','deploy','readback','live_readback',
-       'rollback','independent_review','zero_unresolved_findings','zero_blockers',
-       'two_clean_audit_cycles','material_fix') then
-    raise exception 'known package, version, purpose, admitted job, and idempotency key are required';
-  end if;
-  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-evidence-job:'||p_job_id,0));
-  select * into existing from ops.siep_job_evidence_binding
-   where idempotency_key=p_idempotency_key or job_id=p_job_id order by bound_at limit 1;
-  if found then
-    if (existing.package_key,existing.work_request_version,existing.evidence_kind,existing.job_id)
-       is distinct from (k,p_base_version,p_evidence_kind,p_job_id) then
-      raise exception 'idempotency_key_reuse: SIEP evidence binding inputs changed';
-    end if;
-    return jsonb_build_object('job_id',existing.job_id,'package_key',existing.package_key,
-      'evidence_kind',existing.evidence_kind,'replayed',true);
-  end if;
-  select w0.* into w from ops.work_request w0 join ops.siep_package_contract c
-    on c.work_request_id=w0.id where c.package_key=k for share;
-  if w.version<>p_base_version then raise exception 'SIEP evidence binding requires the exact Work Request version'; end if;
-  select id into aid from public.actor where slug='joe' and active;
-  if aid is null then raise exception 'active Joe actor is required'; end if;
-  if not exists(
-    select 1 from ops.job j
-      join ops.engineering_execution_envelope env on env.job_id=j.id and env.work_request_id=w.id
-      join ops.engineering_slice_plan sp on sp.id=env.slice_plan_id and sp.work_request_id=w.id
-      join ops.engineering_slice_receipt er on er.envelope_id=env.id and er.work_request_id=w.id
-      join ops.job_attempt ja on ja.id=er.job_attempt_id and ja.job_id=j.id
-        and ja.attempt=j.attempt and ja.state='succeeded'
-      join ops.engineering_reviewer_fact rf on rf.receipt_id=er.id and rf.work_request_id=w.id
-     where j.id=p_job_id and j.definition_key='engineering-slice' and j.definition_version=1
-       and j.payload->>'work_request'=w.ref and j.state='succeeded'
-       and env.state_version=p_base_version and sp.work_request_version=p_base_version
-       and er.outcome='claimed_complete' and rf.state='passed'
-       and rf.reviewer_actor_id=aid and rf.reviewer_actor_id<>er.executor_actor_id
-       and exists(select 1 from ops.job_receipt jr where jr.job_id=j.id
-                    and jr.attempt=j.attempt and jr.kind='completion')
-  ) then
-    raise exception 'SIEP evidence binding requires an exact independently reviewed engineering envelope and completion';
-  end if;
-  insert into ops.siep_job_evidence_binding(job_id,package_key,work_request_version,
-    manifest_digest,evidence_kind,definition_key,definition_version,bound_by_actor_id,idempotency_key)
-  values(p_job_id,k,p_base_version,ops.siep_manifest_digest(),p_evidence_kind,
-    'engineering-slice',1,aid,p_idempotency_key);
-  result:=jsonb_build_object('job_id',p_job_id,'package_key',k,
-    'evidence_kind',p_evidence_kind,'replayed',false);
-  return result;
-end $$;
-
-
---
--- Name: siep_claim_package(text, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_claim_package(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $_$
-declare k text; w ops.work_request%rowtype; c ops.siep_package_contract%rowtype;
-        a public.actor%rowtype; prior ops.siep_command_receipt%rowtype; lane ops.siep_lane_lock%rowtype;
-        result jsonb; request_digest text;
-begin
-  k:=ops.siep_resolve_package(p_component);
-  if k is null or p_idempotency_key is null or p_lease_token is null
-     or coalesce(p_session_ref,'') !~ '^session:[a-zA-Z0-9._:-]{1,240}$' then
-    raise exception 'known SIEP package, bounded session, lease token, and UUID idempotency key are required';
-  end if;
-  select * into c from ops.siep_package_contract where package_key=k;
-  select * into a from public.actor where slug='system' and active for share;
-  if not found then raise exception 'active system actor is required'; end if;
-  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-package:'||k,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-lane:'||c.lane_key,0));
-  request_digest:=ops.siep_request_digest(jsonb_build_object(
-    'package_key',k,'session_ref',p_session_ref,'lease_token',p_lease_token));
-  if exists(select 1 from ops.siep_evidence_link where idempotency_key=p_idempotency_key) then
-    raise exception 'idempotency_key_reuse: SIEP evidence key cannot be reused for a command';
-  end if;
-  select * into prior from ops.siep_command_receipt where idempotency_key=p_idempotency_key;
-  if found then
-    if prior.verb<>'claim' or prior.package_key<>k or prior.request_digest<>request_digest then
-      raise exception 'idempotency_key_reuse: SIEP claim inputs changed';
-    end if;
-    return prior.result||jsonb_build_object('replayed',true);
-  end if;
-  select w0.* into w from ops.work_request w0 where w0.id=c.work_request_id for update;
-  if w.state<>'ready' then raise exception 'SIEP package % is %, not ready',k,w.state; end if;
-  select * into lane from ops.siep_lane_lock where lane_key=c.lane_key for update;
-  if not found or lane.package_key<>k or lane.holder_actor_id<>a.id
-     or lane.executor_tier<>c.minimum_executor_tier or lane.work_request_version<>w.version
-     or lane.session_ref<>p_session_ref or lane.lease_token<>p_lease_token
-     or lane.expires_at<=now() then
-    raise exception 'SIEP claim requires the exact live server-derived lane lock and Work Request version';
-  end if;
-  if exists (select 1 from ops.siep_program_dependency d join ops.siep_package_contract dc on dc.package_key=d.depends_on_package_key
-             join ops.work_request dw on dw.id=dc.work_request_id where d.package_key=k and dw.state<>'confirmed_closed') then
-    raise exception 'SIEP package % has unresolved dependencies',k;
-  end if;
-  if c.approval_gate<>'none' and not ops.siep_current_approval(k,w.version,c.approval_gate)
-    then raise exception 'SIEP package % admission requires %',k,c.approval_gate; end if;
-  result:=jsonb_build_object('package_key',k,'state','claimed','version',w.version+1,
-                             'executor_actor','system','executor_tier',c.minimum_executor_tier,
-                             'lane_key',c.lane_key,'session_ref',p_session_ref,
-                             'lease_digest','sha256:'||encode(public.digest(p_lease_token::text,'sha256'),'hex'));
-  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,agent_rationale,idempotency_key)
-  values(now(),a.id,'siep-claim-package','work_request',w.id,'state',to_jsonb(w.state),
-         result,
-         'system','typed SIEP dependency-first claim',p_idempotency_key::text);
-  update ops.work_request set state='claimed',executor_actor='system',claimed_at=now(),updated_at=now(),version=version+1 where id=w.id;
-  update ops.siep_lane_lock set work_request_version=w.version+1
-   where lane_key=c.lane_key and lease_token=p_lease_token and session_ref=p_session_ref;
-  insert into ops.siep_command_receipt(idempotency_key,verb,package_key,request_digest,result,recorded_actor_id)
-  values(p_idempotency_key,'claim',k,request_digest,result,a.id);
-  return result||jsonb_build_object('replayed',false);
-end $_$;
-
-
---
--- Name: siep_current_approval(text, integer, text); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_current_approval(p_package_key text, p_work_request_version integer, p_gate text) RETURNS boolean
-    LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-  select exists(
-    select 1 from ops.siep_package_contract c
-      join ops.work_request w on w.id=c.work_request_id
-      join ops.siep_evidence_link e on e.package_key=c.package_key
-      join public.event d on d.id=e.ledger_id and e.ledger_kind='decision_event'
-      join public.actor joe on joe.id=d.actor_id and joe.slug='joe' and joe.active
-     where c.package_key=p_package_key and c.approval_gate=p_gate
-       and p_gate in ('joe_approval','joe_go_no_go')
-       and e.work_request_version=p_work_request_version and e.evidence_kind=p_gate
-       and e.manifest_digest=ops.siep_manifest_digest()
-       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)
-       and e.source_observed_at=d.occurred_at and d.verb='siep-joe-decision'
-       and d.new_value->>'package_key'=c.package_key
-       and d.new_value->>'gate'=c.approval_gate
-       and d.new_value->>'manifest_digest'=ops.siep_manifest_digest()
-       and d.new_value->>'decision'=case when p_gate='joe_go_no_go' then 'go' else 'approved' end
-       and d.occurred_at>=coalesce((
-         select max(dw.closed_at) from ops.siep_program_dependency dep
-           join ops.siep_package_contract dc on dc.package_key=dep.depends_on_package_key
-           join ops.work_request dw on dw.id=dc.work_request_id
-          where dep.package_key=c.package_key
-       ),w.captured_at)
-       and not exists(
-         select 1 from public.event later
-          where later.actor_id=joe.id and later.verb='siep-joe-decision'
-            and later.new_value->>'package_key'=c.package_key
-            and later.new_value->>'gate'=c.approval_gate
-            and (later.occurred_at,later.id)>(d.occurred_at,d.id)
-       )
-  )
-$$;
-
-
---
--- Name: siep_current_evidence_digest(text, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_current_evidence_digest(p_ledger_kind text, p_ledger_id uuid) RETURNS text
-    LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-  select 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(source_row),'sha256'),'hex')
-    from (
-      select jsonb_build_object('receipt',to_jsonb(r),'job',to_jsonb(j),'attempt',to_jsonb(a),
-                                'binding',to_jsonb(b)) source_row
-        from ops.job_receipt r join ops.job j on j.id=r.job_id
-        join ops.job_attempt a on a.job_id=j.id and a.attempt=r.attempt
-        join ops.siep_job_evidence_binding b on b.job_id=j.id
-       where p_ledger_kind='job_receipt' and r.id=p_ledger_id
-      union all select to_jsonb(e) from public.event e
-       where p_ledger_kind='decision_event' and e.id=p_ledger_id
-    ) canonical
-$$;
-
-
---
--- Name: siep_evidence_actor(text, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_evidence_actor(p_ledger_kind text, p_ledger_id uuid) RETURNS uuid
-    LANGUAGE plpgsql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-declare aid uuid;
-begin
-  case p_ledger_kind
-    when 'job_receipt' then select a.id into aid from ops.job_receipt r join ops.job j on j.id=r.job_id join public.actor a on a.slug=coalesce(j.lease_owner,'system') where r.id=p_ledger_id;
-    when 'decision_event' then select actor_id into aid from public.event where id=p_ledger_id and verb='siep-joe-decision';
-    else aid:=null;
-  end case;
-  if aid is null then raise exception 'evidence target does not exist in its canonical ledger'; end if;
-  return aid;
-end $$;
-
-
---
--- Name: siep_joe_decision_event_guard(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_joe_decision_event_guard() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-declare old_scoped boolean:=false; new_scoped boolean:=false;
-begin
-  if tg_op<>'INSERT' then
-    select old.verb='siep-joe-decision'
-      and old.new_value->>'program_key'='carr-system-integrity-elimination-v1'
-      and ops.siep_resolve_package(old.new_value->>'package_key') is not null
-      and old.new_value->>'gate' in ('joe_approval','joe_go_no_go')
-      into old_scoped;
-  end if;
-  if tg_op<>'DELETE' then
-    select new.verb='siep-joe-decision'
-      and new.new_value->>'program_key'='carr-system-integrity-elimination-v1'
-      and ops.siep_resolve_package(new.new_value->>'package_key') is not null
-      and new.new_value->>'gate' in ('joe_approval','joe_go_no_go')
-      into new_scoped;
-  end if;
-  if tg_op='INSERT' and new_scoped and session_user<>'carr_authority_joe' then
-    raise exception 'SIEP Joe decisions require the authenticated Joe authority session';
-  end if;
-  if tg_op in ('UPDATE','DELETE') and (old_scoped or new_scoped) then
-    raise exception 'SIEP Joe decision events are immutable';
-  end if;
-  return case when tg_op='DELETE' then old else new end;
-end $$;
-
-
---
--- Name: siep_manifest_digest(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_manifest_digest() RETURNS text
-    LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-  select 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(jsonb_build_object(
-    'program_key','carr-system-integrity-elimination-v1',
-    'packages',(select jsonb_agg(jsonb_build_object('key',c.package_key,'work_request',w.ref,
-      'ordinal',w.program_ordinal,'title',w.title,'lane',c.lane_key,'tier',c.minimum_executor_tier,
-      'approval_gate',c.approval_gate,'test_contract',c.test_contract,
-      'delivery_contract',c.delivery_contract,'rollback_contract',c.rollback_contract,
-      'required_evidence_kinds',to_jsonb(c.required_evidence_kinds)) order by w.program_ordinal)
-      from ops.siep_package_contract c join ops.work_request w on w.id=c.work_request_id),
-    'dependencies',(select jsonb_agg(jsonb_build_array(package_key,depends_on_package_key)
-      order by package_key,depends_on_package_key) from ops.siep_program_dependency),
-    'aliases',(select jsonb_agg(jsonb_build_array(alias_key,package_key) order by alias_key)
-      from ops.siep_component_alias)
-  )),'sha256'),'hex')
-$$;
-
-
---
--- Name: siep_manifest_insert_guard(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_manifest_insert_guard() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops'
-    AS $$
-begin
-  raise exception 'the reviewed SIEP package, dependency, and alias manifest is sealed';
-end $$;
-
-
---
--- Name: siep_program_identity_guard(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_program_identity_guard() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops'
-    AS $$
-begin
-  if old.program_key='carr-system-integrity-elimination-v1'
-     and (to_jsonb(new)-array['state','executor_actor','claimed_at','started_at','closed_at','updated_at','version',
-                                  'completion_kind','completion_evidence','verification_accepted_at','verification_evidence_ref'])
-         is distinct from
-         (to_jsonb(old)-array['state','executor_actor','claimed_at','started_at','closed_at','updated_at','version',
-                                  'completion_kind','completion_evidence','verification_accepted_at','verification_evidence_ref']) then
-    raise exception 'SIEP package identity and contract projection are immutable';
-  end if;
-  return new;
-end $$;
-
-
---
--- Name: siep_program_transition_guard(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_program_transition_guard() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops'
-    AS $$
-begin
-  if old.program_key is distinct from 'carr-system-integrity-elimination-v1' then return new; end if;
-  if old.state='confirmed_closed' and new is distinct from old then raise exception 'closed SIEP package is immutable'; end if;
-  if old.state is not distinct from new.state and new is distinct from old then raise exception 'SIEP package mutations require a typed state transition'; end if;
-  if old.state is distinct from new.state and (old.state,new.state) not in (
-    ('ready','claimed'),('claimed','in_progress'),('in_progress','verification'),
-    ('verification','awaiting_release'),('awaiting_release','released'),('released','confirmed_closed')
-  ) then raise exception 'invalid SIEP package state transition'; end if;
-  if new.version<>old.version+1 then raise exception 'SIEP package transitions require exact version plus one'; end if;
-  if old.state='ready' and (new.executor_actor is distinct from 'system' or old.executor_actor is not null) then
-    raise exception 'SIEP claim executor is server-derived';
-  end if;
-  if old.state<>'ready' and new.executor_actor is distinct from old.executor_actor then
-    raise exception 'SIEP executor binding is immutable after claim';
-  end if;
-  if not exists(
-    select 1 from public.event e where e.subject_type='work_request' and e.subject_id=old.id
-      and e.verb=case when old.state='ready' then 'siep-claim-package' else 'siep-transition-package' end
-      and e.old_value=to_jsonb(old.state) and e.new_value->>'state'=new.state
-      and (e.new_value->>'version')::integer=new.version
-  ) then raise exception 'SIEP package transition requires its exact command event'; end if;
-  if new.state<>'confirmed_closed' and (
-    new.completion_kind is distinct from old.completion_kind
-    or new.completion_evidence is distinct from old.completion_evidence
-    or new.verification_accepted_at is distinct from old.verification_accepted_at
-    or new.verification_evidence_ref is distinct from old.verification_evidence_ref
-    or new.closed_at is distinct from old.closed_at
-  ) then raise exception 'SIEP completion fields may change only at terminal package closure'; end if;
-  return new;
-end $$;
-
-
---
--- Name: siep_read_program(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_read_program() RETURNS jsonb
-    LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops'
-    AS $$
-  select jsonb_build_object(
-    'program_key','carr-system-integrity-elimination-v1',
-    'manifest_digest',ops.siep_manifest_digest(),
-    'packages',coalesce(jsonb_agg(jsonb_build_object(
-      'package_key',c.package_key,'work_request_ref',w.ref,'title',w.title,'state',w.state,
-      'version',w.version,'owner',w.owner_actor,'executor',w.executor_actor,
-      'minimum_executor_tier',c.minimum_executor_tier,'approval_gate',c.approval_gate,
-      'dependencies',(select coalesce(jsonb_agg(d.depends_on_package_key order by d.depends_on_package_key),'[]'::jsonb)
-                        from ops.siep_program_dependency d where d.package_key=c.package_key),
-      'evidence',(select coalesce(jsonb_object_agg(e.evidence_kind,e.count),'{}'::jsonb)
-                    from (select evidence_kind,count(*) from ops.siep_evidence_link
-                           where package_key=c.package_key group by evidence_kind) e),
-      'delivery_contract',c.delivery_contract
-    ) order by w.program_ordinal),'[]'::jsonb)
-  ) from ops.siep_package_contract c join ops.work_request w on w.id=c.work_request_id
-$$;
-
-
---
--- Name: siep_record_joe_decision(text, text, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_record_joe_decision(p_component text, p_gate text, p_decision text, p_idempotency_key uuid) RETURNS uuid
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-declare k text; c ops.siep_package_contract%rowtype; w ops.work_request%rowtype;
-        joe_id uuid; existing public.event%rowtype; eid uuid; payload jsonb;
-        decision_at timestamptz;
-begin
-  if session_user<>'carr_authority_joe' then
-    raise exception 'SIEP decisions require the authenticated Joe authority session';
-  end if;
-  k:=ops.siep_resolve_package(p_component);
-  select * into c from ops.siep_package_contract where package_key=k;
-  select * into w from ops.work_request where id=c.work_request_id;
-  if k is null or p_idempotency_key is null or p_gate<>c.approval_gate
-     or p_gate not in ('joe_approval','joe_go_no_go')
-     or (p_gate='joe_approval' and p_decision not in ('approved','rejected','revoked'))
-     or (p_gate='joe_go_no_go' and p_decision not in ('go','no_go','revoked')) then
-    raise exception 'exact SIEP approval gate and typed decision are required';
-  end if;
-  select id into joe_id from public.actor where slug='joe' and active;
-  if joe_id is null then raise exception 'active Joe actor is required'; end if;
-  perform pg_advisory_xact_lock(hashtextextended('siep-joe-decision:'||p_idempotency_key,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-joe-decision-package:'||k,0));
-  payload:=jsonb_build_object('program_key','carr-system-integrity-elimination-v1',
-    'package_key',k,'work_request_version',w.version,'gate',p_gate,'decision',p_decision,
-    'manifest_digest',ops.siep_manifest_digest());
-  select * into existing from public.event where actor_id=joe_id and verb='siep-joe-decision'
-    and idempotency_key=p_idempotency_key::text order by occurred_at,id limit 1;
-  if found then
-    if existing.subject_id<>w.id or existing.new_value<>payload then
-      raise exception 'idempotency_key_reuse: SIEP Joe decision inputs changed';
-    end if;
-    return existing.id;
-  end if;
-  select greatest(clock_timestamp(),coalesce(max(e.occurred_at)+interval '1 microsecond',clock_timestamp()))
-    into decision_at from public.event e
-   where e.actor_id=joe_id and e.verb='siep-joe-decision'
-     and e.new_value->>'package_key'=k and e.new_value->>'gate'=p_gate;
-  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,
-                           old_value,new_value,cause,agent_rationale,idempotency_key)
-  values(decision_at,joe_id,'siep-joe-decision','work_request',w.id,'decision',null,payload,
-         'human_stated','typed SIEP authority decision',p_idempotency_key::text)
-  returning id into eid;
-  return eid;
-end $$;
-
-
---
--- Name: siep_release_lane_lock(text, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_release_lane_lock(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) RETURNS boolean
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops'
-    AS $_$
-declare k text; n integer; c ops.siep_package_contract%rowtype; w ops.work_request%rowtype;
-        prior ops.siep_command_receipt%rowtype; aid uuid; released boolean;
-        request_digest text; result jsonb; lane ops.siep_lane_lock%rowtype;
-begin
-  k:=ops.siep_resolve_package(p_component);
-  select * into c from ops.siep_package_contract where package_key=k;
-  if k is null or p_lease_token is null or p_idempotency_key is null
-     or coalesce(p_session_ref,'') !~ '^session:[a-zA-Z0-9._:-]{1,240}$' then
-    raise exception 'known package, bounded session, lease token, and idempotency key are required';
-  end if;
-  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-package:'||k,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-lane:'||c.lane_key,0));
-  request_digest:=ops.siep_request_digest(jsonb_build_object(
-    'package_key',k,'session_ref',p_session_ref,'lease_token',p_lease_token));
-  if exists(select 1 from ops.siep_evidence_link where idempotency_key=p_idempotency_key) then
-    raise exception 'idempotency_key_reuse: SIEP evidence key cannot be reused for a command';
-  end if;
-  select * into prior from ops.siep_command_receipt where idempotency_key=p_idempotency_key;
-  if found then
-    if prior.verb<>'release_lane' or prior.package_key<>k or prior.request_digest<>request_digest then
-      raise exception 'idempotency_key_reuse: SIEP lane-release inputs changed';
-    end if;
-    return (prior.result->>'released')::boolean;
-  end if;
-  select w0.* into w from ops.work_request w0 where w0.id=c.work_request_id for update;
-  select * into lane from ops.siep_lane_lock where lane_key=c.lane_key for update;
-  delete from ops.siep_lane_lock where lane_key=c.lane_key and package_key=k
-    and session_ref=p_session_ref and lease_token=p_lease_token
-    and (expires_at<=now() or w.state in ('ready','confirmed_closed','declined','superseded'));
-  get diagnostics n=row_count; released:=n=1;
-  select id into aid from public.actor where slug='system' and active;
-  result:=jsonb_build_object('package_key',k,'session_ref',p_session_ref,
-      'lease_digest','sha256:'||encode(public.digest(p_lease_token::text,'sha256'),'hex'),'released',released);
-  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,agent_rationale,idempotency_key)
-  values(now(),aid,'siep-release-lane-lock','work_request',w.id,'lane_lock',null,
-    result,
-    'system','typed SIEP lane release',p_idempotency_key::text);
-  insert into ops.siep_command_receipt(idempotency_key,verb,package_key,request_digest,result,recorded_actor_id)
-  values(p_idempotency_key,'release_lane',k,request_digest,result,aid);
-  return released;
-end $_$;
-
-
---
--- Name: siep_request_digest(jsonb); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_request_digest(p_request jsonb) RETURNS text
-    LANGUAGE sql IMMUTABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-  select 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(p_request),'sha256'),'hex')
-$$;
-
-
---
--- Name: siep_resolve_package(text); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_resolve_package(p_component text) RETURNS text
-    LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops'
-    AS $$
-  select coalesce(
-    (select package_key from ops.siep_package_contract where package_key=p_component),
-    (select package_key from ops.siep_component_alias where alias_key=p_component)
-  )
-$$;
-
-
---
--- Name: siep_terminal_status(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_terminal_status() RETURNS jsonb
-    LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops'
-    AS $$
-  with facts as (
-    select count(*) filter(where w.state<>'confirmed_closed') as open_packages,
-           count(*) as contract_packages,
-           (select count(*) from ops.work_request sw where sw.program_key='carr-system-integrity-elimination-v1') as program_rows,
-           count(*) filter(where w.state='blocked' or w.blocker_code is not null) as blocked_packages,
-           bool_or(c.package_key='06B' and w.state='confirmed_closed') as closure_authority_closed,
-           bool_or(c.package_key='44' and w.state='confirmed_closed') as retirement_closed
-      from ops.siep_package_contract c join ops.work_request w on w.id=c.work_request_id
-  ), audit as (
-    select count(distinct (r.evidence->>'cycle')) as clean_cycles,
-           count(distinct (r.evidence->>'baseline_digest')) as baseline_count,
-           count(distinct (r.evidence->>'run_id')) as audit_run_count,
-           min(e.source_observed_at) filter(where r.evidence->>'cycle'='1') as cycle_one_at,
-           min(e.source_observed_at) filter(where r.evidence->>'cycle'='2') as cycle_two_at
-      from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
-     where e.package_key='44' and e.evidence_kind='two_clean_audit_cycles'
-       and e.ledger_kind='job_receipt' and r.evidence->>'operation'='clean_audit_cycle'
-       and r.evidence->>'cycle' in ('1','2') and r.evidence->>'unresolved_count'='0'
-       and r.evidence->>'blocker_count'='0'
-       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)
-  ), mutation as (
-    select max(source_observed_at) as last_material_fix_at
-      from ops.siep_evidence_link e where evidence_kind='material_fix'
-       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)
-  ), zeroes as (
-    select exists(select 1 from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
-      where e.package_key='44' and e.evidence_kind='zero_unresolved_findings'
-        and r.evidence->>'operation'='zero_unresolved_findings' and r.evidence->>'count'='0'
-        and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)) as zero_findings,
-      exists(select 1 from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
-      where e.package_key='44' and e.evidence_kind='zero_blockers'
-        and r.evidence->>'operation'='zero_blockers' and r.evidence->>'count'='0'
-        and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)) as zero_blockers
-  ), live as (
-    select exists(select 1 from ops.siep_lane_lock where expires_at>now()) as live_lane_lock,
-           exists(select 1 from ops.incident i join ops.incident_link l on l.incident_id=i.id
-                   where l.kind='work_request' and l.ref like 'WR-SIEP-%'
-                     and i.state not in ('resolved','reviewed')) as open_incident,
-           exists(select 1 from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
-             where e.package_key='44' and e.evidence_kind='live_readback'
-               and r.evidence->>'operation'='live_readback' and r.evidence->>'status'='pass'
-               and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)) as live_readback
-  )
-  select jsonb_build_object(
-    'complete',open_packages=0 and contract_packages=40 and program_rows=40 and blocked_packages=0
-      and closure_authority_closed and retirement_closed and zero_findings and zero_blockers
-      and clean_cycles=2 and audit_run_count=2 and baseline_count=1
-      and cycle_one_at>coalesce(last_material_fix_at,'-infinity'::timestamptz) and cycle_two_at>cycle_one_at
-      and not live_lane_lock and not open_incident and live_readback,
-    'open_packages',open_packages,'closure_authority_closed',closure_authority_closed,
-    'retirement_closed',retirement_closed,'blocked_packages',blocked_packages,
-    'clean_audit_cycles',clean_cycles,'audit_run_count',audit_run_count,'audit_baseline_count',baseline_count,
-    'exact_program_rowset',contract_packages=40 and program_rows=40,
-    'last_material_fix_at',last_material_fix_at,'live_lane_lock',live_lane_lock,
-    'open_incident',open_incident,'live_readback',live_readback,
-    'required_terminal_evidence',jsonb_build_array('zero_unresolved_findings','zero_blockers','two_clean_audit_cycles','live_readback')
-  ) from facts cross join audit cross join mutation cross join zeroes cross join live
-$$;
-
-
---
--- Name: siep_transition_package(text, integer, text, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $_$
-declare k text; w ops.work_request%rowtype; c ops.siep_package_contract%rowtype;
-        actor_id uuid; prior ops.siep_command_receipt%rowtype; review_id uuid; missing text[];
-        lane ops.siep_lane_lock%rowtype; result jsonb; clean_cycles integer; baselines integer; audit_runs integer;
-        last_fix timestamptz; cycle_one timestamptz; cycle_two timestamptz; attestor text; request_digest text;
-begin
-  k:=ops.siep_resolve_package(p_component);
-  if k is null or p_idempotency_key is null or p_lease_token is null or p_base_version<1
-     or coalesce(p_session_ref,'') !~ '^session:[a-zA-Z0-9._:-]{1,240}$' then
-    raise exception 'known package, positive base version, bounded session, lease token, and UUID idempotency key are required';
-  end if;
-  select * into c from ops.siep_package_contract where package_key=k;
-  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-package:'||k,0));
-  perform pg_advisory_xact_lock(hashtextextended('siep-lane:'||c.lane_key,0));
-  request_digest:=ops.siep_request_digest(jsonb_build_object(
-    'package_key',k,'base_version',p_base_version,'target_state',p_target_state,
-    'session_ref',p_session_ref,'lease_token',p_lease_token));
-  if exists(select 1 from ops.siep_evidence_link where idempotency_key=p_idempotency_key) then
-    raise exception 'idempotency_key_reuse: SIEP evidence key cannot be reused for a command';
-  end if;
-  select * into prior from ops.siep_command_receipt where idempotency_key=p_idempotency_key;
-  if found then
-    if prior.verb<>'transition' or prior.package_key<>k or prior.request_digest<>request_digest then
-      raise exception 'idempotency_key_reuse: SIEP transition inputs changed';
-    end if;
-    return prior.result||jsonb_build_object('replayed',true);
-  end if;
-  select w0.* into w from ops.work_request w0
-    join ops.siep_package_contract c0 on c0.work_request_id=w0.id
-   where c0.package_key=k for update of w0;
-  if w.version<>p_base_version then raise exception 'version_conflict: expected %, current %',p_base_version,w.version; end if;
-  select * into lane from ops.siep_lane_lock where lane_key=c.lane_key for update;
-  if not found or lane.package_key<>k or lane.work_request_version<>p_base_version
-     or lane.session_ref<>p_session_ref or lane.lease_token<>p_lease_token or lane.expires_at<=now() then
-    raise exception 'SIEP transition requires the exact live holder-bound package lane lock';
-  end if;
-  if (w.state,p_target_state) not in (('claimed','in_progress'),('in_progress','verification'),('verification','awaiting_release'),('awaiting_release','released'),('released','confirmed_closed')) then
-    raise exception 'invalid SIEP transition % -> %',w.state,p_target_state;
-  end if;
-  if p_target_state in ('released','confirmed_closed') then
-    select array_agg(req) into missing from unnest(c.required_evidence_kinds) req
-     where not exists(select 1 from ops.siep_evidence_link e where e.package_key=k and e.evidence_kind=req
-       and e.manifest_digest=ops.siep_manifest_digest()
-       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)
-       and (req in ('joe_approval','joe_go_no_go')
-            or e.work_request_version>=w.version-case when p_target_state='confirmed_closed' then 1 else 0 end));
-    if missing is not null then raise exception 'SIEP package % missing evidence: %',k,missing; end if;
-    if not exists(select 1 from ops.siep_evidence_link e
-                   where e.package_key=k and e.evidence_kind='independent_review'
-                     and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)) then
-      raise exception 'SIEP package % requires independent evidence',k;
-    end if;
-  end if;
-  if p_target_state='confirmed_closed' then
-    if exists(select 1 from ops.siep_program_dependency d join ops.siep_package_contract dc on dc.package_key=d.depends_on_package_key
-              join ops.work_request dw on dw.id=dc.work_request_id where d.package_key=k and dw.state<>'confirmed_closed') then
-      raise exception 'SIEP package % cannot close before its dependencies',k;
-    end if;
-    if k='44' and exists(select 1 from ops.siep_package_contract pc join ops.work_request pw on pw.id=pc.work_request_id
-                          where pc.package_key<>'44' and pw.state<>'confirmed_closed') then
-      raise exception 'SIEP terminal authority refuses completion: packages remain open';
-    end if;
-    if k='44' and ((select count(*) from ops.work_request where program_key='carr-system-integrity-elimination-v1')<>40
-                   or (select count(*) from ops.siep_package_contract)<>40) then
-      raise exception 'SIEP terminal authority refuses completion: program rowset is not exact';
-    end if;
-    if k='44' then
-      select count(distinct r.evidence->>'cycle'),count(distinct r.evidence->>'baseline_digest'),
-             count(distinct r.evidence->>'run_id'),
-             min(e.source_observed_at) filter(where r.evidence->>'cycle'='1'),
-             min(e.source_observed_at) filter(where r.evidence->>'cycle'='2')
-        into clean_cycles,baselines,audit_runs,cycle_one,cycle_two
-        from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
-       where e.package_key='44' and e.evidence_kind='two_clean_audit_cycles' and e.ledger_kind='job_receipt'
-         and r.evidence->>'operation'='clean_audit_cycle' and r.evidence->>'cycle' in ('1','2')
-         and r.evidence->>'unresolved_count'='0' and r.evidence->>'blocker_count'='0'
-         and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id);
-      select max(source_observed_at) into last_fix from ops.siep_evidence_link e where evidence_kind='material_fix'
-       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id);
-      if clean_cycles<>2 or audit_runs<>2 or baselines<>1
-         or cycle_one<=coalesce(last_fix,'-infinity'::timestamptz) or cycle_two<=cycle_one
-         or exists(select 1 from ops.siep_lane_lock where expires_at>now() and package_key<>'44')
-         or exists(select 1 from ops.incident i join ops.incident_link l on l.incident_id=i.id
-                   where l.kind='work_request' and l.ref like 'WR-SIEP-%' and i.state not in ('resolved','reviewed'))
-         or exists(select 1 from ops.siep_package_contract pc join ops.work_request pw on pw.id=pc.work_request_id
-                   where pw.state='blocked' or pw.blocker_code is not null) then
-        raise exception 'SIEP terminal authority refuses completion: final clean-cycle, blocker, incident, or lane predicate failed';
-      end if;
-    end if;
-    select e.id,a.slug into review_id,attestor from ops.siep_evidence_link e
-      join public.actor a on a.id=e.linked_actor_id
-     where e.package_key=k and e.evidence_kind='independent_review' order by e.linked_at desc limit 1;
-  end if;
-  select id into actor_id from public.actor where slug=coalesce(w.executor_actor,'system') and active;
-  if actor_id is null then raise exception 'SIEP transition requires an active claimed executor'; end if;
-  result:=jsonb_build_object('package_key',k,'base_version',p_base_version,'state',p_target_state,
-    'version',w.version+1,'session_ref',p_session_ref,
-    'lease_digest','sha256:'||encode(public.digest(p_lease_token::text,'sha256'),'hex'));
-  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,agent_rationale,idempotency_key)
-  values(now(),actor_id,'siep-transition-package','work_request',w.id,'state',to_jsonb(w.state),result,
-         'system','typed SIEP transition',p_idempotency_key::text);
-  update ops.work_request set state=p_target_state,version=version+1,updated_at=now(),
-    started_at=case when p_target_state='in_progress' then coalesce(started_at,now()) else started_at end,
-    closed_at=case when p_target_state='confirmed_closed' then now() else closed_at end,
-    completion_kind=case when p_target_state='confirmed_closed' then 'extended' else completion_kind end,
-    completion_evidence=case when p_target_state='confirmed_closed' then jsonb_build_object(
-      'acceptance_predicates',to_jsonb(c.required_evidence_kinds),
-      'change_ref',ops.siep_manifest_digest(),'user_facing',false,'attested_by',attestor,
-      'siep_package',k,'evidence_links',(select jsonb_agg(id order by linked_at) from ops.siep_evidence_link where package_key=k)) else completion_evidence end,
-    verification_accepted_at=case when p_target_state='confirmed_closed' then now() else verification_accepted_at end,
-    verification_evidence_ref=case when p_target_state='confirmed_closed' then review_id::text else verification_evidence_ref end
-   where id=w.id;
-  if p_target_state='confirmed_closed' then
-    delete from ops.siep_lane_lock where lane_key=c.lane_key and package_key=k
-      and session_ref=p_session_ref and lease_token=p_lease_token;
-  else
-    update ops.siep_lane_lock set work_request_version=w.version+1
-     where lane_key=c.lane_key and package_key=k
-       and session_ref=p_session_ref and lease_token=p_lease_token;
-  end if;
-  insert into ops.siep_command_receipt(idempotency_key,verb,package_key,request_digest,result,recorded_actor_id)
-  values(p_idempotency_key,'transition',k,request_digest,result,actor_id);
-  return result||jsonb_build_object('replayed',false);
-end $_$;
-
-
---
 -- Name: sourced_heavy_build_review_target(text, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -16168,162 +15094,6 @@ COMMENT ON COLUMN ops.settings_change.reason IS 'Why the change was made, in the
 
 
 --
--- Name: siep_command_receipt; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.siep_command_receipt (
-    idempotency_key uuid NOT NULL,
-    verb text NOT NULL,
-    package_key text NOT NULL,
-    request_digest text NOT NULL,
-    result jsonb NOT NULL,
-    recorded_actor_id uuid NOT NULL,
-    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT siep_command_receipt_never_stores_lease_token CHECK ((NOT (result ? 'lease_token'::text))),
-    CONSTRAINT siep_command_receipt_request_digest_check CHECK ((request_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
-    CONSTRAINT siep_command_receipt_result_check CHECK ((jsonb_typeof(result) = 'object'::text)),
-    CONSTRAINT siep_command_receipt_verb_check CHECK ((verb = ANY (ARRAY['claim'::text, 'transition'::text, 'acquire_lane'::text, 'release_lane'::text])))
-);
-
-
---
--- Name: siep_component_alias; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.siep_component_alias (
-    alias_key text NOT NULL,
-    package_key text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT siep_component_alias_alias_key_check CHECK ((alias_key ~ '^(SCAC-[0-9]{2}|MPE-17[A-H])$'::text))
-);
-
-
---
--- Name: siep_evidence_link; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.siep_evidence_link (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    package_key text NOT NULL,
-    evidence_kind text NOT NULL,
-    ledger_kind text NOT NULL,
-    ledger_id uuid NOT NULL,
-    work_request_version integer NOT NULL,
-    manifest_digest text NOT NULL,
-    evidence_digest text NOT NULL,
-    note text NOT NULL,
-    linked_actor_id uuid NOT NULL,
-    attested_session_principal text NOT NULL,
-    source_observed_at timestamp with time zone NOT NULL,
-    idempotency_key uuid NOT NULL,
-    linked_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT siep_evidence_link_evidence_digest_check CHECK ((evidence_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
-    CONSTRAINT siep_evidence_link_evidence_kind_check CHECK ((evidence_kind = ANY (ARRAY['source'::text, 'tests'::text, 'migration'::text, 'deploy'::text, 'readback'::text, 'live_readback'::text, 'rollback'::text, 'independent_review'::text, 'joe_approval'::text, 'joe_go_no_go'::text, 'zero_unresolved_findings'::text, 'zero_blockers'::text, 'two_clean_audit_cycles'::text, 'material_fix'::text]))),
-    CONSTRAINT siep_evidence_link_ledger_kind_check CHECK ((ledger_kind = ANY (ARRAY['job_receipt'::text, 'decision_event'::text]))),
-    CONSTRAINT siep_evidence_link_manifest_digest_check CHECK ((manifest_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
-    CONSTRAINT siep_evidence_link_note_check CHECK (((note ~ '^safe:[a-z0-9][a-z0-9:_./-]*$'::text) AND (char_length(note) <= 300))),
-    CONSTRAINT siep_evidence_link_work_request_version_check CHECK ((work_request_version > 0))
-);
-
-
---
--- Name: TABLE siep_evidence_link; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON TABLE ops.siep_evidence_link IS 'Typed links into existing receipt, event, decision, and finding ledgers. Evidence bodies are never copied here.';
-
-
---
--- Name: siep_job_evidence_binding; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.siep_job_evidence_binding (
-    job_id uuid NOT NULL,
-    package_key text NOT NULL,
-    work_request_version integer NOT NULL,
-    manifest_digest text NOT NULL,
-    evidence_kind text NOT NULL,
-    definition_key text NOT NULL,
-    definition_version integer NOT NULL,
-    bound_by_actor_id uuid NOT NULL,
-    idempotency_key uuid NOT NULL,
-    bound_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT siep_job_evidence_binding_check CHECK (((definition_key = 'engineering-slice'::text) AND (definition_version = 1))),
-    CONSTRAINT siep_job_evidence_binding_evidence_kind_check CHECK ((evidence_kind = ANY (ARRAY['source'::text, 'tests'::text, 'migration'::text, 'deploy'::text, 'readback'::text, 'live_readback'::text, 'rollback'::text, 'independent_review'::text, 'zero_unresolved_findings'::text, 'zero_blockers'::text, 'two_clean_audit_cycles'::text, 'material_fix'::text]))),
-    CONSTRAINT siep_job_evidence_binding_manifest_digest_check CHECK ((manifest_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
-    CONSTRAINT siep_job_evidence_binding_work_request_version_check CHECK ((work_request_version > 0))
-);
-
-
---
--- Name: siep_lane_lock; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.siep_lane_lock (
-    lane_key text NOT NULL,
-    package_key text NOT NULL,
-    work_request_version integer NOT NULL,
-    holder_actor_id uuid NOT NULL,
-    executor_tier text NOT NULL,
-    session_ref text NOT NULL,
-    lease_token uuid NOT NULL,
-    acquired_at timestamp with time zone DEFAULT now() NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    idempotency_key uuid NOT NULL,
-    CONSTRAINT siep_lane_lock_check CHECK ((expires_at > acquired_at)),
-    CONSTRAINT siep_lane_lock_executor_tier_check CHECK ((executor_tier = ANY (ARRAY['luna'::text, 'terra'::text, 'sol'::text, 'main'::text]))),
-    CONSTRAINT siep_lane_lock_lane_key_check CHECK ((lane_key = ANY (ARRAY['program-control'::text, 'heavy-build'::text, 'scac-core'::text, 'dell-mpe'::text]))),
-    CONSTRAINT siep_lane_lock_session_ref_check CHECK (((btrim(session_ref) <> ''::text) AND (char_length(session_ref) <= 300))),
-    CONSTRAINT siep_lane_lock_work_request_version_check CHECK ((work_request_version > 0))
-);
-
-
---
--- Name: siep_package_contract; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.siep_package_contract (
-    package_key text NOT NULL,
-    work_request_id uuid NOT NULL,
-    lane_key text NOT NULL,
-    minimum_executor_tier text NOT NULL,
-    test_contract jsonb NOT NULL,
-    delivery_contract jsonb NOT NULL,
-    rollback_contract jsonb NOT NULL,
-    required_evidence_kinds text[] NOT NULL,
-    approval_gate text DEFAULT 'none'::text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT siep_package_contract_approval_gate_check CHECK ((approval_gate = ANY (ARRAY['none'::text, 'joe_approval'::text, 'joe_go_no_go'::text]))),
-    CONSTRAINT siep_package_contract_delivery_contract_check CHECK (((jsonb_typeof(delivery_contract) = 'object'::text) AND (delivery_contract ?& ARRAY['source'::text, 'migration'::text, 'deploy'::text, 'readback'::text, 'rollback'::text]))),
-    CONSTRAINT siep_package_contract_lane_key_check CHECK ((lane_key = ANY (ARRAY['program-control'::text, 'heavy-build'::text, 'scac-core'::text, 'dell-mpe'::text]))),
-    CONSTRAINT siep_package_contract_minimum_executor_tier_check CHECK ((minimum_executor_tier = ANY (ARRAY['luna'::text, 'terra'::text, 'sol'::text, 'main'::text, 'human_authority'::text]))),
-    CONSTRAINT siep_package_contract_package_key_check CHECK ((package_key ~ '^(B0|00|0[1-5]|06A|06B|1[0-9]|2[0-3]|24A|24B|25|26|3[0-7]|4[0-4])$'::text)),
-    CONSTRAINT siep_package_contract_required_evidence_kinds_check CHECK ((cardinality(required_evidence_kinds) > 0)),
-    CONSTRAINT siep_package_contract_rollback_contract_check CHECK ((jsonb_typeof(rollback_contract) = 'object'::text)),
-    CONSTRAINT siep_package_contract_test_contract_check CHECK ((jsonb_typeof(test_contract) = 'object'::text))
-);
-
-
---
--- Name: TABLE siep_package_contract; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON TABLE ops.siep_package_contract IS 'Immutable SIEP package contract linked one-to-one to the sole lifecycle row in ops.work_request; it is not a task tracker.';
-
-
---
--- Name: siep_program_dependency; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.siep_program_dependency (
-    package_key text NOT NULL,
-    depends_on_package_key text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT siep_program_dependency_check CHECK ((package_key <> depends_on_package_key))
-);
-
-
---
 -- Name: sourced_work_request_outcome_feedback; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -17417,7 +16187,7 @@ CREATE TABLE ops.work_request (
     CONSTRAINT work_request_program_ordinal_positive CHECK (((program_ordinal IS NULL) OR (program_ordinal > 0))),
     CONSTRAINT work_request_shape_disposition_complete CHECK ((((shape_disposition IS NULL) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NULL) AND (shape_decided_by_actor_id IS NULL) AND (shape_decided_at IS NULL)) OR ((shape_disposition = 'required'::text) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)) OR ((shape_disposition = 'not_required'::text) AND (shape_fixed_surface_ref IS NOT NULL) AND (btrim(shape_fixed_surface_ref) <> ''::text) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)))),
     CONSTRAINT work_request_shape_disposition_valid CHECK (((shape_disposition IS NULL) OR (shape_disposition = ANY (ARRAY['required'::text, 'not_required'::text])))),
-    CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL)) OR ((capture_idempotency_key IS NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key = ANY (ARRAY['carr-ai-engineering-suite-v1'::text, 'carr-system-integrity-elimination-v1'::text])) AND (program_ordinal IS NOT NULL) AND (program_ordinal > 0) AND (NOT (requester_actor IS DISTINCT FROM 'joe'::text)) AND (NOT (owner_actor IS DISTINCT FROM 'joe'::text))) OR ((capture_idempotency_key IS NOT NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref IS NOT NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)))))),
+    CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL)) OR ((capture_idempotency_key IS NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (NOT (program_key IS DISTINCT FROM 'carr-ai-engineering-suite-v1'::text)) AND (program_ordinal IS NOT NULL) AND (program_ordinal > 0) AND (NOT (requester_actor IS DISTINCT FROM 'joe'::text)) AND (NOT (owner_actor IS DISTINCT FROM 'joe'::text))) OR ((capture_idempotency_key IS NOT NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref IS NOT NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)))))),
     CONSTRAINT work_request_state_check CHECK ((state = ANY (ARRAY['captured'::text, 'triaged'::text, 'ready'::text, 'claimed'::text, 'in_progress'::text, 'verification'::text, 'awaiting_release'::text, 'released'::text, 'confirmed_closed'::text, 'needs_joe'::text, 'blocked'::text, 'declined'::text, 'superseded'::text, 'failed'::text])))
 );
 
@@ -17454,7 +16224,7 @@ COMMENT ON COLUMN ops.work_request.shape_disposition IS 'Mandatory before a requ
 -- Name: COLUMN work_request.organization_tenant_id; Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON COLUMN ops.work_request.organization_tenant_id IS 'Server-derived CARR tenant for sourced Program 6 plus the exact fixed AI and SIEP programs. Other historical rows remain null.';
+COMMENT ON COLUMN ops.work_request.organization_tenant_id IS 'Server-derived CARR organization tenant for sourced Program 6 capture and the exact fixed carr-ai-engineering-suite-v1 legacy program. Other historical rows remain null.';
 
 
 --
@@ -17469,104 +16239,40 @@ COMMENT ON COLUMN ops.work_request.doctrine_revision_id IS 'Exact current doctri
 --
 
 CREATE VIEW ops.v_capability_program_next AS
- SELECT w.id,
-    w.ref,
-    w.state,
-    w.title,
-    w.desired_outcome,
-    w.acceptance_criteria,
-    w.origin_ref,
-    w.requester_actor,
-    w.owner_actor,
-    w.executor_actor,
-    w.blocker_code,
-    w.blocker_detail,
-    w.verification_accepted_at,
-    w.verification_evidence_ref,
-    w.exit_reason,
-    w.superseded_by,
-    w.captured_at,
-    w.claimed_at,
-    w.started_at,
-    w.closed_at,
-    w.updated_at,
-    w.correlation_id,
-    w.program_key,
-    w.program_ordinal,
-    w.disposition,
-    w.existing_status,
-    w.project_context,
-    w.completion_kind,
-    w.completion_evidence,
-    w.version,
-    w.shape_disposition,
-    w.shape_fixed_surface_ref,
-    w.shape_rationale,
-    w.shape_decided_by_actor_id,
-    w.shape_decided_at,
-    w.organization_tenant_id,
-    w.doctrine_section_id,
-    w.doctrine_revision_id,
-    w.capture_idempotency_key,
-    w.sourced_capture_sequence,
-    w.triage_classification,
-    w.triaged_by_actor_id,
-    w.triaged_at
+ SELECT id,
+    ref,
+    state,
+    title,
+    desired_outcome,
+    acceptance_criteria,
+    origin_ref,
+    requester_actor,
+    owner_actor,
+    executor_actor,
+    blocker_code,
+    blocker_detail,
+    verification_accepted_at,
+    verification_evidence_ref,
+    exit_reason,
+    superseded_by,
+    captured_at,
+    claimed_at,
+    started_at,
+    closed_at,
+    updated_at,
+    correlation_id,
+    program_key,
+    program_ordinal,
+    disposition,
+    existing_status,
+    project_context,
+    completion_kind,
+    completion_evidence,
+    version
    FROM ops.work_request w
-  WHERE ((w.program_key IS NOT NULL) AND (w.program_key <> 'carr-system-integrity-elimination-v1'::text) AND (w.state <> 'confirmed_closed'::text) AND (NOT (EXISTS ( SELECT 1
+  WHERE ((program_key IS NOT NULL) AND (state <> 'confirmed_closed'::text) AND (NOT (EXISTS ( SELECT 1
            FROM ops.work_request p
-          WHERE ((p.program_key = w.program_key) AND (p.program_ordinal < w.program_ordinal) AND (p.state <> 'confirmed_closed'::text))))))
-UNION ALL
- SELECT w.id,
-    w.ref,
-    w.state,
-    w.title,
-    w.desired_outcome,
-    w.acceptance_criteria,
-    w.origin_ref,
-    w.requester_actor,
-    w.owner_actor,
-    w.executor_actor,
-    w.blocker_code,
-    w.blocker_detail,
-    w.verification_accepted_at,
-    w.verification_evidence_ref,
-    w.exit_reason,
-    w.superseded_by,
-    w.captured_at,
-    w.claimed_at,
-    w.started_at,
-    w.closed_at,
-    w.updated_at,
-    w.correlation_id,
-    w.program_key,
-    w.program_ordinal,
-    w.disposition,
-    w.existing_status,
-    w.project_context,
-    w.completion_kind,
-    w.completion_evidence,
-    w.version,
-    w.shape_disposition,
-    w.shape_fixed_surface_ref,
-    w.shape_rationale,
-    w.shape_decided_by_actor_id,
-    w.shape_decided_at,
-    w.organization_tenant_id,
-    w.doctrine_section_id,
-    w.doctrine_revision_id,
-    w.capture_idempotency_key,
-    w.sourced_capture_sequence,
-    w.triage_classification,
-    w.triaged_by_actor_id,
-    w.triaged_at
-   FROM (ops.work_request w
-     JOIN ops.siep_package_contract c ON ((c.work_request_id = w.id)))
-  WHERE ((w.state <> 'confirmed_closed'::text) AND (NOT (EXISTS ( SELECT 1
-           FROM ((ops.siep_program_dependency d
-             JOIN ops.siep_package_contract dc ON ((dc.package_key = d.depends_on_package_key)))
-             JOIN ops.work_request dw ON ((dw.id = dc.work_request_id)))
-          WHERE ((d.package_key = c.package_key) AND (dw.state <> 'confirmed_closed'::text))))));
+          WHERE ((p.program_key = w.program_key) AND (p.program_ordinal < w.program_ordinal) AND (p.state <> 'confirmed_closed'::text))))));
 
 
 --
@@ -28458,126 +27164,6 @@ ALTER TABLE ONLY ops.settings_change
 
 
 --
--- Name: siep_command_receipt siep_command_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_command_receipt
-    ADD CONSTRAINT siep_command_receipt_pkey PRIMARY KEY (idempotency_key);
-
-
---
--- Name: siep_component_alias siep_component_alias_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_component_alias
-    ADD CONSTRAINT siep_component_alias_pkey PRIMARY KEY (alias_key);
-
-
---
--- Name: siep_evidence_link siep_evidence_link_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_evidence_link
-    ADD CONSTRAINT siep_evidence_link_idempotency_key_key UNIQUE (idempotency_key);
-
-
---
--- Name: siep_evidence_link siep_evidence_link_package_key_evidence_kind_ledger_kind_le_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_evidence_link
-    ADD CONSTRAINT siep_evidence_link_package_key_evidence_kind_ledger_kind_le_key UNIQUE (package_key, evidence_kind, ledger_kind, ledger_id);
-
-
---
--- Name: siep_evidence_link siep_evidence_link_package_key_ledger_kind_ledger_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_evidence_link
-    ADD CONSTRAINT siep_evidence_link_package_key_ledger_kind_ledger_id_key UNIQUE (package_key, ledger_kind, ledger_id);
-
-
---
--- Name: siep_evidence_link siep_evidence_link_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_evidence_link
-    ADD CONSTRAINT siep_evidence_link_pkey PRIMARY KEY (id);
-
-
---
--- Name: siep_job_evidence_binding siep_job_evidence_binding_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_job_evidence_binding
-    ADD CONSTRAINT siep_job_evidence_binding_idempotency_key_key UNIQUE (idempotency_key);
-
-
---
--- Name: siep_job_evidence_binding siep_job_evidence_binding_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_job_evidence_binding
-    ADD CONSTRAINT siep_job_evidence_binding_pkey PRIMARY KEY (job_id);
-
-
---
--- Name: siep_lane_lock siep_lane_lock_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_lane_lock
-    ADD CONSTRAINT siep_lane_lock_idempotency_key_key UNIQUE (idempotency_key);
-
-
---
--- Name: siep_lane_lock siep_lane_lock_lease_token_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_lane_lock
-    ADD CONSTRAINT siep_lane_lock_lease_token_key UNIQUE (lease_token);
-
-
---
--- Name: siep_lane_lock siep_lane_lock_package_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_lane_lock
-    ADD CONSTRAINT siep_lane_lock_package_key_key UNIQUE (package_key);
-
-
---
--- Name: siep_lane_lock siep_lane_lock_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_lane_lock
-    ADD CONSTRAINT siep_lane_lock_pkey PRIMARY KEY (lane_key);
-
-
---
--- Name: siep_package_contract siep_package_contract_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_package_contract
-    ADD CONSTRAINT siep_package_contract_pkey PRIMARY KEY (package_key);
-
-
---
--- Name: siep_package_contract siep_package_contract_work_request_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_package_contract
-    ADD CONSTRAINT siep_package_contract_work_request_id_key UNIQUE (work_request_id);
-
-
---
--- Name: siep_program_dependency siep_program_dependency_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_program_dependency
-    ADD CONSTRAINT siep_program_dependency_pkey PRIMARY KEY (package_key, depends_on_package_key);
-
-
---
 -- Name: sourced_work_request_outcome_feedback_acceptance_receipt sourced_work_request_outcome__work_request_id_feedback_has_key1; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -32466,13 +31052,6 @@ CREATE TRIGGER engineering_reviewer_fact_append_only BEFORE DELETE OR UPDATE ON 
 
 
 --
--- Name: capability_agent_session engineering_session_terminalization_guard; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER engineering_session_terminalization_guard BEFORE UPDATE OF state ON ops.capability_agent_session FOR EACH ROW EXECUTE FUNCTION ops.guard_engineering_session_terminalization();
-
-
---
 -- Name: engineering_slice_plan engineering_slice_plan_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -32904,83 +31483,6 @@ CREATE TRIGGER rule_load_layer_packs_exist BEFORE INSERT OR UPDATE ON ops.rule_l
 --
 
 CREATE TRIGGER rule_retirement_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_retirement_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
-
-
---
--- Name: siep_command_receipt siep_command_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_command_receipt_append_only BEFORE DELETE OR UPDATE ON ops.siep_command_receipt FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
-
-
---
--- Name: siep_component_alias siep_component_alias_append_only; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_component_alias_append_only BEFORE DELETE OR UPDATE ON ops.siep_component_alias FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
-
-
---
--- Name: siep_component_alias siep_component_alias_sealed_before_insert; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_component_alias_sealed_before_insert BEFORE INSERT ON ops.siep_component_alias FOR EACH ROW EXECUTE FUNCTION ops.siep_manifest_insert_guard();
-
-
---
--- Name: siep_evidence_link siep_evidence_link_append_only; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_evidence_link_append_only BEFORE DELETE OR UPDATE ON ops.siep_evidence_link FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
-
-
---
--- Name: siep_job_evidence_binding siep_job_evidence_binding_append_only; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_job_evidence_binding_append_only BEFORE DELETE OR UPDATE ON ops.siep_job_evidence_binding FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
-
-
---
--- Name: siep_package_contract siep_package_contract_append_only; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_package_contract_append_only BEFORE DELETE OR UPDATE ON ops.siep_package_contract FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
-
-
---
--- Name: siep_package_contract siep_package_contract_sealed_before_insert; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_package_contract_sealed_before_insert BEFORE INSERT ON ops.siep_package_contract FOR EACH ROW EXECUTE FUNCTION ops.siep_manifest_insert_guard();
-
-
---
--- Name: siep_program_dependency siep_program_dependency_append_only; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_program_dependency_append_only BEFORE DELETE OR UPDATE ON ops.siep_program_dependency FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
-
-
---
--- Name: siep_program_dependency siep_program_dependency_sealed_before_insert; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_program_dependency_sealed_before_insert BEFORE INSERT ON ops.siep_program_dependency FOR EACH ROW EXECUTE FUNCTION ops.siep_manifest_insert_guard();
-
-
---
--- Name: work_request siep_program_identity_guard_before_update; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_program_identity_guard_before_update BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.siep_program_identity_guard();
-
-
---
--- Name: work_request siep_program_transition_guard_before_update; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER siep_program_transition_guard_before_update BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.siep_program_transition_guard();
 
 
 --
@@ -33562,13 +32064,6 @@ CREATE TRIGGER rule_touch BEFORE UPDATE ON public.rule FOR EACH ROW EXECUTE FUNC
 --
 
 CREATE TRIGGER session_work_touch BEFORE UPDATE ON public.session_work FOR EACH ROW EXECUTE FUNCTION public.trg_touch_row();
-
-
---
--- Name: event siep_joe_decision_event_guard_before_write; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER siep_joe_decision_event_guard_before_write BEFORE INSERT OR DELETE OR UPDATE ON public.event FOR EACH ROW EXECUTE FUNCTION ops.siep_joe_decision_event_guard();
 
 
 --
@@ -35054,118 +33549,6 @@ ALTER TABLE ONLY ops.service_dependency
 
 ALTER TABLE ONLY ops.service_environment
     ADD CONSTRAINT service_environment_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE CASCADE;
-
-
---
--- Name: siep_command_receipt siep_command_receipt_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_command_receipt
-    ADD CONSTRAINT siep_command_receipt_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
-
-
---
--- Name: siep_command_receipt siep_command_receipt_recorded_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_command_receipt
-    ADD CONSTRAINT siep_command_receipt_recorded_actor_id_fkey FOREIGN KEY (recorded_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
-
-
---
--- Name: siep_component_alias siep_component_alias_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_component_alias
-    ADD CONSTRAINT siep_component_alias_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
-
-
---
--- Name: siep_evidence_link siep_evidence_link_linked_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_evidence_link
-    ADD CONSTRAINT siep_evidence_link_linked_actor_id_fkey FOREIGN KEY (linked_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
-
-
---
--- Name: siep_evidence_link siep_evidence_link_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_evidence_link
-    ADD CONSTRAINT siep_evidence_link_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
-
-
---
--- Name: siep_job_evidence_binding siep_job_evidence_binding_bound_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_job_evidence_binding
-    ADD CONSTRAINT siep_job_evidence_binding_bound_by_actor_id_fkey FOREIGN KEY (bound_by_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
-
-
---
--- Name: siep_job_evidence_binding siep_job_evidence_binding_definition_key_definition_versio_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_job_evidence_binding
-    ADD CONSTRAINT siep_job_evidence_binding_definition_key_definition_versio_fkey FOREIGN KEY (definition_key, definition_version) REFERENCES ops.job_definition(key, version);
-
-
---
--- Name: siep_job_evidence_binding siep_job_evidence_binding_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_job_evidence_binding
-    ADD CONSTRAINT siep_job_evidence_binding_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
-
-
---
--- Name: siep_job_evidence_binding siep_job_evidence_binding_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_job_evidence_binding
-    ADD CONSTRAINT siep_job_evidence_binding_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
-
-
---
--- Name: siep_lane_lock siep_lane_lock_holder_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_lane_lock
-    ADD CONSTRAINT siep_lane_lock_holder_actor_id_fkey FOREIGN KEY (holder_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
-
-
---
--- Name: siep_lane_lock siep_lane_lock_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_lane_lock
-    ADD CONSTRAINT siep_lane_lock_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
-
-
---
--- Name: siep_package_contract siep_package_contract_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_package_contract
-    ADD CONSTRAINT siep_package_contract_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id) ON DELETE RESTRICT;
-
-
---
--- Name: siep_program_dependency siep_program_dependency_depends_on_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_program_dependency
-    ADD CONSTRAINT siep_program_dependency_depends_on_package_key_fkey FOREIGN KEY (depends_on_package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
-
-
---
--- Name: siep_program_dependency siep_program_dependency_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.siep_program_dependency
-    ADD CONSTRAINT siep_program_dependency_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
 
 
 --
@@ -37937,33 +36320,6 @@ ALTER TABLE ONLY public.vendor
 
 
 --
--- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -
---
-
-ALTER TABLE ops.work_request ENABLE ROW LEVEL SECURITY;
-
---
--- Name: work_request work_request_read_all; Type: POLICY; Schema: ops; Owner: -
---
-
-CREATE POLICY work_request_read_all ON ops.work_request FOR SELECT USING (true);
-
-
---
--- Name: work_request work_request_writer_non_siep_insert; Type: POLICY; Schema: ops; Owner: -
---
-
-CREATE POLICY work_request_writer_non_siep_insert ON ops.work_request FOR INSERT WITH CHECK ((program_key IS DISTINCT FROM 'carr-system-integrity-elimination-v1'::text));
-
-
---
--- Name: work_request work_request_writer_non_siep_update; Type: POLICY; Schema: ops; Owner: -
---
-
-CREATE POLICY work_request_writer_non_siep_update ON ops.work_request FOR UPDATE USING ((program_key IS DISTINCT FROM 'carr-system-integrity-elimination-v1'::text)) WITH CHECK ((program_key IS DISTINCT FROM 'carr-system-integrity-elimination-v1'::text));
-
-
---
 -- PostgreSQL database dump complete
 --
 
@@ -38030,19 +36386,15 @@ revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_ma
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
 revoke all on function ops.engineering_claim_slice(p_worker text, p_limit integer, p_lease_seconds integer) from public;
-revoke all on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid, p_lease_token uuid) from public;
+revoke all on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid) from public;
 revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text) from public;
 revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) from public;
-revoke all on function ops.engineering_envelope_is_executable(p_envelope_id uuid, p_job_id uuid, p_minimum_remaining_seconds integer) from public;
-revoke all on function ops.engineering_finalize_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) from public;
 revoke all on function ops.engineering_record_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) from public;
 revoke all on function ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text) from public;
 revoke all on function ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) from public;
 revoke all on function ops.fence_definition_jobs(p_definition_key text, p_definition_version integer) from public;
 revoke all on function ops.get_cognition_cache(p_cache_key text) from public;
 revoke all on function ops.get_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text) from public;
-revoke all on function ops.guard_engineering_envelope_supersession() from public;
-revoke all on function ops.guard_engineering_session_terminalization() from public;
 revoke all on function ops.guidance_import_canonical_json(p_value jsonb) from public;
 revoke all on function ops.guidance_import_manifest_digest(p_manifest_text text) from public;
 revoke all on function ops.guidance_import_split_group_id(p_key text) from public;
@@ -38122,26 +36474,6 @@ revoke all on function ops.select_provider_routes(p_requested text[]) from publi
 revoke all on function ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) from public;
 revoke all on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
-revoke all on function ops.siep_acquire_lane_lock(p_component text, p_session_ref text, p_lease_seconds integer, p_idempotency_key uuid) from public;
-revoke all on function ops.siep_append_only_guard() from public;
-revoke all on function ops.siep_attach_evidence(p_component text, p_evidence_kind text, p_ledger_id uuid, p_ledger_kind text, p_evidence_digest text, p_note text, p_idempotency_key uuid) from public;
-revoke all on function ops.siep_bind_evidence_job(p_component text, p_base_version integer, p_evidence_kind text, p_job_id uuid, p_idempotency_key uuid) from public;
-revoke all on function ops.siep_claim_package(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) from public;
-revoke all on function ops.siep_current_approval(p_package_key text, p_work_request_version integer, p_gate text) from public;
-revoke all on function ops.siep_current_evidence_digest(p_ledger_kind text, p_ledger_id uuid) from public;
-revoke all on function ops.siep_evidence_actor(p_ledger_kind text, p_ledger_id uuid) from public;
-revoke all on function ops.siep_joe_decision_event_guard() from public;
-revoke all on function ops.siep_manifest_digest() from public;
-revoke all on function ops.siep_manifest_insert_guard() from public;
-revoke all on function ops.siep_program_identity_guard() from public;
-revoke all on function ops.siep_program_transition_guard() from public;
-revoke all on function ops.siep_read_program() from public;
-revoke all on function ops.siep_record_joe_decision(p_component text, p_gate text, p_decision text, p_idempotency_key uuid) from public;
-revoke all on function ops.siep_release_lane_lock(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) from public;
-revoke all on function ops.siep_request_digest(p_request jsonb) from public;
-revoke all on function ops.siep_resolve_package(p_component text) from public;
-revoke all on function ops.siep_terminal_status() from public;
-revoke all on function ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_preimage(p_work_request_id uuid, p_plan_id uuid, p_plan_acceptance_receipt_id uuid, p_criterion_results jsonb, p_evidence_refs jsonb, p_outcome text, p_blocker_code text, p_result_summary text, p_observed_minutes integer, p_interaction_surface text, p_heavy_session_used boolean, p_manual_context_transfers integer) from public;
@@ -38875,8 +37207,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
@@ -38910,12 +37242,12 @@ grant execute on function ops.engineering_admission_source(p_work_request text) 
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_reader;
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_writer;
 grant execute on function ops.engineering_claim_slice(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
-grant execute on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
+grant execute on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid) to carr_jobs;
 grant execute on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) to carr_writer;
-grant execute on function ops.engineering_finalize_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) to carr_jobs;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_jobs;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_reader;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_writer;
+grant execute on function ops.engineering_record_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) to carr_jobs;
 grant execute on function ops.engineering_register_slice_plan(p_work_request text, p_plan jsonb, p_plan_digest text, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text) to carr_jobs;
 grant execute on function ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) to carr_jobs;
@@ -39011,26 +37343,6 @@ grant execute on function ops.select_provider_routes(p_requested text[]) to carr
 grant execute on function ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) to carr_authority;
 grant execute on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
-grant execute on function ops.siep_acquire_lane_lock(p_component text, p_session_ref text, p_lease_seconds integer, p_idempotency_key uuid) to carr_writer;
-grant execute on function ops.siep_attach_evidence(p_component text, p_evidence_kind text, p_ledger_id uuid, p_ledger_kind text, p_evidence_digest text, p_note text, p_idempotency_key uuid) to carr_authority;
-grant execute on function ops.siep_attach_evidence(p_component text, p_evidence_kind text, p_ledger_id uuid, p_ledger_kind text, p_evidence_digest text, p_note text, p_idempotency_key uuid) to carr_writer;
-grant execute on function ops.siep_bind_evidence_job(p_component text, p_base_version integer, p_evidence_kind text, p_job_id uuid, p_idempotency_key uuid) to carr_authority;
-grant execute on function ops.siep_claim_package(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) to carr_writer;
-grant execute on function ops.siep_manifest_digest() to carr_authority;
-grant execute on function ops.siep_manifest_digest() to carr_jobs;
-grant execute on function ops.siep_manifest_digest() to carr_reader;
-grant execute on function ops.siep_manifest_digest() to carr_writer;
-grant execute on function ops.siep_read_program() to carr_authority;
-grant execute on function ops.siep_read_program() to carr_jobs;
-grant execute on function ops.siep_read_program() to carr_reader;
-grant execute on function ops.siep_read_program() to carr_writer;
-grant execute on function ops.siep_record_joe_decision(p_component text, p_gate text, p_decision text, p_idempotency_key uuid) to carr_authority;
-grant execute on function ops.siep_release_lane_lock(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) to carr_writer;
-grant execute on function ops.siep_terminal_status() to carr_authority;
-grant execute on function ops.siep_terminal_status() to carr_jobs;
-grant execute on function ops.siep_terminal_status() to carr_reader;
-grant execute on function ops.siep_terminal_status() to carr_writer;
-grant execute on function ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) to carr_writer;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
@@ -39352,9 +37664,6 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0321_rule_delivery_policy_seed_repair.sql	98494c4715a09ed735524a97f8bd3a1d0323df4adda690f5f06abcc6e971b482	2026-08-26 02:22:41.137134+00
 0322_clean_staging_replacement_contract.sql	8be25e17aed9fbc665a2ac226f95b26cb66b9abbe32865c021a83fed7ef65659	2026-08-26 03:43:35.495345+00
 0323_engineering_claim_output_qualification.sql	85c828bc82197ec14fa82871cc9bf7c17282c1807e3b17b6c9fc61080e3d5ff6	2026-08-26 03:43:35.712334+00
-0324_siep_program_authority.sql	e86613bcde40a5fa26d4ce92e09829f6e2b9b5f911dbf6d086d69a28bfe5c523	2026-08-26 22:03:37.415578+00
-0325_engineering_claim_envelope_eligibility.sql	bfaf7f7f89643a432754ba60a3b7ec48943ac6c6554276b83cd90c02e9282d4b	2026-08-26 22:03:37.643079+00
-0331_a_batch_close_must_not_outrank_a_live_ruling.sql	aed173c81a2cbba988c94ebe4c403558ad633f881f2bb527641517c732d02fb1	2026-08-26 23:45:31.312548+00
 \.
 
 
