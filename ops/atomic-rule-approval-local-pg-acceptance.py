@@ -434,8 +434,245 @@ def main() -> int:
                 retirement_binding = cur.fetchone()
                 if retirement_binding is None or retirement_binding[0] is not True:
                     refuse("retirement receipt is not exactly bound to the retired tombstone")
+
+                # A receipted retirement's row must NEVER read as legacy --
+                # migration 0351 must not have relaxed anything for a rule
+                # that DOES carry an exact approval receipt.
+                cur.execute(
+                    """select legacy_admission is null and approval_receipt_id is not null
+                         from ops.rule_retirement_receipt where rule_id=%s""",
+                    (rule_id,),
+                )
+                receipted_retirement_not_legacy = cur.fetchone()
+                if receipted_retirement_not_legacy is None or receipted_retirement_not_legacy[0] is not True:
+                    refuse("a receipted retirement was recorded as legacy, or lost its approval_receipt_id")
+
+                # ---- legacy rule lifecycle (WR-000019 follow-up, migration 0351) ----
+                # 217 of 219 active rules today have no ops.rule_approval_receipt
+                # row: they were taught and activated by hand before the receipt
+                # system (migration 0228 and friends) existed. The trigger that
+                # enforces admission on activation (ops.require_rule_admission)
+                # did not exist when they were activated either, so the ONLY
+                # honest way to build a rollback-only fixture that reproduces
+                # that historical shape is the same trigger-disable technique
+                # already used above for "altered retirement replay" -- this is
+                # not bypassing a live guard, it is reconstructing a row shape
+                # that predates the guard's own existence.
+                cur.execute("reset session authorization")
+
+                legacy_retire_id = uuid.uuid4()
+                legacy_retire_key = f"local-legacy-retire-{uuid.uuid4()}"
+                cur.execute(
+                    """insert into rule(id,statement,human_quote,taught_by,status)
+                       values (%s,'local legacy active fixture, pre-receipt era',
+                               'Joe taught this before receipts existed',%s,'proposed')""",
+                    (legacy_retire_id, actor[0]),
+                )
+                cur.execute("alter table rule disable trigger rule_activation_requires_admission")
+                try:
+                    cur.execute(
+                        """update rule set status='active', activated_by=%s,
+                               activated_at='2020-01-01T00:00:00+00'
+                           where id=%s""",
+                        (actor[0], legacy_retire_id),
+                    )
+                finally:
+                    cur.execute("alter table rule enable trigger rule_activation_requires_admission")
+                cur.execute(
+                    "select count(*) from ops.rule_approval_receipt where rule_id=%s",
+                    (legacy_retire_id,),
+                )
+                if cur.fetchone()[0] != 0:
+                    refuse("legacy retirement fixture unexpectedly has an approval receipt")
+
+                # Non-authority is refused on the legacy path exactly as on the
+                # receipted path -- the Joe-authority check runs before any
+                # legacy-vs-receipted branching.
+                cur.execute("savepoint legacy_retire_requires_joe")
+                cur.execute("set session authorization carr_authority_dell")
+                try:
+                    cur.execute(
+                        "select ops.retire_rule(%s,%s,null,%s)",
+                        (legacy_retire_id, "Dell tries to retire a legacy rule",
+                         f"local-legacy-retire-dell-{uuid.uuid4()}"),
+                    )
+                    refuse("retire_rule succeeded for Dell on a legacy rule")
+                except psycopg.Error as exc:
+                    cur.execute("rollback to savepoint legacy_retire_requires_joe")
+                    if "joe authority" not in str(exc).lower():
+                        refuse(f"Dell legacy-retirement refusal was for the wrong reason: {exc}")
+                finally:
+                    cur.execute("reset session authorization")
+                cur.execute("release savepoint legacy_retire_requires_joe")
+
+                cur.execute("set session authorization carr_authority_joe")
+                cur.execute(
+                    "select ops.retire_rule(%s,%s,null,%s)",
+                    (legacy_retire_id, "legacy retirement acceptance (0351)", legacy_retire_key),
+                )
+                legacy_retired = cur.fetchone()
+                if legacy_retired is None or legacy_retired[0].get("ok") is not True \
+                        or legacy_retired[0].get("replayed") is not False \
+                        or legacy_retired[0].get("status") != "retired":
+                    refuse("legacy retire_rule did not report a fresh success")
+                legacy_note = legacy_retired[0].get("legacy_admission")
+                if not legacy_note or "legacy_admission" not in legacy_note:
+                    refuse("legacy retirement did not report a legacy_admission marker")
+
+                cur.execute(
+                    """select legacy_admission is not null and approval_receipt_id is null
+                         from ops.rule_retirement_receipt where rule_id=%s""",
+                    (legacy_retire_id,),
+                )
+                legacy_row = cur.fetchone()
+                if legacy_row is None or legacy_row[0] is not True:
+                    refuse("legacy retirement receipt did not record legacy_admission with a null approval_receipt_id")
+
+                # Exact replay of the legacy retirement still works.
+                cur.execute(
+                    "select ops.retire_rule(%s,%s,null,%s)",
+                    (legacy_retire_id, "legacy retirement acceptance (0351)", legacy_retire_key),
+                )
+                legacy_replay = cur.fetchone()
+                if legacy_replay is None or legacy_replay[0].get("replayed") is not True \
+                        or legacy_replay[0].get("legacy_admission") != legacy_note:
+                    refuse("legacy retirement exact replay failed")
+
+                # A receiptless ACTIVE rule that does NOT predate the receipt
+                # cutover is a real defect, not history -- it must keep being
+                # refused exactly as before 0351. Activated "now", well after
+                # the earliest receipt already written above.
+                cur.execute("reset session authorization")
+                broken_rule_id = uuid.uuid4()
+                cur.execute(
+                    """insert into rule(id,statement,human_quote,taught_by,status)
+                       values (%s,'local receiptless-but-not-legacy fixture',
+                               'this one should still be refused',%s,'proposed')""",
+                    (broken_rule_id, actor[0]),
+                )
+                cur.execute("alter table rule disable trigger rule_activation_requires_admission")
+                try:
+                    cur.execute(
+                        "update rule set status='active', activated_by=%s, activated_at=now() where id=%s",
+                        (actor[0], broken_rule_id),
+                    )
+                finally:
+                    cur.execute("alter table rule enable trigger rule_activation_requires_admission")
+                cur.execute("set session authorization carr_authority_joe")
+                cur.execute("savepoint non_legacy_receiptless_still_refused")
+                try:
+                    cur.execute(
+                        "select ops.retire_rule(%s,%s,null,%s)",
+                        (broken_rule_id, "should still be refused",
+                         f"local-broken-retire-{uuid.uuid4()}"),
+                    )
+                    refuse("retire_rule accepted a receiptless active rule that postdates the cutover")
+                except psycopg.Error as exc:
+                    cur.execute("rollback to savepoint non_legacy_receiptless_still_refused")
+                    if "lacks its exact approval receipt" not in str(exc).lower():
+                        refuse(f"non-legacy receiptless refusal was for the wrong reason: {exc}")
+                cur.execute("release savepoint non_legacy_receiptless_still_refused")
+                cur.execute("reset session authorization")
+
+                # ---- legacy amendment ----
+                legacy_amend_id = uuid.uuid4()
+                legacy_amend_key = f"local-legacy-amend-{uuid.uuid4()}"
+                legacy_original_statement = "local legacy active amendment fixture, before wording fix"
+                cur.execute(
+                    """insert into rule(id,statement,human_quote,taught_by,status)
+                       values (%s,%s,'Joe taught this before receipts existed',%s,'proposed')""",
+                    (legacy_amend_id, legacy_original_statement, actor[0]),
+                )
+                cur.execute("alter table rule disable trigger rule_activation_requires_admission")
+                try:
+                    cur.execute(
+                        """update rule set status='active', activated_by=%s,
+                               activated_at='2020-01-01T00:00:00+00'
+                           where id=%s""",
+                        (actor[0], legacy_amend_id),
+                    )
+                finally:
+                    cur.execute("alter table rule enable trigger rule_activation_requires_admission")
+
+                cur.execute(
+                    "select count(*) from ops.applicable_rules(null,null,null) where rule_id=%s",
+                    (legacy_amend_id,),
+                )
+                if cur.fetchone()[0] != 0:
+                    refuse("a legacy rule with no approval receipt was somehow returned by applicable_rules "
+                           "before any amendment -- the receipt-bound compiler must never see it")
+
+                legacy_amended_statement = "local legacy active amendment fixture, AFTER wording fix"
+                cur.execute("set session authorization carr_authority_joe")
+                cur.execute(
+                    "select ops.amend_rule_statement(%s,%s,%s,%s)",
+                    (legacy_amend_id, legacy_amended_statement, legacy_amend_key,
+                     "fixing a legacy rule's wording (0351)"),
+                )
+                legacy_amended = cur.fetchone()
+                if legacy_amended is None or legacy_amended[0].get("ok") is not True \
+                        or legacy_amended[0].get("replayed") is not False:
+                    refuse("legacy amend_rule_statement did not report a fresh success")
+                legacy_amend_note = legacy_amended[0].get("legacy_admission")
+                if not legacy_amend_note or "legacy_admission" not in legacy_amend_note:
+                    refuse("legacy amendment did not report a legacy_admission marker")
+
+                cur.execute(
+                    """select r.statement=%s and legacy_admission is not null
+                         from rule r join ops.rule_amendment_receipt ar on ar.rule_id=r.id
+                        where r.id=%s and ar.idempotency_key=%s""",
+                    (legacy_amended_statement, legacy_amend_id, legacy_amend_key),
+                )
+                legacy_amend_row = cur.fetchone()
+                if legacy_amend_row is None or legacy_amend_row[0] is not True:
+                    refuse("legacy amendment receipt did not record the new statement with legacy_admission set")
+
+                # Still excluded from applicable_rules() after amendment too --
+                # the legacy path never joins into the receipt-bound compiler,
+                # so amending it changes nothing about that exclusion.
+                cur.execute(
+                    "select count(*) from ops.applicable_rules(null,null,null) where rule_id=%s",
+                    (legacy_amend_id,),
+                )
+                if cur.fetchone()[0] != 0:
+                    refuse("an amended legacy rule appeared in applicable_rules -- it must still be delivered "
+                           "only through ops.rule_delivery_plan, never the receipt-bound compiler")
+
+                # Non-authority is refused on the legacy amendment path too.
+                cur.execute("savepoint legacy_amend_requires_joe")
+                cur.execute("reset session authorization")
+                cur.execute("set session authorization carr_authority_dell")
+                try:
+                    cur.execute(
+                        "select ops.amend_rule_statement(%s,%s,%s,%s)",
+                        (legacy_amend_id, "a Dell-authored legacy rewrite",
+                         f"local-legacy-amend-dell-{uuid.uuid4()}", "Dell tries to amend a legacy rule"),
+                    )
+                    refuse("amend_rule_statement succeeded for Dell on a legacy rule")
+                except psycopg.Error as exc:
+                    cur.execute("rollback to savepoint legacy_amend_requires_joe")
+                    if "joe authority" not in str(exc).lower():
+                        refuse(f"Dell legacy-amendment refusal was for the wrong reason: {exc}")
+                finally:
+                    cur.execute("reset session authorization")
+                cur.execute("release savepoint legacy_amend_requires_joe")
+
+                # Exact replay of the legacy amendment still works.
+                cur.execute("set session authorization carr_authority_joe")
+                cur.execute(
+                    "select ops.amend_rule_statement(%s,%s,%s,%s)",
+                    (legacy_amend_id, legacy_amended_statement, legacy_amend_key,
+                     "fixing a legacy rule's wording (0351)"),
+                )
+                legacy_amend_replay = cur.fetchone()
+                if legacy_amend_replay is None or legacy_amend_replay[0].get("replayed") is not True \
+                        or legacy_amend_replay[0].get("legacy_admission") != legacy_amend_note:
+                    refuse("legacy amendment exact replay failed")
+                cur.execute("reset session authorization")
+
                 conn.rollback()
-                print("PASS: atomic Joe rule approval, amendment, replay, retirement and rollback")
+                print("PASS: atomic Joe rule approval, amendment, replay, retirement, "
+                      "legacy lifecycle (0351) and rollback")
                 return 0
         finally:
             conn.rollback()
