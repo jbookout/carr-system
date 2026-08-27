@@ -259,7 +259,60 @@ def main() -> int:
                     cur.execute("reset session authorization")
                 cur.execute("release savepoint amend_requires_joe_not_just_authority")
 
+                # A no-op "amendment" (new text hashes identically to the
+                # current text) is refused, not silently accepted with a
+                # receipt that would claim a correction never made.
+                cur.execute("set session authorization carr_authority_joe")
+                cur.execute("savepoint amend_refuses_noop")
+                try:
+                    cur.execute(
+                        "select ops.amend_rule_statement(%s,%s,%s,%s)",
+                        (amend_rule_id, amended_statement,
+                         f"local-amend-noop-{uuid.uuid4()}", "no actual change"),
+                    )
+                    refuse("amend_rule_statement accepted a no-op amendment")
+                except psycopg.Error as exc:
+                    cur.execute("rollback to savepoint amend_refuses_noop")
+                    if "no-op" not in str(exc).lower():
+                        refuse(f"no-op amendment refusal was for the wrong reason: {exc}")
+                cur.execute("release savepoint amend_refuses_noop")
+
+                # A RETIRED rule's words are history; amending a tombstone is
+                # exactly what the retirement receipt already refuses to be
+                # reopened from -- ops.amend_rule_statement must refuse it
+                # directly, at the database layer, not merely because the MCP
+                # handler happens to check status first.
+                retired_rule_id = uuid.uuid4()
+                retire_for_amend_key = f"local-retire-for-amend-{uuid.uuid4()}"
                 cur.execute("reset session authorization")
+                cur.execute(
+                    """insert into rule(id,statement,human_quote,taught_by,status)
+                       values (%s,'local exact retired-amendment fixture','Joe said retire it',%s,'proposed')""",
+                    (retired_rule_id, actor[0]),
+                )
+                cur.execute("set session authorization carr_authority_joe")
+                cur.execute(
+                    "select ops.retire_rule(%s,%s,null,%s)",
+                    (retired_rule_id, "never needed", retire_for_amend_key),
+                )
+                retired_for_amend = cur.fetchone()
+                if retired_for_amend is None or retired_for_amend[0].get("status") != "retired":
+                    refuse("retired-amendment fixture did not actually retire")
+                cur.execute("savepoint amend_refuses_retired")
+                try:
+                    cur.execute(
+                        "select ops.amend_rule_statement(%s,%s,%s,%s)",
+                        (retired_rule_id, "reopening a tombstone",
+                         f"local-amend-retired-{uuid.uuid4()}", "try to reopen"),
+                    )
+                    refuse("amend_rule_statement succeeded on a retired rule")
+                except psycopg.Error as exc:
+                    cur.execute("rollback to savepoint amend_refuses_retired")
+                    if "retired" not in str(exc).lower():
+                        refuse(f"retired-rule amendment refusal was for the wrong reason: {exc}")
+                cur.execute("release savepoint amend_refuses_retired")
+                cur.execute("reset session authorization")
+
                 cur.execute("savepoint amend_requires_authority")
                 cur.execute("set local role carr_writer")
                 try:
