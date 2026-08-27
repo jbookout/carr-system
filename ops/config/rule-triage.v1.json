@@ -1719,5 +1719,27 @@
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
    "jit_trigger_hint": "Delivered by pack(s) governance-rules \u2014 fires on: Merit tests: real need not hypothetical \u00b7 smallest structure that works \u00b7 output as\u2026"
   }
- ]
+ ],
+ "fallback_narrowing": {
+  "records-intake": {
+   "exclude_terms": [
+    "merge"
+   ]
+  },
+  "delegation-council": {
+   "exclude_terms": [
+    "codex"
+   ]
+  },
+  "joe-comms": {
+   "exclude_terms": [
+    "post"
+   ]
+  },
+  "joe-development": {
+   "exclude_terms": [
+    "ledger"
+   ]
+  }
+ }
 }

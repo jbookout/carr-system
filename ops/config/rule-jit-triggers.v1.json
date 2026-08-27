@@ -8,7 +8,7 @@
  },
  "generated_from": {
   "map_sha256": "0bd85004ed17b2da8aa42cbff0e4b3546fafee0c28df2969e2cebbf412fcc7ec",
-  "triage_sha256": "9bafaccdead9109ba010810401b095117957a3724f929d259e306db693f30320"
+  "triage_sha256": "746255638d5472d869192069084d0dfe0c01962b47537de2b845be136c9b4a58"
  },
  "generated_note": "Compiled by ops/rule-jit-compile.py from ops/config/rule-triage.v1.json's per-rule `detector` fields and ops/config/rule-enforcement-map.json's rule_packs/rule_load_layers. Never hand-edit this file \u2014 run the compiler again after changing either input, and `--check` verifies the two never drift apart.",
  "max_rules_per_trigger": 5,
@@ -76,6 +76,22 @@
   {
    "kind": "content_regex",
    "packs": [
+    "joe-development"
+   ],
+   "pattern": "\\bcalibration\\b|\\boverride\\b|\\bprediction\\b|\\bmonthly\\ review\\b|\\bcurriculum\\b|\\bcompression\\b|\\btiming\\ call\\b|\\bclose\\-before\\-open\\b",
+   "rule_ids": [
+    "018ce972",
+    "19304882",
+    "20d106f1",
+    "bbffc139",
+    "bc4145f6"
+   ],
+   "source": "pack_fallback",
+   "trigger_id": "cc742ee35ba5"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
     "delegation-council"
    ],
    "pattern": "\\bfable\\b",
@@ -101,25 +117,9 @@
   {
    "kind": "content_regex",
    "packs": [
-    "joe-development"
-   ],
-   "pattern": "\\bledger\\b|\\bcalibration\\b|\\boverride\\b|\\bprediction\\b|\\bmonthly\\ review\\b|\\bcurriculum\\b|\\bcompression\\b|\\btiming\\ call\\b|\\bclose\\-before\\-open\\b",
-   "rule_ids": [
-    "018ce972",
-    "19304882",
-    "20d106f1",
-    "bbffc139",
-    "bc4145f6"
-   ],
-   "source": "pack_fallback",
-   "trigger_id": "98c1f00d650d"
-  },
-  {
-   "kind": "content_regex",
-   "packs": [
     "records-intake"
    ],
-   "pattern": "\\bparty\\b|\\bvendor\\b|\\bcontact\\b|\\battendee\\b|\\bmerge\\b|\\bduplicate\\b|\\bdedupe\\b|\\benrichment\\b|\\bnpi\\b|\\bnppes\\b|\\bintake\\b|\\bnew\\ client\\b|\\bnew\\ lead\\b|\\bnew\\ vendor\\b|\\badd\\-party\\b|\\bverification\\ stamp\\b",
+   "pattern": "\\bparty\\b|\\bvendor\\b|\\bcontact\\b|\\battendee\\b|\\bduplicate\\b|\\bdedupe\\b|\\benrichment\\b|\\bnpi\\b|\\bnppes\\b|\\bintake\\b|\\bnew\\ client\\b|\\bnew\\ lead\\b|\\bnew\\ vendor\\b|\\badd\\-party\\b|\\bverification\\ stamp\\b",
    "rule_ids": [
     "2ca2add2",
     "5d44d3f3",
@@ -128,7 +128,7 @@
     "faf1b643"
    ],
    "source": "pack_fallback",
-   "trigger_id": "76e4cf3376de"
+   "trigger_id": "36433cdd2d40"
   },
   {
    "kind": "content_regex",
