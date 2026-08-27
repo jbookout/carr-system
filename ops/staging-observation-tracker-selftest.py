@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "staging-observation-tracker.py")
@@ -309,6 +310,128 @@ def case_malformed_json_never_raises():
     return p.returncode == 0
 
 
+def case_aged_temp_orphan_swept_by_the_write_path():
+    """THE 3.2GB CASE (2026-08-27). A session killed between mkstemp and
+    os.replace leaves a `.staging-observed-*` temp nothing ever looks at
+    again; 152 of them over 1MB apiece filled this Mac's disk and blocked
+    new worktrees. Every write path must now sweep aged siblings first.
+
+    A FRESH temp in the same directory must SURVIVE the sweep: it may be
+    another session's in-flight atomic write, and removing it would turn a
+    disk-space fix into data loss."""
+    observed_dir = tempfile.mkdtemp(prefix="sot-state-i-")
+    orig_state_dir = mod.STATE_DIR
+    mod.STATE_DIR = observed_dir
+    repo = None
+    try:
+        repo = make_fixture_repo()
+        aged = os.path.join(observed_dir, mod.TEMP_PREFIX + "abandoned")
+        fresh = os.path.join(observed_dir, mod.TEMP_PREFIX + "inflight")
+        for path in (aged, fresh):
+            with open(path, "w") as fh:
+                fh.write("x" * 1024)
+        old = time.time() - (mod.TEMP_ORPHAN_MAX_AGE_S + 600)
+        os.utime(aged, (old, old))
+
+        mod.handle(pre_payload(repo, "sot-case-9", "call-1"), repo=repo)
+
+        ok = not os.path.exists(aged) and os.path.exists(fresh)
+        if not ok:
+            print(f"       aged_gone={not os.path.exists(aged)} "
+                  f"fresh_kept={os.path.exists(fresh)} — want both True")
+        return ok
+    finally:
+        mod.STATE_DIR = orig_state_dir
+        if repo:
+            shutil.rmtree(repo, ignore_errors=True)
+        shutil.rmtree(observed_dir, ignore_errors=True)
+
+
+def case_untracked_entries_dropped_from_stored_snapshot():
+    """THE 110MB CASE. A stored pre-snapshot held the WHOLE porcelain map,
+    and in the file measured on 2026-08-27, 6504 of its 6506 entries were
+    "??" -- untracked churn under .claude/exec-clones/ -- repeated across 23
+    in-flight calls. They are dropped at store time now, and the drop must
+    be OUTPUT-EQUIVALENT rather than a sampling tradeoff.
+
+    The equivalence is exercised on the one shape that could possibly
+    distinguish the two: a path that IS "??" at the Pre snapshot and is no
+    longer "??" at the Post snapshot (the script `git add`ed it). Stored,
+    "??" compares unequal to the after code; dropped, a missing entry
+    compares unequal to the same after code. Both credit it, so nothing
+    downstream can tell which one ran -- asserted here, not argued."""
+    observed_dir = tempfile.mkdtemp(prefix="sot-state-j-")
+    orig_state_dir = mod.STATE_DIR
+    mod.STATE_DIR = observed_dir
+    repo = None
+    try:
+        repo = make_fixture_repo()
+        session, call_id = "sot-case-10", "call-1"
+        noise = os.path.join(repo, "untracked-noise.txt")
+        with open(noise, "w") as fh:
+            fh.write("untracked at pre-snapshot time\n")
+
+        mod.handle(pre_payload(repo, session, call_id), repo=repo)
+
+        with open(mod.state_path(session)) as fh:
+            stored = json.load(fh)["pending"][call_id]
+        no_untracked_stored = not any(code == "??" for code in stored.values())
+
+        # The command: stage the previously-untracked file, so its code moves
+        # from "??" to "A " between the two snapshots.
+        git(repo, "add", "untracked-noise.txt")
+        mod.handle(post_payload(repo, session, call_id), repo=repo)
+
+        observed = observed_for(session)
+        ok = no_untracked_stored and "untracked-noise.txt" in observed
+        if not ok:
+            print(f"       stored={stored!r} observed={observed!r} — want no '??' "
+                  f"stored AND the staged path still credited")
+        return ok
+    finally:
+        mod.STATE_DIR = orig_state_dir
+        if repo:
+            shutil.rmtree(repo, ignore_errors=True)
+        shutil.rmtree(observed_dir, ignore_errors=True)
+
+
+def case_state_file_bounded_in_bytes():
+    """MAX_PENDING bounds the NUMBER of in-flight snapshots, never their
+    size, so a tree with a large dirty set grows the file without limit --
+    which is what a 110MB observation file was. The byte budget evicts
+    OLDEST pending first, and must never evict `observed`, which is the
+    product this hook exists to produce."""
+    observed_dir = tempfile.mkdtemp(prefix="sot-state-k-")
+    orig_state_dir = mod.STATE_DIR
+    mod.STATE_DIR = observed_dir
+    try:
+        path = os.path.join(observed_dir, "bulky.json")
+        fat = {f"some/long/tracked/path/number-{n:06d}.py": " M" for n in range(40000)}
+        data = {"observed": ["kept.py"],
+                "pending": {"oldest": dict(fat), "middle": dict(fat), "newest": dict(fat)}}
+        mod.write_state_unlocked(path, data)
+
+        size = os.path.getsize(path)
+        with open(path) as fh:
+            back = json.load(fh)
+        kept = list(back["pending"])
+        # `kept == [...]` and not a membership test: the ORDER read back off
+        # disk is the thing under test. Eviction is oldest-first and reads its
+        # order off the dict, so a file that does not preserve insertion order
+        # makes "oldest" mean "alphabetically first" after any reload. That is
+        # exactly what sort_keys=True was doing here until 2026-08-27.
+        ok = (size <= mod.MAX_STATE_BYTES
+              and back["observed"] == ["kept.py"]
+              and kept == ["middle", "newest"])
+        if not ok:
+            print(f"       size={size} cap={mod.MAX_STATE_BYTES} pending={kept!r} "
+                  f"observed={back['observed']!r}")
+        return ok
+    finally:
+        mod.STATE_DIR = orig_state_dir
+        shutil.rmtree(observed_dir, ignore_errors=True)
+
+
 CASES = [
     ("script-modifies-tracked-file-is-observed", case_script_modifies_tracked_file_is_observed),
     ("already-dirty-before-pre-is-not-credited", case_already_dirty_before_pre_is_not_credited),
@@ -319,6 +442,9 @@ CASES = [
     ("outside-repo-cwd-ignored", case_outside_repo_cwd_ignored),
     ("main-subprocess-smoke", case_main_subprocess_smoke),
     ("malformed-json-never-raises", case_malformed_json_never_raises),
+    ("aged-temp-orphan-swept-by-the-write-path", case_aged_temp_orphan_swept_by_the_write_path),
+    ("untracked-entries-dropped-from-stored-snapshot", case_untracked_entries_dropped_from_stored_snapshot),
+    ("state-file-bounded-in-bytes", case_state_file_bounded_in_bytes),
 ]
 
 

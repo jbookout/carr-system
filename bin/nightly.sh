@@ -89,7 +89,7 @@ if [ "${1:-}" = "--preflight" ]; then
     ops/vendor-level-drift-check.py bin/backup-dump.sh bin/archive-calendar.sh
     bin/sync-settings.sh bin/type-check.sh ops/store-markup-scan.py
     generators/build-open-items-dashboard.py ops/nightly-verb-probe.py
-    bin/smoke-and-record.sh tools/ops-record.py
+    bin/smoke-and-record.sh tools/ops-record.py ops/staging-observed-prune.py
     # bin/routine-canonical-seam-refusal.sh came off this list on 2026-08-23: the
     # chain stopped launching it when the refusals became tombstones, and a
     # preflight that requires a file no step runs is checking the wrong thing.
@@ -1272,6 +1272,27 @@ tombstone "incident sweep" \
 # NO NEW SCHEDULED JOB: this is the council's "piggyback on what already runs",
 # and one more step on a chain that is already awake is the whole cost.
 step "hook telemetry rollup (reports, never retires)"  ./.venv/bin/python ops/hook-telemetry-rollup.py --days 7
+
+# ── THE ENFORCEMENT STACK'S OTHER COST: DISK (2026-08-27) ────────────────────
+# The step above prices the gates in latency. This one prices them in bytes,
+# and on 2026-08-27 that bill came due: out/staging-observed held 152 orphaned
+# temp files over 1MB apiece (~3.2GB) beside per-session observation files, one
+# of them 110MB. The disk filled and no new worktree could be created — which
+# is a hard stop on every session on this Mac, not a slow morning.
+#
+# hooks/staging-observation-tracker.py now sweeps abandoned temps before each
+# of its own writes and bounds its state files in bytes. That handles the
+# machine while sessions are running on it and cannot handle anything else: a
+# hook only runs while a session runs, so the state file of a session that has
+# ENDED is precisely the one nothing will ever touch again. Reaping by
+# absence-of-activity is a question only something outside the sessions can
+# ask, which is why it is a line here and not more code in the hook.
+#
+# NO NEW SCHEDULED JOB, same argument as the rollup above: one more step on a
+# chain that is already awake. It exits 0 whether or not it removes anything —
+# a housekeeping step that reddens the chain is a check people learn to skip.
+step "staging-observed prune (temp orphans + idle sessions)" \
+    ./.venv/bin/python ops/staging-observed-prune.py
 
 # ── RULE REPLAY + WEEKLY RE-SORT (WR-000019 slice S12, Obedience & Autonomy,
 # 2026-08-27) ─────────────────────────────────────────────────────────────
