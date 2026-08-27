@@ -155,10 +155,10 @@
         "Corporate Woods, State Hwy 20",
         "Freeport",
         "4,482 SF",
-        "Unlisted",
-        "Unlisted",
-        "Unlisted",
-        "Unlisted"
+        "$35.00",
+        "$13,073",
+        "$5.85",
+        "Two storey"
       ]
     ]
   },
@@ -858,41 +858,50 @@
       "city": "Freeport, FL 32439",
       "location": {
         "street": "State Highway 20, Freeport, FL 32439",
-        "near": "Corporate Woods, a Class A medical and professional campus under construction on the Highway 20 corridor."
+        "near": "Corporate Woods, north side of Highway 20, about 265 feet west of Blueberry Road.",
+        "parcel": "16-1S-19-23000-001-0002"
       },
-      "copy": "We set this one aside in the first pass, and it has come back. The objection was suite size: the units run 568 and 747 SF, so reaching your band meant combining six or more of them. A 4,482 SF space is now on the table, which is exactly six of the 747 SF suites, and it is offered for lease or for purchase. That makes it the only space on this tour where you could own the real estate instead of renting it. It is a Class A campus purpose-built for medical and professional use, not a conversion, with parking near 4.5 spaces per 1,000 SF, which is stronger than almost anything on the coastal side. The cost is time. It is under development and Phase 1 does not deliver until late 2026 or early 2027, so this is the option you cannot move into next year.",
+      "copy": "We set this one aside in the first pass, and it has come back. The objection was suite size: the units run 568 and 747 SF, so reaching your band meant combining six or more of them. Building A is exactly that, six 747 SF units at 4,482 SF, and the campus is offered by the unit, the floor, or the whole building, to lease or to buy. That makes it the only space on this tour where you could own the real estate instead of renting it. It is Class A construction built for medical and professional use, not a conversion, with 102 parking spaces across the campus at about 4.5 per 1,000 SF. Two costs to weigh against that. At $35.00 a foot plus $5.85 in common area charges it is $40.85 all in, which on the full building is about $15,257 a month and the most expensive monthly figure in this search by a wide margin. And it is under development, with Phase 1 not delivering until late 2026 or early 2027, so this is the option you cannot move into next year.",
       "facts": [
         [
           "Available",
-          "4,482 SF"
+          "4,482 SF, Building A"
         ],
         [
           "Contiguous",
-          "To confirm as one unit"
+          "4,482 SF"
         ],
         [
           "Asking rate",
-          "Unlisted"
+          "$35.00 /SF/yr"
         ],
         [
           "Base rent / mo",
-          "Unlisted"
+          "$13,073"
         ],
         [
           "Operating exp.",
-          "Unlisted"
+          "$5.85 /SF (CAM)"
+        ],
+        [
+          "All in",
+          "$40.85 /SF, about $15,257 /mo"
         ],
         [
           "Structure",
           "Lease or purchase"
         ],
         [
+          "Purchase price",
+          "$395,000 listed"
+        ],
+        [
           "Floor",
-          "Unlisted"
+          "Two storey, elevator served"
         ],
         [
           "Condition",
-          "Under development"
+          "Cool white box shell"
         ],
         [
           "Available from",
@@ -900,36 +909,47 @@
         ],
         [
           "Parking",
-          "About 4.5 per 1,000 SF"
+          "102 spaces, about 4.5 per 1,000 SF"
         ],
         [
           "Suite sizes",
           "568 and 747 SF"
         ],
         [
+          "Year built",
+          "2026"
+        ],
+        [
           "Property type",
           "Medical / Professional, Class A"
+        ],
+        [
+          "Zoning",
+          "Commercial"
         ]
       ],
       "about": [
         "Purpose-built Class A medical and professional campus, not a conversion.",
-        "The 4,482 SF is six of the 747 SF suites combined.",
-        "Parking near 4.5 spaces per 1,000 SF, stronger than almost anything on the coastal side.",
-        "Offered for lease or for purchase, the only ownership option in this search."
+        "Building A is six 747 SF units on two floors, three per floor, which is the 4,482 SF.",
+        "Sold or leased by the unit, the full floor, or the entire building.",
+        "Five buildings and about 22,534 SF at full build, on roughly 2.2 acres.",
+        "102 parking spaces campus wide, about 4.5 per 1,000 SF.",
+        "Delivered as a cool white box shell, so the interior fit-out is yours."
       ],
       "confirm": [
-        "Whether the 4,482 SF delivers as one contiguous space or as six suites you combine.",
-        "The purchase price and the lease rate, neither of which is published.",
-        "Operating expenses, and whether they change on a purchase.",
-        "Whether the 4,482 SF sits on the ground floor, since the buildings are two storeys.",
+        "What the $395,000 buys. The sale listing gives building size as 4,482 SF and unit size as 568 SF in the same record, so the price could be a single unit or the building.",
+        "Whether the $5.85 common area charge is capped, and what it covers on a shell building.",
+        "Whether a dental fit-out is permitted and designed for, including operatory plumbing and vacuum lines.",
+        "What a cool white box excludes, since the entire interior is your cost.",
         "The Phase 1 delivery date in writing, and what waiting for it costs you.",
-        "Whether the shell is finished or the build-out is yours to fund.",
-        "Whether dental use is permitted and designed for, including operatory plumbing and vacuum lines.",
-        "Who represents the developer, and whether the site is listed or off market.",
-        "The street address and parcel number, which are not assigned yet."
+        "Whether the six units in Building A can be taken as one space with no demising walls.",
+        "Ground floor access and equipment delivery, since the building is two storeys.",
+        "Whether buying changes the operating expense, and what the condominium documents require."
       ],
       "photo": "corpwoods.jpg",
-      "limit": "It is under development and Phase 1 does not deliver until late 2026 or early 2027"
+      "limit": "it is $40.85 all in, which on the full building is about $15,257 a month and the most expensive monthly figure in this search by a wide margin",
+      "agent": "Century 21 All Points Realty, Jim Ball",
+      "src": "ECAR / FlexMLS"
     }
   ]
 }
