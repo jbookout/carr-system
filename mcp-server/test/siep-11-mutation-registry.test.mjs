@@ -14,11 +14,11 @@ import {
   mcpInventory,
   parsePlistXml,
   registryDigest,
-  REGISTRY_V6_VERSION,
+  REGISTRY_V7_VERSION,
   renderRuntimeProjection,
-  renderSIEP16RegistrySql,
+  renderSIEP16IntegratedRegistrySql,
   sha256,
-  SIEP16_DB_CATALOG_BASELINE,
+  SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
   validateLaunchdAuthorityCatalogs,
   workflowDefinitionInventory,
@@ -56,6 +56,10 @@ const generatedV6 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v6.generated.js", import.meta.url), "utf8");
 const v6Migration = fs.readFileSync(
   new URL("../../migrations/0351_siep16_forward_mutation_registry.sql", import.meta.url), "utf8");
+const generatedV7 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v7.generated.js", import.meta.url), "utf8");
+const v7Migration = fs.readFileSync(
+  new URL("../../migrations/0353_siep16_integrated_mutation_registry.sql", import.meta.url), "utf8");
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory();
@@ -78,9 +82,10 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   assert.equal(governanceQueue.classification_authorizing, false);
 });
 
-test("sealed v1-v5 stay historical while live source and measured DB projections advance exactly to v6", () => {
+test("sealed v1-v6 stay historical while integrated source and measured DB projections advance exactly to v7", () => {
   const rows = fullInventory();
-  const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal, v5: v5Seal } = HISTORICAL_REGISTRY_SEALS;
+  const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal, v5: v5Seal,
+    v6: v6Seal } = HISTORICAL_REGISTRY_SEALS;
   const historicalArtifacts = new Map([
     ["migrations/0338_siep11_mutation_registry.sql", migration],
     ["migrations/0339_siep12_policy_epoch.sql", successorMigration],
@@ -92,37 +97,41 @@ test("sealed v1-v5 stay historical while live source and measured DB projections
     ["mcp-server/src/scac-mutation-registry.v4.generated.js", generatedV4],
     ["migrations/0347_siep15_forward_mutation_registry.sql", v5Migration],
     ["mcp-server/src/scac-mutation-registry.v5.generated.js", generatedV5],
+    ["migrations/0351_siep16_forward_mutation_registry.sql", v6Migration],
+    ["mcp-server/src/scac-mutation-registry.v6.generated.js", generatedV6],
   ]);
   for (const [path, contents] of historicalArtifacts)
     assert.equal(sha256(contents), HISTORICAL_REGISTRY_ARTIFACT_SHA256[path], `${path} changed after seal`);
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV6.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+    JSON.parse(generatedV7.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
   assert.match(generated, /SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry\.v1"/);
-  assert.equal(generatedV6, renderRuntimeProjection(rows, {
-    version: REGISTRY_V6_VERSION, dbCatalogBaseline: SIEP16_DB_CATALOG_BASELINE,
+  assert.equal(generatedV7, renderRuntimeProjection(rows, {
+    version: REGISTRY_V7_VERSION, dbCatalogBaseline: SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
   }));
-  assert.equal(v6Migration, renderSIEP16RegistrySql(rows));
-  const expectedV6EntryCount = rows.length + SIEP16_DB_CATALOG_BASELINE.secdef_execute.count +
-    SIEP16_DB_CATALOG_BASELINE.relation_dml.count + SIEP16_DB_CATALOG_BASELINE.column_dml.count;
-  assert.match(v6Migration, new RegExp(`'sha256:[0-9a-f]{64}',${expectedV6EntryCount},${rows.length},`));
-  assert.match(v6Migration,
-    new RegExp(`registry_version='scac-mutation-registry\\.v6'\\)<>${expectedV6EntryCount}`));
-  assert.match(v6Migration,
-    new RegExp(`if observed_count<>${SIEP16_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SIEP16_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false`));
+  assert.equal(v7Migration, renderSIEP16IntegratedRegistrySql(rows));
+  const expectedV7EntryCount = rows.length + SIEP16_INTEGRATED_DB_CATALOG_BASELINE.secdef_execute.count +
+    SIEP16_INTEGRATED_DB_CATALOG_BASELINE.relation_dml.count +
+    SIEP16_INTEGRATED_DB_CATALOG_BASELINE.column_dml.count;
+  assert.match(v7Migration, new RegExp(`'sha256:[0-9a-f]{64}',${expectedV7EntryCount},${rows.length},`));
+  assert.match(v7Migration,
+    new RegExp(`registry_version='scac-mutation-registry\\.v7'\\)<>${expectedV7EntryCount}`));
+  assert.match(v7Migration,
+    new RegExp(`if observed_count<>${SIEP16_INTEGRATED_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SIEP16_INTEGRATED_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false`));
   assert.match(successorMigration, /scac-mutation-registry\.v1/);
   assert.match(successorMigration, /scac-mutation-registry\.v2/);
   assert.match(v3Migration, /scac-mutation-registry\.v3/);
   assert.match(v4Migration, /scac-mutation-registry\.v4/);
   assert.match(v5Migration, /scac-mutation-registry\.v5/);
   assert.match(v6Migration, /scac-mutation-registry\.v6/);
-  assert.match(v6Migration,
-    /alter function ops\.scac_mutation_catalog_v5_current\(\) rename to scac_mutation_catalog_v5_live_at_seal/);
-  assert.match(v6Migration, /create or replace function ops\.scac_mutation_registry_seal_valid\(p_registry_version text\)/);
-  assert.match(v6Migration, /ops\.scac_mutation_registry_v5_seal_available\(\)/);
-  assert.match(v6Migration, /source:=ops\.scac_policy_epoch_snapshot_v3\(\)/);
-  assert.doesNotMatch(v6Migration, /source:=ops\.scac_policy_epoch_snapshot_v5\(\)/);
-  for (const seal of [v1Seal, v2Seal, v3Seal, v4Seal, v5Seal])
-    assert.match(v6Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
+  assert.match(v7Migration, /scac-mutation-registry\.v7/);
+  assert.match(v7Migration,
+    /alter function ops\.scac_mutation_catalog_v6_current\(\) rename to scac_mutation_catalog_v6_live_at_seal/);
+  assert.match(v7Migration, /create or replace function ops\.scac_mutation_registry_seal_valid\(p_registry_version text\)/);
+  assert.match(v7Migration, /ops\.scac_mutation_registry_v6_seal_available\(\)/);
+  assert.match(v7Migration, /source:=ops\.scac_policy_epoch_snapshot_v3\(\)/);
+  assert.doesNotMatch(v7Migration, /source:=ops\.scac_policy_epoch_snapshot_v6\(\)/);
+  for (const seal of [v1Seal, v2Seal, v3Seal, v4Seal, v5Seal, v6Seal])
+    assert.match(v7Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
 });
 
 test("unknown, changed, and open operation contracts refuse deterministically", async () => {
@@ -173,7 +182,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 501);
+  assert.equal(rows.length, 507);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -181,7 +190,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 492);
+  assert.equal(scripts.length, 498);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
