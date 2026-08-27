@@ -63,14 +63,22 @@ test("authority DSNs follow verified partners and their sponsored Codex or Claud
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_JOE_URL: "joe-dsn" }, { slug: "grok", human: false, sponsoring_human_slug: "joe" }), null);
 });
 
-test("only verified partners and sponsored Codex or Claude agents cross the partner boundary", () => {
+test("partners, sponsored native agents, and the local machine doors cross the partner boundary", () => {
   assert.equal(canExercisePartnerAuthority(joe), true);
   assert.equal(canExercisePartnerAuthority(dell), true);
   assert.equal(canExercisePartnerAuthority(codexForJoe), true);
   assert.equal(canExercisePartnerAuthority(claudeForDell), true);
+  // ADDED 2026-08-26 (Joe's ruling, decision dc57f62d): the `./run.sh call`
+  // doors. Their sponsor is server-derived through LOCAL_SPONSOR, never
+  // asserted by the Mac, which is why admitting them is safe.
+  assert.equal(canExercisePartnerAuthority({ slug: "joe-local", human: false, sponsoring_human_slug: "joe" }), true);
+  assert.equal(canExercisePartnerAuthority({ slug: "dell-local", human: false, sponsoring_human_slug: "dell" }), true);
+  // STILL REFUSED, and these are the ones that matter: a slug with no sponsor
+  // at all, and a sponsored slug that is not an admitted door. The ruling
+  // removed a human-only gate; it did not make the boundary meaningless.
   assert.equal(canExercisePartnerAuthority({ slug: "codex", human: false }), false);
   assert.equal(canExercisePartnerAuthority({ slug: "grok", human: false, sponsoring_human_slug: "joe" }), false);
-  assert.equal(canExercisePartnerAuthority({ slug: "joe-local", human: false, sponsoring_human_slug: "joe" }), false);
+  assert.equal(canExercisePartnerAuthority({ slug: "joe-local", human: false }), false);
 });
 
 test("authority operation fails closed instead of falling back to writer credentials", async () => {

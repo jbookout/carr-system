@@ -26,10 +26,13 @@ async function planAnchor(c, actor, planId, ToolError) {
   return r.rows[0];
 }
 
-function humanOnlyDirect(actor, ToolError) {
-  if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_only",
-    hint: "this memory transition requires a partner or a server-verified Codex/Claude session sponsored by one" });
-}
+// RETIRED 2026-08-26 BY JOE'S RULING (decision dc57f62d), same as the gate in
+// tools.js — see that comment for what the refusal did and what giving it up
+// costs. Kept as a no-op rather than deleted so the three call sites below
+// still read as the deliberate transitions they are: promote, correct and
+// forget a memory are the writes that rewrite what the system believes about
+// itself, and a future ruling that wants a check back has one place to put it.
+function humanOnlyDirect(_actor, _ToolError) {}
 
 function requireUuid(value, field, ToolError) {
   if (typeof value !== "string" || !UUID_RE.test(value))

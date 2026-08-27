@@ -60,7 +60,16 @@
       "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__find",
       "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__read-room",
       "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__capability-program",
-      "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__catch-me-up"
+      "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__catch-me-up",
+      "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__report-problem",
+      "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__record-defect",
+      "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__add-loop",
+      "mcp__carr__report-problem",
+      "mcp__carr__record-defect",
+      "mcp__carr__add-loop",
+      "mcp__claude_ai_CARR_Record_Layer__report-problem",
+      "mcp__claude_ai_CARR_Record_Layer__record-defect",
+      "mcp__claude_ai_CARR_Record_Layer__add-loop"
     ],
     "deny": [
       "Bash(git push --force:*)",
