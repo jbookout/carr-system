@@ -35,6 +35,9 @@ TARGET_PRE_MARKER = (
 TARGET_POST_0348_MARKER = (
     "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0348 (bin/schema-snapshot.sh)"
 )
+TARGET_POST_0363_MARKER = (
+    "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363 (bin/schema-snapshot.sh)"
+)
 OLD_DIGEST = "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a"
 DIGEST = "c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997"
 THIRD_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
@@ -130,6 +133,10 @@ assert "RULE_DELIVERY_REFRESH_APPLIED" in GENERATOR
 assert f"filename='{REFRESH_MIGRATION}'" in GENERATOR
 assert f"filename='{SECOND_REFRESH_MIGRATION}'" in GENERATOR
 assert 'if [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then' in GENERATOR
+assert "RULE_DELIVERY_DIGEST_REPIN_APPLIED" in GENERATOR
+assert f"filename='{CURRENT_MIGRATION}'" in GENERATOR
+assert 'if [ "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" = t ]; then' in GENERATOR
+assert 'elif [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then' in GENERATOR
 assert "insert into ops.rule_delivery_policy (singleton,mode,changed_by,reason)" in GENERATOR
 assert "values (true,'shadow','schema-snapshot'," in GENERATOR
 assert "on conflict (singleton) do nothing;" in GENERATOR
@@ -139,6 +146,12 @@ assert target_ids(GENERATOR, TARGET_PRE_MARKER) == EXPECTED_TARGETS
 assert target_digests(GENERATOR, TARGET_PRE_MARKER) == [OLD_DIGEST] * 9
 assert target_ids(GENERATOR, TARGET_POST_0348_MARKER) == EXPECTED_TARGETS
 assert target_digests(GENERATOR, TARGET_POST_0348_MARKER) == [THIRD_DIGEST] * 9
+assert target_ids(GENERATOR, TARGET_POST_0363_MARKER) == CURRENT_EXPECTED_TARGETS
+assert target_digests(GENERATOR, TARGET_POST_0363_MARKER) == [CURRENT_DIGEST] * 8
+current_block = GENERATOR.split(TARGET_POST_0363_MARKER, 1)[1].split(
+    "on conflict (short_id) do nothing;", 1
+)[0]
+assert "581cb3fe" not in current_block
 post_block = GENERATOR.split(TARGET_POST_MARKER, 1)[1].split(
     "on conflict (short_id) do nothing;", 1
 )[0]
@@ -210,7 +223,7 @@ assert policy_ledger_applied == policy_seeded, (
     "the source snapshot ledger"
 )
 assert cutover_ledger_applied == targets_seeded, (
-    "the nine rule-delivery activation targets must appear exactly when 0317 "
+    "the ledger-appropriate rule-delivery activation targets must appear exactly when 0317 "
     "is in the source snapshot ledger"
 )
 

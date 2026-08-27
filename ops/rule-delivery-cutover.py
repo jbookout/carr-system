@@ -13,7 +13,7 @@ import psycopg
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-from lib.rule_delivery_activation import load_validated  # noqa:E402
+from lib.rule_delivery_activation import EXPECTED_IDS, load_validated  # noqa:E402
 from lib.rule_delivery_shadow import current_identity, locked_read  # noqa:E402
 
 CURATION_BATCH = REPO / "audits" / "guidance-situation-curation-approval-batch.v1.json"
@@ -110,11 +110,16 @@ def main() -> int:
         curation = cur.fetchone()
         if curation is None:
             raise RuntimeError("curation approval query returned no aggregate row")
-        cur.execute("select count(*) from ops.rule_delivery_activation_target")
+        expected_target_ids = sorted(EXPECTED_IDS)
+        expected_target_count = len(expected_target_ids)
+        cur.execute("""select coalesce(array_agg(short_id order by short_id),
+                                        array[]::text[])
+                         from ops.rule_delivery_activation_target""")
         target_row = cur.fetchone()
         if target_row is None:
             raise RuntimeError("activation target query returned no row")
-        target_count = target_row[0]
+        target_ids = list(target_row[0])
+        target_count = len(target_ids)
         cur.execute("select count(*) from ops.rule_delivery_activation_receipt")
         receipt_row = cur.fetchone()
         if receipt_row is None:
@@ -128,8 +133,9 @@ def main() -> int:
                                   "human_reviewed":curation[2]},
                      "shadow":eligibility,"map_digest":digest}
         print(json.dumps(preflight,sort_keys=True))
-        if target_count != 9:
-            print("rule-delivery-cutover: migration 0317 exact target set is absent",file=sys.stderr)
+        if target_ids != expected_target_ids:
+            print("rule-delivery-cutover: canonical exact activation target set is absent",
+                  file=sys.stderr)
             return 1
         if args.mode == "enforced" and tuple(curation) != (38,38,38):
             print("rule-delivery-cutover: exact 38-item human curation approval is absent",file=sys.stderr)
@@ -161,7 +167,7 @@ def main() -> int:
         cur.execute("select * from ops.set_rule_delivery_mode(%s,%s,%s,%s)",
                     (args.mode,args.changed_by,args.reason,digest))
         result = cur.fetchone()
-        if not result or result[0] != args.mode or result[1] != 9:
+        if not result or result[0] != args.mode or result[1] != expected_target_count:
             raise RuntimeError(f"atomic cutover returned an invalid receipt: {result}")
         conn.commit()
     print(json.dumps({"mode":result[0],"changed_controls":result[1],
