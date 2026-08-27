@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
-"""settings-change-gate.py — a settings change records itself, or does not happen.
+"""settings-change-gate.py — a settings change records itself, and is announced.
 
-THE INCIDENT, 2026-08-14. A session was commissioned to fix main's merge
-treadmill. Its instructions said, in Joe's own words, "this likely changes repo
-settings, so present the finished configuration to Joe with what changed and
-why." It chose a remedy Joe had listed himself, turned off the branch ruleset's
-"require branches to be up to date" flag — and was INTERRUPTED before it
-delivered the report.
+WR-000019 SLICE S3 (2026-08-27). The PreToolUse half used to REFUSE a settings
+write that carried no stated reason (see THE INCIDENT below for why). It no
+longer does: it ANNOUNCES instead, and the reason it asked for moved to the
+PR-description convention that now governs every enforcement-code and
+settings change — CODEOWNERS auto-requests Joe on a PR touching hooks/ or
+ops/config/, and the PR-only ruleset with required CI is what actually keeps
+main honest. An inline `CARR_CHANGE_REASON="..."` is still the fastest way to
+carry a reason all the way to the record layer in one step, and is still read
+the same way; it is simply no longer mandatory to proceed. Rollback: revert
+this PR, which restores the PreToolUse refusal.
+
+THE INCIDENT, 2026-08-14, THAT ORIGINALLY MOTIVATED THE REFUSAL. A session was
+commissioned to fix main's merge treadmill. Its instructions said, in Joe's own
+words, "this likely changes repo settings, so present the finished
+configuration to Joe with what changed and why." It chose a remedy Joe had
+listed himself, turned off the branch ruleset's "require branches to be up to
+date" flag — and was INTERRUPTED before it delivered the report.
 
 The change reached the repository. The reason reached nothing: no commit, no
 loop, no decision entry. Eight hours later a different session found the setting
@@ -23,8 +34,9 @@ So the record is taken by the same mechanism that performs the change, at the
 moment it performs it. Prose asks; this takes.
 
 HOW IT WORKS, two halves of one gate:
-  PreToolUse   a settings write with no stated reason is REFUSED, with the one
-               prefix that satisfies it printed in the refusal.
+  PreToolUse   a settings write with no stated reason is ANNOUNCED — allowed,
+               with a nudge toward the inline reason and the PR-description
+               convention printed alongside it.
   PostToolUse  the change is recorded WITH ITS OUTCOME, because a change that
                failed and a change that landed are different facts and only the
                post hook knows which happened.
@@ -181,20 +193,26 @@ def reason_is_real(reason: str) -> bool:
             and reason.strip().lower().rstrip(".") not in JUNK_REASONS)
 
 
-def refuse(kind: str, target: str) -> None:
+def announce(kind: str, target: str) -> None:
+    """Allow the change, but nudge — WR-000019 slice S3 replaced the refusal.
+
+    The property that mattered — a settings change carries an account of why —
+    now rides the same PR-description convention as every other enforcement
+    change: CODEOWNERS auto-requests Joe on hooks/ and ops/config/, and
+    required CI is what actually keeps main honest. An inline reason is still
+    the fastest path to a clean record layer entry, so it is still offered
+    first.
+    """
     sys.stderr.write(
-        f"SETTINGS CHANGE GATE — refused an unrecorded {kind} change.\n\n"
-        f"  target: {target}\n\n"
-        "A settings change that carries no reason is indistinguishable from\n"
-        "tampering the moment the session that made it ends. On 2026-08-14 an\n"
-        "AUTHORISED ruleset change went unexplained for eight hours for exactly\n"
-        "that reason: the session was interrupted before it could report, and\n"
-        "the change outlived the only account of why it happened.\n\n"
-        "State the reason and the change records itself:\n\n"
+        f"SETTINGS CHANGE GATE — {kind} change to {target} carries no stated "
+        "reason.\n\n"
+        "This is ALLOWED, not refused. State the reason inline and it is "
+        "recorded with the change instead of just the change:\n\n"
         f'  CARR_CHANGE_REASON="why this is being changed" <your command>\n\n'
-        "The reason is stored with the change, its outcome, and this session's\n"
-        "id, so the next session reads it instead of reconstructing it.\n")
-    sys.exit(2)
+        "If this command runs from a worktree PR (the normal route for "
+        "hooks/, ops/config/, and settings changes now), the PR description's "
+        "own account of what changed and why is the durable record CODEOWNERS "
+        "review and CI check against — say it there too.\n")
 
 
 def record(kind: str, target: str, command: str, reason: str,
@@ -261,7 +279,7 @@ def main() -> int:
 
     if event == "PreToolUse":
         if not reason_is_real(reason):
-            refuse(kind, target)
+            announce(kind, target)
         return 0
 
     # PostToolUse — the change has run and its outcome is knowable.

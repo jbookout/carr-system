@@ -1,8 +1,24 @@
 #!/usr/bin/env python3
-"""gate-edit-gate.py — editing a GATE requires Joe's in-session approval.
+"""gate-edit-gate.py — a gate edit is announced, and rides a worktree PR.
 
-WHY THIS REPLACED THE OS HARDENING. Joe, 2026-08-09, overruling both council
-chairs and this session:
+WR-000019 SLICE S3 (2026-08-27). This file no longer asks for Joe's in-session
+approval on an ordinary gate edit, and the docstring below is kept as the
+record of why that channel existed and why it was retired, not as a
+description of current behaviour — see ANNOUNCE-ONLY, END TO END further down
+for what actually runs today. The short version: canonical-edit-gate.py and
+git-writer-gate.py retired in the same slice, and the property all three
+partly carried — an edit to hooks/, ops/config/, or settings lands only
+through review — is now guaranteed server-side. The PR-only ruleset on main
+plus required CI mean a canonical-tree edit cannot reach main any other way,
+and CODEOWNERS (slice S2) auto-requests Joe on any PR touching hooks/ or
+ops/config/. That is a stronger guarantee than a transcript-read approval
+channel ever was: it does not depend on the session surviving to report the
+change, and it cannot be talked around by how the session described the edit
+beforehand. Rollback: revert this PR, which re-wires the three retired gates
+and restores the in-session approval channel from the pre-retirement baseline.
+
+WHY THIS REPLACED THE OS HARDENING (2026-08-09 to 2026-08-10 history, kept for
+context). Joe, 2026-08-09, overruling both council chairs and this session:
 
     "man honestly i disagree with hardening at all. i think the council went
      overboard on that. youre not going to rewrite hooks anyway without a good
@@ -43,14 +59,16 @@ WHAT IT DOES NOT COVER, on purpose: the SELFTESTS (ops/*-selftest.py). Fixtures
 are not enforcement, they are how a gate change is proven, and gating them would
 make it harder to test a gate than to weaken one — precisely backwards.
 
-WHY THIS IS NOT MERELY ADVISORY. It denies the tool call. A session that wants
-the edit has to surface it to Joe and get a real answer, which is the whole
-substance of "just ask me". The remaining honest gap, stated plainly rather than
-hidden: an in-session approval is only as good as the session's description of
-what it is about to change, whereas a password could not be talked around. Joe
-weighed that and chose the cheaper control. That is his call to make and it is
-recorded in the decision log, not quietly reversed later by a session that finds
-this gate inconvenient.
+WHY THIS WAS NOT MERELY ADVISORY, THEN. Before 2026-08-10 it denied the tool
+call. A session that wanted the edit had to surface it to Joe and get a real
+answer, which was the whole substance of "just ask me". The remaining honest
+gap, stated plainly rather than hidden: an in-session approval is only as good
+as the session's description of what it is about to change, whereas a
+password could not be talked around. Joe weighed that and chose the cheaper
+control on 2026-08-09; the 2026-08-10 downgrade (below) then found the
+approval channel itself unreliable, and WR-000019 slice S3 replaced it
+outright with PR review, which does not share that weakness — a reviewer
+reads the actual diff, not the session's account of it.
 
 THE SHELL DOOR, AND A CLAIM THIS FILE MADE THAT WAS FALSE FOR THREE DAYS. The
 deny text below used to tell sessions "guard-unattended.py covers that path" for
@@ -71,10 +89,11 @@ anywhere asking whether the next one should be able to refuse work at all.
 Grok's chair, high confidence: "This is the missing gate that prevents the next
 59 from becoming 90."
 
-It sits ahead of the approval channel below, deliberately. Joe's in-session
-approval answers whether HE wants a change; it reads his words and not the diff,
-so he can approve a gate edit without having been told that what is being
-created is a blocker. That is exactly the gap.
+It sits ahead of the PR-review route the rest of this file now points to,
+deliberately. A reviewer approving a PR answers whether the CHANGE is wanted;
+it does not by itself ask whether the diff is quietly creating a new power to
+refuse work, which is a structural question a code review can miss unless
+someone happens to notice. That is exactly the gap this card closes.
 
 THE DENY IS NARROW AND IT IS NOT A REVERSAL OF HIS DOWNGRADE. It fires only when
 a hooks/*.py file that is NOT already a blessed blocker gains a blocking emit
@@ -354,78 +373,6 @@ def admission_refusal(stem, gaps):
 
 
 
-def joe_approved(payload, path):
-    """Did the partner approve THIS edit in his own words, this turn?
-
-    Reads the transcript for his most recent genuine message — never a
-    system-reminder, task-notification or tool result — and looks for an
-    approval. Same design as conduct-stop-gate.py's exemptions: the signal comes
-    off the human's actual keystrokes and a session cannot grant it to itself.
-
-    WHY THIS EXISTS. The first version of this gate told sessions "get his
-    approval, then edit" and then blocked the edit anyway, because it held no
-    state and never read the transcript. Joe approved the same change three
-    times on 2026-08-09 and the gate refused all three. A gate with no approval
-    channel is not a gate, it is a wall — and the wall was standing in front of
-    work he had explicitly asked for.
-
-    It is a DELIBERATE LOOSENING and it is written down as one: an approval
-    phrase in his last message is weaker evidence than a password, because a
-    session controls how it described the change beforehand. That was the
-    trade he chose when he replaced the OS hardening: "you can just ask me if i
-    approve writing hooks instead of requiring a password."
-    """
-    path_l = (path or "").lower()
-    stem = os.path.basename(path_l).replace(".py", "").replace(".json", "").replace(".sh", "")
-    tp = payload.get("transcript_path")
-    if not tp or not os.path.exists(tp):
-        return False
-    try:
-        with open(tp, "r", errors="replace") as fh:
-            lines = fh.readlines()[-200:]
-    except Exception:
-        return False
-    for line in reversed(lines):
-        try:
-            rec = json.loads(line.strip())
-        except Exception:
-            continue
-        if rec.get("type") not in ("user", "human"):
-            continue
-        if rec.get("isMeta") or rec.get("isCompactSummary"):
-            continue
-        msg = rec.get("message") or rec
-        c = msg.get("content")
-        if isinstance(c, str):
-            t = c
-        elif isinstance(c, list):
-            t = "\n".join(b.get("text", "") for b in c
-                           if isinstance(b, dict) and b.get("type") == "text")
-        else:
-            continue
-        if not t:
-            continue
-        head = t.lstrip()
-        if head.startswith(("<system-reminder>", "<task-notification>",
-                            "[SYSTEM NOTIFICATION", "<local-command",
-                            "<command-name>", "Caveat:")):
-            continue
-        # His most recent real message. Only this one counts — an approval two
-        # turns ago does not license an unrelated edit now.
-        low = " ".join(t.split()).lower()
-        APPROVE = re.compile(
-            r"\b(approve|approved|approve both|go ahead|do it|yes,? do|"
-            r"make the edit|build (it|them|both)|add the|ship it|"
-            r"you can (edit|change|write)|permission granted|lgtm)\b")
-        if not APPROVE.search(low):
-            return False
-        # A blanket "do it" is enough; a named file is stronger and always wins.
-        if stem and stem in low:
-            return True
-        return True
-    return False
-
-
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -443,13 +390,12 @@ def main():
         if not is_protected(path):
             sys.exit(0)
 
-        # THE ADMISSION CARD comes FIRST, and before the approval channel too.
-        # Joe's in-session approval is about whether HE wants this change; the
-        # card is about whether the system can account for a new power to
-        # refuse. He can approve a gate edit without having been told the thing
-        # being created is a blocker — that is precisely the gap the 2026-08-23
-        # audit named, since the approval channel reads his words and not the
-        # diff.
+        # THE ADMISSION CARD comes FIRST, ahead of the PR-review route below
+        # too. A reviewer approving a PR answers whether the CHANGE is wanted;
+        # the card asks whether the system can account for a new power to
+        # refuse — a PR could merge a new blocking gate without anyone having
+        # been told that is what it does. That is precisely the gap the
+        # 2026-08-23 audit named.
         needs_card = new_blocker(path, tool, ti)
         if needs_card:
             stem, gaps = needs_card
@@ -465,54 +411,20 @@ def main():
             print(admission_refusal(stem, gaps), file=sys.stderr)
             sys.exit(2)
 
-        # The approval channel. Without this the gate refuses an edit the
-        # partner has already authorised, which is what happened three times
-        # on 2026-08-09 before it was added.
-        if joe_approved(payload, path):
-            dlog(f"ALLOW(approved-in-session) {path}")
-            sys.exit(0)
-
         name = os.path.basename(path)
 
-        # DOWNGRADED FROM BLOCK TO ANNOUNCE — Joe's ruling 2026-08-10, decision
-        # bd30b665: "dude, i think the gate think is a shitty rule. its causing
-        # some serious blockage" / "yea downgrade it".
+        # ANNOUNCE-ONLY, END TO END — WR-000019 slice S3, 2026-08-27. This file
+        # no longer reads the transcript for an in-session sign-off (the
+        # `joe_approved()` channel this comment used to describe is gone) and no
+        # longer carries a retired-but-kept BLOCK path either. Both existed only
+        # to gate an edit that PR review now gates instead: CODEOWNERS
+        # auto-requests Joe on any PR touching hooks/ or ops/config/, and the
+        # PR-only ruleset with required CI means a canonical-tree edit cannot
+        # reach main any other way. That is stronger than an in-session
+        # approval channel ever was — it does not depend on the session
+        # surviving to report, and it cannot be talked around by how the
+        # session described the change beforehand.
         #
-        # THREE FINDINGS BEHIND IT, each verified rather than asserted:
-        #   1. THE APPROVAL CHANNEL CANNOT SEE HIS APPROVAL. joe_approved()
-        #      reads the transcript for his most recent genuine user record, but
-        #      messages sent MID-TURN — while a turn is still running — are never
-        #      written there. Checked directly: a session with three genuine user
-        #      records contained neither of the two "approved"s he had typed.
-        #      This is not a regex that can be widened; there is nothing in the
-        #      file to match against.
-        #   2. A CROSS-SESSION MESSAGE DISPLACES HIM. The check reads the LAST
-        #      genuine user record, and an agent-to-agent handoff arrives as one
-        #      — so another session's message silently becomes "Joe's last word"
-        #      and the gate refuses even a genuinely approved edit.
-        #   3. THE BLOCK IS REDUNDANT. gate-integrity.py already reports
-        #      "UNBLESSED: hooks/X exists but is not in the baseline" at every
-        #      SessionStart, and the baseline only moves through a deliberate
-        #      --bless. An unauthorised gate edit is caught either way.
-        #
-        # WHAT WAS WRONG IN THE ORIGINAL CASE FOR THIS CHANGE, recorded so the
-        # next reader does not inherit it: the session first claimed this gate
-        # had NO audit trail, having looked for out/gate-edit-gate.jsonl. It
-        # logs to the SHARED out/conduct-gate.jsonl and had six fires on record.
-        # The claim was false; the argument stood without it, because all six
-        # recorded fires were blocks of work Joe had asked for and none was a
-        # change he did not want.
-        #
-        # WHAT THIS COSTS, PLAINLY: a rogue gate edit is now DETECTED at next
-        # SessionStart rather than PREVENTED in the moment. That is weaker.
-        # Rule 61551180 is why it is still right — a present threat outranks a
-        # possible future use when the protection is reversible, and the present
-        # threat (approved work blocked six times in two days) is the only one
-        # of the two that has ever actually happened.
-        #
-        # The principle Joe encoded — a human authorises changes to enforcement
-        # — is NOT discarded. The announcement below is that authorisation
-        # surfacing where he can see it, instead of a wall he cannot open.
         # ONE WORDING, shared with the Bash door, so a session gets the same
         # answer whichever way it reaches the file (hooks/gate_paths.py).
         announcement_text = announcement(path, f"{tool.lower()}")
@@ -530,44 +442,6 @@ def main():
             },
         }))
         sys.exit(0)
-
-        # --- retired block path, kept for one release so the downgrade can be
-        # --- reverted by deleting the return above. Unreachable.
-        reason = (
-            f"GATE EDIT — needs Joe's approval before it can be written.\n\n"
-            f"  file: {path}\n\n"
-            "This file IS enforcement — a gate's logic, its wiring, or the lock "
-            "itself. Changing it changes what binds every session, which rule "
-            "aa411351 puts in the one class the system does not decide for "
-            "itself.\n\n"
-            "THIS IS NOT A REFUSAL, IT IS A HAND-OFF. Joe replaced the OS-level "
-            "hardening with exactly this control on 2026-08-09: \"you can just "
-            "ask me if i approve writing hooks instead of requiring a password. "
-            "thats more of a pain in the ass than just me approving it in the "
-            "session.\"\n\n"
-            "DO THIS NOW, in the session, in three lines and no more:\n"
-            f"  1. WHAT changes in {name} — the actual behaviour, not the diff\n"
-            "  2. WHY — what is broken or missing right now\n"
-            "  3. WHETHER it makes the gate STRONGER or WEAKER, said plainly. "
-            "Weaker is allowed; hiding that it is weaker is not.\n\n"
-            "Then wait for his answer. If he approves, say so and make the edit "
-            "in the next turn — this gate does not fire twice on an approved "
-            "change because he will have seen it.\n\n"
-            "Do NOT route around this by writing the file with a shell command. "
-            "guard-unattended.py covers that path as of 2026-08-10 (it did NOT "
-            "before then, despite this text having claimed so since 2026-08-09), "
-            "and doing so deliberately is the exact behaviour this layer exists "
-            "to stop."
-        )
-
-        audit({"ts": now(), "hook": "gate-edit-gate", "classes": ["gate_edit"],
-               "patterns": [f"gate_edit:{name}"], "session": payload.get("session_id"),
-               "path": path})
-        dlog(f"DENY {path}")
-        # Exit 2, not JSON: on a build that does not parse the structured
-        # contract, exit 0 reads as ALLOW and the gate fails open silently.
-        print(reason, file=sys.stderr)
-        sys.exit(2)
 
     except Exception as exc:
         dlog(f"ALLOW(internal-error) {exc}")

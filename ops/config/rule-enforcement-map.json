@@ -251,15 +251,6 @@
       ],
       "failure_mode": "PreToolUse deny"
     },
-    "git_writer": {
-      "implementation": [
-        "hooks/git-writer-gate.py"
-      ],
-      "test": [
-        "ops/git-writer-gate-selftest.py"
-      ],
-      "failure_mode": "PreToolUse deny"
-    },
     "escalation": {
       "implementation": [
         "hooks/escalation-gate.py"
@@ -322,7 +313,6 @@
     "loose_work": {
       "implementation": [
         "hooks/loose-work-gate.py",
-        "hooks/staging-attribution-gate.py",
         "hooks/staging-observation-tracker.py"
       ],
       "test": [
@@ -330,15 +320,17 @@
       ],
       "failure_mode": "Stop block"
     },
-    "canonical_edit": {
+    "pr_only_main_ruleset": {
       "implementation": [
-        "hooks/canonical-edit-gate.py",
-        "hooks/worktree-self-plumb.py"
+        "external:GitHub branch ruleset 20824501 on jbookout/carr-system's main branch — PR-only, direct pushes rejected server-side with required status checks",
+        "ops/githooks/pre-commit"
       ],
       "test": [
-        "ops/canonical-edit-gate-selftest.py"
+        "ops/main-commit-gate-selftest.py",
+        "external:a direct `git push origin main` from a local clone is rejected by GitHub before it reaches the branch"
       ],
-      "failure_mode": "PreToolUse deny"
+      "failure_mode": "local pre-commit refusal on a direct commit to `main`, plus server-side rejection of a direct push to `main` (the PR-only ruleset with required CI)",
+      "note": "Added 2026-08-27 (WR-000019 slice S3) as the reassignment target for the two rules (308ef1de, 4a53ff82) whose own edit-time/git-action-time gates retired this slice. This control binds LATER than either retired gate did — at commit/push/merge rather than at the git command or the file edit itself — which is a real, stated reduction in how early a mistake is caught, not a claim of equivalent coverage."
     },
     "close_before_open": {
       "implementation": [
@@ -378,7 +370,7 @@
       "test": [
         "ops/gate-edit-gate-selftest.py"
       ],
-      "failure_mode": "PreToolUse deny"
+      "failure_mode": "PreToolUse announce (WR-000019 S3, 2026-08-27: no longer a deny — a gate edit rides a worktree PR under CODEOWNERS + required CI instead of an in-session sign-off; the gate-admission card for a brand-new BLOCKING gate still denies)"
     },
     "gate_integrity": {
       "implementation": [
@@ -437,7 +429,7 @@
       "test": [
         "ops/settings-change-gate-selftest.py"
       ],
-      "failure_mode": "Pre+PostToolUse deny"
+      "failure_mode": "PreToolUse announce + PostToolUse record (WR-000019 S3, 2026-08-27: the PreToolUse half no longer denies an unreasoned settings change — it announces, and the reason's durable home moved to the PR-description convention; PostToolUse still records the outcome unconditionally)"
     },
     "stale_count": {
       "implementation": [
@@ -711,9 +703,10 @@
     "308ef1de": {
       "category": "hard_pre_action",
       "enforcement_class": "deny_gate",
-      "binding_moment": "before shared-tree git action",
-      "control": "git_writer",
-      "exceptions": "named writer/claimed work"
+      "binding_moment": "before a change reaches main",
+      "control": "pr_only_main_ruleset",
+      "exceptions": "named writer/claimed work",
+      "note": "Reassigned 2026-08-27 (WR-000019 slice S3): hooks/git-writer-gate.py retired, the edit-time catch of a shared-tree git write is gone, and what remains BUILT is the server-side backstop -- a change swept or mis-committed locally still cannot reach main without a reviewed PR under the PR-only ruleset with required CI. That is a later, coarser binding moment than the retired gate's (after the fact, at merge, rather than at the git command itself), which is a real reduction in how early the mistake is caught; recovery of any locally-lost work also still depends on git's own reflog/object retention rather than a gate-issued warning. The retired gate's finer-grained, earlier catch has no replacement as of this slice."
     },
     "647f843d": {
       "category": "hard_pre_action",
@@ -1817,10 +1810,10 @@
     "4a53ff82": {
       "category": "hard_pre_action",
       "enforcement_class": "deny_gate",
-      "binding_moment": "before the first write to a tracked file in the canonical checkout",
-      "control": "canonical_edit",
+      "binding_moment": "before a change reaches main",
+      "control": "pr_only_main_ruleset",
       "exceptions": "registered worktrees; integration-lane work (nightly chain, merges/landings, pulls)",
-      "note": "Corrected 2026-08-15. This read unbuilt, with a planned_control describing a hook that had already been built the day before as hooks/canonical-edit-gate.py, blessed in the gate baseline and live in the PreToolUse set. A session working the unbuilt list came one step from building a second gate for an already-enforced rule. ops/enforcement-coverage-check.py now fails on any blessed gate no control names."
+      "note": "Corrected 2026-08-15 (see history below), then reassigned 2026-08-27 (WR-000019 slice S3): hooks/canonical-edit-gate.py retired, and control moved from the retired edit-time gate to the server-side backstop that already carries the same property -- a canonical-tree edit cannot reach main without a reviewed PR under the PR-only ruleset with required CI. That binds later (at merge) than the retired gate's edit-time catch, which is a real reduction in how early a stray canonical edit is caught, stated plainly rather than hidden. HISTORY: this read unbuilt on 2026-08-15, with a planned_control describing a hook that had already been built the day before as hooks/canonical-edit-gate.py, blessed in the gate baseline and live in the PreToolUse set. A session working the unbuilt list came one step from building a second gate for an already-enforced rule. ops/enforcement-coverage-check.py now fails on any blessed gate no control names."
     },
     "596f7549": {
       "category": "judgment_advisory",
@@ -2708,7 +2701,7 @@
         "packs": [
           "engineering-git"
         ],
-        "why": "An installed deny gate delivers this at its binding moment."
+        "why": "An installed deny gate delivered this at its binding moment; WR-000019 S3 (2026-08-27) reassigned the control from the retired hooks/git-writer-gate.py to the server-side PR-only main ruleset (control pr_only_main_ruleset), which is still an installed control that delivers this rule at ITS binding moment (merge, not the git command itself)."
       },
       "30a189fb": {
         "load_layer": "layer0",
@@ -2834,7 +2827,7 @@
         "packs": [
           "engineering-git"
         ],
-        "why": "An installed deny gate delivers this at its binding moment."
+        "why": "An installed deny gate delivered this at its binding moment; WR-000019 S3 (2026-08-27) reassigned the control from the retired hooks/canonical-edit-gate.py to the server-side PR-only main ruleset (control pr_only_main_ruleset), which is still an installed control that delivers this rule at ITS binding moment (merge, not the edit itself)."
       },
       "4a9188f3": {
         "load_layer": "pack",
