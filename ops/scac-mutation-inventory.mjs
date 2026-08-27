@@ -15,6 +15,7 @@ export const REGISTRY_V4_VERSION = "scac-mutation-registry.v4";
 export const REGISTRY_V5_VERSION = "scac-mutation-registry.v5";
 export const REGISTRY_V6_VERSION = "scac-mutation-registry.v6";
 export const REGISTRY_V7_VERSION = "scac-mutation-registry.v7";
+export const REGISTRY_V8_VERSION = "scac-mutation-registry.v8";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 // v1-v4 were rebaselined once while still unshipped so their catalog projections
 // matched the reviewed pre-SIEP database. They are sealed historical artifacts now:
@@ -26,6 +27,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:ce312b08ef4d798554bdf2588d669c77f8eb594dbbf08d096b19bb6900e50e86", entryCount: 1253, sourceEntryCount: 736 }),
   v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:a2b76d733da66d7dd950f7eafcc038d1490a31b329e91f85dfdf9f3cd5fcd306", entryCount: 1265, sourceEntryCount: 737 }),
   v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:9a926b4a61d68e1a99bc2086172096e69e411d14cc289beaee3128b4bde15e3c", entryCount: 1274, sourceEntryCount: 741 }),
+  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:ace53ec4012d03815951cd467ef53a9cf8d831677fbab5db1e87abbbe911c7ff", entryCount: 1284, sourceEntryCount: 747 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0338_siep11_mutation_registry.sql": "91bc0c8f93a0779b0720debf3c2eecc4973df1a3fef290c25b2d944386410e52",
@@ -40,6 +42,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v5.generated.js": "8de8271b107966dd530c2a8e89f53bda71e92e88f86e524ce548c07607255c6e",
   "migrations/0351_siep16_forward_mutation_registry.sql": "2bc6ffee5e8c1c2081e8c68e05bed6480450702197f0262c8d0d4b585a5e58a3",
   "mcp-server/src/scac-mutation-registry.v6.generated.js": "b447d8393bb8ffc4599e76fa4d7ff145b8c2d3ae7a7f41d348c41d7ed593bede",
+  "migrations/0353_siep16_integrated_mutation_registry.sql": "ec810c3e9ed26f9c633bdd7b7f07deb41759205a61455bf6368e28197edc25d8",
+  "mcp-server/src/scac-mutation-registry.v7.generated.js": "11dfd332363a8ca15ad6d964a6c7768d2ff4b1ce536bf7ccd4f7ccaf1ec6ff41",
 });
 export const DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v1",
@@ -100,6 +104,15 @@ export const SIEP16_DB_CATALOG_BASELINE = Object.freeze({
 export const SIEP16_INTEGRATED_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v7",
   secdef_execute: { count: 241, digest: "sha256:bb89e7d1c6e254cbb092e9c02b6de538658dc29c90b5606fa31d140eb74621a0" },
+  relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
+  column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
+  role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
+});
+// SIEP-17's forward successor includes the token/challenge authority source
+// surface. Values are measured from disposable-DB readback only.
+export const SIEP17_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  projection_version: "scac-db-catalog-projection.v8",
+  secdef_execute: { count: 254, digest: "sha256:e068bbd32a912a57800170ce813936c05fbc20995b0dbee82f972505223f4e36" },
   relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -569,7 +582,7 @@ export function fullInventory(tools = TOOLS) {
 
 export function registryDigestFor(version, rows = fullInventory(), dbCatalogBaseline = DB_CATALOG_BASELINE) {
   if (![REGISTRY_VERSION, REGISTRY_V2_VERSION, REGISTRY_V3_VERSION, REGISTRY_V4_VERSION,
-    REGISTRY_V5_VERSION, REGISTRY_V6_VERSION, REGISTRY_V7_VERSION].includes(version))
+    REGISTRY_V5_VERSION, REGISTRY_V6_VERSION, REGISTRY_V7_VERSION, REGISTRY_V8_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -1215,6 +1228,109 @@ export function renderSIEP16IntegratedRegistrySql(rows = fullInventory(),
   return `${sql.slice(0, historyStart)}${v6History}${sql.slice(historyEnd)}`;
 }
 
+export function renderSIEP17ForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = SIEP17_FORWARD_DB_CATALOG_BASELINE) {
+  const { v7: v7Seal } = HISTORICAL_REGISTRY_SEALS;
+  const v8Digest = registryDigestFor(REGISTRY_V8_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v7MigrationPath = "migrations/0353_siep16_integrated_mutation_registry.sql";
+  const v7RuntimePath = "mcp-server/src/scac-mutation-registry.v7.generated.js";
+  const v7Migration = readFileSync(resolve(REPO_ROOT, v7MigrationPath), "utf8");
+  for (const path of [v7MigrationPath, v7RuntimePath]) {
+    const observed = sha256(readFileSync(resolve(REPO_ROOT, path), "utf8"));
+    if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
+      throw new Error(`sealed historical SCAC v7 artifact changed: ${path}: ${observed}`);
+  }
+  const currentV7Start = v7Migration.indexOf("create or replace function ops.scac_mutation_catalog_v7_current()");
+  const policyStart = v7Migration.indexOf("alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v6;");
+  if (currentV7Start < 0 || policyStart < currentV7Start)
+    throw new Error("sealed SCAC v7 migration has no exact catalog successor boundary");
+  const v7Current = v7Migration.slice(currentV7Start, policyStart);
+  const v7History = `alter function ops.scac_mutation_catalog_v7_current() rename to scac_mutation_catalog_v7_live_at_seal;\n` +
+`create or replace function ops.scac_mutation_registry_v7_seal_available()\n` +
+`returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$\n` +
+`  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v7')\n` +
+`$fn$;\n` +
+`create or replace function ops.scac_mutation_catalog_v7_current()\n` +
+`returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$\n` +
+`  select ops.scac_mutation_catalog_v7_live_at_seal()\n` +
+`$fn$;\n` +
+`comment on function ops.scac_mutation_registry_v7_seal_available() is 'Exact immutable v7 registry seal; separate from whether the live catalog still equals v7.';\n` +
+`comment on function ops.scac_mutation_catalog_v7_current() is 'Historical v7 live-catalog validator; expected to become false after the v8 authority surface is installed.';\n\n`;
+  const v8Current = v7Current
+    .replaceAll("scac_mutation_catalog_v7_current", "scac_mutation_catalog_v8_current")
+    .replaceAll("scac-mutation-registry.v7", "scac-mutation-registry.v8")
+    .replace(`if observed_count<>${SIEP16_INTEGRATED_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SIEP16_INTEGRATED_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false; end if;`,
+      `if observed_count<>${dbCatalogBaseline.secdef_execute.count} or observed_digest<>'${dbCatalogBaseline.secdef_execute.digest}' then return false; end if;`);
+  let sql = v7Migration.replace(v7Current, "__SIEP17_V7_CATALOG_SUCCESSOR__")
+    .replace("-- SIEP-16 / SCAC-06: forward-only mutation registry v7.",
+      "-- SIEP-17 / SCAC-07: forward-only mutation registry v8.")
+    .replaceAll("scac-mutation-registry.v7", "scac-mutation-registry.v8")
+    .replaceAll("_v7", "_v8")
+    .replaceAll(" v7", " v8")
+    .replaceAll(JSON.stringify(SIEP16_INTEGRATED_DB_CATALOG_BASELINE), JSON.stringify(dbCatalogBaseline))
+    .replace(`'sha256:${v7Seal.digest.slice("sha256:".length)}',${v7Seal.entryCount},${v7Seal.sourceEntryCount},`,
+      `'sha256:${v8Digest}',${entryCount},${rows.length},`)
+    .replace(`ops.scac_mutation_registration_v8('sha256:${v7Seal.digest.slice("sha256:".length)}',`,
+      `ops.scac_mutation_registration_v8('sha256:${v8Digest}',`)
+    .replace("alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v6;",
+      "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v7;")
+    .replace("__SIEP17_V7_CATALOG_SUCCESSOR__", `${v7History}${v8Current}`);
+
+  const v7CatalogJson = JSON.stringify(SIEP16_INTEGRATED_DB_CATALOG_BASELINE);
+  const v8CatalogJson = JSON.stringify(dbCatalogBaseline);
+  sql = sql
+    .replace("check (registry_version in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v8'))",
+      "check (registry_version in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8'))")
+    .replace("if p_registry_version not in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6') then return false; end if;",
+      "if p_registry_version not in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7') then return false; end if;")
+    .replace(`    when 'scac-mutation-registry.v6' then '${HISTORICAL_REGISTRY_SEALS.v6.digest}' end;`,
+      `    when 'scac-mutation-registry.v6' then '${HISTORICAL_REGISTRY_SEALS.v6.digest}'\n    when '${v7Seal.version}' then '${v7Seal.digest}' end;`)
+    .replace(`    when 'scac-mutation-registry.v6' then '${JSON.stringify(SIEP16_DB_CATALOG_BASELINE)}'::jsonb end;`,
+      `    when 'scac-mutation-registry.v6' then '${JSON.stringify(SIEP16_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v7Seal.version}' then '${v7CatalogJson}'::jsonb end;`)
+    .replace(`    ('scac-mutation-registry.v6','${HISTORICAL_REGISTRY_SEALS.v6.digest}',1274,741)\n`,
+      `    ('scac-mutation-registry.v6','${HISTORICAL_REGISTRY_SEALS.v6.digest}',1274,741),\n    ('${v7Seal.version}','${v7Seal.digest}',${v7Seal.entryCount},${v7Seal.sourceEntryCount})\n`)
+    .replace("    ops.scac_mutation_registry_v6_seal_available()) then",
+      "    ops.scac_mutation_registry_v6_seal_available() and\n    ops.scac_mutation_registry_v7_seal_available()) then")
+    .replace(`or (r.registry_version='scac-mutation-registry.v8' and r.registry_digest='${v7Seal.digest}')`,
+      `or (r.registry_version='scac-mutation-registry.v7' and r.registry_digest='${v7Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v8' and r.registry_digest='sha256:${v8Digest}')`)
+    .replace(`  (registry_version='scac-mutation-registry.v8' and registry_digest='${v7Seal.digest}')`,
+      `  (registry_version='scac-mutation-registry.v7' and registry_digest='${v7Seal.digest}') or\n  (registry_version='scac-mutation-registry.v8' and registry_digest='sha256:${v8Digest}')`)
+    .replace(`'{registry_digest}',to_jsonb('${v7Seal.digest}'::text)`,
+      `'{registry_digest}',to_jsonb('sha256:${v8Digest}'::text)`)
+    .replace("ops.scac_mutation_registry_v6_seal_available(),ops.scac_mutation_catalog_v8_current()",
+      "ops.scac_mutation_registry_v6_seal_available(),ops.scac_mutation_catalog_v7_live_at_seal(),ops.scac_mutation_catalog_v7_current(),ops.scac_mutation_registry_v7_seal_available(),ops.scac_mutation_catalog_v8_current()")
+    .replace("SIEP-16 integrated successor snapshot: current policy epochs bind mutation registry v8 while historical v2/v3/v4/v5/v6 epochs remain immutable.",
+      "SIEP-17 successor snapshot: current policy epochs bind mutation registry v8 while historical v2/v3/v4/v5/v6/v7 epochs remain immutable.");
+  sql = sql
+    .replace("(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v8')<>1284",
+      `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v8')<>${entryCount}`)
+    .replace(`if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v6')<>'${HISTORICAL_REGISTRY_SEALS.v6.digest}'
+     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v6')<>${HISTORICAL_REGISTRY_SEALS.v6.entryCount} then raise exception 'sealed SCAC mutation registry v6 changed during successor creation'; end if;`,
+      `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v7')<>'${v7Seal.digest}'
+     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v7')<>${v7Seal.entryCount} then raise exception 'sealed SCAC mutation registry v7 changed during successor creation'; end if;`);
+  const duplicateV6HistoryStart = sql.indexOf(
+    "alter function ops.scac_mutation_catalog_v6_current() rename to scac_mutation_catalog_v6_live_at_seal;");
+  const v7HistoryStart = sql.indexOf(
+    "alter function ops.scac_mutation_catalog_v7_current() rename to scac_mutation_catalog_v7_live_at_seal;");
+  if (duplicateV6HistoryStart < 0 || v7HistoryStart <= duplicateV6HistoryStart)
+    throw new Error("generated SCAC v8 migration has no exact duplicate-v6 history boundary");
+  sql = `${sql.slice(0, duplicateV6HistoryStart)}${sql.slice(v7HistoryStart)}`
+    .replace("ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),",
+      "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker) + seedStartMarker.length;
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart);
+  if (seedStart < seedStartMarker.length || seedEnd < seedStart)
+    throw new Error("sealed SCAC v7 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  return `${sql.slice(0, seedStart)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+}
+
 function renderMigration(rows = fullInventory()) {
   const digest = registryDigest(rows);
   const sourceCounts = Object.fromEntries(
@@ -1368,6 +1484,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   } else if (process.argv[2] === "--write-siep16-integrated-registry-migration") {
     const target = resolve(process.argv[3] || "migrations/0353_siep16_integrated_mutation_registry.sql");
     await writeFile(target, renderSIEP16IntegratedRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v8") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v8.generated.js");
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V8_VERSION,
+      dbCatalogBaseline: SIEP17_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-siep17-forward-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0356_siep17_forward_mutation_registry.sql");
+    await writeFile(target, renderSIEP17ForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
   } else {
     process.stdout.write(`${JSON.stringify({ schema_version: REGISTRY_VERSION, digest: registryDigest(rows), rows }, null, 2)}\n`);
