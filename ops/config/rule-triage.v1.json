@@ -295,8 +295,8 @@
    "id": "308ef1de",
    "title_gist": "TWO-WRITER DISCIPLINE COVERS THE GIT WORKING TREE",
    "home": "gate",
-   "reason": "Already machine-enforced via control 'git_writer' (hooks/git-writer-gate.py); binds before shared-tree git action. Failure mode on violation: PreToolUse deny",
-   "carrying_control": "git_writer"
+   "reason": "WR-000019 slice S3 (2026-08-27) retired hooks/git-writer-gate.py; reassigned to control 'pr_only_main_ruleset' (the PR-only main ruleset + required hosted CI, backed locally by ops/githooks/pre-commit), the same structural control the enforcement map itself now names for this rule. Binds later than the retired gate did -- at merge, not the git command itself. Failure mode on violation: server-side push rejection / local pre-commit refusal on a direct main commit",
+   "carrying_control": "pr_only_main_ruleset"
   },
   {
    "id": "30a189fb",
