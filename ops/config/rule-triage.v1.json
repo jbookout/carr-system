@@ -357,8 +357,8 @@
    "id": "3a9dbafd",
    "title_gist": "NEVER MAKE A PARTNER DECODE AN ID. Say what the thing IS, in plain words, every time",
    "home": "gate",
-   "reason": "Already machine-enforced via control 'chat_lint' (hooks/chat-lint-gate.py, hooks/chat-lint-carryover.py); binds a reply to a partner carrying a bare id. Failure mode on violation: deferred surfacing \u2014 the finding is parked and injected as context before the NEXT reply (UserPromptSubmit); it does not block the",
-   "carrying_control": "chat_lint"
+   "reason": "Already machine-enforced via control 'conduct_stop' (hooks/conduct-stop-gate.py bare_id_hits(), backed by hooks/conduct_patterns.py BARE_ID + ID_EXPLAINED); binds a reply to a partner carrying a bare id, pre-send at Stop. Failure mode on violation: Stop block \u2014 the turn is held open until the id is explained. Detection moved from chat_lint 2026-08-22; corrected here 2026-08-27.",
+   "carrying_control": "conduct_stop"
   },
   {
    "id": "3b0cd546",

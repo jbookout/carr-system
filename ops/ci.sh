@@ -486,7 +486,21 @@ if portable:
 PYEOF
   }
 
-  for t in ops/*-selftest.py tools/test-*.py; do
+  # BOTH NAMING STYLES ARE COLLECTED, deliberately. This globbed only
+  # tools/test-*.py, so three underscore-named tests — test_displacement_turn_-
+  # filter.py, test_staging_recovery_rehearsal.py and
+  # test_validate_exact_recovery_source.py — sat in the tree from their commits
+  # until 2026-08-27 and executed exactly zero times. Same failure shape as the
+  # uncollected shell tests below: something that looks like coverage and is not.
+  # The repo's script convention is the hyphen, but test_foo.py is what pytest's
+  # own default discovery convention produces, so the underscore arrives by
+  # habit and will keep arriving; matching both is cheaper than renaming files
+  # forever and leaves no pointer to a moved path dangling. What actually keeps
+  # this honest is not the pattern but the invariant behind it:
+  # ops/ci-selftest.py's test_every_test_file_in_the_tree_is_collected reads
+  # these globs back out of this file and fails if ANY test-shaped file in the
+  # tree is matched by none of them.
+  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
     local why; why="$(excluded_reason "$base")"
@@ -533,7 +547,7 @@ PYEOF
   # Python wrapper around them would only shell out to the same script.
   # Everything else is identical to the loop above: same exclusion scope, same
   # counting, same captured log and same 12-line tail on failure.
-  if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh; do
+  if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh tools/test_*.sh; do
     [ -f "$t" ] || continue
     local sbase; sbase="$(basename "$t")"
     local swhy; swhy="$(excluded_reason "$sbase")"
@@ -635,11 +649,24 @@ PYEOF
   # any rule the two sides classify structurally differently. It does not
   # require full coverage between the files, so it stays cheap and honest on a
   # freshly-seeded, mostly-empty export exactly as it will on a fully synced one.
+  # boot-budget-check and core-rule-ids-check JOINED HERE (WR-000019 slice
+  # S11, boot diet). Same kind again: repository content only, no machine
+  # state, no database. boot-budget-check reads CLAUDE.md, the connector's
+  # initialize instructions block in mcp-server/src/mcp.js, and a committed
+  # snapshot of the standing-context payload (ops/config/boot-budget-core-
+  # fixture.v1.json, refreshed by hand -- this check has no database to call
+  # standing-context with) against ops/config/boot-budget.v1.json's ceiling,
+  # and fails the push the same way an overage would go unnoticed otherwise:
+  # silently, at the next session's boot. core-rule-ids-check is the parity
+  # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
+  # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
+  # reads because a Cloudflare Worker has no filesystem at request time.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
-             mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
+             mechanism-doctrine-gate scheduler-cutover-coverage-gate \
+             boot-budget-check core-rule-ids-check; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
