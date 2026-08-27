@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Rollback-only acceptance for SIEP-13 artifact/signature/transparency facts."""
 
 from __future__ import annotations

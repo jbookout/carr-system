@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Rollback-only DB acceptance for SIEP-12's monotonic policy epoch."""
 
 from __future__ import annotations

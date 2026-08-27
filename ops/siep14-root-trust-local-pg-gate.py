@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Rollback-only acceptance for SIEP-14 root quorum and revocation facts."""
 
 from __future__ import annotations

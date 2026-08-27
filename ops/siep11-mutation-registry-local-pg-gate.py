@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Rollback-only DB acceptance for SIEP-11's immutable ingress registry."""
 
 from __future__ import annotations
@@ -17,12 +18,17 @@ sys.path.insert(0, str(REPO))
 from lib.control_plane_scheduler_cutover import scheduler_launchd_rows  # noqa: E402
 
 
+JOB_DEFINITION_CATALOG = {
+    "count": 26,
+    "digest": "sha256:77f78187fa6c79c864ae6f33d8ac53ca983fbfc62d6eddf824373f26afb67407",
+}
+
 EXPECTED_CATALOG = {
     "categories": {
         "secdef_execute": {"count": 205, "digest": "sha256:394508cc8ad50bf7193d857a36fcb35bfa601eccbcf35e70c4fff6c119b5b562"},
         "relation_dml": {"count": 284, "digest": "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345"},
         "column_dml": {"count": 12, "digest": "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},
-        "job_definitions": {"count": 26, "digest": "sha256:77f78187fa6c79c864ae6f33d8ac53ca983fbfc62d6eddf824373f26afb67407"},
+        "job_definitions": JOB_DEFINITION_CATALOG,
     },
     "combined": {"count": 527, "digest": "sha256:ff7bb02d3db9f755f7190a6b65d92590043c36800c289ecedb302f1c477a09f1"},
 }
@@ -122,7 +128,7 @@ def main() -> int:
                 "secdef_execute": successor[1]["secdef_execute"],
                 "relation_dml": successor[1]["relation_dml"],
                 "column_dml": successor[1]["column_dml"],
-                "job_definitions": EXPECTED_CATALOG["categories"]["job_definitions"],
+                "job_definitions": JOB_DEFINITION_CATALOG,
             }
             if catalog["categories"] != expected_categories:
                 raise RuntimeError(f"fresh DB mutation catalog drifted: {catalog!r}")
@@ -136,7 +142,7 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             lookup_function = f"ops.scac_mutation_registration_{runtime_version.rsplit('.', 1)[1]}"
             runtime_digest = cur.execute(
