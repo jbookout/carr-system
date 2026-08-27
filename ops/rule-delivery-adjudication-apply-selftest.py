@@ -29,10 +29,9 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
-import os
-import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -89,11 +88,11 @@ check("word matching inside a span is case-insensitive",
       case_insensitive == [("records-intake", "merge")], case_insensitive)
 
 # 3. occurrence counting: only "explained" counts, aggregated across files
-with tempfile.TemporaryDirectory() as tmp:
-    tmp = Path(tmp)
+with tempfile.TemporaryDirectory() as tmp_str:
+    tmp_dir = Path(tmp_str)
 
     def adjudication_file(name: str, events: list[dict]) -> Path:
-        path = tmp / name
+        path = tmp_dir / name
         path.write_text(json.dumps({
             "schema": "rule-delivery-shadow-adjudication/v1",
             "created_on": "2026-08-27", "events": events,
@@ -115,7 +114,7 @@ with tempfile.TemporaryDirectory() as tmp:
           occurrences.get(("records-intake", "merge")) == ["e1", "e3"], occurrences)
 
     # 4. threshold and already-excluded skip
-    triage_none_excluded = {"rules": []}
+    triage_none_excluded: dict[str, Any] = {"rules": []}
     changes_at_2 = mod.proposed_changes(occurrences, triage_none_excluded, min_occurrences=2)
     check("a pair reaching the threshold is proposed",
           changes_at_2 == [{"pack": "records-intake", "term": "merge", "occurrences": 2,
@@ -129,7 +128,7 @@ with tempfile.TemporaryDirectory() as tmp:
           changes_excluded == [], changes_excluded)
 
 # 5. apply_changes idempotency and multi-pack independence
-base_triage = {"rules": []}
+base_triage: dict[str, Any] = {"rules": []}
 one_change = [{"pack": "records-intake", "term": "merge", "occurrences": 6, "event_ids": []}]
 applied_once = mod.apply_changes(copy.deepcopy(base_triage), one_change)
 applied_twice = mod.apply_changes(copy.deepcopy(applied_once), one_change)
@@ -152,11 +151,11 @@ check("a new excluded term is added to, not replacing, an existing entry's list"
       == ["merge", "party"], applied_onto_existing)
 
 # 6. end-to-end, fully isolated from the real repo's config
-with tempfile.TemporaryDirectory() as tmp:
-    tmp = Path(tmp)
-    map_path = tmp / "rule-enforcement-map.json"
-    triage_path = tmp / "rule-triage.v1.json"
-    output_path = tmp / "rule-jit-triggers.v1.json"
+with tempfile.TemporaryDirectory() as tmp_str2:
+    tmp_dir2 = Path(tmp_str2)
+    map_path = tmp_dir2 / "rule-enforcement-map.json"
+    triage_path = tmp_dir2 / "rule-triage.v1.json"
+    output_path = tmp_dir2 / "rule-jit-triggers.v1.json"
 
     map_data = {
         "rule_packs": {
@@ -176,7 +175,7 @@ with tempfile.TemporaryDirectory() as tmp:
     map_path.write_text(json.dumps(map_data), encoding="utf-8")
     triage_path.write_text(json.dumps(triage_data, indent=1), encoding="utf-8")
 
-    adjudication_path = tmp / "adjudication.json"
+    adjudication_path = tmp_dir2 / "adjudication.json"
     adjudication_path.write_text(json.dumps({
         "schema": "rule-delivery-shadow-adjudication/v1", "created_on": "2026-08-27",
         "events": [
