@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
 
@@ -8,15 +7,17 @@ import {
   DB_CATALOG_BASELINE,
   discoverScriptEntrypoints,
   fullInventory,
+  HISTORICAL_REGISTRY_ARTIFACT_SHA256,
+  HISTORICAL_REGISTRY_SEALS,
   jobDefinitionInventory,
   JOB_DEFINITION_BASELINE,
   mcpInventory,
   parsePlistXml,
   registryDigest,
   REGISTRY_V5_VERSION,
-  renderMigration,
   renderRuntimeProjection,
   renderSIEP15RegistrySql,
+  sha256,
   SIEP15_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
   validateLaunchdAuthorityCatalogs,
@@ -54,9 +55,9 @@ const v5Migration = fs.readFileSync(
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory();
-  assert.equal(rows.length, 185);
+  assert.equal(rows.length, 186);
   assert.equal(rows.filter(row => row.write).length, 128);
-  assert.equal(rows.filter(row => !row.write).length, 57);
+  assert.equal(rows.filter(row => !row.write).length, 58);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -64,33 +65,44 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   assert.throws(() => { TOOLS["add-loop"].handler = async () => ({ ok: true }); }, TypeError);
   assert.equal(new Set(rows.map(row => row.ingress_key)).size, rows.length);
   assert.equal(new Set(rows.map(row => row.schema_digest)).has(undefined), false);
+  const governanceQueue = rows.find(row => row.operation === "governance-queue");
+  assert.ok(governanceQueue);
+  assert.equal(governanceQueue.write, false);
+  assert.equal(governanceQueue.human_only, false);
+  assert.equal(governanceQueue.authority_only, false);
+  assert.equal(governanceQueue.effect_class, "audit_side_effect");
+  assert.equal(governanceQueue.classification_authorizing, false);
 });
 
 test("sealed v1/v2/v3/v4 stay historical while live source and DB projections advance exactly to v5", () => {
   const rows = fullInventory();
-  assert.equal(crypto.createHash("sha256").update(migration).digest("hex"),
-    "b8e6f76ab926eae7cc2ee64a9505be7fa4d65837c48a9bcf4c040c6dad6fc714");
-  assert.match(generated,
-    /SCAC_MUTATION_REGISTRY_DIGEST = "d821ab892e4f9aeb97c4dfc040fd9e072c5d009685b1521fd463cc8268df5038"/);
+  const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal } = HISTORICAL_REGISTRY_SEALS;
+  const historicalArtifacts = new Map([
+    ["migrations/0338_siep11_mutation_registry.sql", migration],
+    ["migrations/0339_siep12_policy_epoch.sql", successorMigration],
+    ["migrations/0341_siep13_forward_mutation_registry.sql", v3Migration],
+    ["migrations/0343_siep14_forward_mutation_registry.sql", v4Migration],
+    ["mcp-server/src/scac-mutation-registry.generated.js", generated],
+    ["mcp-server/src/scac-mutation-registry.v2.generated.js", generatedV2],
+    ["mcp-server/src/scac-mutation-registry.v3.generated.js", generatedV3],
+    ["mcp-server/src/scac-mutation-registry.v4.generated.js", generatedV4],
+  ]);
+  for (const [path, contents] of historicalArtifacts)
+    assert.equal(sha256(contents), HISTORICAL_REGISTRY_ARTIFACT_SHA256[path], `${path} changed after seal`);
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
     JSON.parse(generatedV5.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
   assert.match(generated, /SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry\.v1"/);
-  assert.equal(crypto.createHash("sha256").update(successorMigration).digest("hex"),
-    "23cc10c2074afea130142486c131eef6096d55e36bd3cbb1fc52e0c67a6daaeb");
-  assert.equal(crypto.createHash("sha256").update(generatedV2).digest("hex"),
-    "8775f50745dacd234a0b399ab705404abb65fddd4b29fbea55f8f0d3e753f1af");
-  assert.equal(crypto.createHash("sha256").update(generatedV3).digest("hex"),
-    "384c7a9a7bb900666ef1436317946ec0d2fc92b91e6ffee11a31118544319b8a");
-  assert.equal(crypto.createHash("sha256").update(v3Migration).digest("hex"),
-    "9bbd01e19a81d36f31965b0ebc0685e18faaeb00c7208a4f0cf931fbaf5231dd");
-  assert.equal(crypto.createHash("sha256").update(generatedV4).digest("hex"),
-    "b6b9c5dc68123fac4da707d7a8c6e78d7f09f0a12a647d2190e8e2194c69f3cf");
-  assert.equal(crypto.createHash("sha256").update(v4Migration).digest("hex"),
-    "93bcf7e33f303c7abbfa3c27a61662f95fe9c9b00a4caf6870674945a0fed98b");
   assert.equal(generatedV5, renderRuntimeProjection(rows, {
     version: REGISTRY_V5_VERSION, dbCatalogBaseline: SIEP15_DB_CATALOG_BASELINE,
   }));
   assert.equal(v5Migration, renderSIEP15RegistrySql(rows));
+  const expectedV5EntryCount = rows.length + SIEP15_DB_CATALOG_BASELINE.secdef_execute.count +
+    SIEP15_DB_CATALOG_BASELINE.relation_dml.count + SIEP15_DB_CATALOG_BASELINE.column_dml.count;
+  assert.match(v5Migration, new RegExp(`'sha256:[0-9a-f]{64}',${expectedV5EntryCount},${rows.length},`));
+  assert.match(v5Migration,
+    new RegExp(`registry_version='scac-mutation-registry\\.v5'\\)<>${expectedV5EntryCount}`));
+  assert.match(v5Migration,
+    new RegExp(`if observed_count<>${SIEP15_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SIEP15_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false`));
   assert.match(successorMigration, /scac-mutation-registry\.v1/);
   assert.match(successorMigration, /scac-mutation-registry\.v2/);
   assert.match(v3Migration, /scac-mutation-registry\.v3/);
@@ -105,14 +117,8 @@ test("sealed v1/v2/v3/v4 stay historical while live source and DB projections ad
   assert.match(v5Migration, /ops\.scac_mutation_registry_v4_seal_available\(\)/);
   assert.match(v5Migration, /source:=ops\.scac_policy_epoch_snapshot_v3\(\)/);
   assert.doesNotMatch(v5Migration, /source:=ops\.scac_policy_epoch_snapshot_v4\(\)/);
-  assert.match(v5Migration,
-    /\('scac-mutation-registry\.v1','sha256:d821ab892e4f9aeb97c4dfc040fd9e072c5d009685b1521fd463cc8268df5038',1230,729\)/);
-  assert.match(v5Migration,
-    /\('scac-mutation-registry\.v2','sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231',1235,730\)/);
-  assert.match(v5Migration,
-    /\('scac-mutation-registry\.v3','sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec',1240,731\)/);
-  assert.match(v5Migration,
-    /\('scac-mutation-registry\.v4','sha256:dc605d6d2290ac683ad2d544ad1e1ebe0d6983064a3dd232915c1c5342f8504b',1245,732\)/);
+  for (const seal of [v1Seal, v2Seal, v3Seal, v4Seal])
+    assert.match(v5Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
   assert.doesNotMatch(v5Migration, /Retain v2 as an exact historical lookup after the live catalog advances/);
 });
 
@@ -164,7 +170,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 494);
+  assert.equal(rows.length, 496);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -172,7 +178,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 485);
+  assert.equal(scripts.length, 487);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -184,6 +190,18 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   assert.equal(scripts.some(path => path === "ops/githooks/pre-commit"), true);
   assert.equal(scripts.some(path => path === "ops/githooks/pre-push"), true);
   assert.equal(scripts.some(path => path === "ops/githooks/commit-msg"), true);
+  for (const path of [
+    "ops/capture-verb-reachability.py",
+    "ops/gate-lifecycle-report.py",
+    "ops/rule-triage-apply.py",
+    "ops/rule-triage-report.py",
+    "ops/zz-engineering-controller-concurrency-gate.py",
+  ]) assert.equal(scripts.includes(path), true, `${path} must be registered`);
+  for (const path of [
+    "hooks/canonical-edit-gate.py",
+    "hooks/git-writer-gate.py",
+    "hooks/staging-attribution-gate.py",
+  ]) assert.equal(scripts.includes(path), false, `${path} was retired upstream`);
   assert.equal(scripts.some(path => path.includes("selftest") || path.includes("/test/")), false);
   assert.deepEqual(rows.filter(row => ["script_entrypoint", "external_admin", "break_glass"].includes(row.ingress_kind))
     .map(row => row.source_locator).sort(), scripts);
@@ -201,7 +219,7 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
   assert.equal(jobs.every(row => row.ingress_kind === "job_definition" && row.entrypoint), true);
   assert.deepEqual(DB_CATALOG_BASELINE, {
     projection_version: "scac-db-catalog-projection.v1",
-    secdef_execute: { count: 205, digest: "sha256:394508cc8ad50bf7193d857a36fcb35bfa601eccbcf35e70c4fff6c119b5b562" },
+    secdef_execute: { count: 209, digest: "sha256:109b9317f077a95f1875473a225ae375a7d8b2f8822dbd7e00d0aca34e24bcfe" },
     relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
     column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   });

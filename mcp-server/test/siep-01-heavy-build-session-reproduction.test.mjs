@@ -61,15 +61,122 @@ function passportFacts() {
   };
   const plan = { ...preimage, plan_digest: canonicalDigest(preimage) };
   const good = fixture.observations.find(item => item.case === "fully_observed");
+  const slicePlanId = binding.engineering_slice_plan.id;
+  const workRequestId = binding.work_request.id;
+  const createdAt = "2026-08-26T00:00:00Z";
+  const receiptEvidence = {
+    ref: "evidence:siep01:receipt",
+    content_digest: `sha256:${"4".repeat(64)}`,
+    redaction_class: "metadata_only",
+  };
+  const reviewEvidence = {
+    ref: "evidence:siep01:review",
+    content_digest: `sha256:${"5".repeat(64)}`,
+    redaction_class: "metadata_only",
+  };
+  const envelope = {
+    id: good.envelope.id,
+    job_id: good.job.id,
+    agent_session_id: good.capability_session_id,
+    envelope_digest: good.envelope.digest,
+    work_request_id: workRequestId,
+    slice_plan_id: slicePlanId,
+    slice_ref: good.slice_ref,
+    created_at: createdAt,
+    issued_at: createdAt,
+    supersedes_envelope_id: null,
+    envelope: {
+      envelope_id: `env:${good.envelope.id}`,
+      request: { job_ref: `job:${good.job.id}` },
+      agent_session: { id: `session:${good.capability_session_id}` },
+      server_binding: {
+        identity: { agent_principal_id: "agent:siep01-executor" },
+        adapter: { adapter_id: "adapter:siep01" },
+      },
+    },
+  };
+  const receipt = {
+    actual_component_refs: ["component:engineering-passport"],
+    actual_resource_refs: ["resource:canonical-ledgers"],
+    artifact_refs: ["artifact:siep01:good"],
+    attribution: {
+      actor_ref: "agent:siep01-executor",
+      adapter_ref: "adapter:siep01",
+      session_ref: `session:${good.capability_session_id}`,
+    },
+    attempt_id: "attempt:1",
+    checks: [{ check_ref: "check:siep01:1", evidence_refs: [receiptEvidence], state: "passed" }],
+    deviations: [],
+    envelope_digest: good.envelope.digest,
+    evidence_refs: [receiptEvidence],
+    executor_claim: { claim_state: "executor_claim", claimed_at: createdAt, claimed_by: "siep01-executor" },
+    independent_verification_required: true,
+    outcome: "claimed_complete",
+    plan_digest: plan.plan_digest,
+    planned_component_refs: ["component:engineering-passport"],
+    planned_resource_refs: ["resource:canonical-ledgers"],
+    reset_reconstruction: {
+      fresh_session: true,
+      inherited_transcript_used: false,
+      reconstruction_free: true,
+      remediation_action: null,
+    },
+    schema_version: "engineering-slice-receipt.v1",
+    slice_ref: good.slice_ref,
+    source_evidence: {
+      branch_ref: "branch:siep01-fixture",
+      evidence_refs: [receiptEvidence],
+      source_sha: fixture.source_commit_sha,
+      worktree_ref: "worktree:siep01-fixture",
+    },
+  };
+  const receiptRow = {
+    id: good.engineering_receipt.id,
+    envelope_id: good.envelope.id,
+    work_request_id: workRequestId,
+    slice_ref: good.slice_ref,
+    attempt_id: "attempt:1",
+    outcome: "claimed_complete",
+    executor_actor_id: good.executor_actor_id,
+    executor_actor_active: true,
+    executor_actor_slug: "siep01-executor",
+    created_at: createdAt,
+    receipt,
+    receipt_digest: canonicalDigest(receipt),
+  };
+  const reviewerSessionRef = "session:siep01-reviewer";
   return {
     source: {
       work_request: { id: `wr:${binding.work_request.id}`, version: binding.work_request.version, canonical_record_digest: binding.work_request.canonical_digest },
       accepted_plan: { record_id: binding.accepted_plan.record_id, plan_ref: binding.accepted_plan.ref, revision: binding.accepted_plan.revision, digest: binding.accepted_plan.hash },
     },
-    slice_plans: [{ accepted_plan_id: binding.accepted_plan.record_id, accepted_plan_hash: binding.accepted_plan.hash, plan }],
-    envelopes: fixture.observations.map(item => ({ envelope: { envelope_id: item.envelope.id, slice_ref: item.slice_ref } })),
-    receipts: [{ receipt: { slice_ref: good.slice_ref, attempt_id: "attempt:1", outcome: "claimed_complete", evidence_refs: [], deviations: [] } }],
-    reviewer_facts: [{ fact: { slice_ref: good.slice_ref, attempt_id: "attempt:1", state: "passed" } }],
+    slice_plans: [{ id: slicePlanId, accepted_plan_id: binding.accepted_plan.record_id, accepted_plan_hash: binding.accepted_plan.hash, plan }],
+    envelopes: [envelope],
+    receipts: [receiptRow],
+    reviewer_facts: [{
+      id: good.reviewer_fact.id,
+      receipt_id: good.engineering_receipt.id,
+      work_request_id: workRequestId,
+      slice_ref: good.slice_ref,
+      reviewer_actor_id: good.reviewer_fact.reviewer_actor_id,
+      reviewer_actor_active: true,
+      reviewer_actor_slug: "siep01-reviewer",
+      contract_version: "engineering-review.v1",
+      reviewer_session_ref: reviewerSessionRef,
+      state: "passed",
+      created_at: createdAt,
+      fact: {
+        attempt_id: "attempt:1",
+        evidence_refs: [reviewEvidence],
+        is_independent: true,
+        resolved_deviation_refs: [],
+        reviewed_deviation_refs: [],
+        reviewer_ref: "reviewer:siep01-reviewer",
+        session_ref: reviewerSessionRef,
+        slice_ref: good.slice_ref,
+        state: "passed",
+      },
+    }],
   };
 }
 

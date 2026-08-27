@@ -23,8 +23,8 @@ begin
   select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key),''),'UTF8'),'sha256'),'hex'),
          coalesce(bool_or(entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')),false)
     into actual_count,actual_set,bad_hash from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v1';
-  if v.registry_digest<>'sha256:d821ab892e4f9aeb97c4dfc040fd9e072c5d009685b1521fd463cc8268df5038'
-     or actual_count<>1230 or actual_set is distinct from v.entry_set_digest or bad_hash then
+  if v.registry_digest<>'sha256:717ab5b0d045a176fda05b285d3053b454487ce5f8588f8fbe60191d82e6d844'
+     or actual_count<>1241 or actual_set is distinct from v.entry_set_digest or bad_hash then
     raise exception 'SIEP-12 refuses because sealed mutation registry v1 is not exact';
   end if;
 end $guard$;

@@ -16,7 +16,6 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 from scac_mutation_db_inventory import project, project_role_authority, summarize
 
 REPO = Path(__file__).resolve().parents[1]
-V1_DIGEST = "sha256:d821ab892e4f9aeb97c4dfc040fd9e072c5d009685b1521fd463cc8268df5038"
 
 
 def fail(message: str) -> int:
@@ -57,11 +56,12 @@ def deferred_refusal(cur, mutation: str, fragment: str) -> None:
     raise RuntimeError(f"expected deferred refusal containing {fragment!r}")
 
 
-def generated_v2_digest() -> str:
-    source = (REPO / "mcp-server/src/scac-mutation-registry.v2.generated.js").read_text(encoding="utf-8")
+def generated_registry_digest(version: int) -> str:
+    suffix = "" if version == 1 else f".v{version}"
+    source = (REPO / f"mcp-server/src/scac-mutation-registry{suffix}.generated.js").read_text(encoding="utf-8")
     match = re.search(r'SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})"', source)
     if not match:
-        raise RuntimeError("generated v2 runtime projection lacks one digest")
+        raise RuntimeError(f"generated v{version} runtime projection lacks one digest")
     return "sha256:" + match.group(1)
 
 
@@ -133,14 +133,15 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL or CARR_LOCAL_PG_DSN is required")
     try:
-        expected_v2 = generated_v2_digest()
+        expected_v1 = generated_registry_digest(1)
+        expected_v2 = generated_registry_digest(2)
         migration = REPO / "migrations/0339_siep12_policy_epoch.sql"
         migration_sha = hashlib.sha256(migration.read_bytes()).hexdigest()
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             v1 = cur.execute(
                 "select registry_digest,entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1'"
             ).fetchone()
-            if v1 != (V1_DIGEST, 1230):
+            if v1 != (expected_v1, 1241):
                 raise RuntimeError(f"sealed v1 changed: {v1!r}")
             v2 = cur.execute(
                 """select registry_digest,entry_count,source_entry_count,catalog_projection,
@@ -186,12 +187,12 @@ def main() -> int:
                 ).fetchone()
                 raise RuntimeError(f"exact v2 lookup refused the sealed registry: {lookup!r}; integrity={v2_integrity!r}")
             downgrade = cur.execute(
-                "select ops.scac_mutation_registration_v2(%s,'mcp-tool:standing-context')", (V1_DIGEST,)
+                "select ops.scac_mutation_registration_v2(%s,'mcp-tool:standing-context')", (expected_v1,)
             ).fetchone()[0]
             if downgrade["registered"] or downgrade["reason"] != "digest_mismatch":
                 raise RuntimeError("v2 lookup accepted a v1 downgrade")
             historical_signature = cur.execute(
-                "select ops.scac_mutation_registration(%s,'mcp-tool:standing-context')", (V1_DIGEST,)
+                "select ops.scac_mutation_registration(%s,'mcp-tool:standing-context')", (expected_v1,)
             ).fetchone()[0]
             if not historical_signature["registered"] or historical_signature["registry_version"] != "scac-mutation-registry.v1":
                 raise RuntimeError("owner-only historical v1 audit lookup is unavailable")

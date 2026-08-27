@@ -19,8 +19,6 @@
 -- a direct multi-table read. This function is read-only: it selects, it never
 -- inserts, updates, or deletes, and it opens no new write path.
 
-begin;
-
 create function ops.read_governance_queue() returns jsonb
     language sql stable security definer
     set search_path to 'ops', 'public', 'pg_temp'
@@ -61,8 +59,6 @@ $$;
 grant execute on function ops.read_governance_queue() to carr_reader;
 grant execute on function ops.read_governance_queue() to carr_writer;
 grant execute on function ops.read_governance_queue() to carr_authority;
-
-commit;
 
 do $$
 declare def text;

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -25,6 +26,11 @@ def one(cur, query: str, params: tuple = ()):
     if row is None:
         raise RuntimeError("required row was not returned")
     return row
+
+
+def canonical_digest(value) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def refusal(cur, query: str, params: tuple, fragment: str) -> None:
@@ -76,8 +82,9 @@ def main() -> int:
                 raise RuntimeError("empty package projection did not remain truthful")
 
             manifest = one(cur, "select ops.siep_manifest_digest()")[0]
-            wr_id, wr_version, captured_at = one(
-                cur, "select id,version,captured_at from ops.work_request where ref='WR-SIEP-06A'"
+            wr_id, wr_version, captured_at, shape_ref, shape_rationale = one(
+                cur, """select id,version,captured_at,shape_fixed_surface_ref,shape_rationale
+                          from ops.work_request where ref='WR-SIEP-06A'"""
             )
             joe_id = one(cur, "select id from public.actor where slug='joe' and active")[0]
             codex_id = one(cur, "select id from public.actor where slug='codex' and active")[0]
@@ -116,15 +123,58 @@ def main() -> int:
                 (wr_id, uuid.uuid4(), wr_version, Jsonb({}), section_id, revision_id, "c" * 64,
                  Jsonb([]), Jsonb({}), plan_hash, f"PLAN-{token[:12]}-v1"),
             )[0]
-            plan_digest = "sha256:" + "d" * 64
+            one(
+                cur,
+                """insert into ops.sourced_work_request_plan_acceptance_receipt
+                     (work_request_id,plan_id,idempotency_key,base_version,plan_hash,
+                      accepted_by_actor_id,result_version,shape_fixed_surface_ref,shape_rationale)
+                     values (%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
+                (wr_id, plan_id, uuid.uuid4(), wr_version, plan_hash, joe_id, wr_version,
+                 shape_ref, shape_rationale),
+            )
+            source = one(
+                cur, "select ops.engineering_admission_source('WR-SIEP-06A')"
+            )[0]
+            slice_ref = "slice:siep-06a:source"
+            component_ref = "component:siep06a:source"
+            resource_ref = "resource:siep06a:source"
+            check_ref = "check:siep06a:source"
+            plan_payload = {
+                "accepted_plan_revision": {
+                    "digest": source["accepted_plan"]["digest"],
+                    "id": source["accepted_plan"]["plan_ref"],
+                    "revision": source["accepted_plan"]["revision"],
+                },
+                "schema_version": "engineering-slice-plan.v1",
+                "slices": [
+                    {
+                        "declared_component_refs": [component_ref],
+                        "declared_resource_refs": [resource_ref],
+                        "planned_checks": [
+                            {
+                                "check_ref": check_ref,
+                                "evidence_requirement": "metadata_only_sufficient",
+                            }
+                        ],
+                        "slice_ref": slice_ref,
+                    }
+                ],
+                "work_request": {
+                    "canonical_record_digest": source["work_request"]["canonical_record_digest"],
+                    "id": source["work_request"]["id"],
+                    "state_version": source["work_request"]["version"],
+                },
+            }
+            plan_digest = canonical_digest(plan_payload)
+            plan_payload["plan_digest"] = plan_digest
             slice_plan_id = one(
                 cur,
                 """insert into ops.engineering_slice_plan
                      (work_request_id,accepted_plan_id,accepted_plan_hash,work_request_version,
                       plan_digest,plan,idempotency_key)
                      values (%s,%s,%s,%s,%s,%s,%s) returning id""",
-                (wr_id, plan_id, plan_hash, wr_version, plan_digest,
-                 Jsonb({"plan_digest": plan_digest, "slices": []}), uuid.uuid4()),
+                (wr_id, plan_id, plan_hash, source["work_request"]["version"], plan_digest,
+                 Jsonb(plan_payload), uuid.uuid4()),
             )[0]
             capability_session_id = one(
                 cur,
@@ -145,17 +195,33 @@ def main() -> int:
                                                         "manifest_digest": manifest})),
             )[0]
             envelope_digest = "sha256:" + "f" * 64
+            envelope_id = uuid.uuid4()
+            envelope = {
+                "agent_session": {"id": f"session:{capability_session_id}"},
+                "envelope_id": f"env:{envelope_id}",
+                "request": {"job_ref": f"job:{job_id}"},
+                "server_binding": {
+                    "adapter": {"adapter_id": "adapter:codex-desktop"},
+                    "identity": {"agent_principal_id": "agent:codex"},
+                },
+                "state_binding": {
+                    "state_version": source["work_request"]["version"],
+                    "canonical_record_digest": source["work_request"]["canonical_record_digest"],
+                },
+                "work_request_id": f"wr:{wr_id}",
+            }
             envelope_id = one(
                 cur,
                 """insert into ops.engineering_execution_envelope
-                     (job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,
+                     (id,job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,
                       state_version,canonical_record_digest,envelope_digest,envelope,issued_at,expires_at)
-                     values (%s,%s,%s,%s,'slice:siep-06a:source',%s,%s,%s,%s,%s,
+                     values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                              now()-interval '1 minute',now()+interval '1 hour') returning id""",
-                (job_id, wr_id, plan_id, slice_plan_id, capability_session_id, wr_version,
-                 "sha256:" + "1" * 64, envelope_digest,
-                 Jsonb({"work_request_id": f"wr:{wr_id}", "state_binding": {
-                     "state_version": wr_version, "canonical_record_digest": "sha256:" + "1" * 64}})),
+                (envelope_id, job_id, wr_id, plan_id, slice_plan_id, slice_ref,
+                 capability_session_id,
+                 source["work_request"]["version"],
+                 source["work_request"]["canonical_record_digest"], envelope_digest,
+                 Jsonb(envelope)),
             )[0]
             attempt_id = one(
                 cur,
@@ -163,25 +229,89 @@ def main() -> int:
                      values (%s,1,'siep-06a-gate',%s,'succeeded',now()) returning id""",
                 (job_id, uuid.uuid4()),
             )[0]
+            typed_evidence = {
+                "content_digest": "sha256:" + "1" * 64,
+                "redaction_class": "metadata_only",
+                "ref": "evidence:siep06a:source",
+            }
+            engineering_receipt = {
+                "actual_component_refs": [component_ref],
+                "actual_resource_refs": [resource_ref],
+                "artifact_refs": ["artifact:siep06a:source"],
+                "attribution": {
+                    "actor_ref": "agent:codex",
+                    "adapter_ref": "adapter:codex-desktop",
+                    "session_ref": f"session:{capability_session_id}",
+                },
+                "attempt_id": "attempt:1",
+                "checks": [
+                    {"check_ref": check_ref, "evidence_refs": [typed_evidence], "state": "passed"}
+                ],
+                "deviations": [],
+                "envelope_digest": envelope_digest,
+                "evidence_refs": [typed_evidence],
+                "executor_claim": {
+                    "claim_state": "executor_claim",
+                    "claimed_at": "2026-08-26T00:00:00Z",
+                    "claimed_by": "codex",
+                },
+                "independent_verification_required": True,
+                "outcome": "claimed_complete",
+                "plan_digest": plan_digest,
+                "planned_component_refs": [component_ref],
+                "planned_resource_refs": [resource_ref],
+                "reset_reconstruction": {
+                    "fresh_session": True,
+                    "inherited_transcript_used": False,
+                    "reconstruction_free": True,
+                    "remediation_action": None,
+                },
+                "schema_version": "engineering-slice-receipt.v1",
+                "slice_ref": slice_ref,
+                "source_evidence": {
+                    "branch_ref": "branch:siep06a",
+                    "evidence_refs": [typed_evidence],
+                    "source_sha": "e" * 40,
+                    "worktree_ref": "worktree:siep06a",
+                },
+            }
             engineering_receipt_id = one(
                 cur,
                 """insert into ops.engineering_slice_receipt
                      (job_attempt_id,envelope_id,work_request_id,slice_ref,attempt_id,executor_actor_id,
                       receipt_digest,outcome,receipt)
-                     values (%s,%s,%s,'slice:siep-06a:source','attempt:1',%s,%s,
+                     values (%s,%s,%s,%s,'attempt:1',%s,%s,
                              'claimed_complete',%s) returning id""",
-                (attempt_id, envelope_id, wr_id, codex_id, "sha256:" + "2" * 64,
-                 Jsonb({"attempt_id": "attempt:1", "outcome": "claimed_complete"})),
+                (attempt_id, envelope_id, wr_id, slice_ref, codex_id,
+                 canonical_digest(engineering_receipt), Jsonb(engineering_receipt)),
             )[0]
+            reviewer_session_ref = "session:siep-06a-review"
+            reviewer_fact = {
+                "attempt_id": "attempt:1",
+                "evidence_refs": [
+                    {
+                        "content_digest": "sha256:" + "2" * 64,
+                        "redaction_class": "metadata_only",
+                        "ref": "evidence:siep06a:independent-review",
+                    }
+                ],
+                "is_independent": True,
+                "resolved_deviation_refs": [],
+                "reviewed_deviation_refs": [],
+                "reviewer_ref": "reviewer:joe",
+                "session_ref": reviewer_session_ref,
+                "slice_ref": slice_ref,
+                "state": "passed",
+            }
             reviewer_fact_id = one(
                 cur,
                 """insert into ops.engineering_reviewer_fact
                      (receipt_id,work_request_id,slice_ref,reviewer_actor_id,reviewer_session_ref,
                       state,fact,idempotency_key)
-                     values (%s,%s,'slice:siep-06a:source',%s,'session:siep-06a-review','passed',%s,%s)
+                     values (%s,%s,%s,%s,%s,'passed',%s,%s)
                      returning id""",
-                (engineering_receipt_id, wr_id, joe_id,
-                 Jsonb({"reviewed_artifact_digest": envelope_digest}), uuid.uuid4()),
+                (engineering_receipt_id, wr_id, slice_ref, joe_id, reviewer_session_ref,
+                 Jsonb(reviewer_fact), uuid.uuid4()),
             )[0]
             receipt_id, receipt_created_at = one(
                 cur,

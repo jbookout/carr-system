@@ -11,7 +11,6 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -104,6 +103,61 @@ def typed_slice(slice_ref: str, ordinal: int) -> dict[str, Any]:
         "risk_class": "R1",
         "scope_boundary": "Disposable source-test evidence only.",
         "slice_ref": slice_ref,
+    }
+
+
+def typed_receipt(
+    slice_ref: str,
+    ordinal: int,
+    plan_digest: str,
+    envelope_digest: str,
+    session_id: uuid.UUID,
+) -> dict[str, Any]:
+    slice_spec = typed_slice(slice_ref, ordinal)
+    evidence = {
+        "content_digest": sha("f"),
+        "redaction_class": "metadata_only",
+        "ref": f"evidence:siep01:receipt:{ordinal}",
+    }
+    check_ref = slice_spec["planned_checks"][0]["check_ref"]
+    return {
+        "actual_component_refs": list(slice_spec["declared_component_refs"]),
+        "actual_resource_refs": list(slice_spec["declared_resource_refs"]),
+        "artifact_refs": [f"artifact:siep01:{ordinal}"],
+        "attribution": {
+            "actor_ref": "agent:codex",
+            "adapter_ref": "adapter:codex-desktop",
+            "session_ref": f"session:{session_id}",
+        },
+        "attempt_id": "attempt:1",
+        "checks": [{"check_ref": check_ref, "evidence_refs": [evidence], "state": "passed"}],
+        "deviations": [],
+        "envelope_digest": envelope_digest,
+        "evidence_refs": [evidence],
+        "executor_claim": {
+            "claim_state": "executor_claim",
+            "claimed_at": "2026-08-26T00:00:00Z",
+            "claimed_by": "codex",
+        },
+        "independent_verification_required": True,
+        "outcome": "claimed_complete",
+        "plan_digest": plan_digest,
+        "planned_component_refs": list(slice_spec["declared_component_refs"]),
+        "planned_resource_refs": list(slice_spec["declared_resource_refs"]),
+        "reset_reconstruction": {
+            "fresh_session": True,
+            "inherited_transcript_used": False,
+            "reconstruction_free": True,
+            "remediation_action": None,
+        },
+        "schema_version": "engineering-slice-receipt.v1",
+        "slice_ref": slice_ref,
+        "source_evidence": {
+            "branch_ref": "branch:siep01",
+            "evidence_refs": [evidence],
+            "source_sha": "1" * 40,
+            "worktree_ref": "worktree:siep01",
+        },
     }
 
 
@@ -280,17 +334,9 @@ def main() -> int:
                 "select (ops.engineering_register_slice_plan(%s,%s,%s,%s)).id",
                 (work_request_ref, Jsonb(engineering_plan), plan_digest, uuid.uuid4()),
             )
-            session_id = one(
-                cur,
-                """insert into ops.capability_agent_session
-                     (work_request_id,executor_actor_id,created_by_actor_id,
-                      source_commit_sha,worktree_ref,scope_ref)
-                   values (%s,%s,%s,%s,'worktree:siep-01','scope:siep-01-paired')
-                   returning id""",
-                (work_request_id, executor_id, joe_id, "1" * 40),
-            )
             jobs: dict[str, uuid.UUID] = {}
             envelopes: dict[str, tuple[uuid.UUID, str]] = {}
+            sessions: dict[str, uuid.UUID] = {}
             for index, slice_ref in enumerate(slice_refs, start=1):
                 job_id = one(
                     cur,
@@ -305,20 +351,93 @@ def main() -> int:
                         (job_id,),
                     )
                     set_local_role(cur, "carr_writer")
+
+            def issue_envelope(slice_ref: str, index: int) -> tuple[uuid.UUID, str]:
+                session_id = one(
+                    cur,
+                    """insert into ops.capability_agent_session
+                         (work_request_id,executor_actor_id,created_by_actor_id,
+                          source_commit_sha,worktree_ref,scope_ref,lease_expires_at)
+                       values (%s,%s,%s,%s,'engineering:server-admission',%s,
+                               date_trunc('second',now())+interval '29 minutes')
+                       returning id""",
+                    (work_request_id, executor_id, joe_id, "0" * 40, f"slice:{slice_ref}"),
+                )
+                sessions[slice_ref] = session_id
+                issued_at = one(
+                    cur,
+                    """select to_char(date_trunc('second',now()) at time zone 'UTC',
+                                      'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')""",
+                )
+                expires_at = one(
+                    cur,
+                    """select to_char(lease_expires_at at time zone 'UTC',
+                                      'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+                         from ops.capability_agent_session where id=%s""",
+                    (session_id,),
+                )
+                job_id = jobs[slice_ref]
                 envelope_digest = sha(str(index + 3))
-                clock = datetime.now(timezone.utc)
-                issued_at = (clock - timedelta(minutes=1)).isoformat()
-                expires_at = (clock + timedelta(hours=2)).isoformat()
+                envelope_id = uuid.uuid4()
+                envelope = {
+                    "schema_version": "execution-envelope.v1",
+                    "envelope_id": f"env:{envelope_id}",
+                    "work_request_id": f"wr:{work_request_id}",
+                    "issued_at": issued_at,
+                    "expires_at": expires_at,
+                    "agent_session": {
+                        "id": f"session:{session_id}",
+                        "lease_expires_at": expires_at,
+                    },
+                    "state_binding": {
+                        "state_version": int(source["work_request"]["version"]),
+                        "canonical_record_digest": source["work_request"]["canonical_record_digest"],
+                    },
+                    "plan_revision": {
+                        "id": source["accepted_plan"]["plan_ref"],
+                        "revision": int(source["accepted_plan"]["revision"]),
+                        "digest": source["accepted_plan"]["digest"],
+                    },
+                    "phase_binding": {"phase_id": f"phase:{slice_ref}"},
+                    "request": {
+                        "job_ref": f"job:{job_id}",
+                        "input_digest": sha("8"),
+                        "allowed_actions": [
+                            "repository:create-worktree",
+                            "repository:create-branch",
+                            "repository:write-declared-scope",
+                            "repository:run-checks",
+                            "repository:commit",
+                            "repository:push-branch",
+                            "repository:open-pr",
+                        ],
+                    },
+                    "server_binding": {
+                        "authority": {
+                            "read_only": False,
+                            "capability_profile": "capability:engineering-repository-write",
+                        },
+                        "adapter": {
+                            "surface": "codex_desktop",
+                            "adapter_id": "adapter:codex-desktop",
+                        },
+                        "identity": {
+                            "agent_principal_id": "agent:codex",
+                            "runtime_principal": "runtime:codex",
+                        },
+                    },
+                }
                 envelope_id = one(
                     cur,
                     """insert into ops.engineering_execution_envelope
-                         (job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,
+                         (id,job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,
                           agent_session_id,state_version,canonical_record_digest,
                           envelope_digest,envelope,issued_at,expires_at)
-                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                                %s::timestamptz,%s::timestamptz)
                        returning id""",
                     (
+                        envelope_id,
                         job_id,
                         work_request_id,
                         plan_row[0],
@@ -328,54 +447,30 @@ def main() -> int:
                         int(source["work_request"]["version"]),
                         source["work_request"]["canonical_record_digest"],
                         envelope_digest,
-                        Jsonb(
-                            {
-                                "work_request_id": source["work_request"]["id"],
-                                "expires_at": expires_at,
-                                "state_binding": {
-                                    "state_version": int(source["work_request"]["version"]),
-                                    "canonical_record_digest": source["work_request"]["canonical_record_digest"],
-                                },
-                                "request": {
-                                    "allowed_actions": [
-                                        "repository:create-worktree",
-                                        "repository:create-branch",
-                                        "repository:write-declared-scope",
-                                        "repository:run-checks",
-                                        "repository:commit",
-                                        "repository:push-branch",
-                                        "repository:open-pr",
-                                    ]
-                                },
-                                "server_binding": {
-                                    "authority": {
-                                        "read_only": False,
-                                        "capability_profile": "capability:engineering-repository-write",
-                                    },
-                                    "adapter": {"surface": "codex_desktop"},
-                                },
-                            }
-                        ),
+                        Jsonb(envelope),
                         issued_at,
                         expires_at,
                     ),
                 )
                 envelopes[slice_ref] = (envelope_id, envelope_digest)
+                return envelope_id, envelope_digest
+
+            good_ref, half_ref = slice_refs
+            issue_envelope(good_ref, 1)
             cur.execute("reset role")
 
             set_local_role(cur, "carr_jobs")
-            # 0325 deliberately narrowed the claim verb to exactly one job per
-            # invocation. Reproduce the two sibling histories through two
-            # independently leased claims instead of relying on retired batch
-            # claim semantics.
-            claimed = []
-            for _ in slice_refs:
-                claimed.extend(cur.execute(
-                    "select * from ops.engineering_claim_slice('siep-01-worker',1,1800)"
-                ).fetchall())
-            claims = {row[4]["slice_ref"]: row for row in claimed if row[0] in jobs.values()}
-            if set(claims) != set(slice_refs):
-                refuse(f"0323 did not claim both paired jobs: {claims}")
+            good_claim = cur.execute(
+                "select * from ops.engineering_claim_slice('siep-01-worker-good',1,960)"
+            ).fetchone()
+            if good_claim is None or good_claim[0] != jobs[good_ref]:
+                currentness = one(
+                    cur,
+                    "select ops.engineering_envelope_currentness(%s,%s)",
+                    (envelopes[good_ref][0], jobs[good_ref]),
+                )
+                refuse(f"0323 did not claim the good paired job: {currentness}")
+            claims = {good_ref: good_claim}
             rejected(
                 cur,
                 "update ops.job set state='succeeded' where id=%s",
@@ -383,27 +478,25 @@ def main() -> int:
                 "permission denied",
             )
 
-            good_ref, half_ref = slice_refs
-            good_claim = claims[good_ref]
             good_envelope_id, good_envelope_digest = envelopes[good_ref]
-            wrong_receipt = {
-                "envelope_digest": sha("0"),
-                "slice_ref": good_ref,
-                "attempt_id": "attempt:1",
-                "outcome": "claimed_complete",
-            }
+            wrong_receipt = typed_receipt(
+                good_ref, 1, plan_digest, sha("0"), sessions[good_ref]
+            )
             rejected(
                 cur,
                 "select ops.engineering_finalize_slice_receipt(%s,%s,%s,%s,%s)",
-                (good_envelope_id, good_claim[1], Jsonb(wrong_receipt), sha("6"), executor_id),
+                (
+                    good_envelope_id,
+                    good_claim[1],
+                    Jsonb(wrong_receipt),
+                    canonical_digest(wrong_receipt),
+                    executor_id,
+                ),
                 "not bound",
             )
-            good_receipt_body = {
-                "envelope_digest": good_envelope_digest,
-                "slice_ref": good_ref,
-                "attempt_id": "attempt:1",
-                "outcome": "claimed_complete",
-            }
+            good_receipt_body = typed_receipt(
+                good_ref, 1, plan_digest, good_envelope_digest, sessions[good_ref]
+            )
             good_receipt_digest = canonical_digest(good_receipt_body)
             good_receipt_id = one(
                 cur,
@@ -416,8 +509,23 @@ def main() -> int:
                     executor_id,
                 ),
             )
-            half_claim = claims[half_ref]
-            if one(
+            cur.execute("reset role")
+            set_local_role(cur, "carr_writer")
+            issue_envelope(half_ref, 2)
+            cur.execute("reset role")
+            set_local_role(cur, "carr_jobs")
+            half_claim = cur.execute(
+                "select * from ops.engineering_claim_slice('siep-01-worker-half',1,960)"
+            ).fetchone()
+            if half_claim is None or half_claim[0] != jobs[half_ref]:
+                currentness = one(
+                    cur,
+                    "select ops.engineering_envelope_currentness(%s,%s)",
+                    (envelopes[half_ref][0], jobs[half_ref]),
+                )
+                refuse(f"0323 did not claim the half-executed paired job: {currentness}")
+            claims[half_ref] = half_claim
+            rejected(
                 cur,
                 "select ops.complete_job(%s,%s,%s,%s)",
                 (
@@ -426,9 +534,40 @@ def main() -> int:
                     Jsonb({"operation": "caller-labelled-complete", "status": "pass"}),
                     f"siep-01:{half_ref}:generic-completion",
                 ),
-            ) is not True:
-                refuse(f"generic completion failed for {half_ref}")
+                "engineering jobs require scoped controller functions",
+            )
+            # The current controller refuses this state transition. Recreate
+            # the historical half-executed ledger shape under the rollback-only
+            # fixture owner so the original comparison remains observable.
             cur.execute("reset role")
+            cur.execute(
+                """update ops.job_attempt
+                      set state='succeeded',ended_at=now()
+                    where job_id=%s and attempt=1 and lease_token=%s and state='running'""",
+                (jobs[half_ref], half_claim[1]),
+            )
+            cur.execute(
+                """update ops.job
+                      set state='succeeded',ended_at=now(),lease_owner=null,lease_token=null,
+                          leased_until=null,updated_at=now()
+                    where id=%s and state='running'""",
+                (jobs[half_ref],),
+            )
+            cur.execute(
+                """insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+                   values (%s,1,'completion',%s,%s)""",
+                (
+                    jobs[half_ref],
+                    f"siep-01:{half_ref}:historical-generic-completion",
+                    Jsonb(
+                        {
+                            "operation": "caller-labelled-complete",
+                            "status": "pass",
+                            "fixture_posture": "historical_state_current_runtime_refused",
+                        }
+                    ),
+                ),
+            )
 
             set_local_role(cur, "carr_writer")
             reviewer_fact_id = one(
@@ -443,7 +582,25 @@ def main() -> int:
                     work_request_id,
                     good_ref,
                     joe_id,
-                    Jsonb({"slice_ref": good_ref, "attempt_id": "attempt:1", "state": "passed"}),
+                    Jsonb(
+                        {
+                            "attempt_id": "attempt:1",
+                            "evidence_refs": [
+                                {
+                                    "content_digest": sha("c"),
+                                    "redaction_class": "metadata_only",
+                                    "ref": "evidence:siep01:independent-review",
+                                }
+                            ],
+                            "is_independent": True,
+                            "resolved_deviation_refs": [],
+                            "reviewed_deviation_refs": [],
+                            "reviewer_ref": "reviewer:joe",
+                            "session_ref": "session:siep01:independent-completion-review",
+                            "slice_ref": good_ref,
+                            "state": "passed",
+                        }
+                    ),
                     uuid.uuid4(),
                 ),
             )
@@ -480,7 +637,7 @@ def main() -> int:
                 observation = {
                     "case": "fully_observed" if fully_observed else "half_executed",
                     "slice_ref": slice_ref,
-                    "capability_session_id": str(session_id),
+                    "capability_session_id": str(sessions[slice_ref]),
                     "executor_actor_id": str(executor_id),
                     "job": {"id": str(row[0]), "state": row[1], "attempt": row[2]},
                     "job_attempt": {"id": str(row[3]), "state": row[4], "attempt": row[2]},

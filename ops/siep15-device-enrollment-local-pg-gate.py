@@ -87,6 +87,9 @@ def main() -> int:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             zero = "sha256:" + "0" * 64
             epoch_digest = "sha256:" + "1" * 64
+            v2_digest = cur.execute(
+                "select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v2'"
+            ).fetchone()[0]
             cur.execute(
                 """do $fixture$ begin
                      if not exists(select 1 from pg_roles where rolname='carr_authority_joe') then
@@ -105,10 +108,9 @@ def main() -> int:
                     doctrine_projection_digest,rule_projection_digest,schema_applied_count,
                     schema_highest_migration,schema_ledger_digest,source_digest,source_session_user,source_relation)
                    values (1,%s,null,null,'carr-system-integrity-elimination-v1','carr-internal',
-                    'scac-core','scac-mutation-registry.v2',
-                    'sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231',
+                    'scac-core','scac-mutation-registry.v2',%s,
                     0,%s,%s,1,'0346_siep15_device_enrollment.sql',%s,%s,current_user,'public.schema_migrations')""",
-                (epoch_digest, zero, zero, zero, zero),
+                (epoch_digest, v2_digest, zero, zero, zero, zero),
             )
             device_ref = "joe-studio-pending"
             public_key = bytes.fromhex("71" * 32)

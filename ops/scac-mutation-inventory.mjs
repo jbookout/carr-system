@@ -14,9 +14,28 @@ export const REGISTRY_V3_VERSION = "scac-mutation-registry.v3";
 export const REGISTRY_V4_VERSION = "scac-mutation-registry.v4";
 export const REGISTRY_V5_VERSION = "scac-mutation-registry.v5";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
+// v1-v4 were rebaselined once while still unshipped so their catalog projections
+// matched the reviewed pre-SIEP database. They are sealed historical artifacts now:
+// current source discovery must never derive or rewrite these values again.
+export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
+  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:717ab5b0d045a176fda05b285d3053b454487ce5f8588f8fbe60191d82e6d844", entryCount: 1241, sourceEntryCount: 736 }),
+  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:14f78320231a2a09714393b88f82a90e98a3dcacdaed4eea0ca8c218d2528512", entryCount: 1245, sourceEntryCount: 736 }),
+  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:c7690e43ff697666afc0691bbc00f4839ab772bb6f64508c27c727aa05e30de3", entryCount: 1249, sourceEntryCount: 736 }),
+  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:ce312b08ef4d798554bdf2588d669c77f8eb594dbbf08d096b19bb6900e50e86", entryCount: 1253, sourceEntryCount: 736 }),
+});
+export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
+  "migrations/0338_siep11_mutation_registry.sql": "91bc0c8f93a0779b0720debf3c2eecc4973df1a3fef290c25b2d944386410e52",
+  "migrations/0339_siep12_policy_epoch.sql": "f4cce1e6898d0d1cc0c0fc579f66f346725642f8ee8331b8df46a1b668072a08",
+  "migrations/0341_siep13_forward_mutation_registry.sql": "537fde97320b7fb6e2d149ad6eff85555a9d6e2751c24e43a02f4d9d232d74f3",
+  "migrations/0343_siep14_forward_mutation_registry.sql": "79d359ebd1462630fa70eb1fc8da9ac39d676d631b1d7ba3cdf7b6a65fafda38",
+  "mcp-server/src/scac-mutation-registry.generated.js": "b1d437239b5e2abb37dae317a2f17ca9ec7ef433a72338e80829b262b7d59362",
+  "mcp-server/src/scac-mutation-registry.v2.generated.js": "a9ee17f743c089224a5f335fd6429918899ef97cf5b7c1e6963aebc90e6b0dc3",
+  "mcp-server/src/scac-mutation-registry.v3.generated.js": "c055471d5f778b8470021271886590e92f7a92348d920567a1047fcade3859b8",
+  "mcp-server/src/scac-mutation-registry.v4.generated.js": "f95806fc2911b36fe16b77f5ff26c571afda9784fe6c1b1dbe8518a693ec79c6",
+});
 export const DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v1",
-  secdef_execute: { count: 205, digest: "sha256:394508cc8ad50bf7193d857a36fcb35bfa601eccbcf35e70c4fff6c119b5b562" },
+  secdef_execute: { count: 209, digest: "sha256:109b9317f077a95f1875473a225ae375a7d8b2f8822dbd7e00d0aca34e24bcfe" },
   relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
 });
@@ -25,7 +44,7 @@ export const DB_CATALOG_BASELINE = Object.freeze({
 // a caller or a running Production catalog.
 export const SIEP12_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v2",
-  secdef_execute: { count: 209, digest: "sha256:b0ad6b4494025998f29a5476f6dd4ed8d6a433426db7677f86d8e44d7171cfe7" },
+  secdef_execute: { count: 213, digest: "sha256:64859ec8d8dfed298c2e187b6e2b6c47fea68c5db3b2080dd84a827e3e2489fa" },
   relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -34,7 +53,7 @@ export const SIEP12_DB_CATALOG_BASELINE = Object.freeze({
 // The digest is replaced only from disposable-DB readback when 0341 changes.
 export const SIEP13_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v3",
-  secdef_execute: { count: 213, digest: "sha256:5c2e136deb1cc9aabf416cdbfca1ee167ce030c7be9db7daea4a74bcc8b770af" },
+  secdef_execute: { count: 217, digest: "sha256:a54dfdd5aae8cfa0212dbcf5c0926d24a6ebf7d9f8cdd753c91cec3166ffbf74" },
   relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -43,7 +62,7 @@ export const SIEP13_DB_CATALOG_BASELINE = Object.freeze({
 // category digest is replaced only from disposable-DB readback.
 export const SIEP14_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v4",
-  secdef_execute: { count: 217, digest: "sha256:e9b3f81812129b4da18d2bb9ab385487c5d6da42b23b73b6834321cefe3f917a" },
+  secdef_execute: { count: 221, digest: "sha256:dd862ede52a3467afb25be7a082f22dd9948840b6e7a7bbbfe6b3770aa2fd607" },
   relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -52,7 +71,7 @@ export const SIEP14_DB_CATALOG_BASELINE = Object.freeze({
 // The secdef digest starts fail-closed and is replaced only by disposable-DB readback.
 export const SIEP15_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v5",
-  secdef_execute: { count: 222, digest: "sha256:3203299b50629044605ea7f5d9fdf06979bb9e448f7b7baed9f4f65dcdb2cd79" },
+  secdef_execute: { count: 232, digest: "sha256:982c1ac3113ea5575451d1069da5254d842934c91c84426285bd23d570b07a9c" },
   relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -531,6 +550,17 @@ export function registryDigest(rows = fullInventory()) {
   return registryDigestFor(REGISTRY_VERSION, rows, DB_CATALOG_BASELINE);
 }
 
+export function registrySeal(version, rows, dbCatalogBaseline) {
+  const catalogEntryCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  return Object.freeze({
+    version,
+    digest: `sha256:${registryDigestFor(version, rows, dbCatalogBaseline)}`,
+    entryCount: rows.length + catalogEntryCount,
+    sourceEntryCount: rows.length,
+  });
+}
+
 export function renderRuntimeProjection(rows = fullInventory(), {
   version = REGISTRY_VERSION,
   dbCatalogBaseline = DB_CATALOG_BASELINE,
@@ -625,9 +655,10 @@ function catalogSeedSql(version = REGISTRY_VERSION) {
 `  'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex'),contract from contracts;\n\n`;
 }
 
-export function renderSuccessorRegistrySql(rows = fullInventory(),
+function renderSuccessorRegistrySql(rows = fullInventory(),
   dbCatalogBaseline = SIEP12_DB_CATALOG_BASELINE) {
   const version = REGISTRY_V2_VERSION;
+  const predecessor = registrySeal(REGISTRY_VERSION, rows, DB_CATALOG_BASELINE);
   const digest = registryDigestFor(version, rows, dbCatalogBaseline);
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
@@ -660,17 +691,18 @@ catalogSeedSql(version) +
 `  if (select count(*) from ops.scac_mutation_registry_entry where registry_version='${version}')<>${totalCount}\n` +
 `     or exists(select 1 from ops.scac_mutation_registry_entry where registry_version='${version}' and (contract->>'owner_package'<>'11' or (contract->>'classification_authorizing')::boolean))\n` +
 `     or exists(select 1 from ops.scac_mutation_registry_entry where registry_version='${version}' and entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')) then raise exception 'SCAC mutation registry v2 seed is incomplete or drifted'; end if;\n` +
-`  if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1')<>'sha256:d821ab892e4f9aeb97c4dfc040fd9e072c5d009685b1521fd463cc8268df5038'\n` +
-`     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v1')<>1230 then raise exception 'sealed SCAC mutation registry v1 changed during successor creation'; end if;\n` +
+`  if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${predecessor.version}')<>'${predecessor.digest}'\n` +
+`     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${predecessor.version}')<>${predecessor.entryCount} then raise exception 'sealed SCAC mutation registry v1 changed during successor creation'; end if;\n` +
 `end $$;\n` +
 `create trigger scac_mutation_registry_version_sealed before insert or update or delete on ops.scac_mutation_registry_version for each row execute function ops.scac_mutation_registry_append_only();\n` +
 `create trigger scac_mutation_registry_entry_sealed before insert or update or delete on ops.scac_mutation_registry_entry for each row execute function ops.scac_mutation_registry_append_only();\n` +
 `-- END GENERATED SIEP-12 REGISTRY V2.\n`;
 }
 
-export function renderSIEP13RegistrySql(rows = fullInventory(),
+function renderSIEP13RegistrySql(rows = fullInventory(),
   dbCatalogBaseline = SIEP13_DB_CATALOG_BASELINE) {
   const version = REGISTRY_V3_VERSION;
+  const predecessor = registrySeal(REGISTRY_V2_VERSION, rows, SIEP12_DB_CATALOG_BASELINE);
   const digest = registryDigestFor(version, rows, dbCatalogBaseline);
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
@@ -727,16 +759,16 @@ catalogSeedSql(version) +
 `  if (select count(*) from ops.scac_mutation_registry_entry where registry_version='${version}')<>${totalCount}\n` +
 `     or exists(select 1 from ops.scac_mutation_registry_entry where registry_version='${version}' and (contract->>'owner_package'<>'11' or (contract->>'classification_authorizing')::boolean))\n` +
 `     or exists(select 1 from ops.scac_mutation_registry_entry where registry_version='${version}' and entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')) then raise exception 'SCAC mutation registry v3 seed is incomplete or drifted'; end if;\n` +
-`  if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v2')<>'sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231'\n` +
-`     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v2')<>1235 then raise exception 'sealed SCAC mutation registry v2 changed during successor creation'; end if;\n` +
+`  if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${predecessor.version}')<>'${predecessor.digest}'\n` +
+`     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${predecessor.version}')<>${predecessor.entryCount} then raise exception 'sealed SCAC mutation registry v2 changed during successor creation'; end if;\n` +
 `end $$;\n` +
 `-- Retain v2 as an exact historical lookup after the live catalog advances.\n` +
 `create or replace function ops.scac_mutation_catalog_v2_current()\n` +
 `returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$\n` +
 `  select exists(select 1 from ops.scac_mutation_registry_version\n` +
-`    where registry_version='scac-mutation-registry.v2'\n` +
-`      and registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231'\n` +
-`      and entry_count=1235 and source_entry_count=730)\n` +
+`    where registry_version='${predecessor.version}'\n` +
+`      and registry_digest='${predecessor.digest}'\n` +
+`      and entry_count=${predecessor.entryCount} and source_entry_count=${predecessor.sourceEntryCount})\n` +
 `$fn$;\n` +
 `comment on function ops.scac_mutation_catalog_v2_current() is 'Historical v2 seal availability after v3; it is not a claim that the live catalog remains v2.';\n\n` +
 `create or replace function ops.scac_mutation_catalog_v3_current()\n` +
@@ -799,7 +831,7 @@ catalogSeedSql(version) +
 `      'rule_projection_digest',r.rule_projection_digest,'schema_applied_count',r.schema_applied_count,\n` +
 `      'schema_highest_migration',r.schema_highest_migration,'schema_ledger_digest',r.schema_ledger_digest)),'UTF8'),'sha256'),'hex');\n` +
 `    recomputed_epoch:=ops.scac_policy_epoch_digest(r.epoch,coalesce(r.previous_epoch,0),coalesce(r.previous_epoch_digest,'bootstrap'),recomputed_source,r.created_at);\n` +
-`    if not ((r.registry_version='scac-mutation-registry.v2' and r.registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231')\n` +
+`    if not ((r.registry_version='${predecessor.version}' and r.registry_digest='${predecessor.digest}')\n` +
 `         or (r.registry_version='${version}' and r.registry_digest='sha256:${digest}'))\n` +
 `       or r.source_digest is distinct from recomputed_source or r.epoch_digest is distinct from recomputed_epoch\n` +
 `       or r.created_at>clock_timestamp()+interval '1 minute' then\n` +
@@ -819,7 +851,7 @@ catalogSeedSql(version) +
 `alter table ops.scac_policy_epoch drop constraint scac_policy_epoch_registry_version_check;\n` +
 `alter table ops.scac_policy_epoch drop constraint scac_policy_epoch_registry_digest_check;\n` +
 `alter table ops.scac_policy_epoch add constraint scac_policy_epoch_registry_version_digest_check check (\n` +
-`  (registry_version='scac-mutation-registry.v2' and registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231') or\n` +
+`  (registry_version='${predecessor.version}' and registry_digest='${predecessor.digest}') or\n` +
 `  (registry_version='${version}' and registry_digest='sha256:${digest}'));\n` +
 `revoke all on function ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v2(),ops.scac_mutation_catalog_v2_current(),ops.scac_mutation_catalog_v3_current() from public,carr_reader,carr_writer,carr_jobs,carr_authority;\n` +
 `comment on function ops.scac_policy_epoch_snapshot() is 'SIEP-13 successor snapshot: current policy epochs bind mutation registry v3 while historical v2 epochs remain immutable.';\n\n` +
@@ -827,8 +859,10 @@ catalogSeedSql(version) +
 `create trigger scac_mutation_registry_entry_sealed before insert or update or delete on ops.scac_mutation_registry_entry for each row execute function ops.scac_mutation_registry_append_only();\n`;
 }
 
-export function renderSIEP14RegistrySql(rows = fullInventory(),
+function renderSIEP14RegistrySql(rows = fullInventory(),
   dbCatalogBaseline = SIEP14_DB_CATALOG_BASELINE) {
+  const v2Seal = registrySeal(REGISTRY_V2_VERSION, rows, SIEP12_DB_CATALOG_BASELINE);
+  const v3Seal = registrySeal(REGISTRY_V3_VERSION, rows, SIEP13_DB_CATALOG_BASELINE);
   const fakeV3Digest = registryDigestFor(REGISTRY_V3_VERSION, rows, dbCatalogBaseline);
   const v4Digest = registryDigestFor(REGISTRY_V4_VERSION, rows, dbCatalogBaseline);
   let sql = renderSIEP13RegistrySql(rows, dbCatalogBaseline)
@@ -841,11 +875,11 @@ export function renderSIEP14RegistrySql(rows = fullInventory(),
   sql = sql
     .replace("check (registry_version in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v4'))",
       "check (registry_version in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4'))")
-    .replace("if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v2')<>'sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v2')<>1235 then raise exception 'sealed SCAC mutation registry v2 changed during successor creation'; end if;",
-      "if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v3')<>'sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v3')<>1240 then raise exception 'sealed SCAC mutation registry v3 changed during successor creation'; end if;")
+    .replace(`if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v2Seal.version}')<>'${v2Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v2Seal.version}')<>${v2Seal.entryCount} then raise exception 'sealed SCAC mutation registry v2 changed during successor creation'; end if;`,
+      `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v3Seal.version}')<>'${v3Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v3Seal.version}')<>${v3Seal.entryCount} then raise exception 'sealed SCAC mutation registry v3 changed during successor creation'; end if;`)
     .replaceAll("scac_mutation_catalog_v2_current", "scac_mutation_catalog_v3_current")
-    .replaceAll("registry_version='scac-mutation-registry.v2'\n      and registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231'\n      and entry_count=1235 and source_entry_count=730",
-      "registry_version='scac-mutation-registry.v3'\n      and registry_digest='sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec'\n      and entry_count=1240 and source_entry_count=731")
+    .replaceAll(`registry_version='${v2Seal.version}'\n      and registry_digest='${v2Seal.digest}'\n      and entry_count=${v2Seal.entryCount} and source_entry_count=${v2Seal.sourceEntryCount}`,
+      `registry_version='${v3Seal.version}'\n      and registry_digest='${v3Seal.digest}'\n      and entry_count=${v3Seal.entryCount} and source_entry_count=${v3Seal.sourceEntryCount}`)
     .replaceAll("Historical v2 seal availability after v4; it is not a claim that the live catalog remains v3.",
       "Historical v3 seal availability after v4; it is not a claim that the live catalog remains v3.")
     .replace("alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v2;",
@@ -853,10 +887,10 @@ export function renderSIEP14RegistrySql(rows = fullInventory(),
     .replaceAll("scac_policy_epoch_snapshot_v2()", "scac_policy_epoch_snapshot_v3()")
     .replace("alter table ops.scac_policy_epoch drop constraint scac_policy_epoch_registry_version_check;\nalter table ops.scac_policy_epoch drop constraint scac_policy_epoch_registry_digest_check;",
       "alter table ops.scac_policy_epoch drop constraint scac_policy_epoch_registry_version_digest_check;")
-    .replace("if not ((r.registry_version='scac-mutation-registry.v2' and r.registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231')\n         or (r.registry_version='scac-mutation-registry.v4'",
-      "if not ((r.registry_version='scac-mutation-registry.v2' and r.registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231')\n         or (r.registry_version='scac-mutation-registry.v3' and r.registry_digest='sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec')\n         or (r.registry_version='scac-mutation-registry.v4'")
-    .replace("(registry_version='scac-mutation-registry.v2' and registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231') or\n  (registry_version='scac-mutation-registry.v4'",
-      "(registry_version='scac-mutation-registry.v2' and registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231') or\n  (registry_version='scac-mutation-registry.v3' and registry_digest='sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec') or\n  (registry_version='scac-mutation-registry.v4'")
+    .replace(`if not ((r.registry_version='${v2Seal.version}' and r.registry_digest='${v2Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v4'`,
+      `if not ((r.registry_version='${v2Seal.version}' and r.registry_digest='${v2Seal.digest}')\n         or (r.registry_version='${v3Seal.version}' and r.registry_digest='${v3Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v4'`)
+    .replace(`(registry_version='${v2Seal.version}' and registry_digest='${v2Seal.digest}') or\n  (registry_version='scac-mutation-registry.v4'`,
+      `(registry_version='${v2Seal.version}' and registry_digest='${v2Seal.digest}') or\n  (registry_version='${v3Seal.version}' and registry_digest='${v3Seal.digest}') or\n  (registry_version='scac-mutation-registry.v4'`)
     .replaceAll("SIEP-14 successor snapshot: current policy epochs bind mutation registry v4 while historical v2 epochs remain immutable.",
       "SIEP-14 successor snapshot: current policy epochs bind mutation registry v4 while historical v2/v3 epochs remain immutable.");
   return sql;
@@ -864,27 +898,53 @@ export function renderSIEP14RegistrySql(rows = fullInventory(),
 
 export function renderSIEP15RegistrySql(rows = fullInventory(),
   dbCatalogBaseline = SIEP15_DB_CATALOG_BASELINE) {
-  const fakeV4Digest = registryDigestFor(REGISTRY_V4_VERSION, rows, dbCatalogBaseline);
+  const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal } = HISTORICAL_REGISTRY_SEALS;
   const v5Digest = registryDigestFor(REGISTRY_V5_VERSION, rows, dbCatalogBaseline);
-  let sql = renderSIEP14RegistrySql(rows, dbCatalogBaseline)
-    .replaceAll(fakeV4Digest, v5Digest)
+  const v5CatalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const v5EntryCount = rows.length + v5CatalogCount;
+  const v4Path = "migrations/0343_siep14_forward_mutation_registry.sql";
+  const v4Sql = readFileSync(resolve(REPO_ROOT, v4Path), "utf8");
+  const observedV4Sha = sha256(v4Sql);
+  if (observedV4Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v4Path])
+    throw new Error(`sealed historical SCAC v4 migration changed: ${observedV4Sha}`);
+  let sql = v4Sql
+    .replaceAll(JSON.stringify(SIEP14_DB_CATALOG_BASELINE), JSON.stringify(dbCatalogBaseline))
+    .replaceAll(
+      `if observed_count<>${SIEP14_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SIEP14_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false; end if;`,
+      `if observed_count<>${dbCatalogBaseline.secdef_execute.count} or observed_digest<>'${dbCatalogBaseline.secdef_execute.digest}' then return false; end if;`,
+    )
+    .replaceAll(v4Seal.digest.slice("sha256:".length), v5Digest)
     .replaceAll("SIEP-14", "SIEP-15")
     .replaceAll("SCAC-04", "SCAC-05")
     .replaceAll("scac-mutation-registry.v4", "scac-mutation-registry.v5")
     .replaceAll("_v4", "_v5")
     .replaceAll(" v4", " v5");
   sql = sql
+    .replace(`'sha256:${v5Digest}',${v4Seal.entryCount},${v4Seal.sourceEntryCount},`,
+      `'sha256:${v5Digest}',${v5EntryCount},${rows.length},`)
+    .replace(`where registry_version='${REGISTRY_V5_VERSION}')<>${v4Seal.entryCount}\n`,
+      `where registry_version='${REGISTRY_V5_VERSION}')<>${v5EntryCount}\n`);
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker) + seedStartMarker.length;
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart);
+  if (seedStart < seedStartMarker.length || seedEnd < seedStart)
+    throw new Error("sealed SCAC v4 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+  sql = sql
     .replace("check (registry_version in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v5'))",
       "check (registry_version in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5'))")
-    .replace("if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v3')<>'sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v3')<>1240 then raise exception 'sealed SCAC mutation registry v3 changed during successor creation'; end if;",
-      "if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v4')<>'sha256:dc605d6d2290ac683ad2d544ad1e1ebe0d6983064a3dd232915c1c5342f8504b'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v4')<>1245 then raise exception 'sealed SCAC mutation registry v4 changed during successor creation'; end if;")
+    .replace(`if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v3Seal.version}')<>'${v3Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v3Seal.version}')<>${v3Seal.entryCount} then raise exception 'sealed SCAC mutation registry v3 changed during successor creation'; end if;`,
+      `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v4Seal.version}')<>'${v4Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v4Seal.version}')<>${v4Seal.entryCount} then raise exception 'sealed SCAC mutation registry v4 changed during successor creation'; end if;`)
     .replace("alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v3;",
       "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v4;")
     .replaceAll("scac_policy_epoch_snapshot_v3()", "scac_policy_epoch_snapshot_v4()")
-    .replace("if not ((r.registry_version='scac-mutation-registry.v2' and r.registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231')\n         or (r.registry_version='scac-mutation-registry.v3' and r.registry_digest='sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec')\n         or (r.registry_version='scac-mutation-registry.v5'",
-      "if not ((r.registry_version='scac-mutation-registry.v2' and r.registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231')\n         or (r.registry_version='scac-mutation-registry.v3' and r.registry_digest='sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec')\n         or (r.registry_version='scac-mutation-registry.v4' and r.registry_digest='sha256:dc605d6d2290ac683ad2d544ad1e1ebe0d6983064a3dd232915c1c5342f8504b')\n         or (r.registry_version='scac-mutation-registry.v5'")
-    .replace("(registry_version='scac-mutation-registry.v2' and registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231') or\n  (registry_version='scac-mutation-registry.v3' and registry_digest='sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec') or\n  (registry_version='scac-mutation-registry.v5'",
-      "(registry_version='scac-mutation-registry.v2' and registry_digest='sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231') or\n  (registry_version='scac-mutation-registry.v3' and registry_digest='sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec') or\n  (registry_version='scac-mutation-registry.v4' and registry_digest='sha256:dc605d6d2290ac683ad2d544ad1e1ebe0d6983064a3dd232915c1c5342f8504b') or\n  (registry_version='scac-mutation-registry.v5'")
+    .replace(`if not ((r.registry_version='${v2Seal.version}' and r.registry_digest='${v2Seal.digest}')\n         or (r.registry_version='${v3Seal.version}' and r.registry_digest='${v3Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v5'`,
+      `if not ((r.registry_version='${v2Seal.version}' and r.registry_digest='${v2Seal.digest}')\n         or (r.registry_version='${v3Seal.version}' and r.registry_digest='${v3Seal.digest}')\n         or (r.registry_version='${v4Seal.version}' and r.registry_digest='${v4Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v5'`)
+    .replace(`(registry_version='${v2Seal.version}' and registry_digest='${v2Seal.digest}') or\n  (registry_version='${v3Seal.version}' and registry_digest='${v3Seal.digest}') or\n  (registry_version='scac-mutation-registry.v5'`,
+      `(registry_version='${v2Seal.version}' and registry_digest='${v2Seal.digest}') or\n  (registry_version='${v3Seal.version}' and registry_digest='${v3Seal.digest}') or\n  (registry_version='${v4Seal.version}' and registry_digest='${v4Seal.digest}') or\n  (registry_version='scac-mutation-registry.v5'`)
     .replaceAll("SIEP-15 successor snapshot: current policy epochs bind mutation registry v5 while historical v2/v3 epochs remain immutable.",
       "SIEP-15 successor snapshot: current policy epochs bind mutation registry v5 while historical v2/v3/v4 epochs remain immutable.");
   const v4HistoryVerifier = `-- Preserve the v4 live-catalog validator under an honest historical name.\n` +
@@ -897,10 +957,10 @@ export function renderSIEP15RegistrySql(rows = fullInventory(),
 `begin\n` +
 `  if p_registry_version not in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4') then return false; end if;\n` +
 `  expected_registry:=case p_registry_version\n` +
-`    when 'scac-mutation-registry.v1' then 'sha256:d821ab892e4f9aeb97c4dfc040fd9e072c5d009685b1521fd463cc8268df5038'\n` +
-`    when 'scac-mutation-registry.v2' then 'sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231'\n` +
-`    when 'scac-mutation-registry.v3' then 'sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec'\n` +
-`    when 'scac-mutation-registry.v4' then 'sha256:dc605d6d2290ac683ad2d544ad1e1ebe0d6983064a3dd232915c1c5342f8504b' end;\n` +
+`    when '${v1Seal.version}' then '${v1Seal.digest}'\n` +
+`    when '${v2Seal.version}' then '${v2Seal.digest}'\n` +
+`    when '${v3Seal.version}' then '${v3Seal.digest}'\n` +
+`    when '${v4Seal.version}' then '${v4Seal.digest}' end;\n` +
 `  expected_catalog:=case p_registry_version\n` +
 `    when 'scac-mutation-registry.v1' then ${sqlLiteral(JSON.stringify(DB_CATALOG_BASELINE))}::jsonb\n` +
 `    when 'scac-mutation-registry.v2' then ${sqlLiteral(JSON.stringify(SIEP12_DB_CATALOG_BASELINE))}::jsonb\n` +
@@ -941,10 +1001,10 @@ export function renderSIEP15RegistrySql(rows = fullInventory(),
 `do $history$ declare expected record; actual ops.scac_mutation_registry_version%rowtype;\n` +
 `begin\n` +
 `  for expected in select * from (values\n` +
-`    ('scac-mutation-registry.v1','sha256:d821ab892e4f9aeb97c4dfc040fd9e072c5d009685b1521fd463cc8268df5038',1230,729),\n` +
-`    ('scac-mutation-registry.v2','sha256:92f9bc98b90eb9a678facfd9b8c7d28eb72b4864c1d603e6f274c39103d35231',1235,730),\n` +
-`    ('scac-mutation-registry.v3','sha256:dcdf3f9617bf5f595df4dc6977e7b35e3316ce4fd29deb26d0bae77b4f025fec',1240,731),\n` +
-`    ('scac-mutation-registry.v4','sha256:dc605d6d2290ac683ad2d544ad1e1ebe0d6983064a3dd232915c1c5342f8504b',1245,732)\n` +
+`    ('${v1Seal.version}','${v1Seal.digest}',${v1Seal.entryCount},${v1Seal.sourceEntryCount}),\n` +
+`    ('${v2Seal.version}','${v2Seal.digest}',${v2Seal.entryCount},${v2Seal.sourceEntryCount}),\n` +
+`    ('${v3Seal.version}','${v3Seal.digest}',${v3Seal.entryCount},${v3Seal.sourceEntryCount}),\n` +
+`    ('${v4Seal.version}','${v4Seal.digest}',${v4Seal.entryCount},${v4Seal.sourceEntryCount})\n` +
 `  ) as x(registry_version,registry_digest,entry_count,source_entry_count) loop\n` +
 `    select * into actual from ops.scac_mutation_registry_version where registry_version=expected.registry_version;\n` +
 `    if actual.registry_digest is distinct from expected.registry_digest or actual.entry_count<>expected.entry_count or\n` +
@@ -966,7 +1026,7 @@ export function renderSIEP15RegistrySql(rows = fullInventory(),
   return sql;
 }
 
-export function renderMigration(rows = fullInventory()) {
+function renderMigration(rows = fullInventory()) {
   const digest = registryDigest(rows);
   const sourceCounts = Object.fromEntries(
     [...new Set(rows.map(row => row.ingress_kind))]
@@ -1104,54 +1164,16 @@ catalogSeedSql() +
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const rows = fullInventory();
-  if (process.argv[2] === "--write-runtime") {
-    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.generated.js");
-    await writeFile(target, renderRuntimeProjection(rows));
-    process.stdout.write(`${target}\n`);
-  } else if (process.argv[2] === "--write-runtime-v2") {
-    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v2.generated.js");
-    await writeFile(target, renderRuntimeProjection(rows, {
-      version: REGISTRY_V2_VERSION,
-      dbCatalogBaseline: SIEP12_DB_CATALOG_BASELINE,
-    }));
-    process.stdout.write(`${target}\n`);
-  } else if (process.argv[2] === "--write-runtime-v3") {
-    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v3.generated.js");
-    await writeFile(target, renderRuntimeProjection(rows, {
-      version: REGISTRY_V3_VERSION,
-      dbCatalogBaseline: SIEP13_DB_CATALOG_BASELINE,
-    }));
-    process.stdout.write(`${target}\n`);
-  } else if (process.argv[2] === "--write-runtime-v4") {
-    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v4.generated.js");
-    await writeFile(target, renderRuntimeProjection(rows, {
-      version: REGISTRY_V4_VERSION,
-      dbCatalogBaseline: SIEP14_DB_CATALOG_BASELINE,
-    }));
-    process.stdout.write(`${target}\n`);
+  if (["--write-runtime", "--write-runtime-v2", "--write-runtime-v3", "--write-runtime-v4",
+    "--write-migration", "--write-siep12-migration", "--write-siep13-registry-migration",
+    "--write-siep14-registry-migration"].includes(process.argv[2])) {
+    throw new Error(`${process.argv[2]} refused: SCAC registry v1-v4 artifacts are sealed historical evidence; create a forward successor instead`);
   } else if (process.argv[2] === "--write-runtime-v5") {
     const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v5.generated.js");
     await writeFile(target, renderRuntimeProjection(rows, {
       version: REGISTRY_V5_VERSION,
       dbCatalogBaseline: SIEP15_DB_CATALOG_BASELINE,
     }));
-    process.stdout.write(`${target}\n`);
-  } else if (process.argv[2] === "--write-migration") {
-    const target = resolve(process.argv[3] || "migrations/0338_siep11_mutation_registry.sql");
-    await writeFile(target, renderMigration(rows));
-    process.stdout.write(`${target}\n`);
-  } else if (process.argv[2] === "--write-siep12-migration") {
-    const target = resolve(process.argv[3] || "migrations/0339_siep12_policy_epoch.sql");
-    const { renderPolicyEpochMigration } = await import("./scac-policy-epoch-sql.mjs");
-    await writeFile(target, renderPolicyEpochMigration(renderSuccessorRegistrySql(rows)));
-    process.stdout.write(`${target}\n`);
-  } else if (process.argv[2] === "--write-siep13-registry-migration") {
-    const target = resolve(process.argv[3] || "migrations/0341_siep13_forward_mutation_registry.sql");
-    await writeFile(target, renderSIEP13RegistrySql(rows));
-    process.stdout.write(`${target}\n`);
-  } else if (process.argv[2] === "--write-siep14-registry-migration") {
-    const target = resolve(process.argv[3] || "migrations/0343_siep14_forward_mutation_registry.sql");
-    await writeFile(target, renderSIEP14RegistrySql(rows));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-siep15-registry-migration") {
     const target = resolve(process.argv[3] || "migrations/0347_siep15_forward_mutation_registry.sql");
