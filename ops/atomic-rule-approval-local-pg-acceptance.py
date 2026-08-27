@@ -51,6 +51,25 @@ def main() -> int:
                        end $$"""
                 )
                 cur.execute("grant carr_authority to carr_authority_joe")
+                # carr_authority_dell: a role that DOES carry EXECUTE on the
+                # amendment function (member of carr_authority) but must still
+                # be refused by ops.amend_rule_statement's OWN internal check
+                # -- proving the Joe-only guard is not merely the GRANT.
+                cur.execute(
+                    """do $$
+                       begin
+                         if not exists (
+                           select 1 from pg_roles where rolname='carr_authority_dell'
+                         ) then
+                           create role carr_authority_dell login;
+                         elsif not (
+                           select rolcanlogin from pg_roles where rolname='carr_authority_dell'
+                         ) then
+                           raise exception 'carr_authority_dell must be an exact LOGIN identity';
+                         end if;
+                       end $$"""
+                )
+                cur.execute("grant carr_authority to carr_authority_dell")
                 cur.execute("grant carr_writer to current_user")
                 cur.execute("select id from actor where slug='joe' and kind='human' and active")
                 actor = cur.fetchone()
@@ -218,6 +237,27 @@ def main() -> int:
                 if after_amend is None or after_amend[0] != 1:
                     refuse("amended active rule dropped out of applicable_rules -- "
                            "it must keep reciting under its old approval")
+
+                # Dell HAS execute (carr_authority_dell is a carr_authority
+                # member) but ops.amend_rule_statement's own body must still
+                # refuse -- this is the check the GRANT alone cannot prove.
+                cur.execute("reset session authorization")
+                cur.execute("savepoint amend_requires_joe_not_just_authority")
+                cur.execute("set session authorization carr_authority_dell")
+                try:
+                    cur.execute(
+                        "select ops.amend_rule_statement(%s,%s,%s,%s)",
+                        (amend_rule_id, "a Dell-authored rewrite",
+                         f"local-amend-dell-{uuid.uuid4()}", "Dell tries to amend"),
+                    )
+                    refuse("amend_rule_statement succeeded for Dell, not Joe")
+                except psycopg.Error as exc:
+                    cur.execute("rollback to savepoint amend_requires_joe_not_just_authority")
+                    if "joe authority" not in str(exc).lower():
+                        refuse(f"Dell amendment refusal was for the wrong reason: {exc}")
+                finally:
+                    cur.execute("reset session authorization")
+                cur.execute("release savepoint amend_requires_joe_not_just_authority")
 
                 cur.execute("reset session authorization")
                 cur.execute("savepoint amend_requires_authority")
