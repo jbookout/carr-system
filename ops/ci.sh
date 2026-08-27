@@ -627,8 +627,16 @@ PYEOF
   # fix D: it is the one question none of the others ask — whether anything
   # CALLS a declared control.
   # selftest-git-isolation-check JOINED 2026-08-23, council recommendation 1.
+  # rule-classification-parity-check JOINED here (WR-000019 slice S10). Same
+  # kind again: repository content only, no machine state and no database — it
+  # compares ops/config/rule-enforcement-map.json against the committed
+  # ops/config/rule-admission-export.v1.json (refreshed only by a human running
+  # bin/sync-rule-admission-prod.sh --export against production) and fails on
+  # any rule the two sides classify structurally differently. It does not
+  # require full coverage between the files, so it stays cheap and honest on a
+  # freshly-seeded, mostly-empty export exactly as it will on a fully synced one.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             rule-enforcement-map-check rule-load-layer-check \
+             rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
