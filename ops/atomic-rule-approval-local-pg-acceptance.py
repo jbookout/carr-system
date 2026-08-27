@@ -574,6 +574,29 @@ def main() -> int:
                 cur.execute("release savepoint non_legacy_receiptless_still_refused")
                 cur.execute("reset session authorization")
 
+                # A still-PROPOSED rule has no receipt either, but that is the
+                # ordinary case ops.legacy_rule_admission_note must never call
+                # "legacy" -- only an ACTIVE receiptless rule can be. Proves
+                # the predicate's status guard, not just its timestamp check.
+                proposed_amend_id = uuid.uuid4()
+                cur.execute(
+                    """insert into rule(id,statement,human_quote,taught_by,status)
+                       values (%s,'local still-proposed amendment fixture','Joe said this, still proposed',%s,'proposed')""",
+                    (proposed_amend_id, actor[0]),
+                )
+                cur.execute("set session authorization carr_authority_joe")
+                cur.execute(
+                    "select ops.amend_rule_statement(%s,%s,%s,%s)",
+                    (proposed_amend_id, "local still-proposed amendment fixture, reworded",
+                     f"local-proposed-amend-{uuid.uuid4()}", "wording pass while still proposed"),
+                )
+                proposed_amended = cur.fetchone()
+                if proposed_amended is None or proposed_amended[0].get("ok") is not True:
+                    refuse("amendment of a still-proposed rule did not report success")
+                if proposed_amended[0].get("legacy_admission") is not None:
+                    refuse("a still-proposed rule's amendment was incorrectly marked legacy_admission")
+                cur.execute("reset session authorization")
+
                 # ---- legacy amendment ----
                 legacy_amend_id = uuid.uuid4()
                 legacy_amend_key = f"local-legacy-amend-{uuid.uuid4()}"
