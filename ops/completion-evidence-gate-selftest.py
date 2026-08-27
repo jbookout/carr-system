@@ -529,6 +529,24 @@ def floor_preserved():
 
 
 
+def cancel_capability_session_is_a_write():
+    """A cancel is a lifecycle write, and "cancel" is not a generic write prefix.
+
+    Paired with the WRITE_ACTION_EXACT entry of the same name. The live-registry
+    coverage check below would also catch a missing classification, but only on a
+    machine where mcp-server/src/tools.js loads; this pins the intent directly so
+    the pair still means something in a portable runner.
+    """
+    ok = mod.is_write_action("cancel-capability-session")
+    # And the negative half: adding it must not have turned "cancel" into a
+    # prefix that swallows anything named cancel-*.
+    not_a_prefix = not mod.is_write_action("cancel-something-that-does-not-exist")
+    passed = ok and not_a_prefix
+    print(f"{'PASS' if passed else 'FAIL'}  cancel-capability-session classifies as a write "
+          f"without making 'cancel' a blanket prefix")
+    return passed
+
+
 def registry_prefix_coverage():
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
@@ -844,6 +862,7 @@ def main():
     outcomes.append(machine_text_boundary())
     outcomes.append(clause_extraction_coverage())
     outcomes.append(floor_preserved())
+    outcomes.append(cancel_capability_session_is_a_write())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
     outcomes.append(latch_cases())

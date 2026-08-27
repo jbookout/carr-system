@@ -163,6 +163,15 @@ WRITE_ACTION_EXACT = {
                                          # a one-off judgment verb whose first word ("adjudicate")
                                          # is not a generic write prefix
     "call-verb",             # unknown inner call is conservatively a write
+    "cancel-capability-session",  # abandons the open build session on a capability
+                              # project and returns that project to ready. A write in
+                              # the sense this gate cares about: it changes governed
+                              # lifecycle state and is the kind of act a session might
+                              # report as having tidied something up. "cancel" stays an
+                              # EXACT entry rather than becoming a prefix, for the same
+                              # reason as adjudicate above — it would cover exactly one
+                              # verb today, and a generic "cancel" prefix would silently
+                              # capture any future read named cancel-something.
     "dry-run-doctrine-gates",
     "edit-loop-header",      # updates loop_block.prose_md, like presence-lease/review-deal:
                               # a one-off verb whose first word ("edit") is not a generic
