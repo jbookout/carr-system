@@ -11862,8 +11862,8 @@ begin
   if coalesce(btrim(p_changed_by),'')='' or coalesce(btrim(p_reason),'')='' then
     raise exception 'changed_by and reason are required';
   end if;
-  if (select count(*) from ops.rule_delivery_activation_target) <> 9 then
-    raise exception 'activation target set is not exactly nine';
+  if (select count(*) from ops.rule_delivery_activation_target) <> 8 then
+    raise exception 'activation target set is not exactly eight';
   end if;
   if exists (select 1 from ops.rule_delivery_activation_target
               where map_digest<>p_expected_map_digest) then
@@ -11897,7 +11897,7 @@ begin
     join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id
    where r.status='active' for update of r;
   get diagnostics v_count=row_count;
-  if v_count<>9 then raise exception 'active target preimage count is %, expected 9',v_count; end if;
+  if v_count<>8 then raise exception 'active target preimage count is %, expected 8',v_count; end if;
 
   perform l.rule_id from ops.rule_load_layer l
     join ops.rule_delivery_activation_target t on t.short_id=l.short_id
@@ -11905,7 +11905,7 @@ begin
      and l.load_layer='pack' and l.map_digest=t.map_digest
    for update of l;
   get diagnostics v_count=row_count;
-  if v_count<>9 then raise exception 'delivery target tag preimage count is %, expected 9',v_count; end if;
+  if v_count<>8 then raise exception 'delivery target tag preimage count is %, expected 8',v_count; end if;
 
   perform a.rule_id from ops.rule_admission a
     join public.rule r on r.id=a.rule_id
@@ -11916,7 +11916,7 @@ begin
      and not exists (select 1 from ops.rule_approval_receipt ar where ar.rule_id=r.id)
    for update of a;
   get diagnostics v_count=row_count;
-  if v_count<>9 then raise exception 'admission target preimage count is %, expected 9',v_count; end if;
+  if v_count<>8 then raise exception 'admission target preimage count is %, expected 8',v_count; end if;
 
   select count(*) into v_count
     from ops.rule_enforcement_point ep
@@ -11924,10 +11924,10 @@ begin
     join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id
    where ep.control_key=v_expected_control
      and ep.enforcement_class=v_expected_class and ep.installed;
-  if v_count<>9 or (select count(*) from ops.rule_enforcement_point ep
+  if v_count<>8 or (select count(*) from ops.rule_enforcement_point ep
       join public.rule r on r.id=ep.rule_id
-      join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id)<>9 then
-    raise exception 'enforcement-point preimage is not the exact nine %/% rows',
+      join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id)<>8 then
+    raise exception 'enforcement-point preimage is not the exact eight %/% rows',
       v_expected_control,v_expected_class;
   end if;
   if p_mode='enforced' and not exists (
@@ -11970,7 +11970,7 @@ begin
   select v_from_mode,p_mode,p_changed_by,p_reason,p_expected_map_digest,
          array_agg(t.short_id order by t.short_id)
     from ops.rule_delivery_activation_target t returning id into v_receipt;
-  return query select p_mode,9::bigint,v_receipt;
+  return query select p_mode,8::bigint,v_receipt;
 end $$;
 
 
@@ -17904,7 +17904,7 @@ CREATE TABLE ops.rule_delivery_activation_receipt (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT rule_delivery_activation_receipt_changed_by_check CHECK ((btrim(changed_by) <> ''::text)),
     CONSTRAINT rule_delivery_activation_receipt_reason_check CHECK ((btrim(reason) <> ''::text)),
-    CONSTRAINT rule_delivery_activation_receipt_target_short_ids_check CHECK ((cardinality(target_short_ids) = 9))
+    CONSTRAINT rule_delivery_activation_receipt_target_short_ids_check CHECK ((cardinality(target_short_ids) = ANY (ARRAY[8, 9])))
 );
 
 
@@ -41592,6 +41592,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0353_authority_rule_row_lock_grant.sql	8d103a1d06215486cab6cbd4dc4e63d723f5898f8a481b42110570ebb556a574	2026-08-27 13:32:55.359113+00
 0354_authority_event_ledger_grant.sql	4a1464fd5b8f42cd89895d7344c7f7156791e5c88e44740e991beb33661c1d28	2026-08-27 13:45:57.014435+00
 0355_rename_cognition_control_to_installed_reality.sql	348df25a24014ba1d2f096a0ea88aadd2575ad2f387801b3339afc13849b24d3	2026-08-27 14:09:26.564721+00
+0363_rule_delivery_activation_digest_repin.sql	03133d0627cf63d2a0a2a7dd8a392065bc19ba17d56d0b2cfabd3dbccafdcb65	2026-08-27 18:56:57.366645+00
 \.
 
 
@@ -41653,15 +41654,14 @@ COPY ops.guidance_registry (id, singleton, created_by, created_at) FROM stdin;
 --
 
 COPY ops.rule_delivery_activation_target (short_id, expected_scope, expected_pack, from_control, from_enforcement_class, from_implementation_ref, from_test_ref, to_control, to_enforcement_class, to_implementation_ref, to_test_ref, map_digest) FROM stdin;
-25fcddee	shared	governance-rules	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
-3fa17fa0	shared	client-deal	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
-72e06bdf	shared	client-deal	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
-581cb3fe	shared	delegation-council	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
-113b3833	joe	governance-rules	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
-57d13061	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
-c66dc739	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
-49533583	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
-557838a5	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
+25fcddee	shared	governance-rules	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+3fa17fa0	shared	client-deal	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+72e06bdf	shared	client-deal	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+113b3833	joe	governance-rules	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+57d13061	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+c66dc739	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+49533583	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+557838a5	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
 \.
 
 
@@ -42151,21 +42151,20 @@ values (true,'shadow','schema-snapshot',
         'Fresh rebuild default: scoped delivery remains shadow until governed cutover evidence exists.')
 on conflict (singleton) do nothing;
 
--- CARR RULE DELIVERY ACTIVATION TARGETS POST-0348 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363 (bin/schema-snapshot.sh) — exact reviewed cutover config.
 insert into ops.rule_delivery_activation_target
   (short_id,expected_scope,expected_pack,
    from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
    to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
 values
- ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
- ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
- ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
- ('581cb3fe','shared','delegation-council','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
- ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
- ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
- ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
- ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
- ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218')
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904')
 on conflict (short_id) do nothing;
 
 -- CARR GOVERNED EXECUTION SEEDS (bin/schema-snapshot.sh) — exact bounded repository declarations.
@@ -42464,7 +42463,7 @@ insert into ops.siep_component_alias select * from jsonb_populate_record(null::o
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-14", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-15", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-16", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26"}'::jsonb) on conflict do nothing;
-select pg_catalog.setval('ops.work_request_ref_seq', 26, true);
+select pg_catalog.setval('ops.work_request_ref_seq', 33, true);
 alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
 alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
 alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
@@ -42478,3 +42477,29 @@ begin
   end if;
 end
 $carr_siep_manifest$;
+
+-- CARR DOCTRINE VALIDATION REGISTRY (bin/schema-snapshot.sh) — the gate rows
+-- themselves, not their findings. Without these a rebuilt database enforces no
+-- doctrine gates and says nothing about it.
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {"note": "scoped OFF internal classes 2026-08-08: rule ede4c735 binds writing-rules to PROSPECT-VISIBLE surfaces only, and all current store classes are internal doctrine (the gate blocked the first legitimate doctrine write for an em-dash). Re-scope by adding a client-facing content class here when one exists."}, "enabled": true, "impl_key": "gates.banned_phrases", "severity": "block", "check_key": "banned_phrases", "applies_to": {"ops": ["write"], "content_classes": []}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "writing-rules lint on prospect-visible content classes"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.base_version_match", "severity": "block", "check_key": "base_version_match", "applies_to": {"ops": ["write", "move", "retire"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "expected_version equals current_version (also SQL-enforced)"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.body_schema", "severity": "block", "check_key": "body_schema", "applies_to": {"ops": ["write"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "body validates against its content_class JSON schema"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.claim_holder_or_free", "severity": "block", "check_key": "claim_holder_or_free", "applies_to": {"ops": ["write", "move", "retire"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "no foreign unexpired claim on the section"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.edge_acyclic", "severity": "block", "check_key": "edge_acyclic", "applies_to": {"ops": ["refs_set"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "acyclic edge types stay acyclic after the write"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.edge_class_allowed", "severity": "block", "check_key": "edge_class_allowed", "applies_to": {"ops": ["refs_set"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "edge source/target classes legal for the edge_type"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.no_md_escape", "severity": "block", "check_key": "no_md_escape", "applies_to": {"ops": ["write"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "body text does not instruct writing vault .md outside the manifest"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.personal_owner_required", "severity": "block", "check_key": "personal_owner_required", "applies_to": {"ops": ["create", "write"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "visibility=personal requires owner_actor_id"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.slug_unique", "severity": "block", "check_key": "slug_unique", "applies_to": {"ops": ["create", "rename"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "document slug free among documents and aliases"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.target_exists", "severity": "block", "check_key": "target_exists", "applies_to": {"ops": ["refs_set", "write"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "every link/edge target resolves to a live row"}'::jsonb) on conflict (check_key) do nothing;
+insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.unresolved_conflict", "severity": "block", "check_key": "unresolved_conflict", "applies_to": {"ops": ["refs_set"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "CONFLICTS_WITH present without a resolving edge"}'::jsonb) on conflict (check_key) do nothing;
+
+-- CARR NAMED AGENT PROFILES (bin/schema-snapshot.sh) — the seeded roster. No
+-- runtime path creates these; a rebuild without them breaks the bot brief.
+insert into agent_profile select * from jsonb_populate_record(null::agent_profile, '{"id": "1f116c08-8e2c-4ab3-834a-6b4a5c7deea1", "status": "active", "charter": ["implementation in the repo worktree lanes", "migrations and Worker verbs", "tests written before the thing", "release mechanics through the sanctioned doors"], "version": 3, "created_at": "2026-08-23T03:20:17.201266+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "builder", "current_desk": "hermes-desktop", "display_name": "Builder", "current_model": "openrouter/stealth/ox-alpha", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into agent_profile select * from jsonb_populate_record(null::agent_profile, '{"id": "d01a2a96-70d9-42d8-beb3-82fe26eb079c", "status": "active", "charter": ["deal watch and next-action hygiene", "critical-date and follow-up triage", "draft-only partner escalations"], "version": 2, "created_at": "2026-08-25T03:31:03.957747+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "deal-steward", "current_desk": "hermes-desktop", "display_name": "Deal Steward", "current_model": "xai-oauth/grok-4.6", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into agent_profile select * from jsonb_populate_record(null::agent_profile, '{"id": "1427c2c4-64bb-4090-8b21-f1bc96e8a830", "status": "active", "charter": ["surface and interaction design under the CARR surface constraints", "doctrine-governed visual work", "concept documents to order level"], "version": 2, "created_at": "2026-08-23T03:20:17.201266+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "designer", "current_desk": "hermes-desktop", "display_name": "Designer", "current_model": "nous/moonshotai/kimi-k3", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into agent_profile select * from jsonb_populate_record(null::agent_profile, '{"id": "95aaf923-f0cb-44b1-948d-c5c2bfd3f1bf", "status": "active", "charter": ["the doctorcre app persona (Dr. CRE)", "prospect-facing product surfaces under Doc''s own product rules", "hermes-app runtime once the October machine arrives"], "version": 2, "created_at": "2026-08-23T03:20:17.201266+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "doc", "current_desk": "hermes-desktop", "display_name": "Doc", "current_model": "xai-oauth/grok-4.6", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into agent_profile select * from jsonb_populate_record(null::agent_profile, '{"id": "8fb63424-05d1-498b-bb83-a9bb44467a43", "status": "active", "charter": ["structured intake and normalization", "record completeness checks", "research queue preparation"], "version": 2, "created_at": "2026-08-25T03:31:03.957747+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "intake-clerk", "current_desk": "hermes-desktop", "display_name": "Intake Clerk", "current_model": "nous/deepseek/deepseek-v4-pro", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into agent_profile select * from jsonb_populate_record(null::agent_profile, '{"id": "df274c25-f590-41c9-ae78-89290a96fd5c", "status": "active", "charter": ["marketing queue operations", "content repurposing and scheduling drafts", "campaign evidence capture"], "version": 2, "created_at": "2026-08-25T03:31:03.957747+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "marketing-ops", "current_desk": "hermes-desktop", "display_name": "Marketing Ops", "current_model": "xai-oauth/grok-4.6", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into agent_profile select * from jsonb_populate_record(null::agent_profile, '{"id": "7325c706-580a-40e2-a62f-db68332da99d", "status": "active", "charter": ["independent verification with fresh context", "adversarial reading of finished work", "attestation of builds it did not make"], "version": 2, "created_at": "2026-08-23T03:20:17.201266+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "reviewer", "current_desk": "hermes-desktop", "display_name": "Reviewer", "current_model": "nous/deepseek/deepseek-v4-pro", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into agent_profile select * from jsonb_populate_record(null::agent_profile, '{"id": "4b3ccb10-ae39-4a9a-a3c7-48c69d593d28", "status": "active", "charter": ["routine system health observation", "scheduled-run and freshness checks", "incident draft preparation"], "version": 2, "created_at": "2026-08-25T03:31:03.957747+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "system-watch", "current_desk": "hermes-desktop", "display_name": "System Watch", "current_model": "nous/deepseek/deepseek-v4-pro", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
