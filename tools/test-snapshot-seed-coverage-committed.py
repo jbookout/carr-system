@@ -30,6 +30,7 @@ matching emit block. The message names the table either way.
 from pathlib import Path
 import importlib.util
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOT = ROOT / "db" / "schema.sql"
@@ -65,7 +66,24 @@ def main() -> int:
               f"migrations; detection has collapsed and a clean verdict would mean nothing")
         return 1
 
+    # A BUDGET, because the cost of this check is not a fixed price. scan_sql was
+    # quadratic in artifact size -- 1.5s at 0.5MB, 7.4s at 1MB, 28.9s at 1.5MB --
+    # and db/schema.sql is 2.3MB and grows with every migration. ops/ci.sh gives
+    # each gate selftest CI_SELFTEST_TIMEOUT_SECONDS and, on exit 124, sets
+    # gates_timed_out and BREAKS: a check that eventually runs long does not fail
+    # alone, it abandons every remaining gate selftest in the class. Correctness
+    # cases cannot see this - the quadratic form returns identical answers - so the
+    # property is asserted here or nowhere. Measured at 5s; the budget is six times
+    # that, loose enough for a loaded machine and tight enough to catch a return to
+    # the shape that cost 37s.
+    started = time.monotonic()
     failures = module.check(str(ROOT), artifact)
+    elapsed = time.monotonic() - started
+    if elapsed > 30.0:
+        print(f"  FAIL the seed-coverage check took {elapsed:.1f}s against a 30s budget. "
+              f"It is not merely slow: on timeout ops/ci.sh abandons the remaining gate "
+              f"selftests in this class. Profile scan_sql before raising this number.")
+        return 1
     if failures:
         print(f"  FAIL the committed db/schema.sql does not pass its own seed-coverage check "
               f"({len(failures)} finding(s)). A database rebuilt from this file would come up "
@@ -75,7 +93,8 @@ def main() -> int:
         return 1
 
     print(f"  ok   the committed db/schema.sql passes seed coverage "
-          f"({len(applied)} applied migrations, {len(seeds)} seeded tables classified)")
+          f"({len(applied)} applied migrations, {len(seeds)} seeded tables classified, "
+          f"checked in {elapsed:.1f}s)")
     print("snapshot seed-coverage committed-artifact selftest: PASS")
     return 0
 
