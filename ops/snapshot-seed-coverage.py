@@ -61,24 +61,42 @@ import sys
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|)\$")
 TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
-ANY_COPY = re.compile(r"^COPY\s+" + TABLE + r"\s*\(", re.M | re.I)
+ANY_COPY = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\(|FROM\b)", re.M | re.I)
 
 CREATE_ROUTINE = re.compile(
     r"create\s+(?:or\s+replace\s+)?function\s+([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)?)\s*\(", re.I)
 
-# Statements that NAME a function without invoking it. Left in place they make
-# every routine in a migration look called, which is how an early draft of this
-# check reported 88 "newly seeded" tables instead of the real 58.
+# Statements that NAME a function without invoking it, masked to the END OF THE
+# STATEMENT rather than to the end of one signature. That distinction is the whole
+# fix: a privilege statement may list many functions --
+#
+#     grant execute on function
+#       ops.select_provider_routes(text[]),
+#       ops.record_provider_observation(text,text,integer,text,integer,text),
+#       ops.put_cognition_cache(text,text,integer,integer,jsonb,text[],integer)
+#     to carr_jobs;
+#
+# -- and masking only the first left the rest looking like calls, so their bodies
+# were pulled in as migration-time writes. An independent review measured the
+# damage: 49 of 153 detections were routine bodies admitted this way, none of
+# which the migration ever runs. Masking to the semicolon covers a list of any
+# length.
 MENTIONS_ROUTINE = re.compile(
-    r"(?:create\s+(?:or\s+replace\s+)?function|revoke[^;]*?on\s+function|grant[^;]*?on\s+function"
-    r"|alter\s+function|drop\s+function|comment\s+on\s+function"
-    r"|security\s+label[^;]*?on\s+function)\s+[a-z_][a-z0-9_.\s]*\([^)]*\)", re.I | re.S)
+    r"(?:create\s+(?:or\s+replace\s+)?function|revoke\b[^;]*?\bon\s+function"
+    r"|grant\b[^;]*?\bon\s+function|alter\s+function|drop\s+function"
+    r"|comment\s+on\s+function|security\s+label\b[^;]*?\bon\s+function)[^;]*;", re.I | re.S)
+
+# A signature inside a quoted string is a NAME too, never a call:
+#     has_function_privilege('carr_writer','ops.record_executed_lease(text,integer)')
+# Dynamic EXECUTE of a built string is the acknowledged blind spot on the other
+# side of this trade; no migration in this repository seeds that way today.
+QUOTED_LITERAL = re.compile(r"'(?:[^']|'')*'", re.S)
 
 # Row-landing DML. Every form here has been seen in this repository's migrations.
 WRITES_ANYWHERE = (
-    re.compile(r"insert\s+into\s+" + TABLE, re.I),
+    re.compile(r"insert\s+into\s+(?:only\s+)?" + TABLE, re.I),
     re.compile(r"merge\s+into\s+" + TABLE, re.I),
-    re.compile(r"copy\s+" + TABLE + r"\s*\([^)]*\)\s*from", re.I),
+    re.compile(r"copy\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?from\b", re.I),
     # TEMP and TEMPORARY are deliberately NOT matched. Thirteen migrations build
     # scratch tables this way for before/after comparison (_org_before, amd2_map,
     # lt_before, ...); they vanish with the session and can never be in a snapshot,
@@ -154,7 +172,7 @@ def migration_time_text(sql):
     called, changed = set(), True
     while changed:
         changed = False
-        blob = MENTIONS_ROUTINE.sub(" ", " ".join(executing))
+        blob = QUOTED_LITERAL.sub(" ", MENTIONS_ROUTINE.sub(" ", " ".join(executing)))
         for name, bodies in routines.items():
             if name in called:
                 continue
@@ -232,13 +250,25 @@ def check_region_boundary(artifact):
     vocabulary. Reordering those two would silently blind the excluded-but-present
     direction, so the positional assumption is asserted rather than assumed.
     """
-    first = ANY_COPY.search(artifact)
     ledger = LEDGER_COPY.search(artifact)
-    if first and ledger and first.start() != ledger.start():
-        return (f"DATA REGION BOUNDARY MOVED: the first COPY in the artifact is "
-                f"{normalise(first.group(1))}, not public.schema_migrations.\n"
-                f"    This check reads data statements from the ledger COPY to EOF. With another\n"
-                f"    COPY above it, rows in that block are invisible here and an excluded table\n"
+    if not ledger:
+        return None
+    # Not COPY alone: the two data blocks bin/schema-snapshot.sh appends by hand
+    # (the SIEP manifest, doctrine_meta) are INSERTs, so an INSERT above the ledger
+    # would sit outside the data region and go unread just as a COPY would.
+    # Only statements OUTSIDE routine bodies count. The DDL above the ledger is
+    # full of CREATE FUNCTION bodies whose own INSERTs start a line, and reading
+    # those as data made this check refuse every real snapshot.
+    prefix = artifact[:ledger.start()]
+    prefix_top, _do_bodies, _routines = split_segments(prefix)
+    candidates = [ANY_COPY.search(prefix)]
+    candidates.append(re.search(r"^\s*insert\s+into\s+(?:only\s+)?" + TABLE, prefix_top, re.M | re.I))
+    first = min((c for c in candidates if c), key=lambda c: c.start(), default=None)
+    if first:
+        return (f"DATA REGION BOUNDARY MOVED: the first data statement in the artifact is "
+                f"{normalise(first.group(1))}, above public.schema_migrations.\n"
+                f"    This check reads data statements from the ledger COPY to EOF. With data\n"
+                f"    above it, rows in that block are invisible here and an excluded table\n"
                 f"    could enter a tracked file unseen. Restore the ledger-first order in\n"
                 f"    bin/schema-snapshot.sh, or teach this check the new boundary.")
     return None
@@ -251,7 +281,8 @@ def tables_with_data(artifact):
     for hit in ANY_COPY.finditer(region):
         found.add(normalise(hit.group(1)))
     for pattern in WRITES_ANYWHERE:
-        for hit in re.finditer(r"^\s*" + pattern.pattern, region, pattern.flags | re.M):
+        for hit in re.finditer(r"^\s*(?:with\s+[^;]{0,4000}?\s)?" + pattern.pattern,
+                               region, pattern.flags | re.M):
             found.add(normalise(hit.group(1)))
     return found
 
@@ -305,6 +336,15 @@ def check(repo, artifact_text):
             f"    Decide and record it in {rel_config}: 'carried' if a rebuild needs its rows\n"
             f"    (then add the block to bin/schema-snapshot.sh), or 'excluded' with the reason\n"
             f"    it is business, runtime or usage data. Read the rows before carrying them.")
+
+    classified = set(carried) | set(subset) | set(excluded)
+    for table in sorted(classified - set(seeds)):
+        failures.append(
+            f"CLASSIFICATION ENTRY NO LONGER APPLIES: {table}\n"
+            f"    {rel_config} classifies this table, and no applied migration writes rows\n"
+            f"    into it at migration time any more. That is how a false alarm becomes\n"
+            f"    permanent: an entry nobody revisits, for a question nobody is asking.\n"
+            f"    Remove it, or say why detection changed.")
 
     for table in sorted(set(carried) | set(subset)):
         if table not in present:
