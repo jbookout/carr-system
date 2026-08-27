@@ -104,7 +104,11 @@
    "title_gist": "CONSTRAINT, binding at the moment a session is about to say anything about UNCOMMITTED WORK, a DIRTY TREE, or",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'whose_work' at before any claim about uncommitted work, a dirty tree, or who is blocking whom, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: CONSTRAINT, binding at the moment a session is about to say anything about UNCOMMITTED\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: CONSTRAINT, binding at the moment a session is about to say anything about UNCOMMITTED\u2026",
+   "detector": {
+    "kind": "bash_family",
+    "pattern": "\\bgit\\s+push\\b|\\bgh\\s+pr\\s+(?:create|merge)\\b"
+   }
   },
   {
    "id": "179be4b8",
@@ -125,7 +129,11 @@
    "title_gist": "OUTSIDE MODELS ARE PART OF THE DELEGATION POOL FOR ACTUAL JOBS, NOT ONLY ADVISORY CHAIRS \u2014 AND COST TIER IS",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'delegation_tripwire' at model selection, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: OUTSIDE MODELS ARE PART OF THE DELEGATION POOL FOR ACTUAL JOBS, NOT ONLY ADVISORY CHAIRS\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: OUTSIDE MODELS ARE PART OF THE DELEGATION POOL FOR ACTUAL JOBS, NOT ONLY ADVISORY CHAIRS\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^Agent$"
+   }
   },
   {
    "id": "19304882",
@@ -181,7 +189,11 @@
    "title_gist": "A shared-event guest list is assembled outside any tool call",
    "home": "jit",
    "reason": "No verb represents 'co-invite'; guest lists live in prose a human sends, and the exception is Joe's to give for a given event. (planned_control on record: a guest-list check running the same pairing predicate as e6e0b0e7, once events and vendor Category are both on the record.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-vendor|update-vendor|merge-vendor-rows)$"
+   }
   },
   {
    "id": "1fddcffb",
@@ -256,7 +268,11 @@
    "title_gist": "Fan-out hygiene: Verifiers get fresh context \u2014 a checker never inherits the maker's conversation",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'delegation_tripwire' at fan-out brief, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: Fan-out hygiene: Verifiers get fresh context \u2014 a checker never inherits the maker's\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: Fan-out hygiene: Verifiers get fresh context \u2014 a checker never inherits the maker's\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^Agent$"
+   }
   },
   {
    "id": "2b889e80",
@@ -282,7 +298,11 @@
    "title_gist": "EVERY NEW IMPLEMENTATION STARTS WITH A DEEP-DIVE RESEARCH PASS, BEFORE ANY BUILDING",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: EVERY NEW IMPLEMENTATION STARTS WITH A DEEP-DIVE RESEARCH PASS, BEFORE ANY BUILDING"
+   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: EVERY NEW IMPLEMENTATION STARTS WITH A DEEP-DIVE RESEARCH PASS, BEFORE ANY BUILDING",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^(WebFetch|WebSearch)$"
+   }
   },
   {
    "id": "2e8b4840",
@@ -345,7 +365,11 @@
    "title_gist": "A named-rivalry list keeps two competing vendors apart, and the list grows by teaching",
    "home": "jit",
    "reason": "A NEW rivalry is taught as it surfaces, so a fixed predicate would go stale the day one appears; this stays a living, taught list. (planned_control on record: a named-rivalry pair list on the vendor record, checked by the same draft-time pairing check as e6e0b0e7.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-vendor|update-vendor|merge-vendor-rows)$"
+   }
   },
   {
    "id": "3d185f2b",
@@ -359,7 +383,11 @@
    "title_gist": "Stale notes are not status: before drafting re-engagement off notes older than ~60 days, ask Joe \"is this",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'session_boot' at stale-note re-engagement, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Stale notes are not status: before drafting re-engagement off notes older than ~60 days,\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Stale notes are not status: before drafting re-engagement off notes older than ~60 days,\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-conversation|add-deal-note|log-activity|log-outreach)$"
+   }
   },
   {
    "id": "3fa422b7",
@@ -380,21 +408,33 @@
    "title_gist": "HIPAA is always spelled HIPAA; double-check compliance references",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'writing_lint' at writing HIPAA in any surface, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: HIPAA is always spelled HIPAA; double-check compliance references"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: HIPAA is always spelled HIPAA; double-check compliance references",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-document|compare-lease-terms|record-executed-lease)$"
+   }
   },
   {
    "id": "424ba0cc",
    "title_gist": "Cold and paused clients leave the active book and go to a separate not-top-of-mind category \u2014 never pester a",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Cold and paused clients leave the active book and go to a separate not-top-of-mind\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Cold and paused clients leave the active book and go to a separate not-top-of-mind\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-conversation|add-deal-note|log-activity|log-outreach)$"
+   }
   },
   {
    "id": "4399df76",
    "title_gist": "Every LOI term is negotiable and template values are placeholders holding the most-common case, never fixed",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Every LOI term is negotiable and template values are placeholders holding the most-common\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Every LOI term is negotiable and template values are placeholders holding the most-common\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-document|compare-lease-terms|record-executed-lease)$"
+   }
   },
   {
    "id": "43e2ef76",
@@ -415,21 +455,33 @@
    "title_gist": "When Joe feeds a source, the job is to IMPROVE the system with it, and the burden of proof sits on \"we",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: When Joe feeds a source, the job is to IMPROVE the system with it, and the burden of\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: When Joe feeds a source, the job is to IMPROVE the system with it, and the burden of\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^(WebFetch|WebSearch)$"
+   }
   },
   {
    "id": "48083552",
    "title_gist": "DISCOVERY BEFORE SOLVING, IN EVERY CLIENT AND PROSPECT MEETING",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: DISCOVERY BEFORE SOLVING, IN EVERY CLIENT AND PROSPECT MEETING"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: DISCOVERY BEFORE SOLVING, IN EVERY CLIENT AND PROSPECT MEETING",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-conversation|add-deal-note|log-activity|log-outreach)$"
+   }
   },
   {
    "id": "49533583",
    "title_gist": "CONSTRAINT, binding at the moment a session reaches for any of Joe's meetings, attendees, or mail",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'session_boot' at calendar/mail read, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) joe-comms \u2014 fires on: CONSTRAINT, binding at the moment a session reaches for any of Joe's meetings, attendees,\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) joe-comms \u2014 fires on: CONSTRAINT, binding at the moment a session reaches for any of Joe's meetings, attendees,\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(send_message|reply|forward|create_draft|update_draft)$"
+   }
   },
   {
    "id": "49c627cc",
@@ -490,7 +542,11 @@
    "title_gist": "Prospects are healthcare experts unfamiliar with CRE",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Prospects are healthcare experts unfamiliar with CRE"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Prospects are healthcare experts unfamiliar with CRE",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-deal|update-deal|patch-deal-field|reassign-deal|revert-deal-field)$"
+   }
   },
   {
    "id": "5409731b",
@@ -511,21 +567,33 @@
    "title_gist": "WHEN JOE POSTS A LINK, THE QUOTED POST INSIDE IT IS PART OF THE SOURCE, NOT A FOOTNOTE",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'session_boot' at X link intake, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) joe-comms \u2014 fires on: WHEN JOE POSTS A LINK, THE QUOTED POST INSIDE IT IS PART OF THE SOURCE, NOT A FOOTNOTE"
+   "jit_trigger_hint": "Delivered by pack(s) joe-comms \u2014 fires on: WHEN JOE POSTS A LINK, THE QUOTED POST INSIDE IT IS PART OF THE SOURCE, NOT A FOOTNOTE",
+   "detector": {
+    "kind": "content_regex",
+    "pattern": "\\bx\\.com\\b|\\btwitter\\.com\\b"
+   }
   },
   {
    "id": "5697071b",
    "title_gist": "LICENSURE IS PER PARTNER, NOT PER TERRITORY, AND THE TWO ARE CURRENTLY DIFFERENT",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: LICENSURE IS PER PARTNER, NOT PER TERRITORY, AND THE TWO ARE CURRENTLY DIFFERENT"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: LICENSURE IS PER PARTNER, NOT PER TERRITORY, AND THE TWO ARE CURRENTLY DIFFERENT",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-document|compare-lease-terms|record-executed-lease)$"
+   }
   },
   {
    "id": "57d13061",
    "title_gist": "For any x.com/X retrieval \u2014 single links and research at scale alike \u2014 GROK BUILD IS THE FIRST MOVE",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'session_boot' at X retrieval, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) joe-comms \u2014 fires on: For any x.com/X retrieval \u2014 single links and research at scale alike \u2014 GROK BUILD IS THE\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) joe-comms \u2014 fires on: For any x.com/X retrieval \u2014 single links and research at scale alike \u2014 GROK BUILD IS THE\u2026",
+   "detector": {
+    "kind": "content_regex",
+    "pattern": "\\bx\\.com\\b|\\btwitter\\.com\\b"
+   }
   },
   {
    "id": "57d83b75",
@@ -594,7 +662,11 @@
    "title_gist": "When Joe feeds a link, the session incorporates the applicable learnings into the system in the same session",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: When Joe feeds a link, the session incorporates the applicable learnings into the system\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: When Joe feeds a link, the session incorporates the applicable learnings into the system\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^(WebFetch|WebSearch)$"
+   }
   },
   {
    "id": "5e89c211",
@@ -608,7 +680,11 @@
    "title_gist": "Vertical match is weighed against relationship stage when picking a vendor",
    "home": "jit",
    "reason": "Vertical-match strength versus relationship-stage strength is a weighing judgment with no fixed formula. (No planned_control named.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(who-do-we-know|counterparty-history)$"
+   }
   },
   {
    "id": "614c1209",
@@ -657,7 +733,11 @@
    "title_gist": "When Joe provides an article, video, or any source, READ IT IN FULL and mine it for gold nuggets applicable",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: When Joe provides an article, video, or any source, READ IT IN FULL and mine it for gold\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: When Joe provides an article, video, or any source, READ IT IN FULL and mine it for gold\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^(WebFetch|WebSearch)$"
+   }
   },
   {
    "id": "647f843d",
@@ -698,7 +778,11 @@
    "title_gist": "Delivery tier is the last tiebreaker, below hard blocks and vertical/state fit, above relationship stage",
    "home": "jit",
    "reason": "Ordering three soft factors for one client's need is judgment; the ORDER is fixed but the weighing per case is not. (No planned_control named.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(who-do-we-know|counterparty-history)$"
+   }
   },
   {
    "id": "708c2150",
@@ -726,14 +810,22 @@
    "title_gist": "The vendor network is the TEAM's, never Dell's alone",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'writing_lint' at at each prospect-visible write, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: The vendor network is the TEAM's, never Dell's alone"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: The vendor network is the TEAM's, never Dell's alone",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-conversation|add-deal-note|log-activity|log-outreach)$"
+   }
   },
   {
    "id": "72e06bdf",
    "title_gist": "Never pre-qualify leads before the board",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'session_boot' at lead board presentation, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Never pre-qualify leads before the board"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Never pre-qualify leads before the board",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-deal|update-deal|patch-deal-field|reassign-deal|revert-deal-field)$"
+   }
   },
   {
    "id": "73381d78",
@@ -768,7 +860,11 @@
    "title_gist": "Territory and Vertical must be read together against one client's location",
    "home": "jit",
    "reason": "No fixed predicate can weigh territory and vertical fit for a specific client's specific location at once. (No planned_control named.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(who-do-we-know|counterparty-history)$"
+   }
   },
   {
    "id": "76a53dfe",
@@ -782,14 +878,22 @@
    "title_gist": "A fragile, high-stakes client may justify pairing with a Trusted vendor as an exception",
    "home": "jit",
    "reason": "'Fragile, high-stakes client' and 'a Trusted option fits' are both judgments about one specific deal. (No planned_control named; deal-specific risk read.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(who-do-we-know|counterparty-history)$"
+   }
   },
   {
    "id": "7e4ca905",
    "title_gist": "Closes a loophole in the same-category rule (e6e0b0e7) by interpretation",
    "home": "jit",
    "reason": "This rule only binds wherever e6e0b0e7 binds, and both are pure interpretation calls with no separate machine surface. (Inherits e6e0b0e7's planned_control if that ever lands.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-vendor|update-vendor|merge-vendor-rows)$"
+   }
   },
   {
    "id": "7e9739f2",
@@ -817,14 +921,22 @@
    "title_gist": "A RED TEAM ASSIGNS DISTINCT LENSES, NEVER REDUNDANT VOTES \u2014 and one seat re-runs the evidence instead of",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: A RED TEAM ASSIGNS DISTINCT LENSES, NEVER REDUNDANT VOTES \u2014 and one seat re-runs the\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: A RED TEAM ASSIGNS DISTINCT LENSES, NEVER REDUNDANT VOTES \u2014 and one seat re-runs the\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^Agent$"
+   }
   },
   {
    "id": "83b9a362",
    "title_gist": "Suggest a pairing with a caveat until a partner rules on it",
    "home": "jit",
    "reason": "Whether a caveat was actually carried in the prose is a reading judgment, not a checkable field. (No planned_control named.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "content_regex",
+    "pattern": "(?=.*\\b(?:prepare-conversation|log-outreach)\\b)(?=.*\\bvendor\\b)"
+   }
   },
   {
    "id": "847f9995",
@@ -851,14 +963,22 @@
    "title_gist": "A Benched-vendor override is Joe's to give, in conversation",
    "home": "jit",
    "reason": "The override happens in prose even once Stage exists on the record, so it stays a judgment call at the moment, never a gate. (planned_control on record: the same Stage check as defee176 plus a log-decision receipt whenever Joe overrides a Benched vendor.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-vendor|update-vendor|merge-vendor-rows)$"
+   }
   },
   {
    "id": "8aefcdce",
    "title_gist": "Copilot: Microsoft-native. Claude: everything else \u2014 lead gen, outreach, research, automation, documents",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: Copilot: Microsoft-native. Claude: everything else \u2014 lead gen, outreach, research,\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: Copilot: Microsoft-native. Claude: everything else \u2014 lead gen, outreach, research,\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^Agent$"
+   }
   },
   {
    "id": "8c1e6057",
@@ -949,7 +1069,11 @@
    "title_gist": "When Joe feeds a link or source, never evaluate it only against its stated use case",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: When Joe feeds a link or source, never evaluate it only against its stated use case"
+   "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: When Joe feeds a link or source, never evaluate it only against its stated use case",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^(WebFetch|WebSearch)$"
+   }
   },
   {
    "id": "99e951b9",
@@ -970,7 +1094,11 @@
    "title_gist": "Doctor cadence is the message: outreach frequency IS content \u2014 pressure reads as desperation",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Doctor cadence is the message: outreach frequency IS content \u2014 pressure reads as\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Doctor cadence is the message: outreach frequency IS content \u2014 pressure reads as\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-deal|update-deal|patch-deal-field|reassign-deal|revert-deal-field)$"
+   }
   },
   {
    "id": "9e3fb6d0",
@@ -1078,21 +1206,33 @@
    "title_gist": "BUILD FOR THE TRAJECTORY, NOT THE SNAPSHOT",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: BUILD FOR THE TRAJECTORY, NOT THE SNAPSHOT"
+   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: BUILD FOR THE TRAJECTORY, NOT THE SNAPSHOT",
+   "detector": {
+    "kind": "bash_family",
+    "pattern": "\\bgit\\s+push\\b|\\bgh\\s+pr\\s+(?:create|merge)\\b"
+   }
   },
   {
    "id": "b587f6c2",
    "title_gist": "WHEN TO CONVENE A FRONTIER-MODEL COUNCIL \u2014 the decision procedure, so convening is never a mood or a ritual",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: WHEN TO CONVENE A FRONTIER-MODEL COUNCIL \u2014 the decision procedure, so convening is never\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: WHEN TO CONVENE A FRONTIER-MODEL COUNCIL \u2014 the decision procedure, so convening is never\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "^Agent$"
+   }
   },
   {
    "id": "ba5730c5",
    "title_gist": "Shared-project overlap between vendors is conditional, not a default block",
    "home": "jit",
    "reason": "The rule states its own conditions explicitly (live/likely shared project, complementary territory, no existing loyalty) \u2014 situational judgment every time, not a fixed predicate. (No planned_control named; conditions are too situational for a machine check.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "content_regex",
+    "pattern": "(?=.*\\b(?:prepare-conversation|log-outreach)\\b)(?=.*\\bvendor\\b)"
+   }
   },
   {
    "id": "bbffc139",
@@ -1119,14 +1259,22 @@
    "title_gist": "When Joe chooses a machine or system state permanently, change the check so it reads that state as accepted",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: When Joe chooses a machine or system state permanently, change the check so it reads that\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: When Joe chooses a machine or system state permanently, change the check so it reads that\u2026",
+   "detector": {
+    "kind": "bash_family",
+    "pattern": "\\bgit\\s+push\\b|\\bgh\\s+pr\\s+(?:create|merge)\\b"
+   }
   },
   {
    "id": "bddb0e7b",
    "title_gist": "Overlap 'defaults' require confirming the specific pairing before acting",
    "home": "jit",
    "reason": "The rule states its own softness \u2014 these are defaults, not blocks \u2014 and requires a specific confirm step no predicate can replace. (No planned_control named; the confirm step is inherently a human-judgment moment.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "content_regex",
+    "pattern": "(?=.*\\b(?:prepare-conversation|log-outreach)\\b)(?=.*\\bvendor\\b)"
+   }
   },
   {
    "id": "c0b38d80",
@@ -1140,7 +1288,11 @@
    "title_gist": "The placement test: state WHERE it lives and why \u2014 repo `~/carr-system` vs the Drive vault vs BOTH",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: The placement test: state WHERE it lives and why \u2014 repo `~/carr-system` vs the Drive\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: The placement test: state WHERE it lives and why \u2014 repo `~/carr-system` vs the Drive\u2026",
+   "detector": {
+    "kind": "bash_family",
+    "pattern": "\\bgit\\s+push\\b|\\bgh\\s+pr\\s+(?:create|merge)\\b"
+   }
   },
   {
    "id": "c1db316c",
@@ -1180,7 +1332,11 @@
    "title_gist": "Mail capture on Joe's side reads the LOCAL mail stores on his Mac \u2014 never a Gmail API integration, and never",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'session_boot' at mail capture, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) joe-comms \u2014 fires on: Mail capture on Joe's side reads the LOCAL mail stores on his Mac \u2014 never a Gmail API\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) joe-comms \u2014 fires on: Mail capture on Joe's side reads the LOCAL mail stores on his Mac \u2014 never a Gmail API\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(send_message|reply|forward|create_draft|update_draft)$"
+   }
   },
   {
    "id": "c6f69dee",
@@ -1200,7 +1356,11 @@
    "title_gist": "A PRACTICE OWNER SELLING TO A PLATFORM IS A LEAD, AND THE LEAD IS THEIR NEXT STARTUP \u2014 NOT THE SALE",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: A PRACTICE OWNER SELLING TO A PLATFORM IS A LEAD, AND THE LEAD IS THEIR NEXT STARTUP \u2014\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: A PRACTICE OWNER SELLING TO A PLATFORM IS A LEAD, AND THE LEAD IS THEIR NEXT STARTUP \u2014\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-deal|update-deal|patch-deal-field|reassign-deal|revert-deal-field)$"
+   }
   },
   {
    "id": "ca841807",
@@ -1221,14 +1381,22 @@
    "title_gist": "Lead with the no-conflict tenant/buyer-only model",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Lead with the no-conflict tenant/buyer-only model"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Lead with the no-conflict tenant/buyer-only model",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-document|compare-lease-terms|record-executed-lease)$"
+   }
   },
   {
    "id": "cf1c13a6",
    "title_gist": "Lead with the no-conflict framing when a counterparty could self-perform",
    "home": "jit",
    "reason": "A positioning rule about how a draft opens; no predicate can tell whether a draft actually led with the no-conflict framing. (No planned_control named; this is a drafting-quality judgment, not a checkable field.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "content_regex",
+    "pattern": "(?=.*\\b(?:prepare-conversation|log-outreach)\\b)(?=.*\\bvendor\\b)"
+   }
   },
   {
    "id": "cff429f5",
@@ -1326,14 +1494,22 @@
    "title_gist": "Vendor Stage gates an introduction, but Stage lives in a spreadsheet today",
    "home": "jit",
    "reason": "Stage is a vendors.xlsx column with no record-layer representation yet, so nothing can be denied on it mechanically. (planned_control on record: a Stage check at introduction-draft time once vendor Stage moves onto the vendor record.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-vendor|update-vendor|merge-vendor-rows)$"
+   }
   },
   {
    "id": "df55c398",
    "title_gist": "EVERY DELEGATED SWEEP CARRIES A DATA-CLASS BOUNDARY, AND A WIDENED SCOPE RE-STATES IT",
    "home": "jit",
    "reason": "Currently only SURFACED (a reminder via 'delegation_tripwire' at delegated scope brief, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core.",
-   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: EVERY DELEGATED SWEEP CARRIES A DATA-CLASS BOUNDARY, AND A WIDENED SCOPE RE-STATES IT"
+   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: EVERY DELEGATED SWEEP CARRIES A DATA-CLASS BOUNDARY, AND A WIDENED SCOPE RE-STATES IT",
+   "detector": {
+    "kind": "content_regex",
+    "pattern": "(?=.*\\bdata.?class\\b)(?=.*\\b(?:scope|widen|widening)\\b)"
+   }
   },
   {
    "id": "df8f1da0",
@@ -1374,14 +1550,22 @@
    "title_gist": "WRITE THE TEST BEFORE THE THING, AND ESPECIALLY BEFORE A GATE",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: WRITE THE TEST BEFORE THE THING, AND ESPECIALLY BEFORE A GATE"
+   "jit_trigger_hint": "Delivered by pack(s) engineering-git \u2014 fires on: WRITE THE TEST BEFORE THE THING, AND ESPECIALLY BEFORE A GATE",
+   "detector": {
+    "kind": "bash_family",
+    "pattern": "\\bgit\\s+push\\b|\\bgh\\s+pr\\s+(?:create|merge)\\b"
+   }
   },
   {
    "id": "e6e0b0e7",
    "title_gist": "Same-category vendor pairing is judgment, not a machine check",
    "home": "jit",
    "reason": "No tool call represents 'introduce'; judging whether two vendors are 'the same category' at the relationship level is the rule's whole content. (planned_control on record: a draft-time pairing check reading both parties' Category off the vendor record, once vendor Category is carried there.)",
-   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing."
+   "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(who-do-we-know|counterparty-history)$"
+   }
   },
   {
    "id": "e8868cbe",
@@ -1437,7 +1621,11 @@
    "title_gist": "EVERY CLIENT-FACING RECOMMENDATION NAMES AT LEAST ONE THING WE WOULD NOT DO, AND WHY",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: EVERY CLIENT-FACING RECOMMENDATION NAMES AT LEAST ONE THING WE WOULD NOT DO, AND WHY"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: EVERY CLIENT-FACING RECOMMENDATION NAMES AT LEAST ONE THING WE WOULD NOT DO, AND WHY",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(prepare-document|compare-lease-terms|record-executed-lease)$"
+   }
   },
   {
    "id": "f47a8fe9",
@@ -1451,7 +1639,11 @@
    "title_gist": "Joe & Dell are early-stage: prioritize prospecting/pipeline over polish on low-impact areas",
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Joe & Dell are early-stage: prioritize prospecting/pipeline over polish on low-impact\u2026"
+   "jit_trigger_hint": "Delivered by pack(s) client-deal \u2014 fires on: Joe & Dell are early-stage: prioritize prospecting/pipeline over polish on low-impact\u2026",
+   "detector": {
+    "kind": "verb",
+    "pattern": "__(new-deal|update-deal|patch-deal-field|reassign-deal|revert-deal-field)$"
+   }
   },
   {
    "id": "f5beac20",
@@ -1499,8 +1691,12 @@
    "id": "fb110a39",
    "title_gist": "FABLE IS RESERVED FOR ITS BEST USE CASES",
    "home": "jit",
-   "reason": "Reclassified 2026-08-27 (WR-000019 slice S4): hooks/delegation-gate.py stopped denying anything and now only records a per-session ledger, with a Stop ANNOUNCE for a materially under-delegated session — never a hard deny. Currently only SURFACED (a reminder via 'delegation_tripwire' at fan-out brief, not a hard deny) — situational content, belongs delivered by pack/moment rather than the always-loaded core, matching this map's other delegation_tripwire rules (2b66211d, df55c398).",
-   "jit_trigger_hint": "Delivered by pack(s) delegation-council — fires on: FABLE IS RESERVED FOR ITS BEST USE CASES"
+   "reason": "Reclassified 2026-08-27 (WR-000019 slice S4): hooks/delegation-gate.py stopped denying anything and now only records a per-session ledger, with a Stop ANNOUNCE for a materially under-delegated session \u2014 never a hard deny. Currently only SURFACED (a reminder via 'delegation_tripwire' at fan-out brief, not a hard deny) \u2014 situational content, belongs delivered by pack/moment rather than the always-loaded core, matching this map's other delegation_tripwire rules (2b66211d, df55c398).",
+   "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: FABLE IS RESERVED FOR ITS BEST USE CASES",
+   "detector": {
+    "kind": "content_regex",
+    "pattern": "\\bfable\\b"
+   }
   },
   {
    "id": "fb2b263d",
