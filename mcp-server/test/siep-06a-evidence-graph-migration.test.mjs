@@ -3,7 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 
 const migration = fs.readFileSync(
-  new URL("../../migrations/0337_siep06a_evidence_graph.sql", import.meta.url),
+  new URL("../../migrations/0365_siep06a_evidence_graph.sql", import.meta.url),
   "utf8",
 );
 const gate = fs.readFileSync(

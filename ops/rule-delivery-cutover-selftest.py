@@ -14,7 +14,7 @@ cutover=importlib.util.module_from_spec(spec); spec.loader.exec_module(cutover)
 py=(REPO/"ops/rule-delivery-cutover.py").read_text()
 sh=(REPO/"bin/rule-delivery-cutover-prod.sh").read_text()
 sql=(REPO/"migrations/0317_atomic_rule_delivery_cutover.sql").read_text()
-successor=(REPO/"migrations/0336_siep02_rule_delivery_authority.sql").read_text()
+successor=(REPO/"migrations/0364_siep02_rule_delivery_authority.sql").read_text()
 checks={
  "exact 38 reviewed proposal ids":len(cutover.curation_ids())==38,
  "human reviewer is checked":"rp.status='approved' and a.kind='human'" in successor,

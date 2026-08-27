@@ -10,7 +10,7 @@ import {
   verifyArtifactBundle,
 } from "../src/artifact-trust.js";
 
-const migration = fs.readFileSync(new URL("../../migrations/0340_siep13_artifact_registry.sql", import.meta.url), "utf8");
+const migration = fs.readFileSync(new URL("../../migrations/0368_siep13_artifact_registry.sql", import.meta.url), "utf8");
 const sha = value => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 
 function fixture() {

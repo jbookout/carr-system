@@ -3,7 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 const migration = fs.readFileSync(
-  new URL("../../migrations/0358_retired_rule_delivery_cleanup.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0376_retired_rule_delivery_cleanup.sql", import.meta.url), "utf8");
 
 test("retirement removes only the retired rule's delivery row in the same transaction", () => {
   assert.match(migration,

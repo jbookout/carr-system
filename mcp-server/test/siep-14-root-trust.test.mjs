@@ -8,7 +8,7 @@ import { containsForbiddenRootMaterial, custodianSetDigest, evaluateRootTrust,
   rootTrustEventDigest, verifyArtifactRootBindingAgainstDigest,
   verifyRootTrustChainAgainstDigest } from "../src/root-trust.js";
 
-const migration = fs.readFileSync(new URL("../../migrations/0342_siep14_root_trust.sql", import.meta.url), "utf8");
+const migration = fs.readFileSync(new URL("../../migrations/0370_siep14_root_trust.sql", import.meta.url), "utf8");
 const sha = value => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 const CUSTODIANS = [generateKeyPairSync("ed25519"), generateKeyPairSync("ed25519")];
 

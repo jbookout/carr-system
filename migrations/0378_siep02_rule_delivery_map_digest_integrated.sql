@@ -1,4 +1,4 @@
--- SIEP-02 post-main integration: advance the scoped-rule activation preimage
+-- 0378 / SIEP-02 post-main integration: advance the scoped-rule activation preimage
 -- to the exact reviewed map from PR #732 without changing delivery mode.
 -- Source/test implementation only. Production application or enforcement
 -- remains subject to Joe's explicit go/no-go.

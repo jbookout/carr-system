@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-const migration = await readFile(new URL("../../migrations/0336_siep02_rule_delivery_authority.sql", import.meta.url), "utf8");
+const migration = await readFile(new URL("../../migrations/0364_siep02_rule_delivery_authority.sql", import.meta.url), "utf8");
 const runtime = await readFile(new URL("../../ops/rule-delivery-cutover.py", import.meta.url), "utf8");
 const wrapper = await readFile(new URL("../../bin/rule-delivery-cutover-prod.sh", import.meta.url), "utf8");
-const digestForward = await readFile(new URL("../../migrations/0350_siep02_rule_delivery_map_digest_forward.sql", import.meta.url), "utf8");
-const digestIntegrated = await readFile(new URL("../../migrations/0360_siep02_rule_delivery_map_digest_integrated.sql", import.meta.url), "utf8");
+const digestForward = await readFile(new URL("../../migrations/0374_siep02_rule_delivery_map_digest_forward.sql", import.meta.url), "utf8");
+const digestIntegrated = await readFile(new URL("../../migrations/0378_siep02_rule_delivery_map_digest_integrated.sql", import.meta.url), "utf8");
 const mapBytes = await readFile(new URL("../../ops/config/rule-enforcement-map.json", import.meta.url));
 const overlay = JSON.parse(await readFile(new URL("../../ops/config/rule-delivery-activation-overlay.v1.json", import.meta.url), "utf8"));
 const currentMapDigest = createHash("sha256").update(mapBytes).digest("hex");

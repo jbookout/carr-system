@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { TOOLS } from "../mcp-server/src/tools.js";
+import { renderPolicyEpochMigration } from "./scac-policy-epoch-sql.mjs";
 
 export const REGISTRY_VERSION = "scac-mutation-registry.v1";
 export const REGISTRY_V2_VERSION = "scac-mutation-registry.v2";
@@ -17,11 +18,12 @@ export const REGISTRY_V6_VERSION = "scac-mutation-registry.v6";
 export const REGISTRY_V7_VERSION = "scac-mutation-registry.v7";
 export const REGISTRY_V8_VERSION = "scac-mutation-registry.v8";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
-// v1-v4 were rebaselined once while still unshipped so their catalog projections
-// matched the reviewed pre-SIEP database. They are sealed historical artifacts now:
-// current source discovery must never derive or rewrite these values again.
+// v1-v8 remain source-only until Joe approves Production application. Their
+// active post-main tail may be regenerated only through the explicit
+// --write-rebased-* commands below; ordinary historical write modes stay
+// refused so an accidental invocation cannot rewrite a reviewed seal.
 export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
-  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:717ab5b0d045a176fda05b285d3053b454487ce5f8588f8fbe60191d82e6d844", entryCount: 1241, sourceEntryCount: 736 }),
+  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:0cf4aac8ae4dec8f1d9735fe4844d7d49a2a512018d555b123ca8ab2c8ee6727", entryCount: 1263, sourceEntryCount: 748 }),
   v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:14f78320231a2a09714393b88f82a90e98a3dcacdaed4eea0ca8c218d2528512", entryCount: 1245, sourceEntryCount: 736 }),
   v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:c7690e43ff697666afc0691bbc00f4839ab772bb6f64508c27c727aa05e30de3", entryCount: 1249, sourceEntryCount: 736 }),
   v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:ce312b08ef4d798554bdf2588d669c77f8eb594dbbf08d096b19bb6900e50e86", entryCount: 1253, sourceEntryCount: 736 }),
@@ -30,29 +32,29 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:2e0375342458beff8c15e87df90eabf9183dcdcf5be29f9f90f6697cdfd40fd6", entryCount: 1288, sourceEntryCount: 748 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
-  "migrations/0338_siep11_mutation_registry.sql": "91bc0c8f93a0779b0720debf3c2eecc4973df1a3fef290c25b2d944386410e52",
-  "migrations/0339_siep12_policy_epoch.sql": "f4cce1e6898d0d1cc0c0fc579f66f346725642f8ee8331b8df46a1b668072a08",
-  "migrations/0341_siep13_forward_mutation_registry.sql": "537fde97320b7fb6e2d149ad6eff85555a9d6e2751c24e43a02f4d9d232d74f3",
-  "migrations/0343_siep14_forward_mutation_registry.sql": "79d359ebd1462630fa70eb1fc8da9ac39d676d631b1d7ba3cdf7b6a65fafda38",
-  "mcp-server/src/scac-mutation-registry.generated.js": "b1d437239b5e2abb37dae317a2f17ca9ec7ef433a72338e80829b262b7d59362",
+  "migrations/0366_siep11_mutation_registry.sql": "eab44eee4ce0f15808f1664ceecf3292eb19ea8496089165220d1e1f93c17a48",
+  "migrations/0367_siep12_policy_epoch.sql": "f4cce1e6898d0d1cc0c0fc579f66f346725642f8ee8331b8df46a1b668072a08",
+  "migrations/0369_siep13_forward_mutation_registry.sql": "537fde97320b7fb6e2d149ad6eff85555a9d6e2751c24e43a02f4d9d232d74f3",
+  "migrations/0371_siep14_forward_mutation_registry.sql": "79d359ebd1462630fa70eb1fc8da9ac39d676d631b1d7ba3cdf7b6a65fafda38",
+  "mcp-server/src/scac-mutation-registry.generated.js": "b093ca507a09fcd609d618fbfe60a680b70baaade5c661f19920d1c14e5a010b",
   "mcp-server/src/scac-mutation-registry.v2.generated.js": "a9ee17f743c089224a5f335fd6429918899ef97cf5b7c1e6963aebc90e6b0dc3",
   "mcp-server/src/scac-mutation-registry.v3.generated.js": "c055471d5f778b8470021271886590e92f7a92348d920567a1047fcade3859b8",
   "mcp-server/src/scac-mutation-registry.v4.generated.js": "f95806fc2911b36fe16b77f5ff26c571afda9784fe6c1b1dbe8518a693ec79c6",
-  "migrations/0347_siep15_forward_mutation_registry.sql": "4d1d535fd1956a5e273f2c58a6680c5d25b3c0c79a8fe77882444d450bccce11",
+  "migrations/0373_siep15_forward_mutation_registry.sql": "4d1d535fd1956a5e273f2c58a6680c5d25b3c0c79a8fe77882444d450bccce11",
   "mcp-server/src/scac-mutation-registry.v5.generated.js": "8de8271b107966dd530c2a8e89f53bda71e92e88f86e524ce548c07607255c6e",
-  "migrations/0357_siep16_forward_mutation_registry.sql": "101d2a7c885c0749743a7820164a6fa29c314883704938debeb2b48d91e3a956",
+  "migrations/0375_siep16_forward_mutation_registry.sql": "101d2a7c885c0749743a7820164a6fa29c314883704938debeb2b48d91e3a956",
   "mcp-server/src/scac-mutation-registry.v6.generated.js": "9da3e748dc526a38664b84e3b4d76edf1d497c63fcbcb82ae7e4231b62f5d3f1",
-  "migrations/0359_siep16_integrated_mutation_registry.sql": "d104861817765bd76de38962ec252deb7bda10ab3a262f343a4566e98fb963d7",
+  "migrations/0377_siep16_integrated_mutation_registry.sql": "d104861817765bd76de38962ec252deb7bda10ab3a262f343a4566e98fb963d7",
   "mcp-server/src/scac-mutation-registry.v7.generated.js": "cd8bc4bef39c643a0773748797a0dc2de31eeb900d355105b6c8fc72d11deb48",
 });
 export const DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v1",
-  secdef_execute: { count: 209, digest: "sha256:109b9317f077a95f1875473a225ae375a7d8b2f8822dbd7e00d0aca34e24bcfe" },
+  secdef_execute: { count: 219, digest: "sha256:069f4cad859e283a2f8d73aa1334bcf54fd3f97ae95b727925720f39706e0545" },
   relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
 });
 // SIEP-12's forward-only registry successor. These values are recomputed from
-// a disposable database after every 0339 authority-surface change, never from
+// a disposable database after every 0367 authority-surface change, never from
 // a caller or a running Production catalog.
 export const SIEP12_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v2",
@@ -89,7 +91,7 @@ export const SIEP15_DB_CATALOG_BASELINE = Object.freeze({
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
 });
 // SIEP-16 itself is source-only. This forward successor records the measured
-// post-0349/0350 database catalog and the current source inventory without
+// post-main database catalog and the current source inventory without
 // rewriting the now-historical v5 artifacts.
 export const SIEP16_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v6",
@@ -944,7 +946,7 @@ export function renderSIEP15RegistrySql(rows = fullInventory(),
   const v5CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v5EntryCount = rows.length + v5CatalogCount;
-  const v4Path = "migrations/0343_siep14_forward_mutation_registry.sql";
+  const v4Path = "migrations/0371_siep14_forward_mutation_registry.sql";
   const v4Sql = readFileSync(resolve(REPO_ROOT, v4Path), "utf8");
   const observedV4Sha = sha256(v4Sql);
   if (observedV4Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v4Path])
@@ -1074,7 +1076,7 @@ export function renderSIEP16RegistrySql(rows = fullInventory(),
   const v6CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v6EntryCount = rows.length + v6CatalogCount;
-  const v5Path = "migrations/0347_siep15_forward_mutation_registry.sql";
+  const v5Path = "migrations/0373_siep15_forward_mutation_registry.sql";
   const v5Sql = readFileSync(resolve(REPO_ROOT, v5Path), "utf8");
   const observedV5Sha = sha256(v5Sql);
   if (observedV5Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v5Path])
@@ -1155,7 +1157,7 @@ export function renderSIEP16IntegratedRegistrySql(rows = fullInventory(),
   const v7CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v7EntryCount = rows.length + v7CatalogCount;
-  const v6Path = "migrations/0357_siep16_forward_mutation_registry.sql";
+  const v6Path = "migrations/0375_siep16_forward_mutation_registry.sql";
   const v6Sql = readFileSync(resolve(REPO_ROOT, v6Path), "utf8");
   const observedV6Sha = sha256(v6Sql);
   if (observedV6Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v6Path])
@@ -1235,7 +1237,7 @@ export function renderSIEP17ForwardRegistrySql(rows = fullInventory(),
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const entryCount = rows.length + catalogCount;
-  const v7MigrationPath = "migrations/0359_siep16_integrated_mutation_registry.sql";
+  const v7MigrationPath = "migrations/0377_siep16_integrated_mutation_registry.sql";
   const v7RuntimePath = "mcp-server/src/scac-mutation-registry.v7.generated.js";
   const v7Migration = readFileSync(resolve(REPO_ROOT, v7MigrationPath), "utf8");
   for (const path of [v7MigrationPath, v7RuntimePath]) {
@@ -1469,7 +1471,40 @@ catalogSeedSql() +
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const rows = fullInventory();
-  if (["--write-runtime", "--write-runtime-v2", "--write-runtime-v3", "--write-runtime-v4", "--write-runtime-v5", "--write-runtime-v6",
+  const rebasedRuntimeModes = {
+    "--write-rebased-runtime-v1": [REGISTRY_VERSION, DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.generated.js"],
+    "--write-rebased-runtime-v2": [REGISTRY_V2_VERSION, SIEP12_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v2.generated.js"],
+    "--write-rebased-runtime-v3": [REGISTRY_V3_VERSION, SIEP13_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v3.generated.js"],
+    "--write-rebased-runtime-v4": [REGISTRY_V4_VERSION, SIEP14_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v4.generated.js"],
+    "--write-rebased-runtime-v5": [REGISTRY_V5_VERSION, SIEP15_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v5.generated.js"],
+    "--write-rebased-runtime-v6": [REGISTRY_V6_VERSION, SIEP16_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v6.generated.js"],
+  };
+  const rebasedMigrationModes = {
+    "--write-rebased-migration-v1": [renderMigration, "migrations/0366_siep11_mutation_registry.sql"],
+    "--write-rebased-migration-v3": [renderSIEP13RegistrySql, "migrations/0369_siep13_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v4": [renderSIEP14RegistrySql, "migrations/0371_siep14_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v5": [renderSIEP15RegistrySql, "migrations/0373_siep15_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v6": [renderSIEP16RegistrySql, "migrations/0375_siep16_forward_mutation_registry.sql"],
+  };
+  if (rebasedRuntimeModes[process.argv[2]]) {
+    const [version, dbCatalogBaseline, defaultTarget] = rebasedRuntimeModes[process.argv[2]];
+    const target = resolve(process.argv[3] || defaultTarget);
+    await writeFile(target, renderRuntimeProjection(rows, { version, dbCatalogBaseline }));
+    process.stdout.write(`${target}\n`);
+  } else if (rebasedMigrationModes[process.argv[2]]) {
+    const [render, defaultTarget] = rebasedMigrationModes[process.argv[2]];
+    const target = resolve(process.argv[3] || defaultTarget);
+    await writeFile(target, render(rows));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-rebased-migration-v2") {
+    const target = resolve(process.argv[3] || "migrations/0367_siep12_policy_epoch.sql");
+    const v1Seal = registrySeal(REGISTRY_VERSION, rows, DB_CATALOG_BASELINE);
+    await writeFile(target, renderPolicyEpochMigration(renderSuccessorRegistrySql(rows), {
+      v1Seal,
+      dbCatalogBaseline: SIEP12_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (["--write-runtime", "--write-runtime-v2", "--write-runtime-v3", "--write-runtime-v4", "--write-runtime-v5", "--write-runtime-v6",
     "--write-migration", "--write-siep12-migration", "--write-siep13-registry-migration",
     "--write-siep14-registry-migration", "--write-siep15-registry-migration",
     "--write-siep16-registry-migration"].includes(process.argv[2])) {
@@ -1482,7 +1517,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     }));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-siep16-integrated-registry-migration") {
-    const target = resolve(process.argv[3] || "migrations/0359_siep16_integrated_mutation_registry.sql");
+    const target = resolve(process.argv[3] || "migrations/0377_siep16_integrated_mutation_registry.sql");
     await writeFile(target, renderSIEP16IntegratedRegistrySql(rows));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-runtime-v8") {
@@ -1493,7 +1528,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     }));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-siep17-forward-registry-migration") {
-    const target = resolve(process.argv[3] || "migrations/0362_siep17_forward_mutation_registry.sql");
+    const target = resolve(process.argv[3] || "migrations/0380_siep17_forward_mutation_registry.sql");
     await writeFile(target, renderSIEP17ForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
   } else {

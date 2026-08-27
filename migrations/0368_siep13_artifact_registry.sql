@@ -1,4 +1,4 @@
--- SIEP-13 / SCAC-03: immutable artifact manifests, Ed25519 signatures, and
+-- 0368 / SIEP-13 / SCAC-03: immutable artifact manifests, Ed25519 signatures, and
 -- an append-only transparency chain. Source/test implementation only.
 -- Root trust, signer authorization, recovery custody, and Production use are
 -- deliberately absent until SIEP-14 and the later approval-gated rollout.

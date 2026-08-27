@@ -1,4 +1,4 @@
--- SIEP-15 / SCAC-05: signed device facts and benchmark-gated optional Studio enrollment.
+-- 0372 / SIEP-15 / SCAC-05: signed device facts and benchmark-gated optional Studio enrollment.
 -- Source/test implementation only. Proof of possession is SIEP-16; privileges and
 -- routing remain false, and applying this migration to Production remains Joe-gated.
 

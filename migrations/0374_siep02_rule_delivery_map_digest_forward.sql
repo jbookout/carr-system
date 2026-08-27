@@ -1,4 +1,4 @@
--- SIEP-02 post-rebase integration: advance the scoped-rule activation preimage
+-- 0374 / SIEP-02 post-rebase integration: advance the scoped-rule activation preimage
 -- to the exact current reviewed enforcement map without changing delivery mode.
 -- Source/test implementation only. Production application or enforcement still
 -- requires Joe's explicit approval through the existing guarded rollout.
