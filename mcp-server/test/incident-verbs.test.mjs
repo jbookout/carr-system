@@ -46,7 +46,7 @@ const probe = { id: "10000000-0000-0000-0000-000000000008", slug: "smoke-probe",
   display: "probe", human: false, probe: true, via: "probe-token" };
 const localMachine = { id: "10000000-0000-0000-0000-000000000007", slug: "joe-local",
   display: "Agent (joe-local)", human: false, agent: true, via: "local-token",
-  sponsoring_human_slug: "joe" };
+  sponsoring_human_slug: "joe", native_agent_verified: true };
 
 // ── 1. THE FINGERPRINT IS THE COLLECTORS' SIGNATURE, NOT A SECOND SHAPE ──────
 

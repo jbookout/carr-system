@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -305,6 +306,9 @@ def main() -> int:
                     )
                     set_local_role(cur, "carr_writer")
                 envelope_digest = sha(str(index + 3))
+                clock = datetime.now(timezone.utc)
+                issued_at = (clock - timedelta(minutes=1)).isoformat()
+                expires_at = (clock + timedelta(hours=2)).isoformat()
                 envelope_id = one(
                     cur,
                     """insert into ops.engineering_execution_envelope
@@ -312,7 +316,7 @@ def main() -> int:
                           agent_session_id,state_version,canonical_record_digest,
                           envelope_digest,envelope,issued_at,expires_at)
                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                               now()-interval '1 minute',now()+interval '30 minutes')
+                               %s::timestamptz,%s::timestamptz)
                        returning id""",
                     (
                         job_id,
@@ -327,21 +331,48 @@ def main() -> int:
                         Jsonb(
                             {
                                 "work_request_id": source["work_request"]["id"],
+                                "expires_at": expires_at,
                                 "state_binding": {
                                     "state_version": int(source["work_request"]["version"]),
                                     "canonical_record_digest": source["work_request"]["canonical_record_digest"],
                                 },
+                                "request": {
+                                    "allowed_actions": [
+                                        "repository:create-worktree",
+                                        "repository:create-branch",
+                                        "repository:write-declared-scope",
+                                        "repository:run-checks",
+                                        "repository:commit",
+                                        "repository:push-branch",
+                                        "repository:open-pr",
+                                    ]
+                                },
+                                "server_binding": {
+                                    "authority": {
+                                        "read_only": False,
+                                        "capability_profile": "capability:engineering-repository-write",
+                                    },
+                                    "adapter": {"surface": "codex_desktop"},
+                                },
                             }
                         ),
+                        issued_at,
+                        expires_at,
                     ),
                 )
                 envelopes[slice_ref] = (envelope_id, envelope_digest)
             cur.execute("reset role")
 
             set_local_role(cur, "carr_jobs")
-            claimed = cur.execute(
-                "select * from ops.engineering_claim_slice('siep-01-worker',100,1800)"
-            ).fetchall()
+            # 0325 deliberately narrowed the claim verb to exactly one job per
+            # invocation. Reproduce the two sibling histories through two
+            # independently leased claims instead of relying on retired batch
+            # claim semantics.
+            claimed = []
+            for _ in slice_refs:
+                claimed.extend(cur.execute(
+                    "select * from ops.engineering_claim_slice('siep-01-worker',1,1800)"
+                ).fetchall())
             claims = {row[4]["slice_ref"]: row for row in claimed if row[0] in jobs.values()}
             if set(claims) != set(slice_refs):
                 refuse(f"0323 did not claim both paired jobs: {claims}")
@@ -363,7 +394,7 @@ def main() -> int:
             }
             rejected(
                 cur,
-                "select ops.engineering_record_slice_receipt(%s,%s,%s,%s,%s)",
+                "select ops.engineering_finalize_slice_receipt(%s,%s,%s,%s,%s)",
                 (good_envelope_id, good_claim[1], Jsonb(wrong_receipt), sha("6"), executor_id),
                 "not bound",
             )
@@ -376,7 +407,7 @@ def main() -> int:
             good_receipt_digest = canonical_digest(good_receipt_body)
             good_receipt_id = one(
                 cur,
-                "select (ops.engineering_record_slice_receipt(%s,%s,%s,%s,%s)).id",
+                "select (ops.engineering_finalize_slice_receipt(%s,%s,%s,%s,%s)).id",
                 (
                     good_envelope_id,
                     good_claim[1],
@@ -385,19 +416,18 @@ def main() -> int:
                     executor_id,
                 ),
             )
-            for slice_ref in slice_refs:
-                claim = claims[slice_ref]
-                evidence = (
-                    {"operation": "tests", "status": "pass", "engineering_receipt_id": str(good_receipt_id)}
-                    if slice_ref == good_ref
-                    else {"operation": "caller-labelled-complete", "status": "pass"}
-                )
-                if one(
-                    cur,
-                    "select ops.complete_job(%s,%s,%s,%s)",
-                    (jobs[slice_ref], claim[1], Jsonb(evidence), f"siep-01:{slice_ref}:generic-completion"),
-                ) is not True:
-                    refuse(f"generic completion failed for {slice_ref}")
+            half_claim = claims[half_ref]
+            if one(
+                cur,
+                "select ops.complete_job(%s,%s,%s,%s)",
+                (
+                    jobs[half_ref],
+                    half_claim[1],
+                    Jsonb({"operation": "caller-labelled-complete", "status": "pass"}),
+                    f"siep-01:{half_ref}:generic-completion",
+                ),
+            ) is not True:
+                refuse(f"generic completion failed for {half_ref}")
             cur.execute("reset role")
 
             set_local_role(cur, "carr_writer")

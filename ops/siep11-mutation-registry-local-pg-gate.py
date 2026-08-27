@@ -19,12 +19,12 @@ from lib.control_plane_scheduler_cutover import scheduler_launchd_rows  # noqa: 
 
 EXPECTED_CATALOG = {
     "categories": {
-        "secdef_execute": {"count": 205, "digest": "sha256:ee70c43304aa499af73d52bdbd98c72c270f5ce2f2ba480b9a1e1c74e39a15cf"},
+        "secdef_execute": {"count": 205, "digest": "sha256:394508cc8ad50bf7193d857a36fcb35bfa601eccbcf35e70c4fff6c119b5b562"},
         "relation_dml": {"count": 284, "digest": "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345"},
         "column_dml": {"count": 12, "digest": "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},
-        "job_definitions": {"count": 26, "digest": "sha256:25ca2c7ef68c71479add93e5b2b2e5cffaa320b3de0188d17407821567c81020"},
+        "job_definitions": {"count": 26, "digest": "sha256:77f78187fa6c79c864ae6f33d8ac53ca983fbfc62d6eddf824373f26afb67407"},
     },
-    "combined": {"count": 527, "digest": "sha256:68eef95e5afce9863efc43aa5b6e34fb8d90560d20722fe3604affdcc62ea49e"},
+    "combined": {"count": 527, "digest": "sha256:ff7bb02d3db9f755f7190a6b65d92590043c36800c289ecedb302f1c477a09f1"},
 }
 
 
@@ -124,13 +124,13 @@ def main() -> int:
             digest = version[0]
             if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71:
                 raise RuntimeError(f"malformed sealed registry digest {digest!r}")
-            if version[1:] != (1221, True, True, False, False, False, False, False):
+            if version[1:] != (1230, True, True, False, False, False, False, False):
                 raise RuntimeError(f"unexpected sealed registry version {version!r}")
 
             counts = dict(cur.execute(
                 "select ingress_kind,count(*) from ops.scac_mutation_registry_entry group by ingress_kind"
             ))
-            if counts != {"mcp_tool": 184, "script_entrypoint": 444,
+            if counts != {"mcp_tool": 185, "script_entrypoint": 452,
                           "worker_route": 6, "worker_sidewrite": 3,
                           "external_admin": 27, "break_glass": 2,
                           "job_definition": 26, "workflow_entrypoint": 28, "db_function_acl": 205,
@@ -295,7 +295,7 @@ def main() -> int:
             cur.execute("release savepoint registry_same_cardinality_probe")
     except Exception as exc:  # noqa: BLE001 - concise CI surface
         return fail(str(exc))
-    print("siep11-mutation-registry-local-pg-gate passed: 1221 exact immutable application/catalog entries; 4 runtime roles have lookup-only access")
+    print("siep11-mutation-registry-local-pg-gate passed: 1230 exact immutable application/catalog entries; 4 runtime roles have lookup-only access")
     return 0
 
 

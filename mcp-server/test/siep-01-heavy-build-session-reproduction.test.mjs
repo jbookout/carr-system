@@ -117,7 +117,7 @@ test("the database gate uses existing ledgers and rolls every fixture back", () 
     "engineering_register_slice_plan",
     "engineering_enqueue_slice_job",
     "engineering_claim_slice",
-    "engineering_record_slice_receipt",
+    "engineering_finalize_slice_receipt",
     "complete_job",
     "engineering_passport_facts",
   ]) assert.match(gate, new RegExp(`ops\\.${name}`, "i"));

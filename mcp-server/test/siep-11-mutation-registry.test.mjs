@@ -27,14 +27,14 @@ import {
 import { TOOLS } from "../src/tools.js";
 
 const migration = fs.readFileSync(
-  new URL("../../migrations/0330_siep11_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0338_siep11_mutation_registry.sql", import.meta.url), "utf8");
 const generated = fs.readFileSync(
   new URL("../src/scac-mutation-registry.generated.js", import.meta.url), "utf8");
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory();
-  assert.equal(rows.length, 184);
-  assert.equal(rows.filter(row => row.write).length, 127);
+  assert.equal(rows.length, 185);
+  assert.equal(rows.filter(row => row.write).length, 128);
   assert.equal(rows.filter(row => !row.write).length, 57);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
@@ -47,11 +47,11 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
 
 test("runtime and migration are generated from the exact same reviewed manifest", () => {
   const rows = fullInventory();
-  assert.equal(rows.length, 720);
+  assert.equal(rows.length, 729);
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, registryDigest(rows));
   assert.equal(generated, renderRuntimeProjection(rows));
   assert.equal(migration, renderMigration(rows));
-  assert.match(migration, new RegExp(`'sha256:${SCAC_MUTATION_REGISTRY_DIGEST}',1221,720,`));
+  assert.match(migration, new RegExp(`'sha256:${SCAC_MUTATION_REGISTRY_DIGEST}',1230,729,`));
 });
 
 test("unknown, changed, and open operation contracts refuse deterministically", async () => {
@@ -102,7 +102,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 482);
+  assert.equal(rows.length, 490);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -110,7 +110,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 473);
+  assert.equal(scripts.length, 481);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -139,7 +139,7 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
   assert.equal(jobs.every(row => row.ingress_kind === "job_definition" && row.entrypoint), true);
   assert.deepEqual(DB_CATALOG_BASELINE, {
     projection_version: "scac-db-catalog-projection.v1",
-    secdef_execute: { count: 205, digest: "sha256:ee70c43304aa499af73d52bdbd98c72c270f5ce2f2ba480b9a1e1c74e39a15cf" },
+    secdef_execute: { count: 205, digest: "sha256:394508cc8ad50bf7193d857a36fcb35bfa601eccbcf35e70c4fff6c119b5b562" },
     relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
     column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   });

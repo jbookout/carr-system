@@ -12,13 +12,13 @@ export const REGISTRY_VERSION = "scac-mutation-registry.v1";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 export const DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v1",
-  secdef_execute: { count: 205, digest: "sha256:ee70c43304aa499af73d52bdbd98c72c270f5ce2f2ba480b9a1e1c74e39a15cf" },
+  secdef_execute: { count: 205, digest: "sha256:394508cc8ad50bf7193d857a36fcb35bfa601eccbcf35e70c4fff6c119b5b562" },
   relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
-  digest: "sha256:25ca2c7ef68c71479add93e5b2b2e5cffaa320b3de0188d17407821567c81020",
+  digest: "sha256:77f78187fa6c79c864ae6f33d8ac53ca983fbfc62d6eddf824373f26afb67407",
 });
 
 export function canonicalize(value) {
@@ -574,6 +574,10 @@ function catalogSeedSql() {
 
 export function renderMigration(rows = fullInventory()) {
   const digest = registryDigest(rows);
+  const sourceCounts = Object.fromEntries(
+    [...new Set(rows.map(row => row.ingress_kind))]
+      .map(kind => [kind, rows.filter(row => row.ingress_kind === kind).length]),
+  );
   const dbCatalogCount = DB_CATALOG_BASELINE.secdef_execute.count +
     DB_CATALOG_BASELINE.relation_dml.count + DB_CATALOG_BASELINE.column_dml.count;
   const totalCount = rows.length + dbCatalogCount;
@@ -584,7 +588,6 @@ export function renderMigration(rows = fullInventory()) {
   return `-- SIEP-11 / SCAC-01: immutable mutation ingress registry.\n` +
     `-- Source/test implementation only. Applying this migration to Production remains Joe-gated.\n` +
     `-- GENERATED seed from ops/scac-mutation-inventory.mjs; review, never hand-edit rows.\n\n` +
-`begin;\n\n` +
 `create table ops.scac_mutation_registry_version (\n` +
 `  registry_version text primary key check (registry_version='scac-mutation-registry.v1'),\n` +
 `  program_key text not null check (program_key='carr-system-integrity-elimination-v1'),\n` +
@@ -686,9 +689,9 @@ catalogSeedSql() +
 `) where registry_version='scac-mutation-registry.v1';\n\n` +
 `do $$ begin\n` +
 `  if (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v1')<>${totalCount}\n` +
-`     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='mcp_tool')<>184\n` +
-`     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='job_definition')<>26\n` +
-`     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='workflow_entrypoint')<>28\n` +
+`     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='mcp_tool')<>${sourceCounts.mcp_tool}\n` +
+`     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='job_definition')<>${sourceCounts.job_definition}\n` +
+`     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='workflow_entrypoint')<>${sourceCounts.workflow_entrypoint}\n` +
 `     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='db_function_acl')<>${DB_CATALOG_BASELINE.secdef_execute.count}\n` +
 `     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='db_relation_acl')<>${DB_CATALOG_BASELINE.relation_dml.count}\n` +
 `     or (select count(*) from ops.scac_mutation_registry_entry where ingress_kind='db_column_acl')<>${DB_CATALOG_BASELINE.column_dml.count}\n` +
@@ -702,8 +705,7 @@ catalogSeedSql() +
 `create trigger scac_mutation_registry_version_sealed before insert or update or delete on ops.scac_mutation_registry_version\n` +
 `for each row execute function ops.scac_mutation_registry_append_only();\n` +
 `create trigger scac_mutation_registry_entry_sealed before insert or update or delete on ops.scac_mutation_registry_entry\n` +
-`for each row execute function ops.scac_mutation_registry_append_only();\n\n` +
-`commit;\n`;
+`for each row execute function ops.scac_mutation_registry_append_only();\n`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -713,7 +715,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(target, renderRuntimeProjection(rows));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-migration") {
-    const target = resolve(process.argv[3] || "migrations/0330_siep11_mutation_registry.sql");
+    const target = resolve(process.argv[3] || "migrations/0338_siep11_mutation_registry.sql");
     await writeFile(target, renderMigration(rows));
     process.stdout.write(`${target}\n`);
   } else {
