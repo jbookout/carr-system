@@ -791,7 +791,7 @@ def main() -> int:
                 ("engineering-claim-local-acceptance",),
             )
             if claimed[0] != job_id or not isinstance(claimed[1], uuid.UUID) or claimed[2:] != ("engineering-slice", 1):
-                return fail("claim did not return the exact eligible Engineering job and lease")
+                return fail(f"claim did not return the exact eligible Engineering job and lease: {claimed!r}")
             if one(cur, "select state,attempt,lease_owner,lease_token=%s,leased_until>now() from ops.job where id=%s", (claimed[1], job_id)) != (
                     "running", 1, "engineering-claim-local-acceptance", True, True):
                 return fail("claim did not persist one exact running job lease")

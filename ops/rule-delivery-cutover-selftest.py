@@ -15,7 +15,13 @@ py=(REPO/"ops/rule-delivery-cutover.py").read_text()
 sh=(REPO/"bin/rule-delivery-cutover-prod.sh").read_text()
 sql=(REPO/"migrations/0317_atomic_rule_delivery_cutover.sql").read_text()
 successor=(REPO/"migrations/0364_siep02_rule_delivery_authority.sql").read_text()
+current_sql=(REPO/"migrations/0363_rule_delivery_activation_digest_repin.sql").read_text()
 checks={
+ "current activation contract is authoritative":len(cutover.EXPECTED_IDS)==8 and "EXPECTED_IDS, load_validated" in py,
+ "exact current target ids are queried":"array_agg(short_id order by short_id)" in py,
+ "target cardinality follows current contract":"expected_target_count = len(expected_target_ids)" in py and "result[1] != expected_target_count" in py,
+ "retired nine-target literals are absent":"target_count != 9" not in py and "result[1] != 9" not in py,
+ "current database function returns eight":"activation target set is not exactly eight" in current_sql and "return query select p_mode,8::bigint,v_receipt" in current_sql,
  "exact 38 reviewed proposal ids":len(cutover.curation_ids())==38,
  "human reviewer is checked":"rp.status='approved' and a.kind='human'" in successor,
  "seven-day eligibility is checked":"shadow_eligible(eligibility_module, ledger_rows, identity)" in py and "eligibility[\"eligible\"]" in py,

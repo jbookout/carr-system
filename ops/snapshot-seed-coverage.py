@@ -88,11 +88,6 @@ MENTIONS_ROUTINE = re.compile(
     r"|comment\s+on\s+(?:function|procedure)"
     r"|security\s+label\b[^;]*?\bon\s+(?:function|procedure))[^;]*;", re.I | re.S)
 
-# A signature inside a quoted string is a NAME too, never a call:
-#     has_function_privilege('carr_writer','ops.record_executed_lease(text,integer)')
-# Dynamic EXECUTE of a built string is the acknowledged blind spot on the other
-# side of this trade; no migration in this repository seeds that way today.
-QUOTED_LITERAL = re.compile(r"'(?:[^']|'')*'", re.S)
 
 # Row-landing DML. Every form here has been seen in this repository's migrations.
 WRITES_ANYWHERE = (
@@ -124,41 +119,119 @@ def normalise(table):
     return table[len("public."):] if table.startswith("public.") else table
 
 
-def split_segments(sql):
-    """Return (top_level_text, do_bodies, routines) for one migration.
+def _scanned(body):
+    """A nested body, run through the same scan and flattened.
 
-    The discriminator for a dollar-quoted body is the token immediately before
-    the opening quote: PostgreSQL introduces a routine body with AS and an
-    anonymous block with DO. A DO block runs at migration time unconditionally.
-    A routine body runs only if something calls it, which is resolved separately.
+    A body's own routines and DO blocks are folded in with it: anything a called
+    routine's body reaches is reached when that routine runs.
+    """
+    inner_top, inner_dos, inner_routines = scan_sql(body)
+    parts = [inner_top, *inner_dos]
+    for bodies in inner_routines.values():
+        parts.extend(bodies)
+    return " ".join(parts)
+
+
+def scan_sql(sql):
+    """One left-to-right pass over a migration: strip comments, blank string
+    literals, and split out dollar-quoted bodies.
+
+    WHY A SCAN AND NOT MORE REGULAR EXPRESSIONS. The previous version masked
+    string literals with a pattern applied to text that still contained SQL
+    comments, so an apostrophe in ordinary English prose paired with the opening
+    quote of a real string and masked everything between them -- including the
+    CALL that makes a routine body count as a seed. One apostrophe in one comment
+    disarmed the check for that whole migration, and 102 of 264 applied
+    migrations already have odd apostrophe parity. Found by the fourth
+    independent review.
+
+    You cannot find comments without knowing where strings are, and you cannot
+    find strings without knowing where comments are. Alternating regular
+    expressions will always lose that race; a single pass that handles both, plus
+    dollar quoting, cannot. Literals are blanked rather than kept because a
+    table name is an identifier -- no row-landing statement hides inside a
+    string, and an `insert into` quoted in prose is not one either.
+
+    Bodies are scanned too, not stored raw. A DO block or a routine body has its
+    own comments and its own string literals, and leaving them unscanned put the
+    apostrophe bug straight back one level down -- caught by the suite case that
+    pins a signature inside has_function_privilege() as a name rather than a call.
+
+    Returns (top_level_text, do_bodies, routines) with routines keyed by name.
     """
     top, do_bodies, routines = [], [], {}
     i, n = 0, len(sql)
     while i < n:
-        match = DOLLAR.search(sql, i)
-        if not match:
-            top.append(sql[i:])
-            break
-        top.append(sql[i:match.start()])
-        tag = match.group(0)
-        end = sql.find(tag, match.end())
-        if end == -1:                        # unterminated: keep the rest verbatim
-            top.append(sql[match.start():])
-            break
-        body = sql[match.end():end]
-        previous = re.search(r"([A-Za-z_]+)\s*$", sql[:match.start()])
-        keyword = previous.group(1).lower() if previous else ""
-        if keyword == "as":
-            headers = list(CREATE_ROUTINE.finditer(sql[:match.start()]))
-            if headers:
-                routines.setdefault(normalise(headers[-1].group(1)), []).append(body)
-            else:                            # AS without a routine header: a literal
-                top.append(" " + body + " ")
-        elif keyword == "do":
-            do_bodies.append(body)
+        ch = sql[i]
+        if ch == "-" and sql.startswith("--", i):                 # line comment
+            end = sql.find("\n", i)
+            i = n if end == -1 else end
+            top.append(" ")
+        elif ch == "/" and sql.startswith("/*", i):               # block comment, nestable
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if sql.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif sql.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            top.append(" ")
+        elif ch == "'":                                           # string literal
+            # E'...' takes BACKSLASH escapes; a plain literal does not (server
+            # default standard_conforming_strings). Knowing only the '' form let
+            # E'the reviewer\\'s registry' end the literal at the escaped quote, so
+            # the rest of the migration was read inside-out and a plainly top-level
+            # INSERT went unreported. That is the apostrophe class of R4 one escape
+            # form over, and it swallowed real DML rather than only a call.
+            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", "".join(top)))
+            i += 1
+            while i < n:
+                if escaped and sql[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if sql[i] == "'":
+                    if sql.startswith("''", i):
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            top.append(" ")
+        elif ch == "$":
+            match = DOLLAR.match(sql, i)
+            if not match:
+                top.append(ch)
+                i += 1
+                continue
+            tag = match.group(0)
+            end = sql.find(tag, match.end())
+            if end == -1:                                         # unterminated: keep verbatim
+                top.append(sql[i:])
+                break
+            body = sql[match.end():end]
+            head = "".join(top)
+            previous = re.search(r"([A-Za-z_]+)\s*$", head)
+            keyword = previous.group(1).lower() if previous else ""
+            # `do language plpgsql $$ ... $$` is the same statement as `do $$ ... $$`.
+            # Matching only the bare word left the body blanked as a string literal
+            # and the block invisible.
+            if keyword != "do" and re.search(r"(?:^|;|\s)do\s+language\s+[a-z_]+\s*$", head, re.I):
+                keyword = "do"
+            if keyword == "as":
+                headers = list(CREATE_ROUTINE.finditer("".join(top)))
+                if headers:
+                    routines.setdefault(normalise(headers[-1].group(1)), []).append(_scanned(body))
+                else:
+                    top.append(" " + _scanned(body) + " ")
+            elif keyword == "do":
+                do_bodies.append(_scanned(body))
+            else:
+                top.append(" ")                                   # dollar-quoted string literal
+            i = end + len(tag)
         else:
-            top.append(" " + body + " ")     # ordinary dollar-quoted string
-        i = end + len(tag)
+            top.append(ch)
+            i += 1
     return "".join(top), do_bodies, routines
 
 
@@ -169,12 +242,12 @@ def migration_time_text(sql):
     migration calls it, so routines are pulled in by transitive closure over the
     text that already executes, with definition sites masked out first.
     """
-    top, do_bodies, routines = split_segments(sql)
+    top, do_bodies, routines = scan_sql(sql)
     executing = [top] + do_bodies
     called, changed = set(), True
     while changed:
         changed = False
-        blob = QUOTED_LITERAL.sub(" ", MENTIONS_ROUTINE.sub(" ", " ".join(executing)))
+        blob = MENTIONS_ROUTINE.sub(" ", " ".join(executing))
         for name, bodies in routines.items():
             if name in called:
                 continue
@@ -262,10 +335,15 @@ def check_region_boundary(artifact):
     # full of CREATE FUNCTION bodies whose own INSERTs start a line, and reading
     # those as data made this check refuse every real snapshot.
     prefix = artifact[:ledger.start()]
-    prefix_top, _do_bodies, _routines = split_segments(prefix)
+    prefix_top, _do_bodies, _routines = scan_sql(prefix)
+    # NOT anchored to the start of a line. Data above the ledger is data wherever
+    # it sits on the line, and the anchor bought nothing: with it and without it the
+    # real artifact is equally clean, so all it did was give a mutation somewhere to
+    # hide. Literals and comments are already gone from prefix_top, so a table merely
+    # NAMED in prose cannot reach here.
     candidates = []
     for pattern in WRITES_ANYWHERE:
-        candidates.append(re.search(r"^\s*" + pattern.pattern, prefix_top, pattern.flags | re.M))
+        candidates.append(re.search(pattern.pattern, prefix_top, pattern.flags | re.M))
     first = min((c for c in candidates if c), key=lambda c: c.start(), default=None)
     if first:
         return (f"DATA REGION BOUNDARY MOVED: the first data statement in the artifact is "

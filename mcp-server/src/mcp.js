@@ -519,7 +519,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.links) && args.links.length)
     throw new ToolError({ error: "not_in_profile", verb: "log-activity (links[])", profile,
       hint: "a narrow profile may log the activity but not assert relationships — drop links[] from this call and file the introduction facts with add-loop for an interactive partner session to link-parties" });
-  if (!tool.write) {
+  if (!tool.write && !tool.writerConnection) {
     const sql = neon(env.DATABASE_URL_READER);
     // sideWrite is the ONLY way a read verb may write, and it is deliberately
     // awkward: a separate credential, never awaited, failure isolated. A read
@@ -562,7 +562,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
   try {
-    await client.query("begin");
+    await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
     // Guarded 2026-08-03. Unguarded, a missing actor row made this a raw
     // TypeError on `undefined.id` — a 500 with a stack trace where the real

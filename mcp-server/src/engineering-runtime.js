@@ -1031,6 +1031,23 @@ export async function recordEngineeringReview(c, actor, args, ToolError, writeEv
 
 export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }) {
   return {
+    "engineering-passport-source": {
+      description: "Read the exact current accepted Work Request and plan binding required to construct an initial Engineering Slice Plan. This is the bootstrap read: it exposes no execution envelope, does not register, assign, dispatch, or grant authority, and remains available before any slice plan exists.",
+      inputSchema: { type: "object", additionalProperties: false, properties: { work_request: { type: "string" } }, required: ["work_request"] },
+      handler: async (c, _actor, args) => {
+        const work = text(args.work_request, "work_request", ToolError);
+        const r = await c.query("select ops.engineering_admission_source($1::text) as source", [work]);
+        const source = r.rows[0]?.source;
+        if (!source?.work_request || !source?.accepted_plan)
+          error(ToolError, { error: "engineering_work_request_not_found_or_not_ready" });
+        const parts = sourceParts(source, ToolError);
+        return {
+          schema_version: "engineering-passport-source.v1",
+          work_request: parts.work,
+          accepted_plan_revision: parts.plan,
+        };
+      },
+    },
     "register-engineering-slice-plan": {
       write: true,
       description: "Register one typed Engineering Slice Plan as an immutable projection of the exact accepted sourced plan. It does not accept, assign, dispatch, or grant authority.",
@@ -1060,6 +1077,40 @@ export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError })
       description: "Read the canonical typed Engineering Passport projection. Closure is derived from persisted envelopes, receipts, and independent reviewer facts; it is not a task store or authority source.",
       inputSchema: { type: "object", additionalProperties: false, properties: { work_request: { type: "string" } }, required: ["work_request"] },
       handler: async (c, _actor, args) => { const work = text(args.work_request, "work_request", ToolError); const r = await c.query("select ops.engineering_passport_facts($1::text) as facts", [work]); if (!r.rows.length || !r.rows[0].facts?.source) error(ToolError, { error: "engineering_work_request_not_found" }); return closureProjection(r.rows[0].facts, ToolError); },
+    },
+    "engineering-writer-runtime-preflight": {
+      fullOnly: true,
+      writerConnection: true,
+      description: "Read the effective database identity and the exact Engineering admission privileges through the Worker's DATABASE_URL_WRITER binding. It never returns or fingerprints the credential and executes in a read-only transaction.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {}, required: [] },
+      handler: async (c) => {
+        const row = (await c.query(`select
+          session_user::text as session_user,
+          current_user::text as current_user,
+          current_database()::text as database,
+          current_setting('transaction_read_only')::text as transaction_read_only,
+          pg_has_role(current_user,'carr_writer','member') as member_carr_writer,
+          has_table_privilege(current_user,'ops.engineering_slice_plan','select') as select_engineering_slice_plan,
+          has_table_privilege(current_user,'ops.engineering_execution_envelope','insert') as insert_engineering_execution_envelope,
+          has_function_privilege(current_user,'ops.engineering_passport_facts(text)','execute') as execute_engineering_passport_facts,
+          has_function_privilege(current_user,'ops.engineering_enqueue_slice_job(text,text,text,text,integer)','execute') as execute_engineering_enqueue_slice_job`)).rows[0];
+        if (!row) error(ToolError, { error: "engineering_writer_runtime_preflight_unavailable" });
+        const checks = {
+          identity_is_app_writer: row.session_user === "app_writer" && row.current_user === "app_writer",
+          database_is_neondb: row.database === "neondb",
+          transaction_is_read_only: row.transaction_read_only === "on",
+          member_carr_writer: row.member_carr_writer === true,
+          select_engineering_slice_plan: row.select_engineering_slice_plan === true,
+          insert_engineering_execution_envelope: row.insert_engineering_execution_envelope === true,
+          execute_engineering_passport_facts: row.execute_engineering_passport_facts === true,
+          execute_engineering_enqueue_slice_job: row.execute_engineering_enqueue_slice_job === true,
+        };
+        return {
+          ok: Object.values(checks).every(Boolean),
+          identity: { session_user: row.session_user, current_user: row.current_user, database: row.database },
+          checks,
+        };
+      },
     },
   };
 }

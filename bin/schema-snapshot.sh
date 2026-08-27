@@ -175,6 +175,14 @@ case "$RULE_DELIVERY_RULESET_CONTROL_APPLIED" in
   *) echo "schema-snapshot: could not read the rule-delivery ruleset-control ledger state" >&2; exit 1 ;;
 esac
 
+RULE_DELIVERY_DIGEST_REPIN_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0363_rule_delivery_activation_digest_repin.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery digest-repin ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -555,7 +563,7 @@ fi
 #     add rule_control_binding or any receipt/rule table: those are per-rule
 #     history, not bounded internal control configuration.
 #   * ops.rule_delivery_policy (exactly 1 row) and
-#     ops.rule_delivery_activation_target (exactly 9 rows) are the bounded
+#     ops.rule_delivery_activation_target (the exact ledger-appropriate row set) are the bounded
 #     configuration for the already-existing scoped rule-delivery cutover.
 #     0291 and 0317 seed them, but once those migrations enter this snapshot's
 #     ledger they no longer replay. Omitting the rows produced mode:null and no
@@ -811,10 +819,29 @@ RULE_DELIVERY_POLICY
 fi
 
 if [ "$RULE_DELIVERY_CUTOVER_APPLIED" = t ]; then
-  # Preserve the exact ledger-visible preimage: a source that has 0317 but not
-  # 0332 must rebuild the old rows so the pending guarded refresh can still
-  # match all nine.  Only a ledger that already carries 0332 gets new refs.
-  if [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then
+  # Preserve the exact ledger-visible postimage. A source with 0363 already
+  # applied gets the current eight-row set; earlier ledgers keep the historical
+  # nine-row preimages needed by their pending guarded transitions.
+  if [ "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_POST_0363'
+-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904')
+on conflict (short_id) do nothing;
+
+RULE_DELIVERY_ACTIVATION_TARGETS_POST_0363
+  elif [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then
   if [ "$RULE_DELIVERY_RULESET_CONTROL_APPLIED" = t ]; then
 cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_POST_0348'
 -- CARR RULE DELIVERY ACTIVATION TARGETS POST-0348 (bin/schema-snapshot.sh) — exact reviewed cutover config.
@@ -1117,6 +1144,60 @@ sed -e '/^-- Dumped from database version/d' \
     -e '/^\\restrict /d' \
     -e '/^\\unrestrict /d' "$TMP" | normalise_eof > "$TMP.clean"
 mv "$TMP.clean" "$TMP"
+
+# THE DOCTRINE VALIDATION REGISTRY — the seventh instance, and the first one the
+# check below found by being WRONG rather than by being silent. It sat in the
+# classification as "runtime evidence", which it is not: doctrine_gate_check is
+# the registry itself, and 0075's own comment states the contract — "A NEW GATE
+# IS A FUNCTION AND A ROW". Results live in doctrine_gate_finding.
+#
+# WHAT A REBUILD LOST. 0075 seeds 11 rows, every one severity=block and enabled,
+# and nothing writes the table at runtime. runGates() in mcp-server/src/doctrine.js
+# selects the enabled checks and treats an empty set as nothing to enforce, so a
+# database rebuilt from a snapshot carrying 0075's ledger row but not its rows ran
+# NO doctrine gates at all and let every write through — silently, because zero
+# findings is indistinguishable from zero problems.
+#
+# Rendered from the source rather than hand-listed, and column-list-free so a
+# later column cannot rot the block.
+cat >> "$TMP" <<'DOCTRINE_GATE_CHECK_HEADER'
+
+-- CARR DOCTRINE VALIDATION REGISTRY (bin/schema-snapshot.sh) — the gate rows
+-- themselves, not their findings. Without these a rebuilt database enforces no
+-- doctrine gates and says nothing about it.
+DOCTRINE_GATE_CHECK_HEADER
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'DOCTRINE_GATE_CHECK_ROWS'
+select format(
+  'insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, %L::jsonb) on conflict (check_key) do nothing;',
+  to_jsonb(g)) from doctrine_gate_check g order by g.check_key;
+DOCTRINE_GATE_CHECK_ROWS
+then
+  echo "schema-snapshot: could not render the doctrine validation registry — nothing written" >&2
+  exit 1
+fi
+
+# THE NAMED AGENT PROFILE ROSTER — the eighth instance, and the second found by
+# the classification being WRONG rather than silent. It sat excluded on the claim
+# that its readers tolerate an empty set. They do not: bot-brief throws
+# profile_not_found and its hint says "new profiles are a migration", and nothing
+# inserts the table at runtime — agent-profiles.js only UPDATEs. A rebuild
+# without these rows fails the bot brief for every named profile.
+cat >> "$TMP" <<'AGENT_PROFILE_HEADER'
+
+-- CARR NAMED AGENT PROFILES (bin/schema-snapshot.sh) — the seeded roster. No
+-- runtime path creates these; a rebuild without them breaks the bot brief.
+AGENT_PROFILE_HEADER
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'AGENT_PROFILE_ROWS'
+select format(
+  'insert into agent_profile select * from jsonb_populate_record(null::agent_profile, %L::jsonb) on conflict (profile_key) do nothing;',
+  to_jsonb(p)) from agent_profile p order by p.profile_key;
+AGENT_PROFILE_ROWS
+then
+  echo "schema-snapshot: could not render the named agent profiles — nothing written" >&2
+  exit 1
+fi
 
 # THE SIXTH INSTANCE WAS CAUGHT BY HAND; THE SEVENTH IS CAUGHT HERE. Every block
 # above this line was written one at a time, each after a database rebuilt from
