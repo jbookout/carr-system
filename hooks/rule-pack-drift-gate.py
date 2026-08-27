@@ -58,7 +58,7 @@ from pathlib import Path
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 from lib.rule_delivery_preuse import (  # noqa:E402
-    contains_receipt_marker, preuse_delivery,
+    contains_receipt_marker, has_background_tool_call, preuse_delivery,
 )
 from lib.rule_delivery_shadow import (  # noqa:E402
     append_locked, file_sha256, make_error_observation, make_observation,
@@ -772,13 +772,7 @@ def observed_packs(turn, triggers):
         if found:
             hits[name] = found[:6]
     for record in turn:
-        message = record.get("message") if isinstance(record.get("message"), dict) else {}
-        content = message.get("content")
-        if isinstance(content, list) and any(
-                isinstance(block, dict) and block.get("type") == "tool_use"
-                and isinstance(block.get("input"), dict)
-                and block["input"].get("run_in_background") is True
-                for block in content):
+        if has_background_tool_call(record):
             if "scheduled-automation" in triggers:
                 hits.setdefault("scheduled-automation", ["background-tool"])
         for name in scheduled_workflow_packs(record):

@@ -67,11 +67,13 @@
   "control_catalog": {
     "pack_delivery": {
       "implementation": [
-        "hooks/rule-pack-drift-gate.py"
+        "hooks/rule-pack-drift-gate.py",
+        "hooks/rule-pack-preuse-reselection.py"
       ],
       "test": [
         "ops/rule-pack-drift-gate-selftest.py",
-        "ops/rule-load-layer-check-selftest.py"
+        "ops/rule-load-layer-check-selftest.py",
+        "ops/rule-pack-preuse-reselection-selftest.py"
       ],
       "failure_mode": "Stop block naming the pack the turn's own work needed, once ops.rule_delivery_policy says enforced; a recorded observation until then",
       "_note": "NOT YET CLAIMED BY ANY RULE, and that is deliberate. Nine rules whose control is `session_boot` move to this one at the enforcement flip (see load_layer_flip_owed). While shadow mode leaves recitation intact, session_boot is still what carries them, and naming a control that is not yet carrying the rule is what rule ab814a26 forbids."

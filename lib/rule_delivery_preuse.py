@@ -21,6 +21,10 @@ IDENTITY_KEYS = frozenset({
 })
 DELIVERY_KEYS = frozenset({"mode", "declared_packs", "packs_not_found"})
 RULE_KEYS = frozenset({"id", "statement"})
+SANCTIONED_LOCAL_SPONSORS = {
+    "joe-local": "joe",
+    "dell-local": "dell",
+}
 
 
 def canonical(value: Any) -> bytes:
@@ -57,6 +61,17 @@ def _nonempty(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def valid_local_identity(identity: object) -> bool:
+    """Bind the local verb door to its exact server-owned sponsor mapping."""
+    if not isinstance(identity, dict):
+        return False
+    agent = identity.get("agent_principal_id")
+    return (isinstance(agent, str)
+            and agent in SANCTIONED_LOCAL_SPONSORS
+            and identity.get("runtime_principal") == agent
+            and identity.get("sponsoring_human_id") == SANCTIONED_LOCAL_SPONSORS[agent])
+
+
 def validate_receipt(row: object, *, repo: Path) -> bool:
     if not isinstance(row, dict) or set(row) != RECEIPT_KEYS:
         return False
@@ -80,7 +95,7 @@ def validate_receipt(row: object, *, repo: Path) -> bool:
         return False
     identity = row.get("identity")
     if (not isinstance(identity, dict) or set(identity) != IDENTITY_KEYS
-            or not all(_nonempty(identity.get(key)) for key in IDENTITY_KEYS)):
+            or not valid_local_identity(identity)):
         return False
     expected_ids = scheduled_rule_ids(repo)
     if row.get("rule_ids") != expected_ids:
@@ -151,7 +166,7 @@ def receipt_from_envelope(record: object) -> dict | None:
     return None
 
 
-def _tool_calls(record: object):
+def tool_calls(record: object):
     if not isinstance(record, dict):
         return
     message = record.get("message")
@@ -162,31 +177,54 @@ def _tool_calls(record: object):
                 yield (block.get("id"), block.get("name"), block.get("input"),
                        record.get("sessionId"))
     payload = record.get("payload")
-    if (record.get("type") == "response_item" and isinstance(payload, dict)
-            and payload.get("type") in {"function_call", "custom_tool_call"}):
+    record_type = record.get("type")
+    payload_type = payload.get("type") if isinstance(payload, dict) else None
+    structured_codex_call = (
+        record_type == "response_item"
+        and payload_type in {"function_call", "custom_tool_call"}
+    ) or (record_type == "event_msg" and payload_type == "custom_tool_call")
+    if isinstance(payload, dict) and structured_codex_call:
         raw = payload.get("arguments", payload.get("input"))
         if isinstance(raw, str):
             try:
                 raw = json.loads(raw)
             except (TypeError, ValueError):
                 raw = None
-        yield (payload.get("call_id"), payload.get("name"), raw, None)
+        name = payload.get("name")
+        if payload_type == "custom_tool_call" and name in {"exec", "exec_command"}:
+            name = "functions.exec"
+        metadata = payload.get("internal_chat_message_metadata_passthrough")
+        turn_id = metadata.get("turn_id") if isinstance(metadata, dict) else None
+        yield (payload.get("call_id"), name, raw, turn_id)
+
+
+def has_background_tool_call(record: object) -> bool:
+    """Recognize exact Claude and Codex structured background invocations."""
+    return any(
+        name in {"Bash", "functions.exec"}
+        and isinstance(tool_input, dict)
+        and tool_input.get("run_in_background") is True
+        for _tool_id, name, tool_input, _session_id in tool_calls(record))
 
 
 def matched_tool_call(row: dict, prior_records: list[dict]) -> bool:
     matches = []
     for record in prior_records:
-        for tool_id, name, tool_input, session_id in _tool_calls(record):
+        for tool_id, name, tool_input, context_id in tool_calls(record):
             if tool_id == row["tool_use_id"]:
-                matches.append((name, tool_input, session_id))
+                matches.append((name, tool_input, context_id))
     if len(matches) != 1:
         return False
-    name, tool_input, session_id = matches[0]
+    name, tool_input, context_id = matches[0]
+    exact_context = (
+        context_id == row["session_id"] if row["client"] == "claude"
+        else context_id == row["turn_id"]
+    )
     return (name == row["tool_name"]
             and isinstance(tool_input, dict)
             and tool_input.get("run_in_background") is True
             and digest(tool_input) == row["tool_input_sha256"]
-            and (row["client"] != "claude" or session_id == row["session_id"]))
+            and exact_context)
 
 
 def preuse_delivery(record: dict, prior_records: list[dict], *, repo: Path):
