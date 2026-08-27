@@ -531,6 +531,18 @@ write_output = rail.process(
 write_row = json.loads(context(write_output))
 check("path_pattern match delivers exactly the structural extra rule",
       write_row["rule_ids"] == path_row["rule_ids"] and write_row["packs"] == path_row["packs"])
+missing_session = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
+missing_session["session_id"] = ""
+missing_session_runner = Runner()
+check("generalized rail refuses a call with no session_id even though it structurally matches",
+      rail.process(missing_session, runner=missing_session_runner) is None
+      and missing_session_runner.calls == [])
+missing_tool_use = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
+del missing_tool_use["tool_use_id"]
+missing_tool_use_runner = Runner()
+check("generalized rail refuses a call with no tool_use_id even though it structurally matches",
+      rail.process(missing_tool_use, runner=missing_tool_use_runner) is None
+      and missing_tool_use_runner.calls == [])
 non_hooks_write = gen_payload(tool="Write", tool_input={"file_path": "lib/plain.py",
                                                         "content": "print(1)\n"})
 check("a Write outside hooks/ does not match the path_pattern trigger",
@@ -543,6 +555,11 @@ gov_call = gen_payload(tool="Bash",
 check("matched_triggers finds the governance-rules pack fallback trigger by content",
       governance_fallback_row["trigger_id"] in
       [r["trigger_id"] for r in rail.matched_triggers(gov_call)])
+gov_call_upper = gen_payload(tool="Bash",
+                            tool_input={"command": "echo checking the retrieval DOCTRINE Index"})
+check("content_regex matching is case-insensitive",
+      governance_fallback_row["trigger_id"] in
+      [r["trigger_id"] for r in rail.matched_triggers(gov_call_upper)])
 
 # bash_family plus its own pack's content fallback can co-fire on one call —
 # the documented multi-trigger over-delivery shape, still capped per row.
@@ -558,6 +575,11 @@ check("multi-trigger merge unions packs/rule_ids across every matched row",
 check("this git push command matches more than one trigger row (bash_family plus its "
       "pack's own content fallback), the multi-match shape this section is testing",
       len(gitpush_matches) > 1, gitpush_ids)
+non_bash_gitpush = gen_payload(tool="SomeOtherTool", tool_input={"command": "git push origin main"})
+check("bash_family is gated to Bash/functions.exec — the same command on another "
+      "tool name does not fire the bash_family trigger (its pack content fallback still can)",
+      gitpush_row["trigger_id"] not in
+      [r["trigger_id"] for r in rail.matched_triggers(non_bash_gitpush)])
 check("every individual matched row still respects the per-trigger cap",
       all(len(r["rule_ids"]) <= MAX_PER_TRIGGER for r in gitpush_matches))
 gitpush_output = rail.process(gitpush_call, runner=Runner(
@@ -605,6 +627,10 @@ tamper_cases = [
     ("wrong trigger_ids", {"trigger_ids": ["0" * 12]}),
     ("wrong packs", {"packs": ["some-other-pack"]}),
     ("extra rule id", {"rule_ids": agent_row["rule_ids"] + ["deadbeef"]}),
+    ("unsorted rule_ids (same set, different order)",
+     {"rule_ids": list(reversed(agent_row["rule_ids"]))}
+     if len(agent_row["rule_ids"]) > 1 else {"rule_ids": agent_row["rule_ids"]}),
+    ("duplicated rule_ids", {"rule_ids": agent_row["rule_ids"] + agent_row["rule_ids"][:1]}),
 ]
 for label, patch in tamper_cases:
     forged = copy.deepcopy(agent_row)
@@ -612,6 +638,18 @@ for label, patch in tamper_cases:
     forged["receipt_id"] = contract.receipt_id(forged)
     check(f"generalized receipt tamper ({label}) fails validate_generalized_receipt",
           not contract.validate_generalized_receipt(forged, repo=REPO))
+
+# A consistent-but-unsorted reordering (rule_ids AND rules moved together, same
+# set, same content) isolates the sortedness invariant from the cross-check
+# against the compiled table above, which a same-set reorder would not catch.
+if len(agent_row["rule_ids"]) > 1:
+    reordered = copy.deepcopy(agent_row)
+    reordered["rule_ids"] = list(reversed(agent_row["rule_ids"]))
+    reordered["rules"] = list(reversed(agent_row["rules"]))
+    reordered["receipt_id"] = contract.receipt_id(reordered)
+    check("a same-set, consistently-reordered (unsorted) rule_ids/rules pair still fails "
+          "validate_generalized_receipt on the sortedness invariant alone",
+          not contract.validate_generalized_receipt(reordered, repo=REPO))
 
 if FAILURES:
     print("rule-pack-preuse-reselection-selftest: FAIL")
