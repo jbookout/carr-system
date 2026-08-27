@@ -141,7 +141,7 @@ def main() -> int:
             v1 = cur.execute(
                 "select registry_digest,entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1'"
             ).fetchone()
-            if v1 != (expected_v1, 1241):
+            if v1 != (expected_v1, 1264):
                 raise RuntimeError(f"sealed v1 changed: {v1!r}")
             v2 = cur.execute(
                 """select registry_digest,entry_count,source_entry_count,catalog_projection,
@@ -201,7 +201,7 @@ def main() -> int:
                 "select sha256 from public.schema_migrations where filename='0367_siep12_policy_epoch.sql'"
             ).fetchone()
             if ledger != (migration_sha,):
-                raise RuntimeError(f"0339 ledger SHA is not exact: {ledger!r}")
+                raise RuntimeError(f"0367 ledger SHA is not exact: {ledger!r}")
             current = cur.execute("select epoch,epoch_digest,schema_highest_migration from ops.scac_policy_epoch").fetchone()
             if current is not None:
                 raise RuntimeError(f"empty reconstructed policy was incorrectly blessed: {current!r}")

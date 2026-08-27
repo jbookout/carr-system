@@ -148,17 +148,17 @@ def main() -> int:
                 raise RuntimeError("owner-only historical v1 audit lookup is unavailable")
             if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71:
                 raise RuntimeError(f"malformed sealed registry digest {digest!r}")
-            if version[1:] != (1241, True, True, False, False, False, False, False):
+            if version[1:] != (1264, True, True, False, False, False, False, False):
                 raise RuntimeError(f"unexpected sealed registry version {version!r}")
 
             counts = dict(cur.execute(
                 "select ingress_kind,count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v1' group by ingress_kind"
             ))
-            if counts != {"mcp_tool": 186, "script_entrypoint": 458,
+            if counts != {"mcp_tool": 186, "script_entrypoint": 470,
                           "worker_route": 6, "worker_sidewrite": 3,
                           "external_admin": 27, "break_glass": 2,
-                          "job_definition": 26, "workflow_entrypoint": 28, "db_function_acl": 209,
-                          "db_relation_acl": 284, "db_column_acl": 12}:
+                          "job_definition": 26, "workflow_entrypoint": 28, "db_function_acl": 219,
+                          "db_relation_acl": 285, "db_column_acl": 12}:
                 raise RuntimeError(f"unexpected ingress census {counts!r}")
             if cur.execute(
                 """select count(*) from ops.scac_mutation_registry_entry
@@ -322,7 +322,7 @@ def main() -> int:
             cur.execute("release savepoint registry_same_cardinality_probe")
     except Exception as exc:  # noqa: BLE001 - concise CI surface
         return fail(str(exc))
-    print("siep11-mutation-registry-local-pg-gate passed: 1241 exact immutable application/catalog entries; 4 runtime roles have lookup-only access")
+    print("siep11-mutation-registry-local-pg-gate passed: 1264 exact immutable application/catalog entries; 4 runtime roles have lookup-only access")
     return 0
 
 

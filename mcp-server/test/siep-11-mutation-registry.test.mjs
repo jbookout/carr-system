@@ -16,6 +16,7 @@ import {
   registryDigest,
   REGISTRY_V7_VERSION,
   REGISTRY_V8_VERSION,
+  replaceExactlyOnce,
   renderRuntimeProjection,
   renderSIEP16IntegratedRegistrySql,
   renderSIEP17ForwardRegistrySql,
@@ -67,6 +68,15 @@ const generatedV8 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v8.generated.js", import.meta.url), "utf8");
 const v8Migration = fs.readFileSync(
   new URL("../../migrations/0380_siep17_forward_mutation_registry.sql", import.meta.url), "utf8");
+
+test("successor generation refuses absent or ambiguous predecessor markers", () => {
+  assert.equal(replaceExactlyOnce("before marker after", "marker", "successor", "unit"),
+    "before successor after");
+  assert.throws(() => replaceExactlyOnce("before after", "marker", "successor", "unit"),
+    /unit marker count must be exactly one/);
+  assert.throws(() => replaceExactlyOnce("marker and marker", "marker", "successor", "unit"),
+    /unit marker count must be exactly one/);
+});
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory();
@@ -256,8 +266,8 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
   assert.equal(jobs.every(row => row.ingress_kind === "job_definition" && row.entrypoint), true);
   assert.deepEqual(DB_CATALOG_BASELINE, {
     projection_version: "scac-db-catalog-projection.v1",
-    secdef_execute: { count: 209, digest: "sha256:109b9317f077a95f1875473a225ae375a7d8b2f8822dbd7e00d0aca34e24bcfe" },
-    relation_dml: { count: 284, digest: "sha256:3bb06a15f3f19914d476edd5a2c789e307b5298633c2d4d98c1a3e5c10359345" },
+    secdef_execute: { count: 219, digest: "sha256:069f4cad859e283a2f8d73aa1334bcf54fd3f97ae95b727925720f39706e0545" },
+    relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
     column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   });
   assert.match(migration, /ingress_kind','db_function_acl'/);
