@@ -354,7 +354,7 @@ everything else and can run whenever production credentials are at hand.
 - (c) Guidance Registry: **STAGED AND APPLIED** — batch id b46f9c26-2291-46e5-9ce2-7e843680150f, manifest digest c22151d2ae2a4ecc63d1493e14afbc34f089de2202277dc1b866960d8bf863fd, 208 entries. YOUR TWO CALLS, in order, all required:
   1. decide-guidance-import-batch {"batch_id":"b46f9c26-2291-46e5-9ce2-7e843680150f","manifest_digest":"c22151d2ae2a4ecc63d1493e14afbc34f089de2202277dc1b866960d8bf863fd","reason":"...","idempotency_key":"<fresh uuid>"}
   2. activate-guidance-registry {"registry_id":"67aa96b6-3cf8-45ce-b73c-6965d36a664c","manifest_digest":"c22151d2ae2a4ecc63d1493e14afbc34f089de2202277dc1b866960d8bf863fd","reason":"...","idempotency_key":"<fresh uuid>"} — call after 1 succeeds.
-- (d) GitHub ruleset review requirement: still your decision, unchanged.
+- (d) GitHub ruleset review requirement: **DECLINED** — see the close-out below.
 - (e) The flip: clock started 2026-08-27T10:56Z, but **waiting alone will not deliver an eligibility verdict** — see the correction below.
 - (f) Prod classification export: **EXECUTED** — parity 208/208 green, committed as PR 748.
 - NEW: rotate the neondb_owner database password when convenient — bin/schema-snapshot.sh --check leaked the DSN with password into a session transcript (defect filed, class credential-leaked-by-tool-error-path).
@@ -392,3 +392,36 @@ as a defect in the new class
 that the scoped selector is not ready to enforce today. That verdict should
 survive whatever is decided about the finding counter. The flip stays yours
 either way.
+
+## QUEUE CLOSED — 2026-08-27 15:05Z, Joe answered all four open items
+
+Nothing in this document is waiting on anyone. It is kept as the record of
+what was staged and what was decided, not as a live to-do list.
+
+- **Program sign-off: ACCEPTED.** Joe: "accepted". Recorded against the
+  corrected proposal (OUTCOME-5af1efab3352-v3), which supersedes the earlier
+  one that wrongly blamed the calendar for the flip being stuck.
+- **Guidance Registry: LIVE.** Joe: "lets do it". Both calls made and then
+  re-read from production to confirm rather than trusted: the import batch
+  decision is `active` as of 15:02:01Z and the registry itself is `active`
+  as of 15:02:06Z under digest c22151d2. This means AC-S9's activation half
+  is now met — the accepted sign-off above still records it as not met,
+  because it was true when he accepted it. The next outcome proposal, filed
+  once the clean-week gate is fixed, carries both corrections at once rather
+  than charging Joe a second acceptance for one line.
+- **Required human review on pull requests: DECLINED, permanently and in
+  general.** Joe: "no blocking for human review. i never wanted this for
+  anything". Branch protection keeps its three existing rules and gains no
+  pull-request review requirement; code-owner review stays advisory. The
+  staged `gh api` call in item (d) above is retained as a record of what was
+  offered and should not be run. Ruling logged as decision
+  8daefaba-8f55-4186-872d-36e2ee37edbd.
+- **Database owner password rotation: DECLINED.** Joe: "I dont care about the
+  password. just leave it". Closed by ruling so it stops being re-raised;
+  logged as decision fc1d48ab-31b6-406b-958a-76da15cca2c3. The separate fix —
+  stopping the snapshot tool printing credentials on its error path — is
+  untouched by that ruling and still worth doing, since it prevents the next
+  leak rather than cleaning up this one.
+
+The only thing left in the whole program is the clean-week gate (WR-000027).
+The flip waits on that, not on a date.
