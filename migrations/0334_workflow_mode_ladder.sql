@@ -1,4 +1,4 @@
--- 0332_workflow_mode_ladder.sql
+-- 0334_workflow_mode_ladder.sql
 -- ops.enqueue_job accepted any mode with no acceptance check: a workflow could
 -- be scheduled straight into canary or live with no evidence it had ever run
 -- clean in a lower tier.  This closes that gap inside the one function every
@@ -115,7 +115,7 @@ do $$
 declare definition text;
 begin
   if to_regprocedure('ops.enqueue_job(text,integer,timestamptz,jsonb,text,text)') is null then
-    raise exception '0332 FAILED: ops.enqueue_job is missing';
+    raise exception '0334 FAILED: ops.enqueue_job is missing';
   end if;
   select pg_get_functiondef('ops.enqueue_job(text,integer,timestamptz,jsonb,text,text)'::regprocedure)
     into definition;
@@ -124,15 +124,15 @@ begin
      or definition not like '%cannot enqueue live mode%'
      or definition not like '%no accepted shadow acceptance evidence%'
      or definition not like '%no accepted canary acceptance evidence%' then
-    raise exception '0332 FAILED: ops.enqueue_job does not enforce the workflow mode ladder';
+    raise exception '0334 FAILED: ops.enqueue_job does not enforce the workflow mode ladder';
   end if;
   -- The original duplicate-delivery reconciliation and unmodified base body
   -- must still be present so this migration is additive, not a rewrite.
   if definition not like '%duplicate delivery conflicts with the canonical scheduled job%' then
-    raise exception '0332 FAILED: ops.enqueue_job lost its duplicate-delivery reconciliation';
+    raise exception '0334 FAILED: ops.enqueue_job lost its duplicate-delivery reconciliation';
   end if;
   if not has_function_privilege('carr_jobs',
        'ops.enqueue_job(text,integer,timestamptz,jsonb,text,text)'::regprocedure,'execute') then
-    raise exception '0332 FAILED: carr_jobs lost enqueue_job execute privilege';
+    raise exception '0334 FAILED: carr_jobs lost enqueue_job execute privilege';
   end if;
 end $$;

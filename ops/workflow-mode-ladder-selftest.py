@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hermetic checks for the workflow mode acceptance ladder.
 
-Covers the three surfaces migration 0332 and tick --mode auto together own:
+Covers the three surfaces migration 0334 and tick --mode auto together own:
 the DB guard's refusal branches (read as text; this selftest never touches a
 database), the pure ladder resolver tick uses to pick a tier per workflow, and
 the wrapper pinning the ladder-aware auto mode instead of a fixed one.
@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO))
 
 from lib.control_plane import resolve_auto_mode  # noqa: E402
 
-MIGRATION = REPO / "migrations" / "0332_workflow_mode_ladder.sql"
+MIGRATION = REPO / "migrations" / "0334_workflow_mode_ladder.sql"
 WRAPPER = REPO / "bin" / "control-plane-tick.sh"
 
 FAILED: list[str] = []
@@ -31,7 +31,7 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 
 
 def check_migration() -> None:
-    check("migration 0332 exists", MIGRATION.is_file(), str(MIGRATION))
+    check("migration 0334 exists", MIGRATION.is_file(), str(MIGRATION))
     if not MIGRATION.is_file():
         return
     source = MIGRATION.read_text(encoding="utf-8")
@@ -53,7 +53,7 @@ def check_migration() -> None:
     check("migration keeps the original duplicate-delivery reconciliation",
           "duplicate delivery conflicts with the canonical scheduled job" in source)
     check("migration wraps the change in begin/commit", "\nbegin;\n" in source and "\ncommit;\n" in source)
-    check("migration ends with a self-check DO block", "do $$" in source and "0332 FAILED" in source)
+    check("migration ends with a self-check DO block", "do $$" in source and "0334 FAILED" in source)
 
 
 def check_resolver() -> None:
