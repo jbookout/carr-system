@@ -1031,6 +1031,23 @@ export async function recordEngineeringReview(c, actor, args, ToolError, writeEv
 
 export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }) {
   return {
+    "engineering-passport-source": {
+      description: "Read the exact current accepted Work Request and plan binding required to construct an initial Engineering Slice Plan. This is the bootstrap read: it exposes no execution envelope, does not register, assign, dispatch, or grant authority, and remains available before any slice plan exists.",
+      inputSchema: { type: "object", additionalProperties: false, properties: { work_request: { type: "string" } }, required: ["work_request"] },
+      handler: async (c, _actor, args) => {
+        const work = text(args.work_request, "work_request", ToolError);
+        const r = await c.query("select ops.engineering_admission_source($1::text) as source", [work]);
+        const source = r.rows[0]?.source;
+        if (!source?.work_request || !source?.accepted_plan)
+          error(ToolError, { error: "engineering_work_request_not_found_or_not_ready" });
+        const parts = sourceParts(source, ToolError);
+        return {
+          schema_version: "engineering-passport-source.v1",
+          work_request: parts.work,
+          accepted_plan_revision: parts.plan,
+        };
+      },
+    },
     "register-engineering-slice-plan": {
       write: true,
       description: "Register one typed Engineering Slice Plan as an immutable projection of the exact accepted sourced plan. It does not accept, assign, dispatch, or grant authority.",
