@@ -515,7 +515,8 @@ def main() -> int:
                     "select count(*) from ops.rule_approval_receipt where rule_id=%s",
                     (legacy_retire_id,),
                 )
-                if cur.fetchone()[0] != 0:
+                legacy_fixture_receipt_count = cur.fetchone()
+                if legacy_fixture_receipt_count is None or legacy_fixture_receipt_count[0] != 0:
                     refuse("legacy retirement fixture unexpectedly has an approval receipt")
 
                 # Non-authority is refused on the legacy path exactly as on the
@@ -654,7 +655,8 @@ def main() -> int:
                     "select count(*) from ops.applicable_rules(null,null,null) where rule_id=%s",
                     (legacy_amend_id,),
                 )
-                if cur.fetchone()[0] != 0:
+                legacy_applicable_before = cur.fetchone()
+                if legacy_applicable_before is None or legacy_applicable_before[0] != 0:
                     refuse("a legacy rule with no approval receipt was somehow returned by applicable_rules "
                            "before any amendment -- the receipt-bound compiler must never see it")
 
@@ -690,7 +692,8 @@ def main() -> int:
                     "select count(*) from ops.applicable_rules(null,null,null) where rule_id=%s",
                     (legacy_amend_id,),
                 )
-                if cur.fetchone()[0] != 0:
+                legacy_applicable_after = cur.fetchone()
+                if legacy_applicable_after is None or legacy_applicable_after[0] != 0:
                     refuse("an amended legacy rule appeared in applicable_rules -- it must still be delivered "
                            "only through ops.rule_delivery_plan, never the receipt-bound compiler")
 
