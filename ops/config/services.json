@@ -343,6 +343,25 @@
       ]
     },
     {
+      "key": "cutover-watch",
+      "name": "Control-plane cutover watch",
+      "purpose": "Unattended report-only watch over the control-plane cutover: completed jobs whose receipts are not yet accepted, jobs newly dead-lettered, and the acceptance table. Writes a loop update to open loop #532 and notifies Joe locally on any change; never accepts, promotes, disables, or dispatches anything (rule 1f3a7372, rule 847f9995). See bin/cutover-watch.sh and tools/cutover-watch.py.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "bin/cutover-watch.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.cutover-watch.plist",
+          "expected_cadence_seconds": 1800,
+          "cadence_grace_seconds": 3600,
+          "notes": "Grace is 2x the 1800s interval, same reasoning as cc-version-sentinel: run rows ride the local spool (tools/ops-spool.py) and land at the next run-spool-flush, so a row can be inserted up to ~1800s after its fire. NOT YET INSTALLED (built in worktree cutover-watch, 2026-08-27) — the orchestrating session installs it after this branch merges to main; see tools/scheduler-truth.py's INSTALL_EXEMPT for the same statement in machine-checkable form."
+        }
+      ]
+    },
+    {
       "key": "recordings-purge",
       "name": "Recording retention purge",
       "purpose": "Deletes call recordings past their retention window.",

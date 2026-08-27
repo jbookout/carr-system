@@ -35,8 +35,8 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from lib.control_plane import (EntrypointFailure, deterministic_args, resolve_auto_mode,
-                               validate_manifest)  # noqa: E402
+from lib.control_plane import (EntrypointFailure, EntrypointNotConfigured, deterministic_args,
+                               resolve_auto_mode, validate_manifest)  # noqa: E402
 from pipelines.availability_matcher import canary_report  # noqa: E402
 from lib.control_plane_content_fuel import (ContentFuelContractError,
                                             validate_content_fuel_proposal,
@@ -54,6 +54,11 @@ from lib.secret_redaction import redacted_tail, sensitive_env_values  # noqa: E4
 
 MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
 SCHEDULER_CUTOVER_REGISTRY_PATH = REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json"
+
+# EX_CONFIG -- this repo's standing convention (bin/nightly.sh and every other
+# launchd chain) for "the step ran, found a credential or setting it needs
+# absent, wrote nothing, and said so". Not a failure; see EntrypointNotConfigured.
+EX_CONFIG = 78
 
 
 def load_manifest() -> dict[str, Any]:
@@ -1014,10 +1019,12 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
         # stack trace. known_secrets draws on THIS process's own environment
         # -- the runner's -- not the child's deliberately-scrubbed one.
         known_secrets = sensitive_env_values(os.environ)
+        stdout_tail = redacted_tail(proc.stdout, known_secrets=known_secrets)
+        stderr_tail = redacted_tail(proc.stderr, known_secrets=known_secrets)
+        if proc.returncode == EX_CONFIG:
+            raise EntrypointNotConfigured(stdout_tail=stdout_tail, stderr_tail=stderr_tail)
         raise EntrypointFailure(
-            proc.returncode,
-            stdout_tail=redacted_tail(proc.stdout, known_secrets=known_secrets),
-            stderr_tail=redacted_tail(proc.stderr, known_secrets=known_secrets))
+            proc.returncode, stdout_tail=stdout_tail, stderr_tail=stderr_tail)
     return {"entrypoint": execution["entrypoint"], "mode": mode,
             "args": args, "exit_code": proc.returncode,
             "stdout_tail": proc.stdout[-2000:]}
@@ -1228,10 +1235,12 @@ def _post_execution_facts(
 
 
 def _failure_detail(exc: Exception) -> str:
-    """Text stored as ``ops.fail_job``'s ``p_detail`` -- and therefore inside
-    the failure/dead-letter receipt's evidence jsonb.
+    """Text stored as ``p_detail`` for ``ops.fail_job`` or ``ops.skip_job`` --
+    and therefore inside the failure/dead-letter/skipped receipt's evidence
+    jsonb.
 
-    An EntrypointFailure carries its own bounded, already-redacted stdout and
+    An EntrypointFailure (EntrypointNotConfigured included -- it subclasses
+    EntrypointFailure) carries its own bounded, already-redacted stdout and
     stderr tails; encode them as JSON so they LAND in the receipt instead of
     being silently dropped by the flat 1000-character cap every other
     exception keeps (rule 1f3a7372: a failure receipt that cannot say why is
@@ -1423,7 +1432,15 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
             # Start a fresh transaction and fail only if the committed lease
             # still owns the job; an expired/reaped token is correctly refused.
             with conn.cursor() as fail_cur:
-                if isinstance(exc,(subprocess.TimeoutExpired,TimeoutError)):
+                if isinstance(exc, EntrypointNotConfigured):
+                    # NOT A FAILURE (rule 88e9b5eb). ops.skip_job is terminal
+                    # on this attempt unconditionally -- it never checks
+                    # attempt against max_attempts the way ops.fail_job does,
+                    # so a missing credential never burns retry budget and
+                    # never reaches dead_lettered.
+                    fail_cur.execute("select ops.skip_job(%s,%s,%s)",
+                                     (job_id,lease,_failure_detail(exc)))
+                elif isinstance(exc,(subprocess.TimeoutExpired,TimeoutError)):
                     fail_cur.execute("select ops.timeout_job(%s,%s,%s)",
                                      (job_id,lease,str(exc)[:1000]))
                 else:

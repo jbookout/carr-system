@@ -61,6 +61,31 @@ class EntrypointFailure(RuntimeError):
         self.stderr_tail = stderr_tail
 
 
+class EntrypointNotConfigured(EntrypointFailure):
+    """A deterministic entrypoint child exited 78 (EX_CONFIG).
+
+    This repo's standing convention (bin/nightly.sh and every other launchd
+    chain) is that 78 means the step RAN, found a credential or setting it
+    needs absent, wrote nothing, and said so on its own stdout/stderr -- not
+    that it failed. Rule 88e9b5eb: "not authorized" and "not possible" are
+    different findings and must never be reported as the same one.
+
+    Subclasses EntrypointFailure so the stdout/stderr capture in
+    ``_execute_deterministic`` and the JSON-tail encoding in
+    ``_failure_detail`` stay ONE piece of code, not a duplicate for this exit
+    code. Only the terminal ledger call a caller makes differs: run_once
+    routes this to ``ops.skip_job``, never ``ops.fail_job`` -- no retry
+    budget spent, no dead-letter, because a missing credential does not
+    self-heal on a timer the way a transient failure might.
+    """
+
+    def __init__(self, *, stdout_tail: str, stderr_tail: str):
+        RuntimeError.__init__(self, "entrypoint exited 78 (not configured)")
+        self.returncode = 78
+        self.stdout_tail = stdout_tail
+        self.stderr_tail = stderr_tail
+
+
 def deterministic_args(execution: dict[str, Any], mode: str) -> list[str]:
     """Return the registered command arguments for one deterministic mode.
 

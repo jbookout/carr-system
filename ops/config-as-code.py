@@ -207,6 +207,13 @@ TOKENS = [(tok, real) for tok, real in
 #                         are explicit recovery only; a second scheduler would
 #                         duplicate the same owner-specific maintenance.
 #   partner-ping        — writes the shared record. One pinger is the point.
+#   cutover-watch       — writes the shared record (a loop update on #532) and
+#                         holds its own sentinel of what it last reported under
+#                         out/cutover-watch/, which is per-machine and would
+#                         make two Macs disagree about what is "new" — the
+#                         same partner-ping shape (one watcher, one shared
+#                         record) with the added risk of two update-loop calls
+#                         racing on the same loop's base_version.
 #
 # What the second machine still needs from the nightly is the record-derived
 # fetch allowlist, which is per-machine and gitignored. That is why
@@ -226,6 +233,7 @@ PRIMARY_ONLY = {
     "com.carr.rules-refresh.plist",
     "com.carr.local-briefs.plist",
     "com.carr.partner-ping.plist",
+    "com.carr.cutover-watch.plist",
 }
 
 
