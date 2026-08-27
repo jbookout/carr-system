@@ -5,6 +5,7 @@
   const summary = document.querySelector("#report-summary");
   const list = document.querySelector("#report-list");
   const openButton = document.querySelector("#open-tour");
+  const downloadPdf = document.querySelector("#download-pdf");
   const commentPanel = document.querySelector("#comment-panel");
   const commentForm = document.querySelector("#comment-form");
   const propertySelect = document.querySelector("#property-ref");
@@ -75,6 +76,7 @@
     const properties = items.map((item, index) => ({ item, index })).filter(({ item }) => validPropertyRef(item?.property_ref))
       .sort((left, right) => routeOrder(left.item, left.index) - routeOrder(right.item, right.index));
     allowReactions = report?.allow_reactions === true;
+    downloadPdf.hidden = report?.allow_pdf_download !== true;
     document.querySelector("#report-title").textContent = title;
     summary.textContent = text(report?.summary, `${properties.length} property${properties.length === 1 ? "" : "ies"} in this report.`);
     list.replaceChildren();

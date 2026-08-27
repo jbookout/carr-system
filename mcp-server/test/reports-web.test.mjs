@@ -26,17 +26,21 @@ function cookies(response) {
 }
 
 async function sha256Digest(value) {
-  const bytes = new TextEncoder().encode(value);
+  const bytes = typeof value === "string" ? new TextEncoder().encode(value)
+    : value instanceof ArrayBuffer ? new Uint8Array(value)
+      : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return "sha256:" + [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function handler(overrides = {}) {
+  const pdf = new TextEncoder().encode("%PDF-1.7\nfixture\n%%EOF");
   return createReportsWebHandler({
     exchangeShareTokenFn: async () => ({ ok: true }),
     readShareFn: async ({ csrfOnly }) => ({ ok: true, csrfToken: "csrf-token", ...(csrfOnly ? {} : { data: { title: "Client tour", items: [{ name: "Redacted property", status: "Available" }] } }) }),
     commentShareFn: async ({ body }) => ({ ok: true, data: { accepted: body.body === "A helpful note" } }),
     reactionShareFn: async () => ({ ok: true, data: { accepted: true } }),
+    readPdfFn: async () => ({ ok: true, body: pdf, artifactDigest: await sha256Digest(pdf) }),
     ...overrides,
   });
 }
@@ -209,4 +213,27 @@ test("static bootstrap removes the fragment but waits for an explicit Open tour 
   assert.match(script, /report\?\.tour_name/);
   assert.match(script, /property:public/);
   assert.match(html, /maxlength="4000"/);
+  assert.match(html, /href="\/api\/share\/pdf"/);
+  assert.match(script, /allow_pdf_download/);
+});
+
+test("PDF download is session-only, digest-verified, bounded, and never forwards the raw cookie", async () => {
+  const cookie = "__Host-tour_share_session=session_abcdefghijklmnopqrstuvwxyz";
+  const rawSession = cookie.slice("__Host-tour_share_session=".length);
+  let input;
+  const pdf = new TextEncoder().encode("%PDF-1.7\nfixture\n%%EOF");
+  const surface = handler({ readPdfFn: async (value) => { input = value; return { ok: true, body: pdf, artifactDigest: await sha256Digest(pdf) }; } });
+  assert.equal((await surface.fetch(request("/api/share/pdf"), {})).status, 401);
+  const response = await surface.fetch(request("/api/share/pdf", { headers: { cookie } }), {});
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "application/pdf");
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="CARR-Tour-Packet.pdf"');
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(Object.keys(input).sort(), ["env", "sessionDigest"]);
+  assert.equal(input.sessionDigest, await sha256Digest(rawSession));
+  assert.equal(input.session, undefined); assert.equal(input.request, undefined);
+  const mismatch = handler({ readPdfFn: async () => ({ ok: true, body: pdf, artifactDigest: `sha256:${"0".repeat(64)}` }) });
+  assert.equal((await mismatch.fetch(request("/api/share/pdf", { headers: { cookie } }), {})).status, 503);
+  const notPdf = handler({ readPdfFn: async () => { const body = new TextEncoder().encode("not a pdf"); return { ok: true, body, artifactDigest: await sha256Digest(body) }; } });
+  assert.equal((await notPdf.fetch(request("/api/share/pdf", { headers: { cookie } }), {})).status, 503);
 });

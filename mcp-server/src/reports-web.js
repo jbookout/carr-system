@@ -10,6 +10,7 @@ export const REPORTS_ASSET_DIRECTORY = "../dealroom/reports";
 
 const SESSION_COOKIE = "__Host-tour_share_session";
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const SESSION_TTL_MS = 60 * 60 * 1000;
 const STATIC_ASSETS = new Map([
   ["/share", "/reports/share.html"],
@@ -19,6 +20,7 @@ const STATIC_ASSETS = new Map([
 const API_METHODS = new Map([
   ["/api/share/exchange", "POST"],
   ["/api/share/report", "GET"],
+  ["/api/share/pdf", "GET"],
   ["/api/share/comment", "POST"],
   ["/api/share/reaction", "POST"],
 ]);
@@ -64,7 +66,10 @@ function sessionCookie(session) {
 }
 
 async function sha256Digest(value) {
-  const bytes = new TextEncoder().encode(value);
+  const bytes = typeof value === "string" ? new TextEncoder().encode(value)
+    : value instanceof ArrayBuffer ? new Uint8Array(value)
+      : ArrayBuffer.isView(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : null;
+  if (!bytes) throw new TypeError("SHA-256 input must be text or bytes");
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
@@ -193,6 +198,26 @@ async function read(request, env, dependencies) {
   return publicResponse(result);
 }
 
+async function downloadPdf(request, env, dependencies) {
+  const session = cookieValue(request, SESSION_COOKIE);
+  if (!session) return json({ error: "unauthorized" }, 401);
+  if (typeof dependencies.readPdfFn !== "function") return json({ error: "not_found" }, 404);
+  let result;
+  try { result = await dependencies.readPdfFn({ env, sessionDigest: await sha256Digest(session) }); }
+  catch { return json({ error: "share_unavailable" }, 503); }
+  if (!result?.ok || typeof result.artifactDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(result.artifactDigest)) return dependencyFailure(result);
+  let bytes;
+  if (result.body instanceof ArrayBuffer) bytes = new Uint8Array(result.body);
+  else if (ArrayBuffer.isView(result.body)) bytes = new Uint8Array(result.body.buffer, result.body.byteOffset, result.body.byteLength);
+  else return json({ error: "share_unavailable" }, 503);
+  if (bytes.byteLength < 8 || bytes.byteLength > MAX_PDF_BYTES || new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") return json({ error: "share_unavailable" }, 503);
+  if (!equalStrings(await sha256Digest(bytes), result.artifactDigest)) return json({ error: "share_unavailable" }, 503);
+  return new Response(bytes, { headers: {
+    "content-type": "application/pdf", "content-length": String(bytes.byteLength),
+    "content-disposition": 'attachment; filename="CARR-Tour-Packet.pdf"', "cache-control": "no-store",
+  } });
+}
+
 async function mutation(request, env, dependencies, dependencyName) {
   if (!sameOriginPost(request)) return json({ error: "forbidden" }, 403);
   const session = cookieValue(request, SESSION_COOKIE);
@@ -242,6 +267,7 @@ async function handleRequest(request, env, dependencies) {
   if (request.method !== method) return methodNotAllowed(method);
   if (pathname === "/api/share/exchange") return exchange(request, env, dependencies);
   if (pathname === "/api/share/report") return read(request, env, dependencies);
+  if (pathname === "/api/share/pdf") return downloadPdf(request, env, dependencies);
   return mutation(request, env, dependencies, pathname.endsWith("/comment") ? "commentShareFn" : "reactionShareFn");
 }
 
