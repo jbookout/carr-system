@@ -1,0 +1,329 @@
+{
+ "counts": {
+  "pack_fallback_triggers": 7,
+  "seeded_detector_rule_ids": 49,
+  "seeded_detector_triggers": 13,
+  "structural_extra_triggers": 1,
+  "triggers": 21
+ },
+ "generated_from": {
+  "map_sha256": "0bd85004ed17b2da8aa42cbff0e4b3546fafee0c28df2969e2cebbf412fcc7ec",
+  "triage_sha256": "746255638d5472d869192069084d0dfe0c01962b47537de2b845be136c9b4a58"
+ },
+ "generated_note": "Compiled by ops/rule-jit-compile.py from ops/config/rule-triage.v1.json's per-rule `detector` fields and ops/config/rule-enforcement-map.json's rule_packs/rule_load_layers. Never hand-edit this file \u2014 run the compiler again after changing either input, and `--check` verifies the two never drift apart.",
+ "max_rules_per_trigger": 5,
+ "schema": "rule-jit-triggers/v1",
+ "slice": "s9",
+ "triggers": [
+  {
+   "kind": "bash_family",
+   "packs": [
+    "engineering-git"
+   ],
+   "pattern": "\\bgit\\s+push\\b|\\bgh\\s+pr\\s+(?:create|merge)\\b",
+   "rule_ids": [
+    "173119a8",
+    "b42f11a0",
+    "bd4a6d22",
+    "c1547ed1",
+    "e65efc68"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "b92cf7b21326"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "vendor-intros"
+   ],
+   "pattern": "(?=.*\\b(?:prepare-conversation|log-outreach)\\b)(?=.*\\bvendor\\b)",
+   "rule_ids": [
+    "83b9a362",
+    "ba5730c5",
+    "bddb0e7b",
+    "cf1c13a6"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "c00eb0c52166"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "(?=.*\\bdata.?class\\b)(?=.*\\b(?:scope|widen|widening)\\b)",
+   "rule_ids": [
+    "df55c398"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "49a3410cc883"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "source-study"
+   ],
+   "pattern": "\\barticle\\b|\\blink\\b|\\bvideo\\b|\\bthread\\b|\\bx\\.com\\b|\\bpaper\\b|\\barxiv\\b|\\brepo\\b|\\bsource\\b|\\bstudy\\b|\\bresearch\\ pass\\b|\\bnew\\ implementation\\b|\\bnew\\ capability\\b",
+   "rule_ids": [
+    "11b2b73b",
+    "6172e7d5",
+    "9e3fb6d0",
+    "c4a284b2"
+   ],
+   "source": "pack_fallback",
+   "trigger_id": "a7409197dee7"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "joe-development"
+   ],
+   "pattern": "\\bcalibration\\b|\\boverride\\b|\\bprediction\\b|\\bmonthly\\ review\\b|\\bcurriculum\\b|\\bcompression\\b|\\btiming\\ call\\b|\\bclose\\-before\\-open\\b",
+   "rule_ids": [
+    "018ce972",
+    "19304882",
+    "20d106f1",
+    "bbffc139",
+    "bc4145f6"
+   ],
+   "source": "pack_fallback",
+   "trigger_id": "cc742ee35ba5"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "\\bfable\\b",
+   "rule_ids": [
+    "fb110a39"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "5616fb7fb4fd"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "engineering-git"
+   ],
+   "pattern": "\\bgit\\b|\\bbranch\\b|\\bworktree\\b|\\bcommit\\b|\\bpush\\b|\\bpull\\ request\\b|\\bci\\b|\\bgate\\b|\\bhook\\b|\\bmigration\\b|\\bschema\\b|\\bdeploy\\b|\\bwrangler\\b|\\btest\\b|\\bselftest\\b|\\bconfig\\ file\\b|\\bbaseline\\b|\\brefactor\\b|\\barchitecture\\ fork\\b",
+   "rule_ids": [
+    "efbdfb1a",
+    "f0f9156e"
+   ],
+   "source": "pack_fallback",
+   "trigger_id": "963b8f2da763"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "records-intake"
+   ],
+   "pattern": "\\bparty\\b|\\bvendor\\b|\\bcontact\\b|\\battendee\\b|\\bduplicate\\b|\\bdedupe\\b|\\benrichment\\b|\\bnpi\\b|\\bnppes\\b|\\bintake\\b|\\bnew\\ client\\b|\\bnew\\ lead\\b|\\bnew\\ vendor\\b|\\badd\\-party\\b|\\bverification\\ stamp\\b",
+   "rule_ids": [
+    "2ca2add2",
+    "5d44d3f3",
+    "614c1209",
+    "d26d63b0",
+    "faf1b643"
+   ],
+   "source": "pack_fallback",
+   "trigger_id": "36433cdd2d40"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "scheduled-automation"
+   ],
+   "pattern": "\\bscheduled\\b|\\blaunchd\\b|\\bcron\\b|\\bnightly\\b|\\bheartbeat\\b|\\bhealth\\b|\\bunattended\\b|\\broutine\\b|\\bjob\\b|\\bcredential\\b|\\baway\\ mode\\b|\\btombstone\\b|\\bmetric\\b|\\balarm\\b|\\blong\\ job\\b|\\bestimate\\b",
+   "rule_ids": [
+    "740bb505",
+    "def3e84e"
+   ],
+   "source": "pack_fallback",
+   "trigger_id": "4390b46cdb6b"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "surface-doctrine"
+   ],
+   "pattern": "\\bsurface\\b|\\bdashboard\\b|\\blead\\ board\\b|\\bdeal\\ board\\b|\\bdeal\\ room\\b|\\bcommand\\ center\\b|\\bcontrol\\ room\\b|\\bartifact\\b|\\brender\\b|\\bhtml\\b|\\bcss\\b|\\bsvg\\b|\\bux\\b|\\bdesign\\b|\\bproposal\\b|\\bpacket\\b|\\bdocument\\b|\\bbrand\\b|\\bmotion\\b|\\bdiagram\\b",
+   "rule_ids": [
+    "67580c28",
+    "6901cc3b",
+    "80def9d2",
+    "9293d609",
+    "a8f159ad"
+   ],
+   "source": "pack_fallback",
+   "trigger_id": "e8a04a8cceda"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "governance-rules"
+   ],
+   "pattern": "\\bteach\\b|\\brule\\b|\\bdoctrine\\b|\\bloop\\b|\\bdecision\\b|\\bcapture\\b|\\bdefect\\b|\\bretire\\b|\\bamend\\b|\\badmission\\b|\\benforcement\\ map\\b|\\bprecedent\\b|\\bindex\\b|\\bhandoff\\b|\\bcheckpoint\\b|\\bpartner\\ sync\\b",
+   "rule_ids": [
+    "015183f5",
+    "0c1bac27",
+    "113b3833",
+    "179be4b8",
+    "1c21263c"
+   ],
+   "source": "pack_fallback",
+   "trigger_id": "33efd5146cbe"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "joe-comms"
+   ],
+   "pattern": "\\bx\\.com\\b|\\btwitter\\.com\\b",
+   "rule_ids": [
+    "557838a5",
+    "57d13061"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "47702bf70f44"
+  },
+  {
+   "kind": "path_pattern",
+   "packs": [
+    "engineering-git"
+   ],
+   "pattern": "hooks/*.py",
+   "rule_ids": [
+    "c0b38d80"
+   ],
+   "source": "structural_extra",
+   "trigger_id": "5e186a09dcf2"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "source-study"
+   ],
+   "pattern": "^(WebFetch|WebSearch)$",
+   "rule_ids": [
+    "2e362970",
+    "466a545a",
+    "5e896ed6",
+    "6437ae15",
+    "98e74e7c"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "6de4382f2855"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "^Agent$",
+   "rule_ids": [
+    "185013c6",
+    "2b66211d",
+    "81709f57",
+    "8aefcdce",
+    "b587f6c2"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "0a28bc5ca35b"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "client-deal"
+   ],
+   "pattern": "__(new-deal|update-deal|patch-deal-field|reassign-deal|revert-deal-field)$",
+   "rule_ids": [
+    "51d9f05f",
+    "72e06bdf",
+    "9d80fd2d",
+    "c8ebeb5b",
+    "f5bac101"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "cd0b98ee85da"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "vendor-intros"
+   ],
+   "pattern": "__(new-vendor|update-vendor|merge-vendor-rows)$",
+   "rule_ids": [
+    "1f750181",
+    "3b0cd546",
+    "7e4ca905",
+    "893aeec5",
+    "defee176"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "dfd2e575fc68"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "client-deal"
+   ],
+   "pattern": "__(prepare-conversation|add-deal-note|log-activity|log-outreach)$",
+   "rule_ids": [
+    "3fa17fa0",
+    "424ba0cc",
+    "48083552",
+    "725dff46"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "e3825c3648c5"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "client-deal"
+   ],
+   "pattern": "__(prepare-document|compare-lease-terms|record-executed-lease)$",
+   "rule_ids": [
+    "412d37d3",
+    "4399df76",
+    "5697071b",
+    "ce12c11e",
+    "f2d58a30"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "4bb5cae9c723"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "joe-comms"
+   ],
+   "pattern": "__(send_message|reply|forward|create_draft|update_draft)$",
+   "rule_ids": [
+    "49533583",
+    "c66dc739"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "d49d5a9d81e9"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "vendor-intros"
+   ],
+   "pattern": "__(who-do-we-know|counterparty-history)$",
+   "rule_ids": [
+    "5f8c661d",
+    "6ec7312d",
+    "76a1ae2b",
+    "7b4ba3aa",
+    "e6e0b0e7"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "3de4b2fa0386"
+  }
+ ],
+ "work_request": "WR-000019"
+}

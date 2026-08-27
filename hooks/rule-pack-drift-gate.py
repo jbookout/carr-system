@@ -124,7 +124,45 @@ CAPTURED_INERT_TOOL_METADATA = {
 
 
 def load_packs():
-    """Pack name -> compiled trigger regex, and pack name -> its rules."""
+    """Pack name -> compiled trigger regex, and pack name -> its rules.
+
+    NOT REPOINTED TO THE NEW TRIGGER TABLE (WR-000019 slice S9). Slice S9 adds
+    a declarative, per-RULE trigger table (ops/config/rule-jit-triggers.v1.json,
+    compiled by ops/rule-jit-compile.py) that the pre-tool-call rail
+    (hooks/rule-pack-preuse-reselection.py) reads for its generalized delivery
+    path. This gate's own keyword matching stays exactly as it is, reading
+    `rule_packs` straight out of ops/config/rule-enforcement-map.json, for two
+    reasons that made "repoint it" not the straightforward move the slice's
+    own instructions allowed for:
+
+      1. GRANULARITY MISMATCH. This gate's `triggers` is PACK-shaped (11 packs,
+         one regex each) and its `members` is used only to name the rules a
+         MISSING pack would have carried (see `evaluate()`'s `missed` line).
+         The new table is TRIGGER-shaped and only ~49 of 126 JIT rules carry a
+         seeded, more precise detector; the rest still resolve through a
+         pack-level fallback that is (by construction) the identical keyword
+         list this file already compiles. Repointing `members` to the new
+         table's rule_ids would either reproduce the exact same pack-level
+         answer for those un-seeded rules or silently narrow this gate's
+         "which rules would this miss have cost you" reporting to only the
+         49 seeded ones — a real behavior change to a byte-pinned, fixture-
+         proven observation contract (CAPTURED_RECEIPT_TOOL_INPUTS and
+         CAPTURED_INERT_TOOL_METADATA above exist for exactly this reason:
+         this file's behavior on real historical transcripts is verified, not
+         merely unit-tested).
+      2. THIS GATE IS TELEMETRY-ONLY, STAYING THAT WAY. It already never
+         blocks outside `mode == "enforced"`, which shadow mode never reaches
+         (see the module docstring). Rewiring its comparison during the same
+         slice that also changes the delivery rail it is meant to audit would
+         make the audit and the thing it audits move together — exactly the
+         coupling an independent drift check exists to avoid.
+
+    So this compiles the SAME `rule_packs` keyword lists it always has, and
+    the new trigger table's own compiler (ops/rule-jit-compile.py) reuses this
+    exact word-boundary construction for its pack_fallback rows on purpose
+    (see `pack_keyword_pattern()` there), so the two are recognizably the same
+    keyword source even though neither reads the other's file.
+    """
     with open(MAP, encoding="utf-8") as handle:
         data = json.load(handle)
     triggers, members = {}, {}

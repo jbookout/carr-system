@@ -414,12 +414,242 @@ claude_rows = [group for group in claude["PreToolUse"]
                if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
 codex_rows = [group for group in codex["PreToolUse"]
               if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
-check("Claude wiring is exact and unique",
-      len(claude_rows) == 1 and claude_rows[0]["matcher"] == "Bash")
-check("Codex wiring is exact and unique",
-      len(codex_rows) == 1 and codex_rows[0]["matcher"] == r"^(Bash|functions\.exec)$")
+CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*"
+CODEX_MATCHER = r"^(Bash|functions\.exec|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*)$"
+check("Claude wiring is exact and unique, widened for the generalized rail (S9)",
+      len(claude_rows) == 1 and claude_rows[0]["matcher"] == CLAUDE_MATCHER)
+check("Codex wiring is exact and unique, widened for the generalized rail (S9)",
+      len(codex_rows) == 1 and codex_rows[0]["matcher"] == CODEX_MATCHER)
 check("new rail participates in the epoch source digest",
       "hooks/rule-pack-preuse-reselection.py" in rail.WINDOW_SOURCE_PATHS)
+check("the compiled trigger table participates in the epoch source digest too",
+      "ops/config/rule-jit-triggers.v1.json" in rail.WINDOW_SOURCE_PATHS
+      and "ops/rule-jit-compile.py" in rail.WINDOW_SOURCE_PATHS)
+
+
+# ===========================================================================
+# GENERALIZED RAIL (WR-000019 slice S9) — the declarative trigger-table path.
+# The tests above are entirely unchanged and still exercise the ORIGINAL,
+# single-pack scheduled-automation rail alone; everything below is new.
+
+TRIGGER_TABLE = json.loads((REPO / "ops/config/rule-jit-triggers.v1.json").read_text())
+TRIGGER_ROWS = {row["trigger_id"]: row for row in TRIGGER_TABLE["triggers"]}
+MAX_PER_TRIGGER = TRIGGER_TABLE["max_rules_per_trigger"]
+
+
+def gen_payload(*, tool: str, tool_input: dict, client: str = "claude",
+               session: str = "g-session", tool_use_id: str = "g-tool") -> dict:
+    row = {
+        "hook_event_name": "PreToolUse",
+        "cwd": str(REPO),
+        "session_id": session,
+        "tool_name": tool,
+        "tool_use_id": tool_use_id,
+        "tool_input": tool_input,
+    }
+    if client == "codex":
+        row["turn_id"] = "g-turn"
+        row["permission_mode"] = "default"
+    return row
+
+
+def gen_selector_result(*, packs: list[str], ids: list[str], mode: str = "shadow",
+                        agent: str = "joe-local", sponsor: str = "joe") -> dict:
+    return {
+        "ok": True,
+        "identity": {
+            "organization_tenant_id": "carr-internal", "sponsoring_human_id": sponsor,
+            "agent_principal_id": agent, "runtime_principal": agent,
+            "personal_brain_scope": "joe-personal",
+            "personal_scope_source": "verified_grant_sponsor",
+            "session_capability_profile": "sponsored_agent", "operational_profile": "full",
+            "human_only_authority": False,
+        },
+        "shared_rules": [
+            {"id": short, "statement": f"binding jit rule {short}", "human_quote": "reviewed"}
+            for short in ids
+        ],
+        "personal_rules": [],
+        "rule_delivery": {"mode": mode, "declared_packs": packs, "would_omit": ["deadbeef"],
+                          "packs_not_found": []},
+    }
+
+
+def find_row(*, kind: str, contains: str):
+    for row in TRIGGER_ROWS.values():
+        if row["kind"] == kind and contains in row["pattern"]:
+            return row
+    raise AssertionError(f"no compiled {kind} trigger contains {contains!r}")
+
+
+council_row = find_row(kind="verb", contains="^Agent$")
+gitpush_row = find_row(kind="bash_family", contains="git")
+path_row = find_row(kind="path_pattern", contains="hooks/")
+governance_fallback_row = find_row(kind="content_regex", contains="doctrine")
+
+# Non-match: an ordinary, keyword-free call matches nothing and injects nothing.
+neutral = gen_payload(tool="Read", tool_input={"limit": 5})
+check("matched_triggers is empty for a neutral, keyword-free call",
+      rail.matched_triggers(neutral) == [])
+neutral_runner = Runner()
+check("process() returns None (no injection, no selector call) for a non-match",
+      rail.process(neutral, runner=neutral_runner) is None and neutral_runner.calls == [])
+
+# Verb match injects: the Agent tool exactly matches the council trigger.
+agent_call = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
+check("matched_triggers finds exactly the council verb trigger for an Agent call",
+      [r["trigger_id"] for r in rail.matched_triggers(agent_call)] == [council_row["trigger_id"]])
+agent_runner = Runner(gen_selector_result(packs=council_row["packs"], ids=council_row["rule_ids"]))
+agent_output = rail.process(agent_call, runner=agent_runner)
+agent_row = json.loads(context(agent_output))
+check("verb-match Agent call fires exactly one selector call",
+      len(agent_runner.calls) == 1)
+check("generalized selector call declares the matched trigger's exact packs and rule_ids",
+      agent_runner.calls[0][0][0] == [
+          str(REPO / "run.sh"), "call", "standing-context",
+          json.dumps({"packs": council_row["packs"], "rule_ids": council_row["rule_ids"]},
+                     sort_keys=True, separators=(",", ":"))])
+check("generalized receipt uses the new schema and passes its own validator",
+      agent_row["schema"] == rail.GENERALIZED_RECEIPT_SCHEMA
+      and contract.validate_generalized_receipt(agent_row, repo=REPO))
+check("generalized receipt binds exactly the matched trigger, packs, and rule_ids",
+      agent_row["trigger_ids"] == [council_row["trigger_id"]]
+      and agent_row["packs"] == council_row["packs"]
+      and agent_row["rule_ids"] == council_row["rule_ids"])
+check("over-delivery stays inside the compiler's per-trigger cap",
+      len(agent_row["rule_ids"]) <= MAX_PER_TRIGGER)
+check("original scheduled-automation receipt fields are absent from the generalized shape",
+      "pack" not in agent_row and "triggers_digest" in agent_row)
+
+# path_pattern match: a hooks/ write hits the structural extra trigger.
+write_call = gen_payload(tool="Write", tool_input={"file_path": "hooks/preuse.py",
+                                                   "content": "print(1)\n"})
+check("matched_triggers finds the hooks/ path_pattern trigger for a Write call",
+      [r["trigger_id"] for r in rail.matched_triggers(write_call)] == [path_row["trigger_id"]])
+write_output = rail.process(
+    write_call, runner=Runner(gen_selector_result(packs=path_row["packs"], ids=path_row["rule_ids"])))
+write_row = json.loads(context(write_output))
+check("path_pattern match delivers exactly the structural extra rule",
+      write_row["rule_ids"] == path_row["rule_ids"] and write_row["packs"] == path_row["packs"])
+missing_session = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
+missing_session["session_id"] = ""
+missing_session_runner = Runner()
+check("generalized rail refuses a call with no session_id even though it structurally matches",
+      rail.process(missing_session, runner=missing_session_runner) is None
+      and missing_session_runner.calls == [])
+missing_tool_use = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
+del missing_tool_use["tool_use_id"]
+missing_tool_use_runner = Runner()
+check("generalized rail refuses a call with no tool_use_id even though it structurally matches",
+      rail.process(missing_tool_use, runner=missing_tool_use_runner) is None
+      and missing_tool_use_runner.calls == [])
+non_hooks_write = gen_payload(tool="Write", tool_input={"file_path": "lib/plain.py",
+                                                        "content": "print(1)\n"})
+check("a Write outside hooks/ does not match the path_pattern trigger",
+      path_row["trigger_id"] not in
+      [r["trigger_id"] for r in rail.matched_triggers(non_hooks_write)])
+
+# content_regex fallback match: an ordinary Bash comment naming two governance words.
+gov_call = gen_payload(tool="Bash",
+                      tool_input={"command": "echo checking the retrieval doctrine index"})
+check("matched_triggers finds the governance-rules pack fallback trigger by content",
+      governance_fallback_row["trigger_id"] in
+      [r["trigger_id"] for r in rail.matched_triggers(gov_call)])
+gov_call_upper = gen_payload(tool="Bash",
+                            tool_input={"command": "echo checking the retrieval DOCTRINE Index"})
+check("content_regex matching is case-insensitive",
+      governance_fallback_row["trigger_id"] in
+      [r["trigger_id"] for r in rail.matched_triggers(gov_call_upper)])
+
+# bash_family plus its own pack's content fallback can co-fire on one call —
+# the documented multi-trigger over-delivery shape, still capped per row.
+gitpush_call = gen_payload(tool="Bash", tool_input={"command": "git push origin main"})
+gitpush_matches = rail.matched_triggers(gitpush_call)
+gitpush_ids = {r["trigger_id"] for r in gitpush_matches}
+check("a git push Bash command matches its seeded bash_family trigger",
+      gitpush_row["trigger_id"] in gitpush_ids)
+merged_trigger_ids, merged_packs, merged_rule_ids = contract.merge_trigger_delivery(gitpush_matches)
+check("multi-trigger merge unions packs/rule_ids across every matched row",
+      merged_rule_ids == sorted({rid for r in gitpush_matches for rid in r["rule_ids"]})
+      and merged_packs == sorted({p for r in gitpush_matches for p in r["packs"]}))
+check("this git push command matches more than one trigger row (bash_family plus its "
+      "pack's own content fallback), the multi-match shape this section is testing",
+      len(gitpush_matches) > 1, gitpush_ids)
+non_bash_gitpush = gen_payload(tool="SomeOtherTool", tool_input={"command": "git push origin main"})
+check("bash_family is gated to Bash/functions.exec — the same command on another "
+      "tool name does not fire the bash_family trigger (its pack content fallback still can)",
+      gitpush_row["trigger_id"] not in
+      [r["trigger_id"] for r in rail.matched_triggers(non_bash_gitpush)])
+check("every individual matched row still respects the per-trigger cap",
+      all(len(r["rule_ids"]) <= MAX_PER_TRIGGER for r in gitpush_matches))
+gitpush_output = rail.process(gitpush_call, runner=Runner(
+    gen_selector_result(packs=merged_packs, ids=merged_rule_ids)))
+gitpush_row_receipt = json.loads(context(gitpush_output))
+check("git push call's receipt reflects the full multi-trigger union",
+      gitpush_row_receipt["rule_ids"] == merged_rule_ids
+      and gitpush_row_receipt["trigger_ids"] == merged_trigger_ids)
+
+# Original rail still wins outright on its own exact shape, even though a
+# background Bash git-push command would ALSO structurally match the new
+# bash_family trigger above — mutual exclusion per call, by design.
+background_gitpush = gen_payload(tool="Bash", tool_input={
+    "command": "git push origin main", "run_in_background": True})
+bg_runner = Runner()
+bg_output = rail.process(background_gitpush, runner=bg_runner)
+bg_row = json.loads(context(bg_output))
+check("the original exact background shape still takes the original rail, not the generalized one",
+      bg_row["schema"] == rail.RECEIPT_SCHEMA and bg_row.get("pack") == rail.PACK)
+
+# Selector-failure paths are fixed, redacted, and never block, matching the
+# original rail's own guarantee for its own failures.
+gen_bad_cases = [
+    ("nonzero", Runner(returncode=1, stderr="token=SUPER-SECRET")),
+    ("exception", Runner(error=RuntimeError("postgres://SUPER-SECRET"))),
+    ("wrong mode", Runner(gen_selector_result(
+        packs=council_row["packs"], ids=council_row["rule_ids"], mode="mystery"))),
+    ("extra declared pack", Runner(gen_selector_result(
+        packs=council_row["packs"] + ["engineering-git"], ids=council_row["rule_ids"]))),
+    ("missing rule", Runner(gen_selector_result(
+        packs=council_row["packs"], ids=council_row["rule_ids"][:-1]))),
+    ("mismatched local sponsor", Runner(gen_selector_result(
+        packs=council_row["packs"], ids=council_row["rule_ids"], sponsor="dell"))),
+]
+for label, fake in gen_bad_cases:
+    failed = rail.process(agent_call, runner=fake)
+    rendered = context(failed)
+    check(f"generalized rail: {label} is fixed redacted nonblocking failure",
+          rendered == rail.GENERALIZED_FAILURE_CONTEXT
+          and "SUPER-SECRET" not in json.dumps(failed)
+          and "decision" not in failed and "updatedInput" not in failed, failed)
+
+# Tampering with a generalized receipt's content fails validate_generalized_receipt.
+tamper_cases = [
+    ("wrong trigger_ids", {"trigger_ids": ["0" * 12]}),
+    ("wrong packs", {"packs": ["some-other-pack"]}),
+    ("extra rule id", {"rule_ids": agent_row["rule_ids"] + ["deadbeef"]}),
+    ("unsorted rule_ids (same set, different order)",
+     {"rule_ids": list(reversed(agent_row["rule_ids"]))}
+     if len(agent_row["rule_ids"]) > 1 else {"rule_ids": agent_row["rule_ids"]}),
+    ("duplicated rule_ids", {"rule_ids": agent_row["rule_ids"] + agent_row["rule_ids"][:1]}),
+]
+for label, patch in tamper_cases:
+    forged = copy.deepcopy(agent_row)
+    forged.update(patch)
+    forged["receipt_id"] = contract.receipt_id(forged)
+    check(f"generalized receipt tamper ({label}) fails validate_generalized_receipt",
+          not contract.validate_generalized_receipt(forged, repo=REPO))
+
+# A consistent-but-unsorted reordering (rule_ids AND rules moved together, same
+# set, same content) isolates the sortedness invariant from the cross-check
+# against the compiled table above, which a same-set reorder would not catch.
+if len(agent_row["rule_ids"]) > 1:
+    reordered = copy.deepcopy(agent_row)
+    reordered["rule_ids"] = list(reversed(agent_row["rule_ids"]))
+    reordered["rules"] = list(reversed(agent_row["rules"]))
+    reordered["receipt_id"] = contract.receipt_id(reordered)
+    check("a same-set, consistently-reordered (unsorted) rule_ids/rules pair still fails "
+          "validate_generalized_receipt on the sortedness invariant alone",
+          not contract.validate_generalized_receipt(reordered, repo=REPO))
 
 if FAILURES:
     print("rule-pack-preuse-reselection-selftest: FAIL")

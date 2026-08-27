@@ -26,6 +26,131 @@ SANCTIONED_LOCAL_SPONSORS = {
     "dell-local": "dell",
 }
 
+# WR-000019 slice S9 — the generalized, multi-shape sibling of the schema
+# above. The scheduled-automation rail above stays byte-for-byte as it was:
+# one pack, one call shape, proven in production. This second schema is for
+# EVERY OTHER call shape the compiled trigger table
+# (ops/config/rule-jit-triggers.v1.json) recognizes — an MCP verb, a Bash
+# command family, a file-path write, or the general content fallback — where
+# more than one trigger can match a single call and more than one pack can be
+# implicated at once, so the receipt carries LISTS rather than the single
+# `pack` string the original schema fixes.
+GENERALIZED_RECEIPT_SCHEMA = "rule-jit-trigger-delivery/v1"
+GENERALIZED_RECEIPT_KEYS = frozenset({
+    "schema", "receipt_id", "client", "session_id", "turn_id", "tool_use_id",
+    "tool_name", "tool_input_sha256", "trigger_ids", "packs", "triggers_digest",
+    "map_digest", "source_digest", "identity", "rule_ids", "rules", "rule_delivery",
+})
+TRIGGER_TABLE_RELATIVE = "ops/config/rule-jit-triggers.v1.json"
+TRIGGER_KINDS = frozenset({"verb", "bash_family", "path_pattern", "content_regex"})
+
+
+def load_trigger_table(repo: Path) -> list[dict]:
+    """The compiled trigger table, never hand-derived a second way here.
+
+    Raises on anything structurally wrong rather than silently degrading —
+    the caller (the hook's generalized rail) treats any exception as a
+    redacted, nonblocking failure the same way the scheduled rail already
+    does for a selector failure.
+    """
+    path = repo / TRIGGER_TABLE_RELATIVE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema") != "rule-jit-triggers/v1":
+        raise ValueError("trigger table has the wrong schema")
+    rows = data.get("triggers")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("trigger table has no triggers")
+    for row in rows:
+        if (not isinstance(row, dict)
+                or row.get("kind") not in TRIGGER_KINDS
+                or not isinstance(row.get("pattern"), str) or not row["pattern"]
+                or not isinstance(row.get("rule_ids"), list) or not row["rule_ids"]
+                or not isinstance(row.get("trigger_id"), str) or not row["trigger_id"]
+                or not isinstance(row.get("packs"), list)):
+            raise ValueError("trigger table row is malformed")
+    return rows
+
+
+def merge_trigger_delivery(rows: list[dict]) -> tuple[list[str], list[str], list[str]]:
+    """(trigger_ids, packs, rule_ids) — the union across every matched row.
+
+    Over-delivery is the stated bias when more than one trigger matches a
+    single call: nothing here re-applies the per-trigger cap, because the cap
+    already lives in the compiler (rule 015183f5's own home: lean per
+    trigger, not lean in aggregate across a rare multi-match).
+    """
+    trigger_ids = sorted({row["trigger_id"] for row in rows})
+    packs = sorted({p for row in rows for p in row["packs"]})
+    rule_ids = sorted({rid for row in rows for rid in row["rule_ids"]})
+    return trigger_ids, packs, rule_ids
+
+
+def validate_generalized_receipt(row: object, *, repo: Path) -> bool:
+    """The multi-shape sibling of validate_receipt, for GENERALIZED_RECEIPT_SCHEMA."""
+    if not isinstance(row, dict) or set(row) != GENERALIZED_RECEIPT_KEYS:
+        return False
+    if row.get("schema") != GENERALIZED_RECEIPT_SCHEMA:
+        return False
+    if row.get("client") not in {"claude", "codex"}:
+        return False
+    if not all(_nonempty(row.get(key)) for key in (
+            "receipt_id", "session_id", "tool_use_id", "tool_name",
+            "tool_input_sha256", "triggers_digest", "map_digest", "source_digest")):
+        return False
+    turn_id = row.get("turn_id")
+    if row["client"] == "codex":
+        if not _nonempty(turn_id):
+            return False
+    elif turn_id is not None:
+        return False
+    identity = row.get("identity")
+    if (not isinstance(identity, dict) or set(identity) != IDENTITY_KEYS
+            or not valid_local_identity(identity)):
+        return False
+    trigger_ids = row.get("trigger_ids")
+    packs = row.get("packs")
+    rule_ids = row.get("rule_ids")
+    if (not isinstance(trigger_ids, list) or not trigger_ids
+            or trigger_ids != sorted(set(trigger_ids))
+            or not isinstance(packs, list) or packs != sorted(set(packs))
+            or not isinstance(rule_ids, list) or not rule_ids
+            or rule_ids != sorted(set(rule_ids))):
+        return False
+    try:
+        table = load_trigger_table(repo)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    by_id = {r["trigger_id"]: r for r in table}
+    if any(tid not in by_id for tid in trigger_ids):
+        return False
+    expected_trigger_ids, expected_packs, expected_rule_ids = merge_trigger_delivery(
+        [by_id[tid] for tid in trigger_ids])
+    if (trigger_ids != expected_trigger_ids or packs != expected_packs
+            or rule_ids != expected_rule_ids):
+        return False
+    rules = row.get("rules")
+    if (not isinstance(rules, list) or len(rules) != len(rule_ids)
+            or any(not isinstance(item, dict) or set(item) != RULE_KEYS
+                   or not _nonempty(item.get("id"))
+                   or not _nonempty(item.get("statement")) for item in rules)
+            or [item["id"] for item in rules] != rule_ids):
+        return False
+    delivery = row.get("rule_delivery")
+    if (not isinstance(delivery, dict) or set(delivery) != DELIVERY_KEYS
+            or delivery.get("mode") not in {"shadow", "enforced"}
+            or sorted(delivery.get("declared_packs") or []) != packs
+            or delivery.get("packs_not_found") != []):
+        return False
+    triggers_path = repo / TRIGGER_TABLE_RELATIVE
+    if row["triggers_digest"] != file_sha256(triggers_path):
+        return False
+    map_path = repo / "ops/config/rule-enforcement-map.json"
+    if row["map_digest"] != file_sha256(map_path):
+        return False
+    if row["source_digest"] != source_sha256(repo):
+        return False
+    return row["receipt_id"] == receipt_id(row)
+
 
 def canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),

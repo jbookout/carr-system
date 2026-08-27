@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^(Bash|functions\\.exec)$",
+        "matcher": "^(Bash|functions\\.exec|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*)$",
         "hooks": [
           {
             "type": "command",
