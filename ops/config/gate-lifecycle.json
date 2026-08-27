@@ -2,7 +2,9 @@
   "_doc": [
     "Gate lifecycle metadata -- WR-000019 slice S5.",
     "",
-    "One entry per gate script actually wired in ops/config/hooks.json (35 gates as of 2026-08-27, down from 38 -- WR-000019 slice S3 retired canonical-edit-gate.py, git-writer-gate.py and staging-attribution-gate.py the same day; the count is re-derivable any time by walking that file the same way ops/hook-telemetry-rollup.py's wiring() does). A gate wired ONLY through .claude/settings.json (delegation-gate.py, worktree-self-plumb.py, machine-converge.py) is a different wiring surface and out of this slice's DoD wording -- it is not listed here.",
+    "One entry per gate script actually wired in ops/config/hooks.json (35 gates as of 2026-08-27, down from 38 -- WR-000019 slice S3 retired canonical-edit-gate.py, git-writer-gate.py and staging-attribution-gate.py the same day; the count is re-derivable any time by walking that file the same way ops/hook-telemetry-rollup.py's wiring() does). A gate wired ONLY through .claude/settings.json (worktree-self-plumb.py, machine-converge.py) is a different wiring surface and out of this slice's DoD wording -- it is not listed here.",
+    "",
+    "delegation-gate.py IS listed, as of WR-000019 slice S4 (2026-08-27), despite being wired only through .claude/settings.json (PreToolUse and, as of this slice, Stop) rather than ops/config/hooks.json -- an intentional, named exception to the line above. This slice's own DoD asked for the gate's mode recorded here, and ops/gate-lifecycle-report.py's coverage check treats a metadata entry for a gate absent from ops/config/hooks.json's wired set as a non-fatal 'stale_metadata' WARNING rather than a failure (see that script's own docstring), so recording it costs nothing. Its catch_metric points at its own dedicated out/delegation-gate-ledger.jsonl rather than the shared out/hook-telemetry.jsonl register convention every ops/config/hooks.json-wired gate uses, for the same reason completion-evidence-gate.py and map-architecture-gate.py keep dedicated logs: it was never part of that shared wiring surface to begin with.",
     "",
     "FIELDS.",
     "  failure_class   one line, what this gate exists to catch. Reused verbatim from ops/config/hook-catch-classes.json's catch_class where an entry already existed there (36 of 38); the two gaps (rule-pack-preuse-reselection.py, rule-pack-drift-gate.py) are new one-liners drawn from the gate's own docstring.",
@@ -213,6 +215,23 @@
       },
       "review_date": "2026-11-24",
       "mode": "enforcing"
+    },
+    "delegation-gate.py": {
+      "failure_class": "a session materially under-delegated mechanical sweep work (recorded, no longer denied -- WR-000019 slice S4, 2026-08-27)",
+      "catch_metric": {
+        "log_path": "out/delegation-gate-ledger.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": null,
+        "true_positive": {
+          "kind": "field_truthy",
+          "field": "materially_under_delegated"
+        },
+        "rule_description": "a row in out/delegation-gate-ledger.jsonl (one row per SESSION, written at Stop -- never one per call) whose materially_under_delegated is true, i.e. would_have_flagged reached DELEGATION_GATE_MATERIAL_THRESHOLD (default 3) in that session. This is this gate's OWN dedicated ledger, not out/hook-telemetry.jsonl's shared register convention, because this gate is wired ONLY through .claude/settings.json (PreToolUse AND, as of this slice, Stop) rather than through ops/config/hooks.json's 35-gate wiring set that feeds the shared telemetry stream -- see this file's _doc note. ops/delegation-telemetry-report.py is the queryable per-session view over the same ledger.",
+        "note": "before this slice, the gate's own out/delegation-gate.jsonl logged one row per DENIED call (35,322 in 18 days: 19,796 sticky_latch, 14,137 second_mechanical_call, 1,389 executor_allowed_after_retry) and is retired in favour of this per-session ledger; that old file stops growing rather than being deleted."
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
     },
     "draft-export-gate.py": {
       "failure_class": "draft exported outside the sanctioned path",

@@ -394,8 +394,17 @@ def main():
     # prohibits a nameless handoff — a constraint by construction, like
     # 937252fb before it, so no manifest row, only this total following the
     # store.
+    # constraint 76 -> 75, procedure 78 -> 79 on 2026-08-27 (WR-000019 slice
+    # S4), when rule fb110a39 was reassigned from deny_gate to surfacing:
+    # hooks/delegation-gate.py stopped denying anything (see
+    # ops/config/rule-enforcement-map.json's note on this rule), so it no
+    # longer binds as a governed refusal the compiler must type "constraint"
+    # (enforcement_class in {deny_gate, schema, stop_gate}) — it is a session
+    # rail that surfaces a reminder, exactly the shape the compiler types
+    # "procedure" for any enforcement_class == "surfacing" rule, the same
+    # transition 3fa422b7 made on 2026-08-23.
     reviewed_counts = {
-        "constraint": 76, "procedure": 78, "doctrine": 13, "rubric": 37,
+        "constraint": 75, "procedure": 79, "doctrine": 13, "rubric": 37,
         "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (

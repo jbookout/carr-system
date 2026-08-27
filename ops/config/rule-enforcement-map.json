@@ -95,7 +95,7 @@
       "test": [
         "ops/delegation-gate-selftest.py"
       ],
-      "failure_mode": "PreToolUse block"
+      "failure_mode": "PreToolUse block (WR-000019 S4, 2026-08-27: no longer a deny — the gate never returns exit 2 or {\"decision\": \"block\"} from anywhere now. It records a per-session ledger row at Stop (out/delegation-gate-ledger.jsonl, queryable via ops/delegation-telemetry-report.py) and speaks a non-reopening Stop ANNOUNCE only when a session materially under-delegated. hooks/executor-tier-gate.py (control executor_tier) is a different rule's control and still denies a subagent spawn naming no model or reasoning effort.)"
     },
     "delegation_names_model_and_effort": {
       "implementation": [
@@ -673,11 +673,12 @@
       "exceptions": "internal record work remains profile-scoped"
     },
     "fb110a39": {
-      "category": "hard_pre_action",
-      "enforcement_class": "deny_gate",
-      "binding_moment": "before delegated sweep reclaim",
+      "category": "session_task_rail",
+      "enforcement_class": "surfacing",
+      "binding_moment": "fan-out brief",
       "control": "delegation_tripwire",
-      "exceptions": "one initial lookup; qualified peer allowed"
+      "exceptions": "one initial lookup; qualified peer allowed",
+      "note": "Reassigned 2026-08-27 (WR-000019 slice S4): hooks/delegation-gate.py stopped denying anything -- it now only records a per-session ledger and speaks an ANNOUNCE at Stop when a session materially under-delegated, never a block. Unlike slice S3's reassignment (which moved two rules to a DIFFERENT installed deny_gate control that already carried the same property server-side), no replacement deny mechanism exists here for THIS rule's property (reclaiming a delegated sweep is no longer refused by anything); the honest move is the same one the map's other six delegation_tripwire rules (2b66211d, c6f69dee, 75c2e4c9, 2dbb0ad8, 185013c6, df55c398) already made before this slice -- category session_task_rail, enforcement_class surfacing, matching BUILT_CLASS_BY_CATEGORY's own mapping. hooks/executor-tier-gate.py (control executor_tier, unchanged by this slice) still denies a subagent spawn naming no model or reasoning effort, but that is a different rule's property, not this one's."
     },
     "14181e60": {
       "category": "hard_pre_action",
@@ -2105,7 +2106,6 @@
       "236ca227",
       "e313a3ca",
       "1e62c007",
-      "fb110a39",
       "57d83b75",
       "ca841807",
       "4c21d86b",
@@ -2217,7 +2217,8 @@
       "c66dc739",
       "0156e9fa",
       "49533583",
-      "557838a5", "3fa422b7"
+      "557838a5", "3fa422b7",
+      "fb110a39"
     ]
   },
     "load_layer_note": "THE DELIVERY HALF of the enforcement recategorization (2026-08-23 rules council, both chairs unanimous). `rule_controls` above says HOW a rule is enforced; this says WHEN its text is delivered to a session. layer0 = recited at every boot, and nothing task-specific belongs here (rule 1fddcffb). control = an installed deny/stop/schema control prints the rule at the moment it binds, so boot recitation is belt-and-suspenders; ops/rule-load-layer-check.py REFUSES this value for any rule whose enforcement_class is not built, which is what stops 'scoped' from meaning 'silently dropped'. pack = delivered when the observed work matches a pack's triggers. A wildcard pack is refused by the same check: grok's warning was that shipping wildcard tags and calling it scoping is how rules go silent on an undeclared session.",
@@ -3741,11 +3742,10 @@
         ]
       },
       "fb110a39": {
-        "load_layer": "control",
+        "load_layer": "pack",
         "packs": [
           "delegation-council"
-        ],
-        "why": "An installed deny gate delivers this at its binding moment."
+        ]
       },
       "fb2b263d": {
         "load_layer": "pack",

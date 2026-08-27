@@ -4,9 +4,9 @@
  "slice": "s7",
  "generated_note": "Triage of the 219 active rules into gate/jit/core/gone homes. Classification and tooling only per S7 scope boundary; no rule was retired, amended, or taught by producing this file. Source data: standing-context (205 rules, full text) + ops/config/rule-enforcement-map.json rule_controls (all 219, including the 14 vendor-intros-pack rules that standing-context does not surface to this session -- see defect ad4e25bd-3c98-4334-a7d3-f53c8158711f).",
  "counts": {
-  "gate": 63,
+  "gate": 62,
   "core": 20,
-  "jit": 125,
+  "jit": 126,
   "gone": 11
  },
  "rules": [
@@ -1498,9 +1498,9 @@
   {
    "id": "fb110a39",
    "title_gist": "FABLE IS RESERVED FOR ITS BEST USE CASES",
-   "home": "gate",
-   "reason": "Already machine-enforced via control 'delegation_tripwire' (hooks/delegation-gate.py); binds before delegated sweep reclaim. Failure mode on violation: PreToolUse block",
-   "carrying_control": "delegation_tripwire"
+   "home": "jit",
+   "reason": "Reclassified 2026-08-27 (WR-000019 slice S4): hooks/delegation-gate.py stopped denying anything and now only records a per-session ledger, with a Stop ANNOUNCE for a materially under-delegated session — never a hard deny. Currently only SURFACED (a reminder via 'delegation_tripwire' at fan-out brief, not a hard deny) — situational content, belongs delivered by pack/moment rather than the always-loaded core, matching this map's other delegation_tripwire rules (2b66211d, df55c398).",
+   "jit_trigger_hint": "Delivered by pack(s) delegation-council — fires on: FABLE IS RESERVED FOR ITS BEST USE CASES"
   },
   {
    "id": "fb2b263d",
