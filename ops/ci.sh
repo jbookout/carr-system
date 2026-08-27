@@ -486,7 +486,21 @@ if portable:
 PYEOF
   }
 
-  for t in ops/*-selftest.py tools/test-*.py; do
+  # BOTH NAMING STYLES ARE COLLECTED, deliberately. This globbed only
+  # tools/test-*.py, so three underscore-named tests — test_displacement_turn_-
+  # filter.py, test_staging_recovery_rehearsal.py and
+  # test_validate_exact_recovery_source.py — sat in the tree from their commits
+  # until 2026-08-27 and executed exactly zero times. Same failure shape as the
+  # uncollected shell tests below: something that looks like coverage and is not.
+  # The repo's script convention is the hyphen, but test_foo.py is what pytest's
+  # own default discovery convention produces, so the underscore arrives by
+  # habit and will keep arriving; matching both is cheaper than renaming files
+  # forever and leaves no pointer to a moved path dangling. What actually keeps
+  # this honest is not the pattern but the invariant behind it:
+  # ops/ci-selftest.py's test_every_test_file_in_the_tree_is_collected reads
+  # these globs back out of this file and fails if ANY test-shaped file in the
+  # tree is matched by none of them.
+  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
     local why; why="$(excluded_reason "$base")"
@@ -533,7 +547,7 @@ PYEOF
   # Python wrapper around them would only shell out to the same script.
   # Everything else is identical to the loop above: same exclusion scope, same
   # counting, same captured log and same 12-line tail on failure.
-  if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh; do
+  if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh tools/test_*.sh; do
     [ -f "$t" ] || continue
     local sbase; sbase="$(basename "$t")"
     local swhy; swhy="$(excluded_reason "$sbase")"
