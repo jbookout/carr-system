@@ -94,6 +94,33 @@ create trigger engineering_work_request_currentness_guard_before_update
   before update on ops.work_request for each row
   execute function ops.engineering_work_request_currentness_guard();
 
+-- A live Engineering lease reserves the exact definition through adapter
+-- launch. Direct definition writes remain possible only after scoped
+-- finalization, failure, or lease expiry.
+create or replace function ops.guard_engineering_job_definition_currentness_update()
+returns trigger language plpgsql security definer
+set search_path=pg_catalog,ops,public
+as $$
+begin
+  if (to_jsonb(new)-'updated_at') is distinct from (to_jsonb(old)-'updated_at')
+     and old.key='engineering-slice' and old.version=1
+     and exists (
+       select 1 from ops.job j
+        where j.definition_key=old.key and j.definition_version=old.version
+          and j.state='running' and j.lease_token is not null
+          and j.leased_until>clock_timestamp()
+     ) then
+    raise exception 'Engineering job definition currentness is reserved by a live scoped lease';
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists engineering_job_definition_currentness_guard_before_update
+  on ops.job_definition;
+create trigger engineering_job_definition_currentness_guard_before_update
+  before update on ops.job_definition for each row
+  execute function ops.guard_engineering_job_definition_currentness_update();
+
 -- This is a read-only, server-derived explanation surface.  It deliberately
 -- does not alter a queued job merely because a replacement can still arrive.
 create or replace function ops.engineering_envelope_currentness(
@@ -349,6 +376,9 @@ begin
   if not found then return null; end if;
   perform 1 from ops.work_request where id=lineage_work_request for share;
   if not found then return null; end if;
+  perform 1 from ops.job_definition d
+   where d.key='engineering-slice' and d.version=1 and d.enabled for share;
+  if not found then return null; end if;
   perform 1 from ops.job where id=p_job_id for share;
   if not found then return null; end if;
   v_binding_at:=clock_timestamp();
@@ -363,11 +393,13 @@ begin
   ) into binding
     from ops.engineering_execution_envelope e
     join ops.job j on j.id=e.job_id
+    join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
     join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
     join ops.capability_agent_session s on s.id=e.agent_session_id
     join public.actor a on a.id=s.executor_actor_id
    where e.id=p_envelope_id and e.job_id=p_job_id
      and a.active and a.kind='automation' and a.slug='codex'
+     and d.enabled and d.key='engineering-slice' and d.version=1
      and j.state='running' and j.lease_token=p_lease_token
      and j.leased_until>=v_binding_at+interval '930 seconds';
   return binding;
@@ -1325,6 +1357,20 @@ begin
         and review.contract_version='engineering-review.v1'
         and review.reviewer_actor_id<>receipt.executor_actor_id
         and exists (select 1 from ops.job_receipt jr where jr.job_id=j.id and jr.attempt=j.attempt and jr.kind='completion')
+        and e.id=v_envelope_id
+        and not exists (
+          select 1 from ops.engineering_execution_envelope successor
+           where successor.supersedes_envelope_id=e.id
+        )
+        and 1=(
+          select count(*) from ops.engineering_execution_envelope leaf
+           where leaf.slice_plan_id=e.slice_plan_id
+             and leaf.slice_ref=e.slice_ref
+             and not exists (
+               select 1 from ops.engineering_execution_envelope successor
+                where successor.supersedes_envelope_id=leaf.id
+             )
+        )
      ) then
     raise exception 'SIEP evidence binding requires a 0335-verified Engineering receipt and review';
   end if;
@@ -1348,9 +1394,25 @@ as $$
 declare result jsonb; contract_version text;
 begin
   result:=ops.siep_bind_evidence_job_unchecked_0324(p_component,p_base_version,p_evidence_kind,p_job_id,p_idempotency_key);
-  select b.engineering_contract_version into contract_version from ops.siep_job_evidence_binding b where b.job_id=p_job_id;
+  select b.engineering_contract_version into contract_version
+    from ops.siep_job_evidence_binding b
+    join ops.engineering_execution_envelope envelope on envelope.job_id=b.job_id
+   where b.job_id=p_job_id
+     and not exists (
+       select 1 from ops.engineering_execution_envelope successor
+        where successor.supersedes_envelope_id=envelope.id
+     )
+     and 1=(
+       select count(*) from ops.engineering_execution_envelope leaf
+        where leaf.slice_plan_id=envelope.slice_plan_id
+          and leaf.slice_ref=envelope.slice_ref
+          and not exists (
+            select 1 from ops.engineering_execution_envelope successor
+             where successor.supersedes_envelope_id=leaf.id
+          )
+     );
   if contract_version is distinct from 'engineering-review.v1' then
-    raise exception 'historical SIEP Engineering evidence binding is not 0335 verified';
+    raise exception 'historical or superseded SIEP Engineering evidence binding is not 0335 verified';
   end if;
   return result;
 end $$;
@@ -1370,8 +1432,22 @@ as $$
         from ops.job_receipt r join ops.job j on j.id=r.job_id
         join ops.job_attempt a on a.job_id=j.id and a.attempt=r.attempt
         join ops.siep_job_evidence_binding b on b.job_id=j.id
+        join ops.engineering_execution_envelope envelope on envelope.job_id=j.id
        where p_ledger_kind='job_receipt' and r.id=p_ledger_id
          and b.engineering_contract_version='engineering-review.v1'
+         and not exists (
+           select 1 from ops.engineering_execution_envelope successor
+            where successor.supersedes_envelope_id=envelope.id
+         )
+         and 1=(
+           select count(*) from ops.engineering_execution_envelope leaf
+            where leaf.slice_plan_id=envelope.slice_plan_id
+              and leaf.slice_ref=envelope.slice_ref
+              and not exists (
+                select 1 from ops.engineering_execution_envelope successor
+                 where successor.supersedes_envelope_id=leaf.id
+              )
+         )
       union all select to_jsonb(e) from public.event e
        where p_ledger_kind='decision_event' and e.id=p_ledger_id
     ) canonical
@@ -1394,6 +1470,7 @@ declare row ops.job%rowtype;
         slice_plan ops.engineering_slice_plan%rowtype;
         dependency_ref text;
         job_key text;
+        current_source jsonb;
 begin
   if btrim(coalesce(p_work_request,''))='' or btrim(coalesce(p_slice_ref,''))=''
      or p_plan_digest is null or p_plan_digest !~ '^sha256:[0-9a-f]{64}$'
@@ -1402,18 +1479,37 @@ begin
   end if;
   perform pg_advisory_xact_lock(hashtextextended(
     'engineering-slice:'||p_plan_digest||':'||p_slice_ref,0));
+  current_source:=ops.engineering_admission_source(p_work_request);
+  if current_source is null then
+    raise exception 'engineering job admission source is not current';
+  end if;
   select sp.* into slice_plan
     from ops.engineering_slice_plan sp
-    join ops.work_request w on w.id=sp.work_request_id
-   where w.ref=p_work_request and sp.plan_digest=p_plan_digest
+   where sp.plan_digest=p_plan_digest
+     and sp.work_request_id=regexp_replace(current_source->'work_request'->>'id','^wr:','')::uuid
+     and sp.accepted_plan_id=(current_source->'accepted_plan'->>'record_id')::uuid
+     and sp.accepted_plan_hash=current_source->'accepted_plan'->>'digest'
+     and sp.work_request_version=(current_source->'work_request'->>'version')::integer
+     and sp.plan->'work_request'->>'canonical_record_digest'=
+         current_source->'work_request'->>'canonical_record_digest'
+     and sp.plan->'accepted_plan_revision'->>'id'=
+         current_source->'accepted_plan'->>'plan_ref'
+     and sp.plan->'accepted_plan_revision'->>'digest'=
+         current_source->'accepted_plan'->>'digest'
      and exists (
        select 1
          from jsonb_array_elements(case when jsonb_typeof(sp.plan->'slices')='array'
                                         then sp.plan->'slices' else '[]'::jsonb end) slice_item
         where slice_item->>'slice_ref'=p_slice_ref
-     );
+     )
+   for key share;
   if not found then
-    raise exception 'engineering slice is not registered for the exact plan';
+    raise exception 'engineering slice is not registered for the exact current plan';
+  end if;
+  perform 1 from ops.work_request w
+   where w.id=slice_plan.work_request_id and w.ref=p_work_request for share;
+  if not found or ops.engineering_admission_source(p_work_request) is distinct from current_source then
+    raise exception 'engineering job admission source changed during serialization';
   end if;
 
   for dependency_ref in
@@ -1746,7 +1842,9 @@ create or replace function ops.guard_engineering_envelope_supersession()
 returns trigger language plpgsql security definer set search_path=pg_catalog,ops,public
 as $$
 declare prior ops.engineering_execution_envelope%rowtype;
+        current_plan ops.engineering_slice_plan%rowtype;
         prior_count integer; v_executor_actor_id uuid;
+        current_source jsonb; current_work_ref text;
 begin
   select s.executor_actor_id into v_executor_actor_id
     from ops.capability_agent_session s where s.id=new.agent_session_id for share;
@@ -1757,10 +1855,33 @@ begin
   if not found then raise exception 'engineering envelope executor actor is not current'; end if;
   perform pg_advisory_xact_lock(hashtextextended(
     'engineering-envelope:' || new.slice_plan_id::text || ':' || new.slice_ref,0));
-  perform 1 from ops.engineering_slice_plan where id=new.slice_plan_id for key share;
+  select * into current_plan from ops.engineering_slice_plan
+   where id=new.slice_plan_id for key share;
   if not found then raise exception 'engineering envelope slice plan is not current'; end if;
-  perform 1 from ops.work_request where id=new.work_request_id for share;
+  select ref into current_work_ref from ops.work_request
+   where id=new.work_request_id for share;
   if not found then raise exception 'engineering envelope Work Request is not current'; end if;
+  current_source:=ops.engineering_admission_source(current_work_ref);
+  if current_source is null
+     or new.work_request_id is distinct from
+        regexp_replace(current_source->'work_request'->>'id','^wr:','')::uuid
+     or new.accepted_plan_id is distinct from
+        (current_source->'accepted_plan'->>'record_id')::uuid
+     or new.state_version is distinct from
+        (current_source->'work_request'->>'version')::integer
+     or new.canonical_record_digest is distinct from
+        current_source->'work_request'->>'canonical_record_digest'
+     or current_plan.work_request_id is distinct from new.work_request_id
+     or current_plan.accepted_plan_id is distinct from new.accepted_plan_id
+     or current_plan.accepted_plan_hash is distinct from
+        current_source->'accepted_plan'->>'digest'
+     or current_plan.work_request_version is distinct from new.state_version
+     or current_plan.plan->'accepted_plan_revision'->>'id' is distinct from
+        current_source->'accepted_plan'->>'plan_ref'
+     or current_plan.plan->'accepted_plan_revision'->>'digest' is distinct from
+        current_source->'accepted_plan'->>'digest' then
+    raise exception 'engineering envelope source or accepted plan is not current';
+  end if;
   select count(*) into prior_count from ops.engineering_execution_envelope
    where slice_plan_id=new.slice_plan_id and slice_ref=new.slice_ref;
   if prior_count=0 then
@@ -1987,6 +2108,7 @@ revoke all on function ops.engineering_envelope_currentness(uuid,uuid),
 revoke all on function ops.engineering_safe_timestamptz(text),
   ops.capability_agent_session_lease_immutable(),
   ops.engineering_work_request_currentness_guard(),
+  ops.guard_engineering_job_definition_currentness_update(),
   ops.guard_engineering_actor_authority_update()
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.engineering_receipt_exact_object(jsonb,text[]),
@@ -2044,6 +2166,7 @@ begin
     'ops.engineering_receipt_exact_object(jsonb,text[])',
     'ops.engineering_receipt_identifier_array(jsonb)',
     'ops.engineering_work_request_currentness_guard()',
+    'ops.guard_engineering_job_definition_currentness_update()',
     'ops.engineering_receipt_identifier_sets_equal(jsonb,jsonb)',
     'ops.engineering_receipt_evidence_array(jsonb)',
     'ops.guard_engineering_reviewer_fact_insert()',

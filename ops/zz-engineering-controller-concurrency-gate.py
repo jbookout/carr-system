@@ -520,6 +520,22 @@ def assert_static_contract():
         raise RuntimeError("runtime reviewer admission does not pin the exact receipt identifier")
 
 
+    admission = runtime[
+        runtime.index("export async function admitEngineeringSlice"):
+        runtime.index("export async function claimEngineeringSlice")
+    ]
+    admission_positions = [
+        admission.index("where id=$1::uuid for update"),
+        admission.index("where id=$1::uuid and slug='codex' and active and kind='automation' for share"),
+        admission.index("engineering-slice:"),
+        admission.index("engineering-envelope:"),
+    ]
+    if admission_positions != sorted(admission_positions):
+        raise RuntimeError("runtime admission lost session -> exact actor -> slice -> lineage ordering")
+    if admission.count("engineering_passport_facts") < 3 or "engineering_admission_serialization_restart" not in admission:
+        raise RuntimeError("runtime admission no longer revalidates source after serialization")
+
+
 def expect_lock_timeout(conn, query, params, label):
     with conn.cursor() as cur:
         cur.execute("set local lock_timeout='300ms'")
@@ -557,10 +573,12 @@ def insert_successor(cur, prior_fixture, *, support_fixture=None, cancel_prior=F
     payload["generation"] = int(payload.get("generation", 1)) + 1
     successor_job = one(cur, "insert into ops.job(definition_key,definition_version,idempotency_key,scheduled_for,max_attempts,timeout_seconds,mode,payload) values('engineering-slice',1,%s,now()-interval '1 second',2,300,'shadow',%s) returning id", (f"engineering-controller-successor:{token}", Jsonb(payload)))[0]
     if cancel_prior:
-        # Reverse ordering mirrors admission: acquire lineage first, then
-        # cancel the predecessor session, then create a legal claimed session.
+        # Admission and the successor trigger share the global
+        # session -> exact actor -> lineage order.
+        prior_session = one(cur, "select s.id from ops.capability_agent_session s join ops.engineering_execution_envelope e on e.agent_session_id=s.id where e.id=%s for update of s", (prior_id,))[0]
+        one(cur, "select id from public.actor where id=%s and active and kind='automation' and slug='codex' for share", (row[8],))
         cur.execute(admission_lock_sql(), (lock_key(row[2], row[3]),))
-        cur.execute("update ops.capability_agent_session set state='cancelled',cancelled_at=now(),version=version+1 where id=(select agent_session_id from ops.engineering_execution_envelope where id=%s) and work_request_id=%s and state not in ('completed','cancelled')", (prior_id, row[0]))
+        cur.execute("update ops.capability_agent_session set state='cancelled',cancelled_at=now(),version=version+1 where id=%s and work_request_id=%s and state not in ('completed','cancelled')", (prior_session, row[0]))
         successor_session = one(cur, "insert into ops.capability_agent_session(work_request_id,executor_actor_id,created_by_actor_id,source_commit_sha,worktree_ref,scope_ref,lease_expires_at) values(%s,%s,%s,%s,'engineering:server-admission','slice:'||%s,date_trunc('second',now())+interval '29 minutes') returning id", (row[0], row[8], row[9], "0" * 40, row[3]))[0]
     else:
         if support_fixture is None:
@@ -1398,8 +1416,8 @@ def main():
         conn.commit()
         post_wait_expiry_case(conn, dsn, near_wait, near_wait_claim)
 
-        # Actual receipt held, then the production admission ordering attempts
-        # lineage lock followed by exact session cancellation.
+        # A real receipt holds session, actor, and lineage; the matching
+        # admission order must block on the exact session before lineage.
         plan_id, slice_ref, session_id, work_request_id = lineage(conn, hold_admission[1])
         key = lock_key(plan_id, slice_ref)
         with psycopg.connect(dsn) as held, psycopg.connect(dsn) as peer:
@@ -1410,6 +1428,8 @@ def main():
             with peer.cursor() as cur:
                 cur.execute("set local lock_timeout='300ms'")
                 try:
+                    cur.execute("select id from ops.capability_agent_session where id=%s and work_request_id=%s for update", (session_id, work_request_id))
+                    cur.execute("select a.id from public.actor a join ops.capability_agent_session s on s.executor_actor_id=a.id where s.id=%s and a.active and a.kind='automation' and a.slug='codex' for share of a", (session_id,))
                     cur.execute(admission_lock_sql(), (key,))
                 except psycopg.errors.LockNotAvailable:
                     peer.rollback()
@@ -1419,17 +1439,17 @@ def main():
                     raise RuntimeError("admission ordering did not wait behind receipt")
             held.rollback()
 
-        # Reverse ordering: admission owns lineage and the exact session row
-        # first; receipt must wait at the same advisory lock and never deadlock.
-        # 0325 correctly forbids terminalizing a session while its dispatch
-        # lease is live, so this contention proof takes the production row lock
-        # without attempting the terminal state transition itself.
+        # Matching order: admission owns the exact session and actor before
+        # lineage; receipt waits on the session row and cannot form a cycle.
+        # The production transition itself is not attempted because 0325
+        # correctly rejects terminalization while the dispatch lease is live.
         plan_id, slice_ref, session_id, work_request_id = lineage(conn, hold_reverse[1])
         key = lock_key(plan_id, slice_ref)
         with psycopg.connect(dsn) as admission, psycopg.connect(dsn) as receipt_peer:
             with admission.cursor() as cur:
-                cur.execute(admission_lock_sql(), (key,))
                 cur.execute("select id from ops.capability_agent_session where id=%s and work_request_id=%s for update", (session_id, work_request_id))
+                cur.execute("select a.id from public.actor a join ops.capability_agent_session s on s.executor_actor_id=a.id where s.id=%s and a.active and a.kind='automation' and a.slug='codex' for share of a", (session_id,))
+                cur.execute(admission_lock_sql(), (key,))
             with receipt_peer.cursor() as cur:
                 set_jobs(cur)
                 cur.execute("set local lock_timeout='300ms'")

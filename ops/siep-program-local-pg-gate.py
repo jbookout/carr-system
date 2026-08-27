@@ -51,6 +51,78 @@ def canonical_digest(value) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
+def superseding_envelope_probe(cur, predecessor_job_id, predecessor_envelope_id):
+    """Add one rollback-only successor so SIEP must reject the predecessor."""
+    row = one(
+        cur,
+        """select e.work_request_id,e.accepted_plan_id,e.slice_plan_id,e.slice_ref,
+                  e.state_version,e.canonical_record_digest,e.envelope,
+                  s.executor_actor_id,s.created_by_actor_id,s.source_commit_sha,
+                  s.worktree_ref,s.scope_ref
+             from ops.engineering_execution_envelope e
+             join ops.capability_agent_session s on s.id=e.agent_session_id
+            where e.id=%s and e.job_id=%s""",
+        (predecessor_envelope_id, predecessor_job_id),
+    )
+    successor_job_id = one(
+        cur,
+        """insert into ops.job
+             (definition_key,definition_version,idempotency_key,scheduled_for,max_attempts,timeout_seconds,mode,payload)
+             values ('engineering-slice',1,%s,now(),2,300,'shadow',%s) returning id""",
+        (f"siep-supersession-probe:{uuid.uuid4()}", Jsonb({"probe": "superseded-siep-leaf"})),
+    )[0]
+    cur.execute(
+        """update ops.capability_agent_session
+              set state='cancelled',cancelled_at=now(),version=version+1
+            where id=(select agent_session_id
+                        from ops.engineering_execution_envelope where id=%s)""",
+        (predecessor_envelope_id,),
+    )
+    successor_session_id = one(
+        cur,
+        """insert into ops.capability_agent_session
+             (work_request_id,executor_actor_id,created_by_actor_id,source_commit_sha,
+              worktree_ref,scope_ref,lease_expires_at)
+             values (%s,%s,%s,%s,%s,%s,now()+interval '1 hour') returning id""",
+        (row[0], row[7], row[8], row[9], row[10], row[11]),
+    )[0]
+    successor_envelope_id = uuid.uuid4()
+    envelope = dict(row[6])
+    envelope["envelope_id"] = f"env:{successor_envelope_id}"
+    envelope["agent_session"] = {
+        **envelope.get("agent_session", {}),
+        "id": f"session:{successor_session_id}",
+    }
+    envelope["request"] = {
+        **envelope.get("request", {}),
+        "job_ref": f"job:{successor_job_id}",
+    }
+    cur.execute(
+        "alter table ops.engineering_execution_envelope "
+        "disable trigger engineering_envelope_supersession_guard"
+    )
+    try:
+        cur.execute(
+            """insert into ops.engineering_execution_envelope
+                 (id,job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,
+                  agent_session_id,state_version,canonical_record_digest,envelope_digest,
+                  envelope,issued_at,expires_at,supersedes_envelope_id,supersession_reason)
+                 values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),now()+interval '1 hour',
+                         %s,'rollback-only SIEP supersession probe')""",
+            (
+                successor_envelope_id, successor_job_id, row[0], row[1], row[2], row[3],
+                successor_session_id, row[4], row[5], "sha256:" + uuid.uuid4().hex * 2,
+                Jsonb(envelope), predecessor_envelope_id,
+            ),
+        )
+    finally:
+        cur.execute(
+            "alter table ops.engineering_execution_envelope "
+            "enable trigger engineering_envelope_supersession_guard"
+        )
+    return successor_job_id, successor_envelope_id
+
+
 def refusal(cur, query: str, params: tuple, fragment: str) -> None:
     savepoint = "siep_refusal_" + uuid.uuid4().hex[:10]
     cur.execute(f"savepoint {savepoint}")
@@ -93,6 +165,31 @@ EDGES = {
     *(("42", dependency) for dependency in ("05", "06B", "24A", "24B", "25", "26", "37", "41")),
     ("43", "42"), ("44", "43"),
 }
+
+
+def set_siep_fixture_state(cur, work_request_id, state):
+    """Model historical state while restoring the real transition trigger."""
+    cur.execute(
+        "alter table ops.work_request "
+        "disable trigger siep_program_transition_guard_before_update"
+    )
+    try:
+        cur.execute(
+            "update ops.work_request set state=%s where id=%s",
+            (state, work_request_id),
+        )
+    finally:
+        cur.execute(
+            "alter table ops.work_request "
+            "enable trigger siep_program_transition_guard_before_update"
+        )
+    if one(
+        cur,
+        """select tgenabled from pg_trigger
+             where tgrelid='ops.work_request'::regclass
+               and tgname='siep_program_transition_guard_before_update'""",
+    )[0] != "O":
+        raise RuntimeError("SIEP transition guard was not restored after historical fixture")
 
 
 def main() -> int:
@@ -234,7 +331,6 @@ def main() -> int:
                      values (%s,1,%s,%s,'SIEP B0 evidence fixture',%s,'fixture') returning id""",
                 (section_id, joe_id, Jsonb({"text": "SIEP B0 evidence fixture"}), "a" * 64),
             )[0]
-            plan_digest = "sha256:" + "d" * 64
             receipt_specs = {
                 "source": {"status": "pass", "operation": "source", "commit_sha": "a" * 40},
                 "tests": {"status": "pass", "operation": "tests", "result_digest": "sha256:" + "b" * 64},
@@ -273,13 +369,50 @@ def main() -> int:
                 (wr00, uuid.uuid4(), Jsonb({}), section_id, revision_id, "b" * 64,
                  Jsonb([]), Jsonb({}), "sha256:" + "c" * 64, f"PLAN-{fixture_token[:12]}-v1"),
             )[0]
+            prior_siep_state = one(
+                cur, "select state from ops.work_request where id=%s", (wr00,)
+            )[0]
+            if prior_siep_state != "awaiting_release":
+                raise RuntimeError(
+                    f"SIEP evidence fixture expected awaiting_release, got {prior_siep_state}"
+                )
+            set_siep_fixture_state(cur, wr00, "ready")
+            one(
+                cur,
+                """insert into ops.sourced_work_request_plan_acceptance_receipt
+                     (work_request_id,plan_id,idempotency_key,base_version,plan_hash,
+                      accepted_by_actor_id,result_version,shape_fixed_surface_ref,shape_rationale)
+                     values (%s,%s,%s,5,%s,%s,5,'fixture:siep-b0','fixture acceptance')
+                     returning id""",
+                (wr00, plan_id, uuid.uuid4(), "sha256:" + "c" * 64, joe_id),
+            )
+            source = one(
+                cur, "select ops.engineering_admission_source('WR-SIEP-00')"
+            )[0]
+            record_digest = source["work_request"]["canonical_record_digest"]
+            plan_payload = {
+                "accepted_plan_revision": {
+                    "digest": source["accepted_plan"]["digest"],
+                    "id": source["accepted_plan"]["plan_ref"],
+                    "revision": source["accepted_plan"]["revision"],
+                },
+                "schema_version": "engineering-slice-plan.v1",
+                "slices": plan_slices,
+                "work_request": {
+                    "canonical_record_digest": record_digest,
+                    "id": source["work_request"]["id"],
+                    "state_version": source["work_request"]["version"],
+                },
+            }
+            plan_digest = canonical_digest(plan_payload)
+            plan_payload["plan_digest"] = plan_digest
             slice_plan_id = one(
                 cur,
                 """insert into ops.engineering_slice_plan
                      (work_request_id,accepted_plan_id,accepted_plan_hash,work_request_version,plan_digest,plan,idempotency_key)
                      values (%s,%s,%s,5,%s,%s,%s) returning id""",
                 (wr00, plan_id, "sha256:" + "c" * 64, plan_digest,
-                 Jsonb({"plan_digest": plan_digest, "slices": plan_slices}), uuid.uuid4()),
+                 Jsonb(plan_payload), uuid.uuid4()),
             )[0]
             capability_session_id = one(
                 cur,
@@ -290,6 +423,7 @@ def main() -> int:
             )[0]
             evidence: dict[str, tuple[uuid.UUID, str, str]] = {}
             evidence_jobs: dict[str, uuid.UUID] = {}
+            evidence_envelopes: dict[str, uuid.UUID] = {}
             for evidence_kind, values in receipt_specs.items():
                 job_id = one(
                     cur,
@@ -316,7 +450,7 @@ def main() -> int:
                     },
                     "work_request_id": f"wr:{wr00}",
                     "state_binding": {"state_version": 5,
-                                      "canonical_record_digest": "sha256:" + "9" * 64},
+                                      "canonical_record_digest": record_digest},
                 }
                 one(
                     cur,
@@ -326,7 +460,7 @@ def main() -> int:
                          values (%s,%s,%s,%s,%s,%s,%s,5,%s,%s,%s,now()-interval '1 minute',now()+interval '1 hour')
                          returning id""",
                     (envelope_id, job_id, wr00, plan_id, slice_plan_id, slice_ref, capability_session_id,
-                     "sha256:" + "9" * 64, envelope_digest,
+                     record_digest, envelope_digest,
                      Jsonb(envelope)),
                 )
                 job_attempt_id = one(
@@ -398,6 +532,7 @@ def main() -> int:
                 )[0]
                 evidence[evidence_kind] = (receipt_id, "job_receipt", "")
                 evidence_jobs[evidence_kind] = job_id
+                evidence_envelopes[evidence_kind] = envelope_id
             generic_job_id = one(
                 cur,
                 """insert into ops.job
@@ -469,7 +604,7 @@ def main() -> int:
                 "server_binding": {"adapter": {"adapter_id": "adapter:codex-desktop"},
                                    "identity": {"agent_principal_id": "agent:codex"}},
                 "work_request_id": f"wr:{wr00}",
-                "state_binding": {"state_version": 5, "canonical_record_digest": "sha256:" + "9" * 64},
+                "state_binding": {"state_version": 5, "canonical_record_digest": record_digest},
             }
             one(cur, """insert into ops.engineering_execution_envelope
                      (id,job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,
@@ -477,7 +612,8 @@ def main() -> int:
                      values (%s,%s,%s,%s,%s,%s,%s,5,%s,%s,%s,now()-interval '1 minute',now()+interval '1 hour')
                      returning id""",
                 (historical_envelope_id, generic_job_id, wr00, plan_id, slice_plan_id, historical_slice_ref,
-                 capability_session_id, "sha256:" + "9" * 64, historical_envelope_digest, Jsonb(historical_envelope)))
+                 capability_session_id, record_digest, historical_envelope_digest, Jsonb(historical_envelope)))
+            set_siep_fixture_state(cur, wr00, prior_siep_state)
             historical_attempt_id = one(cur, "select id from ops.job_attempt where job_id=%s and attempt=1", (generic_job_id,))[0]
             historical_evidence = {"content_digest": "sha256:" + "f" * 64,
                                    "redaction_class": "metadata_only", "ref": "evidence:siep00:historical-replay"}
@@ -533,7 +669,28 @@ def main() -> int:
                 raise RuntimeError("SIEP Engineering contract guard was not restored after historical fixture")
             cur.execute("set session authorization carr_authority_joe")
             refusal(cur, "select ops.siep_bind_evidence_job('00',5,'migration',%s,%s)",
-                    (generic_job_id, historical_key), "historical SIEP Engineering evidence binding is not 0335 verified")
+                    (generic_job_id, historical_key), "historical or superseded SIEP Engineering evidence binding is not 0335 verified")
+            cur.execute("reset session authorization")
+            cur.execute("savepoint siep_superseded_unstamped_probe")
+            superseding_envelope_probe(
+                cur, evidence_jobs["tests"], evidence_envelopes["tests"]
+            )
+            cur.execute("set session authorization carr_authority_joe")
+            refusal(
+                cur, "select ops.siep_bind_evidence_job('00',5,'tests',%s,%s)",
+                (evidence_jobs["tests"], uuid.uuid4()),
+                "SIEP evidence binding requires a 0335-verified Engineering receipt and review",
+            )
+            cur.execute("reset session authorization")
+            if one(
+                cur,
+                "select count(*) from ops.siep_job_evidence_binding where job_id=%s",
+                (evidence_jobs["tests"],),
+            )[0] != 0:
+                raise RuntimeError("superseded Engineering predecessor gained a SIEP v1 stamp")
+            cur.execute("rollback to savepoint siep_superseded_unstamped_probe")
+            cur.execute("release savepoint siep_superseded_unstamped_probe")
+            cur.execute("set session authorization carr_authority_joe")
             binding_keys: dict[str, uuid.UUID] = {}
             for kind, bound_job_id in evidence_jobs.items():
                 binding_key = uuid.uuid4()
@@ -559,6 +716,25 @@ def main() -> int:
             stale_receipt_digest = one(
                 cur, "select ops.siep_current_evidence_digest('job_receipt',%s)", (stale_receipt_id,)
             )[0]
+            cur.execute("savepoint siep_superseded_replay_probe")
+            superseding_envelope_probe(
+                cur, evidence_jobs["tests"], evidence_envelopes["tests"]
+            )
+            cur.execute("set session authorization carr_authority_joe")
+            refusal(
+                cur, "select ops.siep_bind_evidence_job('00',5,'tests',%s,%s)",
+                (evidence_jobs["tests"], binding_keys["tests"]),
+                "historical or superseded SIEP Engineering evidence binding is not 0335 verified",
+            )
+            cur.execute("reset session authorization")
+            if one(
+                cur,
+                "select ops.siep_current_evidence_digest('job_receipt',%s)",
+                (evidence["tests"][0],),
+            )[0] is not None:
+                raise RuntimeError("superseded SIEP v1 evidence remained digest-authoritative")
+            cur.execute("rollback to savepoint siep_superseded_replay_probe")
+            cur.execute("release savepoint siep_superseded_replay_probe")
             set_local_role(cur, "carr_writer")
 
             evidence_keys = {}

@@ -21,12 +21,12 @@ const MEMORY_WRITE_LITERAL_PATTERNS = [
 const memoryWriteLiteralClassified = literal =>
   MEMORY_WRITE_LITERAL_PATTERNS.some(pattern => pattern.test(literal));
 
-// engineering-runtime.js has two actor lookups inside the write:true
-// admitEngineeringSlice path. Keep this content-specific: a future actor
-// lookup elsewhere in that file must still be reviewed by the scanner.
+// engineering-runtime.js has two exact actor lookup shapes inside the
+// write:true admitEngineeringSlice path. Keep this content-specific: a future
+// actor lookup elsewhere in that file must still be reviewed by the scanner.
 const ENGINEERING_ADMISSION_LITERAL_PATTERNS = [
-  /from ops\.capability_agent_session s[\s\S]*join actor on actor\.id=s\.executor_actor_id and actor\.active and actor\.kind='automation'[\s\S]*where s\.id=\$1::uuid for update of s/i,
-  /select id,\s*slug from actor where slug=\$1 and active and kind='automation'/i,
+  /select id,\s*slug from actor where id=\$1::uuid and slug='codex' and active and kind='automation' for share/i,
+  /select id,\s*slug from actor where slug=\$1 and active and kind='automation' for share/i,
 ];
 const engineeringAdmissionLiteralClassified = literal =>
   ENGINEERING_ADMISSION_LITERAL_PATTERNS.some(pattern => pattern.test(literal));
@@ -247,8 +247,8 @@ test("memory actor classification is literal-specific, not filename-wide", () =>
 });
 
 test("engineering admission actor classification is literal-specific", () => {
-  const priorSession = "select s.id from ops.capability_agent_session s join actor on actor.id=s.executor_actor_id and actor.active and actor.kind='automation' where s.id=$1::uuid for update of s";
-  const executor = "select id, slug from actor where slug=$1 and active and kind='automation'";
+  const priorSession = "select id, slug from actor where id=$1::uuid and slug='codex' and active and kind='automation' for share";
+  const executor = "select id, slug from actor where slug=$1 and active and kind='automation' for share";
   const readShape = "select id from actor where slug=$1 and kind='human' and active=true";
   assert.equal(engineeringAdmissionLiteralClassified(priorSession), true);
   assert.equal(engineeringAdmissionLiteralClassified(executor), true);

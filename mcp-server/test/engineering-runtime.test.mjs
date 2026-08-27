@@ -380,6 +380,8 @@ test("dependency admission binds the pass to the newest exact receipt and does n
     writes.push({ sql, params });
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
     if (sql.includes("from actor")) return { rows: [{ id: actor.id, slug: actor.slug }] };
+    if (sql.trimStart().startsWith("select id from ops.engineering_slice_plan")) return { rows: [{ id: "12121212-1212-4212-8212-121212121212" }] };
+    if (sql.includes("select id from ops.work_request")) return { rows: [{ id: source.work.id.replace(/^wr:/, "") }] };
     if (sql.includes("insert into ops.capability_agent_session")) return { rows: [{ id: "22222222-2222-4222-8222-222222222222" }] };
     if (sql.includes("capability_agent_session")) return { rows: [] };
     if (sql.includes("engineering_enqueue_slice_job")) return { rows: [{ id: "11111111-1111-4111-8111-111111111111" }] };
@@ -548,6 +550,8 @@ test("successful admission persists its event through the injected writer", asyn
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
     if (sql.includes("capability_agent_session")) return { rows: [{ id: sessionId, executor_actor_id: actor.id, state: "claimed", lease_expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(), scope_ref: "slice:slice:one", worktree_ref: "engineering:server-admission", source_commit_sha: "0".repeat(40) }] };
     if (sql.includes("from actor")) return { rows: [{ id: actor.id, slug: actor.slug }] };
+    if (sql.trimStart().startsWith("select id from ops.engineering_slice_plan")) return { rows: [{ id: "12121212-1212-4212-8212-121212121212" }] };
+    if (sql.includes("select id from ops.work_request")) return { rows: [{ id: source.work.id.replace(/^wr:/, "") }] };
     if (sql.includes("engineering_enqueue_slice_job")) return { rows: [{ id: jobId }] };
     if (sql.includes("insert into ops.engineering_execution_envelope")) return { rows: [{ id: envelopeId }] };
     return { rows: [] };
@@ -561,6 +565,36 @@ test("successful admission persists its event through the injected writer", asyn
   assert.equal(result.envelope_id, envelopeId);
   assert.equal(events.length, 1);
   assert.equal(events[0][2], "admit-engineering-slice");
+});
+
+test("admission refuses source drift after serialization before any write", async () => {
+  const plan = typedEngineeringPlan([engineeringSlice("slice:one", 1)]);
+  const currentFacts = passportFacts(plan);
+  const staleFacts = structuredClone(currentFacts);
+  staleFacts.source.work_request.version += 1;
+  staleFacts.source.work_request.canonical_record_digest = `sha256:${"f".repeat(64)}`;
+  const calls = [];
+  let passportReads = 0;
+  const c = { query: async (sql, params = []) => {
+    calls.push({ sql, params });
+    if (sql.includes("engineering_passport_facts"))
+      return { rows: [{ facts: passportReads++ === 0 ? currentFacts : staleFacts }] };
+    if (sql.includes("capability_agent_session")) return { rows: [] };
+    if (sql.includes("from actor")) return { rows: [{ id: actor.id, slug: actor.slug }] };
+    if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+    return { rows: [] };
+  } };
+  await assert.rejects(
+    () => admitEngineeringSlice(c, actor, {
+      idempotency_key: "89898989-8989-4989-8989-898989898989",
+      work_request: source.work.ref,
+      slice_ref: "slice:one",
+    }, EngineeringToolError, async () => {}),
+    error => error.error === "engineering_admission_serialization_restart",
+  );
+  assert.equal(calls.some(call => /engineering_enqueue_slice_job|insert into ops\.|update ops\./i.test(call.sql)), false);
+  assert.ok(calls.findIndex(call => call.sql.includes("from actor")) <
+            calls.findIndex(call => call.sql.includes("pg_advisory_xact_lock")));
 });
 
 test("admission replaces a stale read-only envelope whose prior job is terminal with a new immutable generation", async () => {
@@ -603,8 +637,12 @@ test("admission replaces a stale read-only envelope whose prior job is terminal 
       lockOrder.push("prior-binding");
       return { rows: [{ id: priorId, job_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", work_request_id: source.work.id.replace(/^wr:/, ""), accepted_plan_id: source.plan.record_id, slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref: item.slice_ref, agent_session_id: priorSession, envelope: legacy, job_state: "dead_lettered" }] };
     }
-    if (sql.includes("pg_advisory_xact_lock")) { lockOrder.push("lineage-advisory"); return { rows: [] }; }
-    if (sql.includes("where s.id=$1::uuid for update of s")) {
+    if (sql.includes("pg_advisory_xact_lock")) {
+      lockOrder.push(String(params[0]).startsWith("engineering-slice:") ? "admission-advisory" : "lineage-advisory");
+      return { rows: [] };
+    }
+    if (sql.includes("where id=$1::uuid for update")) {
+      lockOrder.push("session-lock");
       return { rows: [{ id: priorSession, work_request_id: source.work.id.replace(/^wr:/, ""), executor_actor_id: actor.id,
         state: "claimed", scope_ref: `slice:${item.slice_ref}`, worktree_ref: "engineering:server-admission",
         source_commit_sha: "0".repeat(40), executor_slug: "codex" }] };
@@ -614,7 +652,9 @@ test("admission replaces a stale read-only envelope whose prior job is terminal 
     if (sql.includes("insert into ops.capability_agent_session"))
       return { rows: [{ id: newSession, executor_actor_id: actor.id, state: "active" }] };
     if (sql.includes("select id, executor_actor_id")) return { rows: [] };
-    if (sql.includes("from actor")) return { rows: [{ id: actor.id, slug: actor.slug }] };
+    if (sql.includes("from actor")) { lockOrder.push("actor-lock"); return { rows: [{ id: actor.id, slug: actor.slug }] }; }
+    if (sql.trimStart().startsWith("select id from ops.engineering_slice_plan")) return { rows: [{ id: "12121212-1212-4212-8212-121212121212" }] };
+    if (sql.includes("select id from ops.work_request")) return { rows: [{ id: source.work.id.replace(/^wr:/, "") }] };
     if (sql.includes("engineering_enqueue_slice_job")) { enqueueParams = params; return { rows: [{ id: newJob }] }; }
     if (sql.includes("insert into ops.engineering_execution_envelope")) {
       insertParams = params;
@@ -631,8 +671,14 @@ test("admission replaces a stale read-only envelope whose prior job is terminal 
   assert.equal(result.supersedes_envelope_id, priorId);
   assert.equal(enqueueParams[4], 2);
   assert.equal(insertParams[12], priorId);
-  const lineageIndex = lockOrder.lastIndexOf("lineage-advisory");
-  assert.ok(lineageIndex > lockOrder.indexOf("prior-binding"), lockOrder.join(","));
+  const sessionIndex = lockOrder.indexOf("session-lock");
+  const actorIndex = lockOrder.indexOf("actor-lock");
+  const admissionIndex = lockOrder.indexOf("admission-advisory");
+  const lineageIndex = lockOrder.indexOf("lineage-advisory");
+  assert.ok(sessionIndex > lockOrder.indexOf("prior-binding"), lockOrder.join(","));
+  assert.ok(actorIndex > sessionIndex, lockOrder.join(","));
+  assert.ok(admissionIndex > actorIndex, lockOrder.join(","));
+  assert.ok(lineageIndex > admissionIndex, lockOrder.join(","));
   assert.ok(lineageIndex < lockOrder.indexOf("currentness"), lockOrder.join(","));
   assert.ok(lineageIndex < lockOrder.indexOf("session-cancellation"), lockOrder.join(","));
   const replacement = JSON.parse(insertParams[9]);
@@ -673,7 +719,7 @@ test("admission rejects a stale read-only envelope bound to a verification sessi
     if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
     if (sql.includes("from ops.engineering_execution_envelope e"))
       return { rows: [{ id: priorId, job_id: priorJob, work_request_id: source.work.id.replace(/^wr:/, ""), accepted_plan_id: source.plan.record_id, slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref: item.slice_ref, agent_session_id: priorSession, envelope: legacy, job_state: "dead_lettered" }] };
-    if (sql.includes("where s.id=$1::uuid for update of s")) {
+    if (sql.includes("where id=$1::uuid for update")) {
       provenanceParams = params;
       return { rows: [{ id: priorSession, work_request_id: source.work.id.replace(/^wr:/, ""), executor_actor_id: actor.id,
         state: "claimed", scope_ref: "verification:read-only-review", worktree_ref: "engineering:server-admission",
@@ -693,7 +739,7 @@ test("admission rejects a stale read-only envelope bound to a verification sessi
   );
   assert.equal(typedError.error, "engineering_session_conflict");
   assert.deepEqual(provenanceParams, [priorSession]);
-  assert.ok(calls.some(sql => sql.includes("where s.id=$1::uuid for update of s")));
+  assert.ok(calls.some(sql => sql.includes("where id=$1::uuid for update")));
   assert.equal(calls.filter(sql => sql.includes("engineering_envelope_currentness")).length, 0);
   assert.equal(calls.filter(sql => sql.includes("update ops.capability_agent_session")).length, 0);
   assert.equal(calls.filter(sql => sql.includes("insert into ops.capability_agent_session")).length, 0);

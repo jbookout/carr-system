@@ -344,6 +344,36 @@ def assert_static_lock_contract():
         raise RuntimeError("receipt path lost the capability-session row lock")
     if "update ops.capability_agent_session set state='cancelled'" not in runtime:
         raise RuntimeError("admission cancellation path no longer updates the capability session")
+    binding = currentness[
+        currentness.index("create or replace function ops.engineering_controller_binding("):
+        currentness.index("-- These are intentionally private predicate helpers")
+    ]
+    binding_positions = [
+        binding.index("from ops.work_request where id=lineage_work_request for share"),
+        binding.index("from ops.job_definition d"),
+        binding.index("from ops.job where id=p_job_id for share"),
+    ]
+    if binding_positions != sorted(binding_positions):
+        raise RuntimeError("controller binding lost Work Request -> job definition -> job lock ordering")
+    if (
+        "create trigger engineering_job_definition_currentness_guard_before_update" not in currentness
+        or "Engineering job definition currentness is reserved by a live scoped lease" not in currentness
+    ):
+        raise RuntimeError("live Engineering job-definition reservation guard is missing")
+    admission = runtime[
+        runtime.index("export async function admitEngineeringSlice"):
+        runtime.index("export async function claimEngineeringSlice")
+    ]
+    admission_positions = [
+        admission.index("where id=$1::uuid for update"),
+        admission.index("where id=$1::uuid and slug='codex' and active and kind='automation' for share"),
+        admission.index("engineering-slice:"),
+        admission.index("engineering-envelope:"),
+    ]
+    if admission_positions != sorted(admission_positions):
+        raise RuntimeError("runtime admission lost session -> exact actor -> slice -> lineage ordering")
+    if admission.count("engineering_passport_facts") < 3 or "engineering_admission_serialization_restart" not in admission:
+        raise RuntimeError("runtime admission no longer revalidates source after serialization")
 
 
 def assert_blocked_by_lock(cur, query, params, blocker_query, blocker_params, dsn, label):
@@ -397,6 +427,57 @@ def expect_lower_claim_lease_refusal(cur):
     cur.execute("rollback to savepoint engineering_claim_lease_floor")
     cur.execute("release savepoint engineering_claim_lease_floor")
     raise RuntimeError("engineering claim accepted a caller-supplied 900-second lease")
+
+
+def expect_job_definition_reservation(cur, job_id, lease_token):
+    """A live scoped lease reserves Engineering v1 through adapter launch."""
+    cur.execute("reset role")
+    cur.execute("savepoint engineering_definition_live_reservation")
+    try:
+        cur.execute(
+            """update ops.job_definition set enabled=not enabled
+                 where key='engineering-slice' and version=1"""
+        )
+    except psycopg.Error as exc:
+        detail = str(exc)
+        cur.execute("rollback to savepoint engineering_definition_live_reservation")
+        cur.execute("release savepoint engineering_definition_live_reservation")
+        if "Engineering job definition currentness is reserved by a live scoped lease" not in detail:
+            raise RuntimeError(f"live definition update returned the wrong refusal: {exc}") from exc
+    else:
+        cur.execute("rollback to savepoint engineering_definition_live_reservation")
+        cur.execute("release savepoint engineering_definition_live_reservation")
+        raise RuntimeError("Engineering v1 definition changed while its scoped lease was live")
+
+    cur.execute("savepoint engineering_definition_release")
+    # The supported wrapper intentionally reruns this gate after the
+    # concurrency program has committed disposable fixtures. Isolate this
+    # claim's release while the outer rollback preserves those rows.
+    cur.execute(
+        """update ops.job set leased_until=clock_timestamp()-interval '1 second'
+             where id<>%s and definition_key='engineering-slice'
+               and state='running' and lease_token is not null
+               and leased_until>clock_timestamp()""",
+        (job_id,),
+    )
+    set_local_role(cur, RUNTIME_ROLE)
+    released = one(
+        cur,
+        "select ops.engineering_fail_claim(%s,%s,'definition_probe','rollback-only release proof')",
+        (job_id, lease_token),
+    )[0]
+    if released not in ("retry_wait", "dead_lettered"):
+        raise RuntimeError(f"scoped definition release returned unexpected state {released}")
+    cur.execute("reset role")
+    cur.execute(
+        """update ops.job_definition set enabled=not enabled
+             where key='engineering-slice' and version=1"""
+    )
+    if cur.rowcount != 1:
+        raise RuntimeError("Engineering v1 definition was not mutable after scoped lease release")
+    cur.execute("rollback to savepoint engineering_definition_release")
+    cur.execute("release savepoint engineering_definition_release")
+    set_local_role(cur, RUNTIME_ROLE)
 
 
 def expect_multi_limit_refusal(cur, job_id):
@@ -631,6 +712,7 @@ def main() -> int:
                 "ops.guard_engineering_reviewer_fact_insert()",
                 "ops.guard_engineering_envelope_supersession()",
                 "ops.guard_engineering_session_terminalization()",
+                "ops.guard_engineering_job_definition_currentness_update()",
                 "ops.engineering_record_slice_receipt(uuid,uuid,jsonb,text,uuid)",
             ]
             for role in ("public", "carr_reader", "carr_writer", "carr_jobs", "carr_authority"):
@@ -719,6 +801,7 @@ def main() -> int:
                     or binding.get("agent_session_id") != str(session_id) or binding.get("agent_session_lease_expires_at") != expected_lease \
                     or binding.get("job_lease_expires_at") != expected_job_lease:
                 return fail("controller binding did not remain exact after claim")
+            expect_job_definition_reservation(cur, job_id, claimed[1])
             predecessor_state = one(cur, "select state,last_failure_class from ops.job where id=%s", (predecessor_job,))
             if predecessor_state != ("dead_lettered", "engineering_superseded_predecessor"):
                 return fail(f"superseded predecessor was not retired audibly: {predecessor_state}")

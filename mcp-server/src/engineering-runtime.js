@@ -644,23 +644,28 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   const sliceRef = id(args.slice_ref, "slice_ref", ToolError);
   const sourceResult = await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRequest]);
   if (!sourceResult.rows.length || !sourceResult.rows[0].facts?.source) error(ToolError, { error: "engineering_work_request_not_found_or_not_ready" });
-  const facts = sourceResult.rows[0].facts;
-  const source = sourceParts(facts.source, ToolError);
-  const plan = sourcePlan(facts, source, ToolError);
-  const slice = sliceFor(plan, sliceRef, ToolError);
+  let facts = sourceResult.rows[0].facts;
+  let source = sourceParts(facts.source, ToolError);
+  let plan = sourcePlan(facts, source, ToolError);
+  let slice = sliceFor(plan, sliceRef, ToolError);
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
-  await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-slice:${source.plan.digest}:${sliceRef}`]);
-  const refreshed = await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRequest]);
-  const refreshedFacts = refreshed.rows[0]?.facts;
-  const priorEnvelopes = (refreshedFacts?.envelopes || [])
+  const locatorSourceDigest = canonicalDigest(facts.source);
+  let priorEnvelopes = (facts.envelopes || [])
     .filter(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id)
     .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-  const priorEnvelope = priorEnvelopes.at(-1) || null;
+  let priorEnvelope = priorEnvelopes.at(-1) || null;
   let priorSessionId = null;
+  let priorBinding = null;
+  let session = null;
+  let executor = null;
+
+  // Locator reads above are intentionally unlocked. Existing mutable authority
+  // is acquired in the global session -> exact actor -> lineage order before
+  // any admission serialization or replacement decision.
   if (priorEnvelope) {
     const priorEnvelopeId = uuid(priorEnvelope.id, "prior_envelope.id", ToolError);
     const priorJobId = uuid(priorEnvelope.job_id, "prior_envelope.job_id", ToolError);
-    const priorBinding = (await c.query(
+    priorBinding = (await c.query(
       `select e.id, e.job_id, e.work_request_id, e.accepted_plan_id, e.slice_plan_id,
               e.slice_ref, e.agent_session_id, e.envelope, j.state as job_state
          from ops.engineering_execution_envelope e
@@ -678,24 +683,68 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
     if (!factSessionId || !rowSessionId || factSessionId !== rowSessionId)
       error(ToolError, { error: "engineering_session_conflict", envelope_id: priorEnvelopeId });
     priorSessionId = rowSessionId;
-    const priorSlicePlanId = uuid(priorBinding.slice_plan_id, "prior_envelope.slice_plan_id", ToolError);
-    await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-envelope:${priorSlicePlanId}:${sliceRef}`]);
-    const priorSession = (await c.query(
-      `select s.id, s.work_request_id, s.executor_actor_id, s.state, s.scope_ref, s.worktree_ref, s.source_commit_sha,
-              actor.slug as executor_slug
-         from ops.capability_agent_session s
-         join actor on actor.id=s.executor_actor_id and actor.active and actor.kind='automation'
-        where s.id=$1::uuid for update of s`,
+    session = (await c.query(
+      `select id, work_request_id, executor_actor_id, state, lease_expires_at, scope_ref, worktree_ref, source_commit_sha
+         from ops.capability_agent_session
+        where id=$1::uuid for update`,
       [priorSessionId],
     )).rows[0];
-    if (!priorSession || priorSession.id !== priorSessionId ||
-        priorSession.work_request_id !== source.work.id.replace(/^wr:/, "") ||
-        priorSession.executor_slug !== "codex" ||
-        !["claimed", "in_progress"].includes(priorSession.state) ||
-        priorSession.scope_ref !== `slice:${sliceRef}` ||
-        priorSession.worktree_ref !== ENGINEERING_SESSION_WORKTREE ||
-        priorSession.source_commit_sha !== ENGINEERING_SESSION_SOURCE)
+    if (!session || session.id !== priorSessionId ||
+        session.work_request_id !== source.work.id.replace(/^wr:/, "") ||
+        !["claimed", "in_progress"].includes(session.state) ||
+        session.scope_ref !== `slice:${sliceRef}` ||
+        session.worktree_ref !== ENGINEERING_SESSION_WORKTREE ||
+        session.source_commit_sha !== ENGINEERING_SESSION_SOURCE)
       error(ToolError, { error: "engineering_session_conflict", envelope_id: priorEnvelopeId });
+    executor = (await c.query(
+      "select id, slug from actor where id=$1::uuid and slug='codex' and active and kind='automation' for share",
+      [session.executor_actor_id],
+    )).rows[0];
+    if (!executor || executor.id !== session.executor_actor_id)
+      error(ToolError, { error: "engineering_codex_actor_not_provisioned" });
+  } else {
+    const openSessions = (await c.query(
+      `select id, work_request_id, executor_actor_id, state, lease_expires_at, scope_ref, worktree_ref, source_commit_sha
+         from ops.capability_agent_session
+        where work_request_id=$1::uuid and state not in ('completed','cancelled')
+        order by created_at desc for update`,
+      [source.work.id.replace(/^wr:/, "")],
+    )).rows;
+    if (openSessions.length > 1) error(ToolError, { error: "engineering_session_conflict" });
+    session = openSessions[0] || null;
+    executor = (await c.query(
+      session
+        ? "select id, slug from actor where id=$1::uuid and slug='codex' and active and kind='automation' for share"
+        : "select id, slug from actor where slug=$1 and active and kind='automation' for share",
+      [session ? session.executor_actor_id : "codex"],
+    )).rows[0];
+    if (!executor) error(ToolError, { error: "engineering_codex_actor_not_provisioned" });
+    if (session && (!session.lease_expires_at || !hasDispatchRunway(session.lease_expires_at)))
+      error(ToolError, { error: "engineering_session_not_lease_bound" });
+    if (session && !isExactEngineeringAdmissionSession(session, sliceRef, executor.id))
+      error(ToolError, { error: "engineering_session_conflict" });
+  }
+
+  await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-slice:${source.plan.digest}:${sliceRef}`]);
+  let refreshed = await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRequest]);
+  facts = refreshed.rows[0]?.facts;
+  if (!facts?.source || canonicalDigest(facts.source) !== locatorSourceDigest)
+    error(ToolError, { error: "engineering_admission_serialization_restart" });
+  source = sourceParts(facts.source, ToolError);
+  plan = sourcePlan(facts, source, ToolError);
+  slice = sliceFor(plan, sliceRef, ToolError);
+  dependenciesSatisfied(facts, source, plan, slice, ToolError);
+  priorEnvelopes = (facts.envelopes || [])
+    .filter(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id)
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  const serializedPriorEnvelope = priorEnvelopes.at(-1) || null;
+  if ((serializedPriorEnvelope?.id || null) !== (priorEnvelope?.id || null))
+    error(ToolError, { error: "engineering_admission_serialization_restart" });
+  priorEnvelope = serializedPriorEnvelope;
+
+  if (priorEnvelope) {
+    const priorSlicePlanId = uuid(priorBinding.slice_plan_id, "prior_envelope.slice_plan_id", ToolError);
+    await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-envelope:${priorSlicePlanId}:${sliceRef}`]);
     const currentness = await c.query("select ops.engineering_envelope_currentness($1::uuid,$2::uuid) as currentness", [priorEnvelope.id, priorEnvelope.job_id]);
     const priorJobReplayable = ["queued", "retry_wait", "running"].includes(priorBinding.job_state);
     if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true &&
@@ -705,29 +754,30 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
       error(ToolError, { error: "engineering_envelope_insufficient_runway", envelope_id: priorEnvelope.id });
   }
 
+  const lockedPlan = await c.query(
+    `select id from ops.engineering_slice_plan
+      where accepted_plan_id=$1::uuid and plan_digest=$2::text for key share`,
+    [source.plan.record_id, plan.plan_digest],
+  );
+  if (!lockedPlan.rows.length) error(ToolError, { error: "engineering_slice_plan_not_registered" });
+  const lockedWork = await c.query("select id from ops.work_request where id=$1::uuid for share", [source.work.id.replace(/^wr:/, "")]);
+  if (!lockedWork.rows.length) error(ToolError, { error: "engineering_work_request_not_found_or_not_ready" });
+  refreshed = await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRequest]);
+  facts = refreshed.rows[0]?.facts;
+  if (!facts?.source || canonicalDigest(facts.source) !== locatorSourceDigest)
+    error(ToolError, { error: "engineering_admission_serialization_restart" });
+  source = sourceParts(facts.source, ToolError);
+  plan = sourcePlan(facts, source, ToolError);
+  slice = sliceFor(plan, sliceRef, ToolError);
+  dependenciesSatisfied(facts, source, plan, slice, ToolError);
+
   if (priorEnvelope) {
     await c.query(
       `update ops.capability_agent_session set state='cancelled', cancelled_at=now(), version=version+1
         where id=$1::uuid and work_request_id=$2::uuid and state not in ('completed','cancelled')`,
       [priorSessionId, source.work.id.replace(/^wr:/, "")]);
+    session = null;
   }
-
-  const executor = (await c.query(
-    "select id, slug from actor where slug=$1 and active and kind='automation'",
-    ["codex"],
-  )).rows[0];
-  if (!executor) error(ToolError, { error: "engineering_codex_actor_not_provisioned" });
-  const sessionResult = await c.query(
-    `select id, executor_actor_id, state, lease_expires_at, scope_ref, worktree_ref, source_commit_sha from ops.capability_agent_session
-      where work_request_id=$1 and state not in ('completed','cancelled')
-      order by created_at desc`, [source.work.id.replace(/^wr:/, "")]);
-  const openSessions = sessionResult.rows;
-  if (openSessions.length > 1) error(ToolError, { error: "engineering_session_conflict" });
-  let session = openSessions[0] || null;
-  if (session && (!session.lease_expires_at || !hasDispatchRunway(session.lease_expires_at)))
-    error(ToolError, { error: "engineering_session_not_lease_bound" });
-  if (session && !isExactEngineeringAdmissionSession(session, sliceRef, executor.id))
-    error(ToolError, { error: "engineering_session_conflict" });
   const sessionExpiry = new Date(Date.now() + 30 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
   if (!session) {
     const created = await c.query(

@@ -155,11 +155,11 @@ test("0324 derives command authority and binds evidence to current immutable fac
 test("0335 makes reviewer and SIEP Engineering stamps database-owned and replay-fail-closed", () => {
   assert.match(controllerMigration, /if new\.contract_version is not null then[\s\S]*?reviewer contract version is caller-controlled[\s\S]*?new\.contract_version:='engineering-review\.v1'/i);
   assert.match(controllerMigration, /if new\.engineering_contract_version is not null then[\s\S]*?SIEP Engineering contract version is caller-controlled[\s\S]*?new\.engineering_contract_version:='engineering-review\.v1'/i);
-  assert.match(controllerMigration, /siep_bind_evidence_job_unchecked_0324[\s\S]*?historical SIEP Engineering evidence binding is not 0335 verified/i);
+  assert.match(controllerMigration, /siep_bind_evidence_job_unchecked_0324[\s\S]*?historical or superseded SIEP Engineering evidence binding is not 0335 verified/i);
   assert.match(controllerMigration, /reviewer\.slug='joe' and reviewer\.active/i);
   assert.match(controllerMigration, /order by actor\.id for share/i);
   assert.match(dbGate, /caller-controlled/);
-  assert.match(dbGate, /historical SIEP Engineering evidence binding is not 0335 verified/);
+  assert.match(dbGate, /historical or superseded SIEP Engineering evidence binding is not 0335 verified/);
   assert.match(dbGate, /valid SIEP evidence binding was not stamped by the database/);
 });
 

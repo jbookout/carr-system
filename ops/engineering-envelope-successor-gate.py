@@ -65,9 +65,13 @@ def fixture(cur):
     )[0]
     work_request_id = one(
         cur,
-        """insert into ops.work_request(ref,state,title,requester_actor,owner_actor)
-             values (%s,'captured','Engineering envelope fixture','joe','joe') returning id""",
-        (f"WR-ENGINEERING-{token}",),
+        """insert into ops.work_request
+             (ref,state,title,requester_actor,owner_actor,shape_disposition,
+              shape_fixed_surface_ref,shape_rationale,shape_decided_by_actor_id,shape_decided_at)
+             values (%s,'ready','Engineering envelope fixture','joe','joe','not_required',
+                     'fixture:engineering-envelope','fixture currentness acceptance',%s,now())
+             returning id""",
+        (f"WR-ENGINEERING-{token}", joe_id),
     )[0]
     plan_id = one(
         cur,
@@ -81,12 +85,42 @@ def fixture(cur):
         (work_request_id, uuid.uuid4(), Jsonb({}), section_id, revision_id, "b" * 64,
          Jsonb([]), Jsonb({}), sha("c"), f"PLAN-{token[:12]}-v1"),
     )[0]
+    one(
+        cur,
+        """insert into ops.sourced_work_request_plan_acceptance_receipt
+             (work_request_id,plan_id,idempotency_key,base_version,plan_hash,
+              accepted_by_actor_id,result_version,shape_fixed_surface_ref,shape_rationale)
+             values (%s,%s,%s,1,%s,%s,1,'fixture:engineering-envelope','fixture acceptance')
+             returning id""",
+        (work_request_id, plan_id, uuid.uuid4(), sha("c"), joe_id),
+    )
+    source = one(
+        cur,
+        "select ops.engineering_admission_source(%s)",
+        (f"WR-ENGINEERING-{token}",),
+    )[0]
+    record_digest = source["work_request"]["canonical_record_digest"]
+    plan_payload = {
+        "accepted_plan_revision": {
+            "digest": source["accepted_plan"]["digest"],
+            "id": source["accepted_plan"]["plan_ref"],
+            "revision": source["accepted_plan"]["revision"],
+        },
+        "plan_digest": sha("d"),
+        "schema_version": "engineering-slice-plan.v1",
+        "slices": [{"slice_ref": "slice:fixture"}],
+        "work_request": {
+            "canonical_record_digest": record_digest,
+            "id": source["work_request"]["id"],
+            "state_version": source["work_request"]["version"],
+        },
+    }
     slice_plan_id = one(
         cur,
         """insert into ops.engineering_slice_plan
              (work_request_id,accepted_plan_id,accepted_plan_hash,work_request_version,plan_digest,plan,idempotency_key)
              values (%s,%s,%s,1,%s,%s,%s) returning id""",
-        (work_request_id, plan_id, sha("c"), sha("d"), Jsonb({}), uuid.uuid4()),
+        (work_request_id, plan_id, sha("c"), sha("d"), Jsonb(plan_payload), uuid.uuid4()),
     )[0]
     old_session_id = one(
         cur,
@@ -118,14 +152,13 @@ def fixture(cur):
              values ('engineering-slice',1,%s,now()+interval '1 minute',1,60,'shadow') returning id""",
         (f"engineering-envelope-new:{token}",),
     )[0]
-    return work_request_id, plan_id, slice_plan_id, old_session_id, new_session_id, old_job_id, new_job_id
+    return work_request_id, plan_id, slice_plan_id, record_digest, old_session_id, new_session_id, old_job_id, new_job_id
 
 
-def insert_envelope(cur, *, job_id, work_request_id, plan_id, slice_plan_id, session_id, digest, expires_sql, supersedes=None):
-    canonical = sha("9")
+def insert_envelope(cur, *, job_id, work_request_id, plan_id, slice_plan_id, session_id, record_digest, digest, expires_sql, supersedes=None):
     envelope = Jsonb({
         "work_request_id": f"wr:{work_request_id}",
-        "state_binding": {"state_version": 1, "canonical_record_digest": canonical},
+        "state_binding": {"state_version": 1, "canonical_record_digest": record_digest},
     })
     return one(
         cur,
@@ -135,7 +168,7 @@ def insert_envelope(cur, *, job_id, work_request_id, plan_id, slice_plan_id, ses
               supersedes_envelope_id,supersession_reason)
              values (%s,%s,%s,%s,'slice:fixture',%s,1,%s,%s,%s,now()-interval '2 hours',{expires_sql},%s,%s)
              returning id""",
-        (job_id, work_request_id, plan_id, slice_plan_id, session_id, canonical, digest, envelope,
+        (job_id, work_request_id, plan_id, slice_plan_id, session_id, record_digest, digest, envelope,
          supersedes, "expired fixture replacement" if supersedes else None),
     )[0]
 
@@ -147,17 +180,17 @@ def main() -> int:
     try:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             grant_settable_runtime_roles(cur, RUNTIME_ROLE)
-            work_request_id, plan_id, slice_plan_id, old_session_id, new_session_id, old_job_id, new_job_id = fixture(cur)
+            work_request_id, plan_id, slice_plan_id, record_digest, old_session_id, new_session_id, old_job_id, new_job_id = fixture(cur)
             set_local_role(cur, RUNTIME_ROLE)
             if one(cur, "select has_table_privilege(current_user,%s,'UPDATE')", (TABLE,))[0]:
                 return fail("carr_writer gained UPDATE on append-only engineering envelopes")
             predecessor_id = insert_envelope(
-                cur, job_id=old_job_id, work_request_id=work_request_id, plan_id=plan_id,
+                cur, job_id=old_job_id, work_request_id=work_request_id, plan_id=plan_id, record_digest=record_digest,
                 slice_plan_id=slice_plan_id, session_id=old_session_id, digest=sha("1"),
                 expires_sql="now()-interval '1 hour'",
             )
             successor_id = insert_envelope(
-                cur, job_id=new_job_id, work_request_id=work_request_id, plan_id=plan_id,
+                cur, job_id=new_job_id, work_request_id=work_request_id, plan_id=plan_id, record_digest=record_digest,
                 slice_plan_id=slice_plan_id, session_id=new_session_id, digest=sha("2"),
                 expires_sql="now()+interval '1 hour'", supersedes=predecessor_id,
             )
