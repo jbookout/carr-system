@@ -346,3 +346,15 @@ far — its first step (epoch restart) should be run as early in the sitting
 as possible, specifically before (f), so the calendar week starts counting
 while Joe works through the rest of the list. (f) is independent of
 everything else and can run whenever production credentials are at hand.
+
+## STATUS UPDATE — 2026-08-27, end of ship session
+
+- (a) Triage batch acceptance: **EXECUTED** — 11 retirements receipted; recite counts 163 shared / 31 personal; 208 in scope.
+- (b) Core compressions: **EXECUTED** — 17 amended with receipts + 3 already at target; live core payload 20,121 chars (~5,748 tokens), 51.5% cut.
+- (c) Guidance Registry: **STAGED AND APPLIED** — batch id b46f9c26-2291-46e5-9ce2-7e843680150f, manifest digest c22151d2ae2a4ecc63d1493e14afbc34f089de2202277dc1b866960d8bf863fd, 208 entries. YOUR TWO CALLS, in order, all required:
+  1. decide-guidance-import-batch {"batch_id":"b46f9c26-2291-46e5-9ce2-7e843680150f","manifest_digest":"c22151d2ae2a4ecc63d1493e14afbc34f089de2202277dc1b866960d8bf863fd","reason":"...","idempotency_key":"<fresh uuid>"}
+  2. activate-guidance-registry — the verb's contract asks for the same digest; call after 1 succeeds.
+- (d) GitHub ruleset review requirement: still your decision, unchanged.
+- (e) The flip: clock started 2026-08-27T10:56Z; eligibility at 168 clean hours (~2026-09-03).
+- (f) Prod classification export: **EXECUTED** — parity 208/208 green, committed as PR 748.
+- NEW: rotate the neondb_owner database password when convenient — bin/schema-snapshot.sh --check leaked the DSN with password into a session transcript (defect filed, class credential-leaked-by-tool-error-path).
