@@ -231,6 +231,70 @@ const HEAVY_BUILD_SCHEMA = { type: "object", additionalProperties: false,
     } },
   } };
 
+
+// WHO ACTUALLY PERFORMED THE AUTHORITY ACTS ON THIS REQUEST.
+//
+// ops.authority_actor_slug() maps the Postgres session role to 'joe' or 'dell'
+// and can return nothing else, and every authority receipt column is constrained
+// to a human actor — so an act performed by an agent sponsored by Joe is
+// structurally unrecordable as anything but Joe. Once Joe's ruling made agent
+// acts the normal case for internal system work rather than the exception, a
+// card that says 'joe' and cannot say more became a card that misleads.
+//
+// Nothing new is captured to fix it. public.tool_call already stores actor_id,
+// authorization_class and via under the SAME idempotency key each receipt
+// stores; the two were simply never joined. This is that join.
+//
+// A row is reported only where the call ledger actually has the key. Acts
+// predating the ledger, or performed by a path that does not write it, come back
+// as null rather than as a guess.
+const ACTING_IDENTITY = `
+  select act, recorded_slug, acted_at, actor_slug, authorization_class, via from (
+    select 'review-and-triage' as act, ha.slug as recorded_slug, r.triaged_at as acted_at,
+           a.slug as actor_slug, t.authorization_class, t.via
+      from ops.work_request_triage_receipt r
+      join ops.work_request w on w.id = r.work_request_id
+      join public.actor ha on ha.id = r.triaged_by_actor_id
+      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
+      left join public.actor a on a.id = t.actor_id
+     where w.ref = $1
+    union all
+    select 'accept-ready-plan', ha.slug, r.accepted_at, a.slug, t.authorization_class, t.via
+      from ops.sourced_work_request_plan_acceptance_receipt r
+      join ops.work_request w on w.id = r.work_request_id
+      join public.actor ha on ha.id = r.accepted_by_actor_id
+      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
+      left join public.actor a on a.id = t.actor_id
+     where w.ref = $1
+    union all
+    select 'accept-outcome-feedback', ha.slug, r.accepted_at, a.slug, t.authorization_class, t.via
+      from ops.sourced_work_request_outcome_feedback_acceptance_receipt r
+      join ops.work_request w on w.id = r.work_request_id
+      join public.actor ha on ha.id = r.accepted_by_actor_id
+      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
+      left join public.actor a on a.id = t.actor_id
+     where w.ref = $1
+  ) acts order by acted_at`;
+
+export function actingIdentityProjection(rows) {
+  return rows.map((row) => ({
+    act: row.act,
+    // The slug the receipt records. Always a human; that is the constraint.
+    recorded_as: row.recorded_slug,
+    // Who actually made the call, when the call ledger knows. null means the
+    // ledger has no row for that key — say so rather than guess.
+    performed_by: row.actor_slug || null,
+    authorization_class: row.authorization_class || null,
+    via: row.via || null,
+    // The one field a reader needs: did a human do this, or an agent under a
+    // human's sponsorship? Unknown is a real answer and is not smoothed away.
+    hand: row.actor_slug
+      ? (row.authorization_class === "sponsored_agent" ? "agent" : "human")
+      : "unknown",
+    acted_at: row.acted_at,
+  }));
+}
+
 export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) {
   return {
     "current-work-requests": {
@@ -439,7 +503,11 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
                /* work-request-intake:pending-outcome-feedback */`, [args.work_request, tenant]);
           pendingOutcomeFeedback = pendingOutcomeFeedbackProjection(pending.rows[0]);
         }
+        const acting = actingIdentityProjection(
+          (await c.query(ACTING_IDENTITY + " /* work-request-intake:acting-identity */",
+                         [args.work_request])).rows);
         return { ok: true, human_ref: row.ref, title: row.title, desired_outcome: row.desired_outcome,
+          acting_identity: acting,
           acceptance_criteria: row.acceptance_criteria, state: row.state, version: Number(row.version),
           projection_state: "queued", source: sourceProjection(row),
           triage: triaged ? { classification: row.triage_classification, human_actor_slug: row.triaged_by_actor_slug,
