@@ -1029,6 +1029,19 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  # Tour Operations Slice 2 carries database-owned rights, digest, seal, and
+  # ACL invariants that cannot be proved by a text-shape test. Run its
+  # transaction-scoped acceptance proof on the same disposable database after
+  # pending migrations apply; the proof rolls back every fixture row.
+  if [ -f mcp-server/test/tour-operations-slice2-postgres.sql ] &&
+     ! run_quiet "$LOGDIR/tour-operations-slice2-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/tour-operations-slice2-postgres.sql; then
+    tail -30 "$LOGDIR/tour-operations-slice2-postgres.log" >&2
+    bad migration "Tour Operations Slice 2 PostgreSQL acceptance failed"
+    return
+  fi
+
   # THE GRANTS CANARY, added 2026-08-14. The snapshot is pg_dump --no-acl, so
   # for months this class built a database where the app roles existed and held
   # NOTHING — has_table_privilege() false for every table, every role — and ran
