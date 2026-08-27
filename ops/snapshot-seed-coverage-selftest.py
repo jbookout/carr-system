@@ -317,6 +317,60 @@ def main():
         case("an INSERT above the ledger refuses; the boundary is not COPY-only",
              any("DATA REGION BOUNDARY MOVED" in f for f in module.check(repo, above)))
 
+        # ---------------------------------------------------------------- R3
+        # normalise() folds public.foo and foo together. Nothing exercised it, so
+        # deleting the fold passed all 45 cases while producing 25 failures on the
+        # real db/schema.sql — the same untested-surface disease that hid the main()
+        # mutants, one layer down.
+        qualified = "insert into public.qualified_table (k) values (1);\n"
+        repo = build_repo(tmp + "/r3norm", {"0100_q.sql": qualified},
+                          {"carried": {}, "excluded": {"qualified_table": "runtime"}})
+        case("a migration writing public.foo is satisfied by the bare name foo",
+             module.check(repo, artifact(["0100_q.sql"])) == [])
+        repo = build_repo(tmp + "/r3norm2", {"0100_q.sql": "insert into bare_table (k) values (1);\n"},
+                          {"carried": {"bare_table": "vocabulary"}, "excluded": {}})
+        case("an artifact carrying COPY public.foo satisfies a bare-name carried entry",
+             module.check(repo, artifact(["0100_q.sql"],
+                                         [copy_block("public.bare_table")])) == [])
+        repo = build_repo(tmp + "/r3norm3", {"0100_q.sql": "insert into ops.kept (k) values (1);\n"},
+                          {"carried": {}, "excluded": {"kept": "runtime"}})
+        case("ops.foo is NOT folded to foo — only the public schema is implicit",
+             any("ops.kept" in f for f in module.check(repo, artifact(["0100_q.sql"]))))
+
+        # CREATE PROCEDURE bodies were attributed to the last CREATE FUNCTION header,
+        # so a procedure that writes could be credited to the wrong routine or lost.
+        proc = ("create function ops.helper() returns void language plpgsql as $$\n"
+                "begin\n  perform 1;\nend $$;\n"
+                "create procedure ops.seed_it() language plpgsql as $$\n"
+                "begin\n  insert into ops.proc_table (k) values (1);\nend $$;\n"
+                "call ops.seed_it();\n")
+        repo = build_repo(tmp + "/r3proc", {"0100_proc.sql": proc},
+                          {"carried": {}, "excluded": {}})
+        case("a CREATE PROCEDURE body that is CALLed is counted as a seed",
+             any("ops.proc_table" in f for f in module.check(repo, artifact(["0100_proc.sql"]))))
+
+        # COPY with no column list, on the ARTIFACT side this time. It was fixed for
+        # migrations and left broken for the snapshot, so a carried table emitted that
+        # way read as absent.
+        repo = build_repo(tmp + "/r3copy", {"0100_seed.sql": seeding},
+                          {"carried": {"ops.widget": "bounded config"}, "excluded": {}})
+        case("a carried table emitted as COPY with no column list reads as present",
+             module.check(repo, artifact(["0100_seed.sql"],
+                                         ["COPY ops.widget FROM stdin;\n1\n\\.\n\n\n"])) == [])
+
+        # The boundary must see every row-landing form above the ledger, not INSERT
+        # and COPY alone.
+        repo = build_repo(tmp + "/r3bound", {"0100_seed.sql": seeding},
+                          {"carried": {}, "excluded": {"ops.widget": "runtime"}})
+        for label, statement in (
+            ("MERGE", "merge into public.client t using s on t.k=s.k when not matched then insert (k) values (s.k);\n"),
+            ("CREATE TABLE AS", "create table public.client_copy as select * from public.client;\n"),
+        ):
+            above = artifact(["0100_seed.sql"]).replace(
+                LEDGER_HEADER, statement + "\n" + LEDGER_HEADER, 1)
+            case(f"{label} above the ledger refuses; the boundary is not INSERT/COPY only",
+                 any("DATA REGION BOUNDARY MOVED" in f for f in module.check(repo, above)))
+
         # ---------------------------------------------------------------- MAIN
         # main() is the ONLY surface bin/schema-snapshot.sh consumes. Testing check()
         # alone let a mutant that returns 0 unconditionally, or swallows the stderr
@@ -413,9 +467,12 @@ def main():
         case("a carried_subset table ABSENT from the artifact refuses",
              any("DECLARED CARRIED BUT ABSENT" in f for f in
                  module.check(repo, artifact(["0100_seed.sql"]))))
-        case("a carried_subset table satisfies classification (not 'unclassified')",
-             not any("UNCLASSIFIED" in f for f in
-                     module.check(repo, artifact(["0100_seed.sql"]))))
+        # NOT a restatement of the case above: that one drives a clean artifact, this
+        # one drives an artifact where the table is ABSENT, and pins that the failure
+        # reported is the carried-but-absent one and never "unclassified".
+        absent = module.check(repo, artifact(["0100_seed.sql"]))
+        case("a carried_subset table reports as carried-but-absent, never unclassified",
+             absent and not any("UNCLASSIFIED" in f for f in absent))
         repo = build_repo(tmp + "/j", {"0100_seed.sql": seeding},
                           {"carried": {"ops.widget": "x"},
                            "carried_subset": {"ops.widget": "y"}, "excluded": {}})
