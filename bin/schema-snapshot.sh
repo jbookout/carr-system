@@ -1169,8 +1169,8 @@ DOCTRINE_GATE_CHECK_HEADER
 
 if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'DOCTRINE_GATE_CHECK_ROWS'
 select format(
-  'insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, %L::jsonb) on conflict (check_key) do nothing;',
-  to_jsonb(g)) from doctrine_gate_check g order by g.check_key;
+  'insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, %L::jsonb) on conflict (check_key) do nothing;',
+  to_jsonb(g)) from public.doctrine_gate_check g order by g.check_key;
 DOCTRINE_GATE_CHECK_ROWS
 then
   echo "schema-snapshot: could not render the doctrine validation registry — nothing written" >&2
@@ -1191,8 +1191,8 @@ AGENT_PROFILE_HEADER
 
 if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'AGENT_PROFILE_ROWS'
 select format(
-  'insert into agent_profile select * from jsonb_populate_record(null::agent_profile, %L::jsonb) on conflict (profile_key) do nothing;',
-  to_jsonb(p)) from agent_profile p order by p.profile_key;
+  'insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, %L::jsonb) on conflict (profile_key) do nothing;',
+  to_jsonb(p)) from public.agent_profile p order by p.profile_key;
 AGENT_PROFILE_ROWS
 then
   echo "schema-snapshot: could not render the named agent profiles — nothing written" >&2
