@@ -371,6 +371,93 @@ def main():
             case(f"{label} above the ledger refuses; the boundary is not INSERT/COPY only",
                  any("DATA REGION BOUNDARY MOVED" in f for f in module.check(repo, above)))
 
+        # ---------------------------------------------------------------- R4
+        # ONE APOSTROPHE IN A COMMENT DISARMED THE WHOLE CHECK. The literal mask was
+        # a regex over text that still held SQL comments, so an apostrophe in English
+        # prose paired with a real string's opening quote and masked everything
+        # between — including the CALL. 102 of 264 applied migrations already had odd
+        # apostrophe parity. Found by the fourth independent review.
+        called = ("create function ops.seed_it() returns void language plpgsql as $$\n"
+                  "begin\n  insert into ops.throwaway_lookup (k) values (1);\nend $$;\n"
+                  "{C}\n"
+                  "select ops.seed_it();\n"
+                  "comment on table ops.throwaway_lookup is 'a bounded lookup';\n")
+        for label, comment in (
+            ("plain", "-- seeds the reviewer throwaway lookup table."),
+            ("with an apostrophe", "-- seeds the reviewer's throwaway lookup table."),
+            ("apostrophe in a block comment", "/* the builder's note */"),
+            ("two apostrophes", "-- the reviewer's and the builder's table."),
+        ):
+            repo = build_repo(tmp + "/r4" + label[:6].replace(" ", ""),
+                              {"0100_c.sql": called.replace("{C}", comment)},
+                              {"carried": {}, "excluded": {}})
+            case(f"a comment {label} cannot disarm the check",
+                 any("ops.throwaway_lookup" in f
+                     for f in module.check(repo, artifact(["0100_c.sql"]))))
+
+        # The same scan fixes two things nobody had reported.
+        repo = build_repo(tmp + "/r4com", {"0100_x.sql": "-- insert into ops.ghost (k) values (1);\n"},
+                          {"carried": {}, "excluded": {}})
+        case("a commented-out INSERT is not counted as a seed",
+             module.check(repo, artifact(["0100_x.sql"])) == [])
+        repo = build_repo(tmp + "/r4str", {"0100_y.sql": "select 'insert into ops.ghost values (1)';\n"},
+                          {"carried": {}, "excluded": {}})
+        case("an INSERT inside a string literal is not counted as a seed",
+             module.check(repo, artifact(["0100_y.sql"])) == [])
+
+        # Bodies are scanned too. Storing them raw put the apostrophe bug straight
+        # back one level down.
+        nested = ("create function ops.helper() returns void language plpgsql as $$\n"
+                  "begin\n  -- the builder's note\n"
+                  "  insert into ops.nested_table (k) values (1);\nend $$;\n"
+                  "select ops.helper();\n"
+                  "comment on table ops.nested_table is 'x';\n")
+        repo = build_repo(tmp + "/r4nest", {"0100_n.sql": nested},
+                          {"carried": {}, "excluded": {}})
+        case("a comment with an apostrophe INSIDE a routine body cannot disarm it",
+             any("ops.nested_table" in f for f in module.check(repo, artifact(["0100_n.sql"]))))
+
+        # Scanner branches a whole-module sweep proved unpinned.
+        repo = build_repo(tmp + "/r4blk",
+                          {"0100_b.sql": "/* insert into ops.ghost (k) values (1); */\n"
+                                         "insert into ops.real_table (k) values (1);\n"},
+                          {"carried": {}, "excluded": {"ops.real_table": "runtime"}})
+        found = module.check(repo, artifact(["0100_b.sql"]))
+        case("DML inside a block comment is not counted",
+             not any("ops.ghost" in f for f in found))
+
+        # PostgreSQL nests block comments. Getting the nesting wrong ends the comment
+        # at the first */ and spills the rest back into the scanned text.
+        repo = build_repo(tmp + "/r4nest2",
+                          {"0100_bn.sql": "/* outer /* inner */ insert into ops.ghost2 (k) values (1); */\n"
+                                          "insert into ops.real2 (k) values (1);\n"},
+                          {"carried": {}, "excluded": {"ops.real2": "runtime"}})
+        case("a NESTED block comment stays a comment to its true end",
+             not any("ops.ghost2" in f for f in module.check(repo, artifact(["0100_bn.sql"]))))
+
+        # '' is an escaped quote, not the end of the literal. Getting that wrong
+        # shifts every following quote boundary and can mask a call.
+        esc = ("create function ops.seed_it() returns void language plpgsql as $$\n"
+               "begin\n  insert into ops.escaped_table (k) values (1);\nend $$;\n"
+               "comment on table ops.escaped_table is 'it''s bounded';\n"
+               "select ops.seed_it();\n")
+        repo = build_repo(tmp + "/r4esc", {"0100_e.sql": esc}, {"carried": {}, "excluded": {}})
+        # NOTE on the one mutant this suite deliberately does not chase: forcing the
+        # '' branch false is an EQUIVALENT mutant. Either way both quote characters
+        # are consumed — the escape branch takes them as a pair, and without it the
+        # first ends one literal and the second opens another that closes at the same
+        # place. Same masked span, same result. A case cannot distinguish them
+        # because there is nothing to distinguish.
+        case("a doubled quote inside a literal does not shift the boundaries",
+             any("ops.escaped_table" in f for f in module.check(repo, artifact(["0100_e.sql"]))))
+
+        # A lone dollar sign is not a dollar quote. Treating it as one crashed the scan.
+        lone = ("select 1 where x = $ and y = 1;\n"
+                "insert into ops.after_dollar (k) values (1);\n")
+        repo = build_repo(tmp + "/r4dol", {"0100_d.sql": lone}, {"carried": {}, "excluded": {}})
+        case("a lone dollar sign does not derail the scan",
+             any("ops.after_dollar" in f for f in module.check(repo, artifact(["0100_d.sql"]))))
+
         # ------------------------------------------------------- SWEEP RESIDUE
         # Found by a mutation sweep over the whole module rather than over the last
         # fix: these two branches could be broken with the entire suite still green.
