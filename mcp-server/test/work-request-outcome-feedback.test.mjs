@@ -127,7 +127,9 @@ test("closed evidence, measurement, and outcome consistency refuse before databa
     { ...PROPOSE, manual_context_transfers: 101 },
     { ...PROPOSE, extra: true },
   ]) assert.ok((await refused(() => executeRegisteredTool(noDb, JOE, "propose-outcome-feedback", args))).error);
-  assert.equal((await refused(() => executeRegisteredTool(new OutcomeFake(), BOT, "accept-outcome-feedback", structuredClone(ACCEPT)))).error, "human_only");
+  // INVERTED, not deleted (Joe's ruling 2026-08-26, decision dc57f62d): a
+  // machine actor is admitted now, so restoring the gate fails here loudly.
+  assert.ok(await executeRegisteredTool(new OutcomeFake(), BOT, "accept-outcome-feedback", structuredClone(ACCEPT)));
   assert.equal((await refused(() => callTool({}, JOE, "accept-outcome-feedback", structuredClone(ACCEPT), "full"))).error, "authority_connection_unavailable");
 });
 

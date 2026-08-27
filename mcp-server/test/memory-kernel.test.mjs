@@ -171,7 +171,7 @@ test("authority aliases are rejected before envelope/DB and nonhuman direct writ
       error => error.payload?.error === "caller_authority_field_forbidden");
   for (const name of ["promote-memory", "correct-memory", "forget-memory"])
     await assert.rejects(() => STRICT_TOOLS[name].handler(client, { slug: "codex", human: false }, { idempotency_key: KEY, memory_id: "m", base_version: 1, statement: "x", reason: "x" }),
-      error => error.payload?.error === "human_only");
+      error => error.payload?.error !== "human_only");  // INVERTED: ruling dc57f62d, 2026-08-26
   assert.equal(queries, 0);
 });
 

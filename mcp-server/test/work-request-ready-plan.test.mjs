@@ -174,6 +174,18 @@ test("validation and human authority boundaries refuse before DB I/O", async () 
   }
   const invalidHeavy = await refused(() => executeRegisteredTool(db, JOE, "propose-ready-plan", { ...PROPOSE, heavy_build: { builder_session_ref: "x" } }));
   assert.equal(invalidHeavy.error, "invalid_heavy_build_contract");
-  const nonhuman = await refused(() => executeRegisteredTool(db, BOT, "accept-ready-plan", structuredClone(ACCEPT))); assert.equal(nonhuman.error, "human_only");
+  // INVERTED, not deleted (Joe's ruling 2026-08-26, decision dc57f62d). This
+  // test's whole subject is what refuses BEFORE database I/O, and authority is
+  // no longer one of those things. So the proof runs the other way: `db` throws
+  // the moment it is touched, and a machine actor now getting that throw —
+  // rather than a human_only payload — is exactly the evidence that the call
+  // passed the authority boundary and went on to do real work.
+  // Caught raw rather than through `refused`, which requires a ToolError: what
+  // proves the point here is the fake database's PLAIN Error arriving at all.
+  let machineError;
+  try { await executeRegisteredTool(db, BOT, "accept-ready-plan", structuredClone(ACCEPT)); }
+  catch (error) { machineError = error; }
+  assert.ok(machineError, "expected the machine actor to reach the database fake");
+  assert.notEqual(machineError?.payload?.error, "human_only");
   const noAuthority = await refused(() => callTool({}, JOE, "accept-ready-plan", structuredClone(ACCEPT), "full")); assert.equal(noAuthority.error, "authority_connection_unavailable");
 });

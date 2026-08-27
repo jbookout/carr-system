@@ -560,12 +560,18 @@ test("the scheduled builder definition cannot certify, merge, deploy, or communi
   ]) assert.match(prompt, new RegExp(boundary, "i"));
 });
 
-test("the dispatcher refuses every capability lifecycle write to a non-human actor", async () => {
+test("the dispatcher lets a non-human actor reach every capability lifecycle handler", async () => {
+  // INVERTED, not deleted (Joe's ruling 2026-08-26, decision dc57f62d). These
+  // five used to be stopped at the dispatcher before their handler ran. The
+  // point now is the opposite one, and it is still worth pinning: the actor
+  // must REACH the handler. The fake client throws the moment it is touched, so
+  // "handler must not run" arriving is proof the dispatcher passed the call
+  // through rather than refusing it on authority.
   const nonHuman = { id: "scheduled-builder", human: false, slug: "scheduled-builder" };
   for (const name of ["start-capability-project", "begin-capability-project", "prepare-capability-project", "attest-capability-project", "complete-capability-project"]) {
     await assert.rejects(
       executeRegisteredTool({ query: async () => { throw new Error("handler must not run"); } }, nonHuman, name, {}),
-      error => error instanceof RegistryToolError && error.payload.error === "human_only",
-      `${name} must be stopped by the dispatcher before its handler`);
+      error => !(error instanceof RegistryToolError && error.payload?.error === "human_only"),
+      `${name} must no longer be stopped on authority`);
   }
 });

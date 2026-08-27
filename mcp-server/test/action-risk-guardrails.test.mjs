@@ -193,8 +193,13 @@ test("set-lead is a human-only optimistic-concurrency mutation", async () => {
   assert.ok(tool.inputSchema.required.includes("base_version"));
   assert.ok(Object.hasOwn(tool.inputSchema.properties, "base_version"));
 
-  const nonhuman = await rejected(() => executeRegisteredTool(new SetLeadFake(), AGENT, "set-lead", payload()));
-  assert.equal(nonhuman.error, "human_only");
+  // INVERTED (Joe's ruling 2026-08-26, decision dc57f62d): set-lead admits a
+  // machine actor now. The optimistic-concurrency checks below are NOT
+  // authority checks and must keep firing for every actor.
+  let nonhuman;
+  try { await executeRegisteredTool(new SetLeadFake(), AGENT, "set-lead", payload()); }
+  catch (error) { nonhuman = error.payload; }
+  assert.notEqual(nonhuman?.error, "human_only");
 
   const missing = await rejected(() => executeRegisteredTool(new SetLeadFake(), JOE, "set-lead", payload({ base_version: undefined })));
   assert.equal(missing.error, "missing_required");
