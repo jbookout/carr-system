@@ -15,6 +15,15 @@
 
 import { organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { searchDoctrineSituations } from "./situation-retrieval.js";
+import { CORE_RULE_IDS, CORE_RULE_COUNT, CORE_RULE_TRIAGE_SOURCE } from "./core-rule-ids.js";
+
+const CORE_RULE_ID_SET = new Set(CORE_RULE_IDS);
+const bootByteLength = (value) => new TextEncoder().encode(
+  typeof value === "string" ? value : JSON.stringify(value)).length;
+// bytes/3.5 is the same rough estimator the boot-budget CI check uses
+// (ops/boot-budget-check.py) -- good enough for a shadow-week trend, not a
+// claim of exactness.
+const bootTokenEstimate = (bytes) => Math.round((bytes / 3.5) * 100) / 100;
 
 /** Read the count banner emitted by the generated personal/shared rule renders. */
 export function generatedRuleCount(rendered) {
@@ -1132,9 +1141,22 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           }
           return g;
         };
+        // CORE-FULL-TEXT DELIVERY (WR-000019 slice S11, boot diet). Once
+        // delivery is enforcing, a Layer 0 / CORE rule (the S7 triage's
+        // `home: "core"` set, ops/config/rule-triage.v1.json, mirrored into
+        // mcp-server/src/core-rule-ids.js because a Worker cannot read that
+        // file at request time) arrives in FULL TEXT rather than a gist. The
+        // pack/trigger index already ships alongside it (rule_delivery.pack_index,
+        // below) -- so an enforced boot recites the CORE law in full plus the
+        // map to everything else, instead of ~205 one-liners of everything.
+        // Non-core rules (pack/control layer) are UNCHANGED: gist by default,
+        // full text only via detail=full or an explicit rule_ids lookup, same
+        // as before this slice.
         const shape = (r, withQuote) => {
           const id = String(r.id).slice(0, 8);
-          if (detail === "full" || wanted.has(id.toLowerCase())) {
+          const idLower = id.toLowerCase();
+          const coreFullText = enforcing && CORE_RULE_ID_SET.has(idLower);
+          if (detail === "full" || wanted.has(idLower) || coreFullText) {
             return withQuote
               ? { id, statement: r.statement, taught_by: r.taught_by, human_quote: r.human_quote }
               : { id, statement: r.statement, human_quote: r.human_quote };
@@ -1166,7 +1188,62 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           : (scope.status === "personal"
               ? `Rules loaded: ${allShared.length} shared, ${allPersonal.length} ${who}-personal`
               : `Rules loaded: ${allShared.length} shared, 0 personal (unsponsored runtime)`);
+        // CORE PREVIEW (WR-000019 slice S11, boot diet). Shadow mode changes
+        // nothing a session receives -- deliveredShared/deliveredPersonal
+        // above are the SAME full recitation this verb has always sent. What
+        // this adds is a measurement of the OTHER future: the payload an
+        // enforced boot would send once slice S13 flips the policy row, built
+        // from the real rows this call already fetched rather than an
+        // estimate. That is the whole point of running the selector beside
+        // the recitation instead of after it -- the shadow week's evidence is
+        // real numbers, not a projection made once and never checked again.
+        //
+        // Gated to deliveryMode === "shadow" specifically (not "!enforcing"
+        // generally): a worker running ahead of migration 0291 has
+        // deliveryMode === null and must stay behavior-identical to before
+        // this slice, and an "enforced" policy with an unusable plan already
+        // has its own fallback story (rule_delivery.fallback) rather than a
+        // second preview bolted on.
+        let corePreview;
+        if (deliveryMode === "shadow") {
+          const corePool = deliveryRulePool; // allRules when not enforcing
+          const coreRulesFull = corePool
+            .filter(r => CORE_RULE_ID_SET.has(String(r.id).slice(0, 8).toLowerCase()))
+            .map(r => ({ id: String(r.id).slice(0, 8), statement: r.statement,
+              human_quote: r.human_quote, taught_by: r.taught_by,
+              scope: r.personal_to ? `${r.personal_to}-personal` : "shared" }));
+          const foundIds = new Set(coreRulesFull.map(r => r.id.toLowerCase()));
+          const missingCoreIds = CORE_RULE_IDS.filter(id => !foundIds.has(id));
+          const previewPackIndex = packIndex.map(p => ({ pack: p.pack, title: p.title,
+            triggers: p.triggers, rules: Number(p.rule_count) }));
+          const previewBytes = bootByteLength({ core_rules: coreRulesFull, pack_index: previewPackIndex });
+          const currentPayload = { shared_rules: deliveredShared.map(r => shape(r, true)),
+            personal_rules: deliveredPersonal.map(r => shape(r, false)) };
+          const currentBytes = bootByteLength(currentPayload);
+          corePreview = {
+            say: "SHADOW MEASUREMENT, not what was delivered: the S13 flip would send "
+              + "this instead of the recitation above -- CORE rules (rule-triage.v1.json's "
+              + "`home: \"core\"` set) in full text, plus the pack/trigger index, and "
+              + "nothing else by default.",
+            source: CORE_RULE_TRIAGE_SOURCE,
+            core_rule_count: CORE_RULE_COUNT,
+            core_rules_found: coreRulesFull.length,
+            ...(missingCoreIds.length ? { missing_core_ids: missingCoreIds,
+              hint: "a core id from the triage file has no matching active rule -- "
+                + "retired, renamed, or the triage file is stale against the rule table" } : {}),
+            core_rules: coreRulesFull,
+            pack_index: previewPackIndex,
+            measured: {
+              bytes_per_token: 3.5,
+              core_preview_bytes: previewBytes,
+              core_preview_tokens_est: bootTokenEstimate(previewBytes),
+              current_recitation_bytes: currentBytes,
+              current_recitation_tokens_est: bootTokenEstimate(currentBytes),
+            },
+          };
+        }
         return { ok: true,
+          ...(corePreview ? { core_preview: corePreview } : {}),
           recite: reciteCounts,
           identity: {
             organization_tenant_id: organizationTenantForActor(actor),
