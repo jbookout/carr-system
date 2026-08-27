@@ -117,6 +117,11 @@ INSTALL_EXEMPT = {
                                      "installed until its shadow/canary evidence and "
                                      "the required cutover approval exist; legacy "
                                      "schedules remain active in the meantime",
+    "com.carr.cutover-watch": "NOT YET INSTALLED — built in worktree cutover-watch "
+                              "(2026-08-27); the orchestrating session installs it "
+                              "after this branch merges to main. Remove this entry "
+                              "once that install has happened, or this line goes "
+                              "stale in the direction that hides a real gap.",
 }
 
 DRIFT: list[str] = []
