@@ -360,7 +360,7 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
                                         "registered_at": cols[4]})
                 elif len(cols) == 16 and cols[0] == "JOB" and cols[4] in {
                     "queued", "running", "retry_wait", "waiting_approval", "succeeded",
-                    "failed", "timed_out", "dead_lettered", "cancelled",
+                    "failed", "timed_out", "dead_lettered", "cancelled", "skipped",
                 }:
                     rows.append({
                         "id": cols[1], "definition_key": cols[2],
