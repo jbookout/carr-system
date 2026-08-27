@@ -3,12 +3,12 @@
   "review_state": "proposed",
   "reviewed_source_manifest": {
     "path": "audits/guidance-migration-manifest.v1.tsv",
-    "sha256": "5034d7d0a6e630abec06ba74274419e7243f0b3b341da319daad144d1d97b127"
+    "sha256": "acf5278e8c94b716d0c73ba2b601239e85e87aaca2447e31c1cf94665126f65f"
   },
   "reviewed_base_inventory": {
     "path": "ops/config/rule-enforcement-map.json",
-    "sha256": "b513180786cf7212877870ab3bc14c03bb78b17b3397eb6ee474187a152b13f2",
-    "standing_source_count": 205,
+    "sha256": "54ed8c4dce8cd8b1e4c6824a22cd3a5b20987d293c4357a79ba4e1cc2dc59b7f",
+    "standing_source_count": 194,
     "excluded_rule_surface": "intro_politics"
   },
   "proposed_constitution_guidance_ids": [
@@ -169,23 +169,6 @@
           "role": "governs",
           "weight": 1,
           "rationale": "The active end-state ruling governs real planned growth while preserving the source rule's discipline against speculative complexity and its requirement to state cost and complexity honestly."
-        }
-      ]
-    },
-    {
-      "guidance_id": "rule-d367188d-whole-v1",
-      "concept_key": "consolidate-duplicate-authorities",
-      "label": "Consolidate duplicate authorities",
-      "definition": "Choosing one surviving authority, migrating its consumers, and retiring parallel versions instead of maintaining two sources of truth.",
-      "phrase": "consolidate duplicate sources of truth",
-      "mappings": [
-        {
-          "concept_key": "consolidate-duplicate-authorities",
-          "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture",
-          "doctrine_section_id": "1debbdd7-9880-47f7-81a6-55e788716c57",
-          "role": "governs",
-          "weight": 1,
-          "rationale": "The active deprecation and knowledge-architecture section governs consolidation while preserving the proactive rule not to create two maintained authorities in the first place."
         }
       ]
     },

@@ -35,6 +35,8 @@
 -- admit. 'system' actors are still excluded: nothing in this path is meant to
 -- run as an unattended system identity with no accountable sponsor.
 
+begin;
+
 create or replace function ops.register_execution_environment_provider(p_manifest jsonb, p_idempotency_key uuid) returns table(provider_ref text, manifest_digest text, state text, replayed boolean)
     language plpgsql security definer
     set search_path to 'ops', 'public', 'pg_temp'
@@ -152,6 +154,8 @@ end $$;
 
 grant execute on function ops.register_execution_environment_provider(p_manifest jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.transition_proposed_eval_candidate(p_work_request text, p_candidate_ref text, p_next_state text, p_decision_basis jsonb, p_idempotency_key uuid) to carr_writer;
+
+commit;
 
 do $$
 declare def text;

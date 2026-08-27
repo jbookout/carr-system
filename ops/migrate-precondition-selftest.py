@@ -34,6 +34,7 @@ from __future__ import annotations
 import pathlib
 import re
 import sys
+import hashlib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
@@ -152,11 +153,38 @@ def test_source_enforces_the_contract() -> None:
           "an internal commit would expose schema before its ledger-bound epoch")
 
 
+def test_historical_transaction_artifact_is_exact() -> None:
+    artifacts = migrate.HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS
+    expected_names = {
+        "0344_demote_evidence_activation_bookkeeping.sql",
+        "0345_governance_queue_projection.sql",
+        "0348_pr_only_main_ruleset_control.sql",
+        "0349_versioned_rule_amendment.sql",
+        "0351_legacy_rule_lifecycle_admission.sql",
+    }
+    check("the historical transaction-control grandfather is five exact files",
+          set(artifacts) == expected_names,
+          "the exception must never widen to another migration")
+    exact = True
+    drift_refused = True
+    for name in expected_names:
+        sql = (REPO / "migrations" / name).read_text(encoding="utf-8")
+        digest = hashlib.sha256(sql.encode()).hexdigest()
+        exact = exact and artifacts.get(name) == digest \
+            and migrate.contains_transaction_control(sql)
+        changed_digest = hashlib.sha256((sql + "\n-- drift probe").encode()).hexdigest()
+        drift_refused = drift_refused and artifacts.get(name) != changed_digest
+    check("every grandfather digest equals its immutable applied artifact", exact,
+          "an edited or transaction-free file must not match a historical exception")
+    check("one-byte drift cannot reuse any historical grandfather", drift_refused)
+
+
 def main() -> int:
     print("migrate-precondition-selftest")
     test_table_shape()
     test_probe_is_checked_before_the_file_runs()
     test_source_enforces_the_contract()
+    test_historical_transaction_artifact_is_exact()
     print()
     print(f"migrate-precondition-selftest: {len(PASS)}/{len(PASS) + len(FAIL)} passed")
     if FAIL:

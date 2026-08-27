@@ -58,6 +58,8 @@
 -- If either fact is wrong for either control, this migration fails loudly
 -- (naming which one) rather than removing enforcement quietly.
 
+begin;
+
 -- ── seed the new control, insert-only (migration 0274's pattern) ───────────
 insert into ops.enforcement_control_catalog
     (control_key, implementation_ref, test_ref, enforcement_class, installed, verified_at)
@@ -218,3 +220,5 @@ begin
     raise exception '0348 FAILED: gate_edit is gone — an unrelated live control was removed';
   end if;
 end $$;
+
+commit;

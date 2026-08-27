@@ -109,6 +109,22 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # a number from it, so widening here cannot desync a second reader.
 NAME_RE = re.compile(r"^\d{4}[a-z]?_[a-z0-9_]+\.sql$")
 OUTER_TRANSACTION_MIGRATION = "0339_"
+# Production's immutable ledger and the canonical schema snapshot already bind
+# this one historical artifact byte-for-byte. It predates enforcement of the
+# outer-transaction scanner on its merge lane; allow only its exact recorded
+# digest so the scanner cannot become a general transaction-control bypass.
+HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS = {
+    "0344_demote_evidence_activation_bookkeeping.sql":
+        "50e2b885db6b92e0a24f0a90fad7b48449f347007d8683c27adf0a4be1a75def",
+    "0345_governance_queue_projection.sql":
+        "c1788dd8ee23d7a7a6dfc88b17d4a11c67a9ad5057c8bb97e3112035863be3ba",
+    "0348_pr_only_main_ruleset_control.sql":
+        "ab901c8e528109bb56375403f0ebb350758678079d7727c9ba24042b0d0bbcdb",
+    "0349_versioned_rule_amendment.sql":
+        "4fb76045cf8ce46ba793a90d0582e6b095a17ba63edf57e91c548e7850ba37f0",
+    "0351_legacy_rule_lifecycle_admission.sql":
+        "59439e1a12c035e61578b85c765d7bbd131bf555b95bbecd49c6d675b5c4d808",
+}
 TRANSACTION_CONTROL_RE = re.compile(
     r"(?is)^\s*(?:(?:begin|commit|end|rollback|abort)\b|"
     r"(?:start|prepare)\s+transaction\b)"
@@ -249,16 +265,18 @@ def load_migrations() -> list[tuple[str, str, str]]:
             if not NAME_RE.match(p.name):
                 fail(f"bad migration filename (want NNNN_name.sql): {p.name}")
             sql = p.read_text()
+            digest = hashlib.sha256(sql.encode()).hexdigest()
             # SIEP-12 makes the migration file, its immutable ledger row, the
             # sealed mutation-registry successor, and the resulting policy
             # epoch one transaction. An internal COMMIT would expose schema
             # with the old epoch before the runner records the file hash.
-            if p.name >= OUTER_TRANSACTION_MIGRATION and contains_transaction_control(sql):
+            if p.name >= OUTER_TRANSACTION_MIGRATION and contains_transaction_control(sql) \
+                    and HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS.get(p.name) != digest:
                 fail(
                     f"{p.name} contains explicit transaction control; migrations from "
                     f"{OUTER_TRANSACTION_MIGRATION} onward must use the runner's single transaction"
                 )
-            out.append((p.name, sql, hashlib.sha256(sql.encode()).hexdigest()))
+            out.append((p.name, sql, digest))
     if not out:
         fail("no .sql files in migrations/")
     try:

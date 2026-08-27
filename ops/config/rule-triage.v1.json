@@ -2,21 +2,14 @@
  "schema_version": 1,
  "work_request": "WR-000019",
  "slice": "s7",
- "generated_note": "Triage of the 219 active rules into gate/jit/core/gone homes. Classification and tooling only per S7 scope boundary; no rule was retired, amended, or taught by producing this file. Source data: standing-context (205 rules, full text) + ops/config/rule-enforcement-map.json rule_controls (all 219, including the 14 vendor-intros-pack rules that standing-context does not surface to this session -- see defect ad4e25bd-3c98-4334-a7d3-f53c8158711f).",
+ "generated_note": "Triage of the 219 active rules into gate/jit/core/gone homes. Classification and tooling only per S7 scope boundary; no rule was retired, amended, or taught by producing this file. Source data: standing-context (205 rules, full text) + ops/config/rule-enforcement-map.json rule_controls (all 219, including the 14 vendor-intros-pack rules that standing-context does not surface to this session -- see defect ad4e25bd-3c98-4334-a7d3-f53c8158711f). ROWS PRUNED 2026-08-27 (WR-000019 rule-retirement batch): Joe accepted and executed the batch this slice's 11 GONE rows named (each already carrying its merge_target in this file); the 11 rows are removed from `rules` and `counts.gone` moves 11 -> 0, keeping this file in exact id-for-id parity with the now-208-row ops/config/rule-enforcement-map.json rule_controls, per ops/rule-triage-selftest.py's coverage checks. The 219/205 figures above describe the file as generated at S7 time and are left as historical record.",
  "counts": {
   "gate": 62,
   "core": 20,
   "jit": 126,
-  "gone": 11
+  "gone": 0
  },
  "rules": [
-  {
-   "id": "006a7eaa",
-   "title_gist": "TO GET SOMETHING APPROVED, SHOW THE FINISHED THING \u2014 DO NOT SEND A WRITTEN REQUEST FOR PERMISSION",
-   "home": "gone",
-   "reason": "Same 'stop asking, act' family applied as a specific tactic (show the finished thing instead of a written request); folds in as the survivor's 'artifact over proposal' corollary.",
-   "merge_target": "aa411351"
-  },
   {
    "id": "015183f5",
    "title_gist": "OPERATE PROCEDURALLY: DEFINE BY DECISION PROCEDURE, NOT BY DESCRIPTION",
@@ -84,13 +77,6 @@
    "title_gist": "DATABASE FIRST; MARKDOWN ONLY WHERE A MACHINE REQUIRES A FILE",
    "home": "core",
    "reason": "Database-first write law: content goes through verbs, markdown only where a machine literally requires a file. The one fact every session must hold before writing anything."
-  },
-  {
-   "id": "14e0408b",
-   "title_gist": "THE COO SEAT DECIDES AND REPORTS; IT DOES NOT ASK FOR PERMISSION ON OBVIOUS YESES",
-   "home": "gone",
-   "reason": "COO-decides ancestor of the 'stop asking permission' family: restates the audience/obvious-yeses posture that aa411351 later closed a genuine-fork loophole in (A28 already flags this exact pair as a collapse candidate).",
-   "merge_target": "aa411351"
   },
   {
    "id": "152ceb65",
@@ -390,13 +376,6 @@
    }
   },
   {
-   "id": "3fa422b7",
-   "title_gist": "AUTONOMOUS FINALIZATION IS THE OPERATING PROCEDURE FOR PLANNED SYSTEM-BUILD WORK",
-   "home": "gone",
-   "reason": "Scopes the same non-escalation posture to git/gh delivery mechanics (commit/push/PR/merge). Its distinct value \u2014 a permission-allowlist entry for the git/gh command family, plus a transcript tripwire \u2014 should carry forward as an implementation note on the survivor, not stand as a fifth restatement of the posture.",
-   "merge_target": "aa411351"
-  },
-  {
    "id": "4039b9b5",
    "title_gist": "DOCTRINE WRITING IS MODEL-AGNOSTIC. Any qualified seat writes doctrine \u2014 Fable, Sol 5.6, Opus, or whatever",
    "home": "gate",
@@ -603,13 +582,6 @@
    "carrying_control": "record_research"
   },
   {
-   "id": "581cb3fe",
-   "title_gist": "THE CEO SEAT'S OPERATING CONTRACT \u2014 the mechanical half of rule 75c2e4c9, which failed within hours of",
-   "home": "gone",
-   "reason": "CEO-seat ancestor and 75c2e4c9's own mechanical half, which the rule's own text says failed within hours because it named a role rather than detectable events. Its disposition/verification-tier/boundary-sweep content is genuinely useful and lives on inside CORE rule c20dc3d5 (the escalation contract), not as a sixth restatement of the permission posture.",
-   "merge_target": "aa411351"
-  },
-  {
    "id": "58b44ccb",
    "title_gist": "A SESSION THAT CANNOT REACH THE CODE REPO STOPS, AND IF IT IS A CLAUDE CODE CLOUD SESSION IT TELEPORTS RATHER",
    "home": "core",
@@ -720,13 +692,6 @@
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
    "jit_trigger_hint": "Fires on the specific moment named in the rule: On any non-trivial problem or decision, apply the crux discipline before generating\u2026"
-  },
-  {
-   "id": "634a2d94",
-   "title_gist": "Do not stop for permission on mechanical steps inside an approved task \u2014 Joe's approval is standing",
-   "home": "gone",
-   "reason": "Personal-file restatement of 'don't stop for permission on mechanical steps inside an approved task' \u2014 folds into the survivor's 'internal work is the session's own call' clause.",
-   "merge_target": "aa411351"
   },
   {
    "id": "6437ae15",
@@ -842,13 +807,6 @@
    "jit_trigger_hint": "Delivered by pack(s) scheduled-automation \u2014 fires on: PROJECTING A LONG JOB: EXCLUDE DEAD TIME, INCLUDE CRASH OVERHEAD, AND SAY WHICH YOU DID"
   },
   {
-   "id": "75c2e4c9",
-   "title_gist": "THE MAIN SESSION IS THE CEO AND THE FINAL CALL",
-   "home": "gone",
-   "reason": "CEO-seat ancestor. Its identity half (main session is the final call, specialists propose) is worth keeping as narrative context; its operative gate clause is the one now drawn more precisely by aa411351. Superseded.",
-   "merge_target": "aa411351"
-  },
-  {
    "id": "767f9b41",
    "title_gist": "A confirmation question is an audit trigger \u2014 actually re-verify, then report honestly what was and wasn't at",
    "home": "gate",
@@ -908,13 +866,6 @@
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
    "jit_trigger_hint": "Delivered by pack(s) surface-doctrine \u2014 fires on: User-friendly by law: every human-facing surface and every choice handed to Joe/Dell\u2026"
-  },
-  {
-   "id": "8117b414",
-   "title_gist": "DO THE BENEFICIAL THING, THEN TELL JOE WHAT YOU DID",
-   "home": "gone",
-   "reason": "'Do the beneficial thing, then tell Joe' restates Joe's 2026-08-12 ruling with the identical four-item carve-out (client-facing, money, destructive/irreversible, invented standing rules) the survivor already draws by audience.",
-   "merge_target": "aa411351"
   },
   {
    "id": "81709f57",
@@ -1014,13 +965,6 @@
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
    "jit_trigger_hint": "Fires on the specific moment named in the rule: BE THE SAFETY CHECK FOR BOTH PARTNERS, EQUALLY AND OUT LOUD"
-  },
-  {
-   "id": "937252fb",
-   "title_gist": "EXERCISE THE WHOLE PATH BEFORE SAYING A CAPABILITY IS LIVE",
-   "home": "gone",
-   "reason": "Restates 97326357's 'a claim about a surface becomes doctrine only after a live test' with a 2026-08-16 case study. 97326357 survives because it already carries real hook citations (conduct-stop-gate.py, context-handoff-gate.py, stop_latch.py) and the more general framing.",
-   "merge_target": "97326357"
   },
   {
    "id": "94806da2",
@@ -1413,13 +1357,6 @@
    "jit_trigger_hint": "Delivered by pack(s) records-intake \u2014 fires on: When ANY new contact enters the system \u2014 lead, client, vendor, or a party met in passing\u2026"
   },
   {
-   "id": "d367188d",
-   "title_gist": "Consolidation bias: one source of truth + derive-on-demand wins every maintain-two-versions choice",
-   "home": "gone",
-   "reason": "Terser restatement of 0f38532e's single-source-of-truth law ('consolidation bias... derive-on-demand wins'). 0f38532e survives because it carries the concrete database/markdown-render pattern this shorter version only alludes to.",
-   "merge_target": "0f38532e"
-  },
-  {
    "id": "d3774a28",
    "title_gist": "Concept coherence is his edge: when the conceptual model and file reality diverge, surface it explicitly and",
    "home": "jit",
@@ -1517,20 +1454,6 @@
    "home": "jit",
    "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
    "jit_trigger_hint": "Fires on the specific moment named in the rule: ASSESSMENT VS ACTION: \"examine this\", \"what do you think\", \"is this worth it\" means\u2026"
-  },
-  {
-   "id": "dff58fef",
-   "title_gist": "CONSTRAINT, binding at the moment a session is about to end a message with a request for Joe's approval",
-   "home": "gone",
-   "reason": "'Activate and execute, do not ask' states the same audience-gate exception list under a different name; its worked example (draft a rule from Joe's words, then activate in the same pass) carries forward as an illustration on the survivor.",
-   "merge_target": "aa411351"
-  },
-  {
-   "id": "e065aa82",
-   "title_gist": "INTERNAL DECISIONS ARE THE SYSTEM'S TO MAKE AND RECORD, NOT TO PARK ON JOE",
-   "home": "gone",
-   "reason": "Applies the identical audience test to decision-parking specifically ('internal decisions are the system's to make'); the test itself (client-facing/public/money/irreversible) is aa411351's \u2014 this is one more instance of it, not a second test.",
-   "merge_target": "aa411351"
   },
   {
    "id": "e313a3ca",
