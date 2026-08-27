@@ -1,0 +1,885 @@
+{
+  "_doc": [
+    "Gate lifecycle metadata -- WR-000019 slice S5.",
+    "",
+    "One entry per gate script actually wired in ops/config/hooks.json (38 gates as of 2026-08-27; the count is re-derivable any time by walking that file the same way ops/hook-telemetry-rollup.py's wiring() does). A gate wired ONLY through .claude/settings.json (delegation-gate.py, worktree-self-plumb.py, machine-converge.py) is a different wiring surface and out of this slice's DoD wording -- it is not listed here.",
+    "",
+    "FIELDS.",
+    "  failure_class   one line, what this gate exists to catch. Reused verbatim from ops/config/hook-catch-classes.json's catch_class where an entry already existed there (36 of 38); the two gaps (rule-pack-preuse-reselection.py, rule-pack-drift-gate.py) are new one-liners drawn from the gate's own docstring.",
+    "  catch_metric    where a real catch is visible in a log already on disk, and the rule for recognizing one there. See ops/gate-lifecycle-report.py's module docstring for the exact evaluator per true_positive.kind.",
+    "  review_date     a static calendar checkpoint (90 days from admission, uniform first pass -- provisional, like the rollup's BUDGET_MS). A downgrade/retirement PROPOSAL from the weekly report can and should trigger review earlier than this date; this date is the backstop for a gate the report never flags.",
+    "  mode            enforcing | announce | shadow, matching ops/hook-meter-run.py's own register vocabulary (block/reopen vs announce vs silent). Determined from the gate's OWN source (a live sys.exit(2) / return 2 / {'decision':'block'} / permissionDecision deny-or-ask path reachable in current code == enforcing; a live additionalContext-only path == announce; no live surfaced effect == shadow), cross-checked against the two gates that self-declare shadow status in their own docstrings (rule-pack-preuse-reselection.py, rule-pack-drift-gate.py) and against the Stop-gate rationing CLAUDE.md and hook-meter-run.py's docstring both name (2026-08-16 chat-lint-gate.py, 2026-08-23 map-architecture/context-handoff/stale-claim/loose-work/unread-artifact-gate.py -- all demoted from blocking to announcing; only conduct-stop-gate.py, completion-evidence-gate.py and the execve'd drift-assertion-gate.py kept the ability to reopen a turn).",
+    "",
+    "THIS FILE PROPOSES NOTHING BY ITSELF. ops/gate-lifecycle-report.py reads it plus the logs above and computes proposals; nothing here changes a gate's actual wiring or mode -- that stays a human/PR act."
+  ],
+  "gates": {
+    "bash-write-gate.py": {
+      "failure_class": "the Bash door onto record-home-gate and one-repo-gate's policies",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "bash-write-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for bash-write-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "blocker-decider-gate.py": {
+      "failure_class": "blocker recorded with no decider named",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "blocker-decider-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for blocker-decider-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "canonical-edit-gate.py": {
+      "failure_class": "edit aimed at the canonical checkout instead of a worktree",
+      "catch_metric": {
+        "log_path": "out/conduct-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "canonical-edit-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row for canonical-edit-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
+        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "chat-lint-carryover.py": {
+      "failure_class": "carryover of the previous turn's lint",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "chat-lint-carryover.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for chat-lint-carryover.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "chat-lint-gate.py": {
+      "failure_class": "writing lint on the turn's prose",
+      "catch_metric": {
+        "log_path": "out/conduct-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "chat-lint-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row for chat-lint-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
+        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "close-before-open-gate.py": {
+      "failure_class": "new work opened while prior work is unclosed",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "close-before-open-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for close-before-open-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "completion-evidence-gate.py": {
+      "failure_class": "completion claimed without evidence",
+      "catch_metric": {
+        "log_path": "out/completion-evidence-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "completion-evidence-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row carries a non-empty 'reason' for the reopen/deny it recorded; presence in the window is the catch.",
+        "note": "dedicated log named in the S5 design guidance."
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "conduct-stop-gate.py": {
+      "failure_class": "conduct violation in the turn being ended",
+      "catch_metric": {
+        "log_path": "out/conduct-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "conduct-stop-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row for conduct-stop-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
+        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "context-handoff-gate.py": {
+      "failure_class": "context ending with no handoff written",
+      "catch_metric": {
+        "log_path": "out/context-handoff.jsonl",
+        "log_format": "jsonl",
+        "ts_field": null,
+        "hook_filter": {
+          "field": "hook",
+          "equals": "context-handoff-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row is a band crossing (70 or 88 pct of context window used); presence would be the catch, but the log carries no timestamp field at all, so a windowed count cannot be computed from it today -- reported as data_unavailable rather than guessed at zero.",
+        "note": "out/context-handoff.jsonl has no 'ts' field (checked 2026-08-26/27); this gate is excluded from downgrade proposals until that gap is closed."
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "costar-lane-gate.py": {
+      "failure_class": "browser lane discipline",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "costar-lane-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for costar-lane-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "draft-export-gate.py": {
+      "failure_class": "draft exported outside the sanctioned path",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "draft-export-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for draft-export-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "drift-assertion-gate.py": {
+      "failure_class": "drift asserted at turn end without a record",
+      "catch_metric": {
+        "log_path": "out/hook-guard.log",
+        "log_format": "text",
+        "ts_field": null,
+        "hook_filter": {
+          "kind": "text_prefix_field",
+          "field_index": 0,
+          "equals": "drift-assertion-gate"
+        },
+        "true_positive": {
+          "kind": "text_regex",
+          "pattern": "^drift-assertion-gate BLOCK "
+        },
+        "rule_description": "a hook-guard.log line 'drift-assertion-gate BLOCK hits=N' -- the gate actually reopened the turn over an unrecorded drift assertion. Unlike drift-claim-gate.py's log() (which prefixes every line with an ISO timestamp), this gate's own log() writes `f\"drift-assertion-gate {line}\\n\"` with NO leading timestamp (checked 2026-08-27, hooks/drift-assertion-gate.py:118-119) -- so a windowed true-positive count cannot be computed from this log at all, and is reported as a data gap rather than guessed at zero.",
+        "note": "same execve situation as drift-claim-gate.py (see its note: this gate never reaches out/hook-telemetry.jsonl either), PLUS its own hook-guard.log lines carry no timestamp -- a real observability gap in the gate's own logging, worth a follow-up, but hooks/*.py is out of this slice's scope to edit."
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "drift-claim-gate.py": {
+      "failure_class": "drift claimed without a record",
+      "catch_metric": {
+        "log_path": "out/hook-guard.log",
+        "log_format": "text",
+        "ts_field": "leading_iso",
+        "hook_filter": {
+          "kind": "text_prefix_field",
+          "field_index": 1,
+          "equals": "drift-claim-gate"
+        },
+        "true_positive": {
+          "kind": "text_regex",
+          "pattern": "^\\S+ drift-claim-gate CONTEXT "
+        },
+        "rule_description": "a hook-guard.log line 'TS drift-claim-gate CONTEXT tool=... hits=N' -- the gate injected its verification reminder because a completion/drift claim needed a fresh record behind it.",
+        "note": "run-record-gate.py execve's this gate, replacing the process before hook-meter-run.py's own telemetry write runs, so it never appears in out/hook-telemetry.jsonl (confirmed empty for hook== 'run-record-gate.py' during this slice's research). out/hook-guard.log is a plain-text log ('TS name VERDICT(class) detail' per line, no ts field to parse structurally) -- true_positive matches the line shape directly instead of a JSON field."
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "escalation-gate.py": {
+      "failure_class": "question escalated to the human that the system should settle",
+      "catch_metric": {
+        "log_path": "out/conduct-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "escalation-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row for escalation-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
+        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "executor-tier-gate.py": {
+      "failure_class": "subagent dispatched with no named model tier",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "executor-tier-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for executor-tier-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "gate-edit-gate.py": {
+      "failure_class": "quiet edit of an enforcement file (hooks/*.py, hooks.json, settings.json, gate-baseline.json)",
+      "catch_metric": {
+        "log_path": "out/conduct-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "gate-edit-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row for gate-edit-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
+        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "gate-integrity.py": {
+      "failure_class": "gate content or wiring drifted from the blessed baseline",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "gate-integrity.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for gate-integrity.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "git-writer-gate.py": {
+      "failure_class": "git write from a session that does not own the tree",
+      "catch_metric": {
+        "log_path": "out/conduct-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "git-writer-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row for git-writer-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
+        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "guard-unattended.py": {
+      "failure_class": "destructive-or-exfiltrating action from a session (rm/force-git/key-read/unknown-host/destructive-SQL)",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "guard-unattended.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for guard-unattended.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "ledger-sweep.py": {
+      "failure_class": "ruling in the turn that belongs in the decision ledger",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "ledger-sweep.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for ledger-sweep.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "lint-gate.py": {
+      "failure_class": "writing lint on a file just written",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "lint-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for lint-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "loose-work-gate.py": {
+      "failure_class": "turn ended with loose work outstanding",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "loose-work-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for loose-work-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "map-architecture-gate.py": {
+      "failure_class": "map work finished without the doctrine front door",
+      "catch_metric": {
+        "log_path": "out/map-architecture-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "map-architecture-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row is an announce-catch (map task finished without the doctrine front door); presence in the window is the catch.",
+        "note": "dedicated log named in the S5 design guidance."
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "model-floor-gate.py": {
+      "failure_class": "work below the model floor for its class",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "model-floor-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for model-floor-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "one-repo-gate.py": {
+      "failure_class": "code written outside the repo",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "one-repo-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for one-repo-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "peer-broadcast-gate.py": {
+      "failure_class": "broadcast to peer sessions",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "peer-broadcast-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for peer-broadcast-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "record-home-gate.py": {
+      "failure_class": "record written to a file instead of the database (rule 14181e60)",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "record-home-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for record-home-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "rule-pack-drift-gate.py": {
+      "failure_class": "turn's observed work outran the rule packs it actually loaded (rule-delivery drift)",
+      "catch_metric": {
+        "log_path": "out/rule-delivery-shadow.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "rule-pack-drift-gate"
+        },
+        "true_positive": {
+          "kind": "field_truthy",
+          "field": "missing"
+        },
+        "rule_description": "a row whose 'missing' list is non-empty -- the turn's observed work needed a rule pack the session never loaded. The gate's own block path (print {'decision':'block',...}) is gated behind result['mode']=='enforced', which is not the case today (rows record mode='shadow'), so 'missing' non-empty is the closest available signal to an actual would-have-caught.",
+        "note": "shadow mode: dead block code, live observation."
+      },
+      "review_date": "2026-11-24",
+      "mode": "shadow"
+    },
+    "rule-pack-preuse-reselection.py": {
+      "failure_class": "scheduled/dynamic-domain rule pack not reselected before the tool call it governs",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "rule-pack-preuse-reselection.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for rule-pack-preuse-reselection.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "shadow"
+    },
+    "rule-shape-gate.py": {
+      "failure_class": "taught rule with no trigger or audit shape",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "rule-shape-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for rule-shape-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "scheduled-run-record.py": {
+      "failure_class": "scheduled run finishing with no run row",
+      "catch_metric": {
+        "log_path": "out/scheduled-run-record.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": null,
+        "true_positive": {
+          "kind": "field_not_in",
+          "field": "why",
+          "values": [
+            "fail-open-v1",
+            "already-fired",
+            "parse-error"
+          ]
+        },
+        "rule_description": "a row whose 'why' is anything other than the three known housekeeping/fail-open reasons -- i.e. the gate actually closed Program 3's gap (job failure -> durable run/incident/Work Request) instead of allowing past its own bootstrap noise. All 14 rows on file today are housekeeping, so this gate currently reads as a standing quiet window (see note).",
+        "note": "the gate's real catch (a filed incident/Work Request) lands in the record layer via a verb call, not in this local file -- this metric can only see the gate's OWN allow/bookkeeping log, so a quiet reading here is a floor, not proof nothing was ever caught."
+      },
+      "review_date": "2026-11-24",
+      "mode": "shadow"
+    },
+    "settings-change-gate.py": {
+      "failure_class": "change to installed machine configuration",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "settings-change-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for settings-change-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "staging-attribution-gate.py": {
+      "failure_class": "staged change with no attributed owner",
+      "catch_metric": {
+        "log_path": "out/staging-attribution-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "staging-attribution-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row written to out/staging-attribution-gate.jsonl already represents a flagged pattern (classes/patterns non-empty by construction), so presence in the window is the catch.",
+        "note": "dedicated log named in the S5 design guidance."
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "staging-observation-tracker.py": {
+      "failure_class": "observation tracking for staged work",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "staging-observation-tracker.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for staging-observation-tracker.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "shadow"
+    },
+    "stale-claim-gate.py": {
+      "failure_class": "claim asserted from stale state",
+      "catch_metric": {
+        "log_path": "out/conduct-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "stale-claim-gate"
+        },
+        "true_positive": {
+          "kind": "row_exists"
+        },
+        "rule_description": "every row for stale-claim-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
+        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "unread-artifact-gate.py": {
+      "failure_class": "artifact referenced but never read",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "unread-artifact-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for unread-artifact-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "announce"
+    },
+    "weekend-quiet-gate.py": {
+      "failure_class": "outbound message in quiet hours",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "weekend-quiet-gate.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for weekend-quiet-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "write-effect-check.py": {
+      "failure_class": "declared-versus-actual effect of a write",
+      "catch_metric": {
+        "log_path": "out/hook-telemetry.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "write-effect-check.py"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "register",
+          "values": [
+            "block",
+            "reopen",
+            "announce"
+          ]
+        },
+        "rule_description": "a row for write-effect-check.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
+        "note": ""
+      },
+      "review_date": "2026-11-24",
+      "mode": "shadow"
+    }
+  }
+}
