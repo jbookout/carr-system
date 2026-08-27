@@ -458,6 +458,45 @@ def main():
         case("a lone dollar sign does not derail the scan",
              any("ops.after_dollar" in f for f in module.check(repo, artifact(["0100_d.sql"]))))
 
+        # ---------------------------------------------------------------- R5
+        # Branches a 448-mutant sweep proved change the answer on the real corpus
+        # while every case stayed green — the same untested-branch shape that hid
+        # the normalise() fold.
+
+        # CREATE TABLE is only a seed when it has an AS SELECT tail. Without that
+        # test every plain CREATE TABLE becomes a seed, and the check would report
+        # most of the schema.
+        repo = build_repo(tmp + "/r5ct",
+                          {"0100_ct.sql": "create table ops.plain_table (k text primary key);\n"},
+                          {"carried": {}, "excluded": {}})
+        case("a plain CREATE TABLE with no AS SELECT is not a seed",
+             module.check(repo, artifact(["0100_ct.sql"])) == [])
+
+        # A bare slash is division, not the start of a block comment. Treating it
+        # as one swallows the rest of the migration.
+        repo = build_repo(tmp + "/r5div",
+                          {"0100_div.sql": "insert into ops.divided (k) select 10 / 2;\n"
+                                           "insert into ops.after_slash (k) values (1);\n"},
+                          {"carried": {},
+                           "excluded": {"ops.divided": "runtime", "ops.after_slash": "runtime"}})
+        case("a division slash does not open a block comment and swallow the rest",
+             module.check(repo, artifact(["0100_div.sql"])) == [])
+
+        # The character immediately after a closing quote belongs to the next
+        # statement. Consuming it too shifts every following boundary.
+        # Two literals separated by one character. Consuming a character too many
+        # after the closing quote eats the comma AND the next opening quote, so what
+        # follows is read inside-out and every later boundary shifts — masking the
+        # insert entirely. One adjacent statement is not enough to show this; the
+        # second literal is what makes the shift observable.
+        repo = build_repo(tmp + "/r5adj",
+                          {"0100_adj.sql": "select 'a','b';\n"
+                                           "insert into ops.adjacent (k) values (1);\n"
+                                           "comment on table ops.t is 'y';\n"},
+                          {"carried": {}, "excluded": {}})
+        case("adjacent string literals do not shift every boundary after them",
+             any("ops.adjacent" in f for f in module.check(repo, artifact(["0100_adj.sql"]))))
+
         # ------------------------------------------------------- SWEEP RESIDUE
         # Found by a mutation sweep over the whole module rather than over the last
         # fix: these two branches could be broken with the entire suite still green.

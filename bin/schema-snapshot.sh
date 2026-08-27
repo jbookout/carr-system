@@ -1118,6 +1118,38 @@ sed -e '/^-- Dumped from database version/d' \
     -e '/^\\unrestrict /d' "$TMP" | normalise_eof > "$TMP.clean"
 mv "$TMP.clean" "$TMP"
 
+# THE DOCTRINE VALIDATION REGISTRY — the seventh instance, and the first one the
+# check below found by being WRONG rather than by being silent. It sat in the
+# classification as "runtime evidence", which it is not: doctrine_gate_check is
+# the registry itself, and 0075's own comment states the contract — "A NEW GATE
+# IS A FUNCTION AND A ROW". Results live in doctrine_gate_finding.
+#
+# WHAT A REBUILD LOST. 0075 seeds 11 rows, every one severity=block and enabled,
+# and nothing writes the table at runtime. runGates() in mcp-server/src/doctrine.js
+# selects the enabled checks and treats an empty set as nothing to enforce, so a
+# database rebuilt from a snapshot carrying 0075's ledger row but not its rows ran
+# NO doctrine gates at all and let every write through — silently, because zero
+# findings is indistinguishable from zero problems.
+#
+# Rendered from the source rather than hand-listed, and column-list-free so a
+# later column cannot rot the block.
+cat >> "$TMP" <<'DOCTRINE_GATE_CHECK_HEADER'
+
+-- CARR DOCTRINE VALIDATION REGISTRY (bin/schema-snapshot.sh) — the gate rows
+-- themselves, not their findings. Without these a rebuilt database enforces no
+-- doctrine gates and says nothing about it.
+DOCTRINE_GATE_CHECK_HEADER
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'DOCTRINE_GATE_CHECK_ROWS'
+select format(
+  'insert into doctrine_gate_check select * from jsonb_populate_record(null::doctrine_gate_check, %L::jsonb) on conflict (check_key) do nothing;',
+  to_jsonb(g)) from doctrine_gate_check g order by g.check_key;
+DOCTRINE_GATE_CHECK_ROWS
+then
+  echo "schema-snapshot: could not render the doctrine validation registry — nothing written" >&2
+  exit 1
+fi
+
 # THE SIXTH INSTANCE WAS CAUGHT BY HAND; THE SEVENTH IS CAUGHT HERE. Every block
 # above this line was written one at a time, each after a database rebuilt from
 # this file failed a db-gate days later: the role preamble, the control catalog,
