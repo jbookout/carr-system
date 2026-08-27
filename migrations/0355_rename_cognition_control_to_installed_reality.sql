@@ -16,8 +16,8 @@ delete from ops.enforcement_control_catalog
 insert into ops.enforcement_control_catalog
   (control_key,enforcement_class,implementation_ref,test_ref,installed,verified_at)
 values
-  ('control-plane-workflow-manifest','transactional_schema',
-   'ops/config/control-plane-workflows.v1.json','ops/control-plane-selftest.py',
+  ('control-plane-workflow-manifest','deny_gate',
+   'ops/config/control-plane-workflows.v1.json','ops/control-plane-selftest.py; ops/control-plane-db-gate.py',
    true,now())
 on conflict (control_key) do update
   set enforcement_class=excluded.enforcement_class,

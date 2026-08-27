@@ -11,7 +11,7 @@
     "completion_evidence": "stop_gate",
     "conduct_stop": "stop_gate",
     "context_rail": "stop_gate",
-    "control-plane-workflow-manifest": "transactional_schema",
+    "control-plane-workflow-manifest": "deny_gate",
     "costar_lane": "deny_gate",
     "deal_guard": "transactional_schema",
     "delegation_names_model_and_effort": "deny_gate",

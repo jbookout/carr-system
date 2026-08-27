@@ -505,7 +505,8 @@
         "ops/config/control-plane-workflows.v1.json"
       ],
       "test": [
-        "ops/control-plane-selftest.py"
+        "ops/control-plane-selftest.py",
+        "ops/control-plane-db-gate.py"
       ]
     },
     "costar_lane": {
