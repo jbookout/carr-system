@@ -238,7 +238,7 @@ SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 # config-as-code reconciles the rest of the machine.  These adapters have their
 # own evidence/approval cutover gates; installing one early would turn a source
 # artifact into an active schedule before those gates pass.
-DEFINITION_ONLY = {
+DEFINITION_ONLY: dict[str, str] = {
     # com.carr.control-plane-tick.plist held here until 2026-08-26: its gate was
     # "accepted shadow/canary evidence and cutover approval". Joe approved the
     # cutover that evening (decision f4af0c87, "Yes I approve cutover") with the
