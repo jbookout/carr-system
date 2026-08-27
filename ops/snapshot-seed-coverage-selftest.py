@@ -371,6 +371,20 @@ def main():
             case(f"{label} above the ledger refuses; the boundary is not INSERT/COPY only",
                  any("DATA REGION BOUNDARY MOVED" in f for f in module.check(repo, above)))
 
+        # ------------------------------------------------------- SWEEP RESIDUE
+        # Found by a mutation sweep over the whole module rather than over the last
+        # fix: these two branches could be broken with the entire suite still green.
+        repo = build_repo(tmp + "/swept", {"0100_seed.sql": seeding},
+                          {"carried": {}, "carried_subset": {"ops.widget": "program rows only"},
+                           "excluded": {},
+                           "carried_subset_must_not_contain": {
+                               "ops.widget": {"broken": "([unclosed"}}})
+        case("an unusable scope pattern is reported, never silently skipped",
+             any("UNUSABLE SCOPE PATTERN" in f for f in
+                 module.check(repo, artifact(["0100_seed.sql"], [insert_block("ops.widget")]))))
+        case("the boundary check returns nothing when there is no ledger to anchor to",
+             module.check_region_boundary("-- no ledger here\n") is None)
+
         # ---------------------------------------------------------------- MAIN
         # main() is the ONLY surface bin/schema-snapshot.sh consumes. Testing check()
         # alone let a mutant that returns 0 unconditionally, or swallows the stderr
