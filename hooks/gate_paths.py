@@ -195,16 +195,32 @@ def enforcement_write(cmd):
 
 
 def announcement(path, how):
-    """The message both doors print. One wording, so the two cannot drift."""
+    """The message both doors print. One wording, so the two cannot drift.
+
+    WR-000019 slice S3 (2026-08-27): gate-edit-gate.py and settings-change-
+    gate.py stopped asking for an in-session sign-off on this file the same
+    day canonical-edit-gate.py and git-writer-gate.py retired. The property
+    that matters — an edit to hooks/, ops/config/, or settings lands only
+    through review — is now guaranteed server-side: the PR-only ruleset on
+    main plus required CI mean a canonical-tree edit cannot reach main any
+    other way, and CODEOWNERS auto-requests Joe on any PR touching hooks/ or
+    ops/config/. This message stopped being an approval request and became a
+    nudge toward that route.
+    """
     name = os.path.basename(path)
     return (
         f"GATE CHANGE ANNOUNCED — {name} is enforcement, and {how} just changed it.\n\n"
         f"  file: {path}\n\n"
-        "The action was ALLOWED. Say in one line what changed in this file and "
-        "whether it makes the gate STRONGER or WEAKER — weaker is allowed, hiding "
-        "that it is weaker is not. Then re-bless the baseline in the same pass "
-        "(`python3 hooks/gate-integrity.py --bless`), or the next SessionStart "
-        "reports it UNBLESSED and the check goes chronically red for a benign "
-        "reason, which is the failure mode that hid a real five-gate wipe on "
-        "2026-08-08."
+        "The action was ALLOWED — this file no longer asks for an in-session "
+        "sign-off. Land it the way every canonical-tree edit lands now: "
+        "`./run.sh worktree <name>`, commit and push from there, and open a PR. "
+        "CODEOWNERS auto-requests Joe on hooks/ and ops/config/, and the PR-only "
+        "ruleset with required CI is what actually keeps main honest — say in "
+        "the PR description what changed and whether it makes the gate STRONGER "
+        "or WEAKER (weaker is allowed; hiding that it is weaker is not). "
+        "Re-bless the baseline in the SAME commit "
+        "(`python3 hooks/gate-integrity.py --bless <name>`), or the next "
+        "SessionStart reports it UNBLESSED and the check goes chronically red "
+        "for a benign reason, which is the failure mode that hid a real "
+        "five-gate wipe on 2026-08-08."
     )

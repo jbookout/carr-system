@@ -2,7 +2,7 @@
   "_doc": [
     "Gate lifecycle metadata -- WR-000019 slice S5.",
     "",
-    "One entry per gate script actually wired in ops/config/hooks.json (38 gates as of 2026-08-27; the count is re-derivable any time by walking that file the same way ops/hook-telemetry-rollup.py's wiring() does). A gate wired ONLY through .claude/settings.json (delegation-gate.py, worktree-self-plumb.py, machine-converge.py) is a different wiring surface and out of this slice's DoD wording -- it is not listed here.",
+    "One entry per gate script actually wired in ops/config/hooks.json (35 gates as of 2026-08-27, down from 38 -- WR-000019 slice S3 retired canonical-edit-gate.py, git-writer-gate.py and staging-attribution-gate.py the same day; the count is re-derivable any time by walking that file the same way ops/hook-telemetry-rollup.py's wiring() does). A gate wired ONLY through .claude/settings.json (delegation-gate.py, worktree-self-plumb.py, machine-converge.py) is a different wiring surface and out of this slice's DoD wording -- it is not listed here.",
     "",
     "FIELDS.",
     "  failure_class   one line, what this gate exists to catch. Reused verbatim from ops/config/hook-catch-classes.json's catch_class where an entry already existed there (36 of 38); the two gaps (rule-pack-preuse-reselection.py, rule-pack-drift-gate.py) are new one-liners drawn from the gate's own docstring.",
@@ -59,25 +59,6 @@
         },
         "rule_description": "a row for blocker-decider-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
         "note": ""
-      },
-      "review_date": "2026-11-24",
-      "mode": "enforcing"
-    },
-    "canonical-edit-gate.py": {
-      "failure_class": "edit aimed at the canonical checkout instead of a worktree",
-      "catch_metric": {
-        "log_path": "out/conduct-gate.jsonl",
-        "log_format": "jsonl",
-        "ts_field": "ts",
-        "hook_filter": {
-          "field": "hook",
-          "equals": "canonical-edit-gate"
-        },
-        "true_positive": {
-          "kind": "row_exists"
-        },
-        "rule_description": "every row for canonical-edit-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
-        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
       },
       "review_date": "2026-11-24",
       "mode": "enforcing"
@@ -357,11 +338,11 @@
         "true_positive": {
           "kind": "row_exists"
         },
-        "rule_description": "every row for gate-edit-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
-        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
+        "rule_description": "every row for gate-edit-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, gate-edit-gate, escalation-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of these, so presence in the window is the catch.",
+        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown). Mode moved enforcing -> announce 2026-08-27 (WR-000019 slice S3): the gate-admission card for a brand-new blocking gate still denies (rows with classes gate_admission / decision deny), but an ordinary edit to an existing gate now only announces -- rows with decision announce -- and rides a worktree PR under CODEOWNERS + required CI instead of an in-session sign-off."
       },
       "review_date": "2026-11-24",
-      "mode": "enforcing"
+      "mode": "announce"
     },
     "gate-integrity.py": {
       "failure_class": "gate content or wiring drifted from the blessed baseline",
@@ -387,25 +368,6 @@
       },
       "review_date": "2026-11-24",
       "mode": "announce"
-    },
-    "git-writer-gate.py": {
-      "failure_class": "git write from a session that does not own the tree",
-      "catch_metric": {
-        "log_path": "out/conduct-gate.jsonl",
-        "log_format": "jsonl",
-        "ts_field": "ts",
-        "hook_filter": {
-          "field": "hook",
-          "equals": "git-writer-gate"
-        },
-        "true_positive": {
-          "kind": "row_exists"
-        },
-        "rule_description": "every row for git-writer-gate in out/conduct-gate.jsonl already represents a genuine detection -- either a non-empty 'classes'/'patterns' match (chat-lint-gate, conduct-stop-gate, git-writer-gate, gate-edit-gate, escalation-gate, canonical-edit-gate) or a commits+excerpt finding (stale-claim-gate, which does not always carry a 'decision' or 'register' field). This log has no 'nothing found' row shape for any of the seven, checked 2026-08-27, so presence in the window is the catch, the same convention as staging-attribution-gate.jsonl.",
-        "note": "dedicated shared log named in the S5 design guidance (conduct-gate.jsonl breakdown)."
-      },
-      "review_date": "2026-11-24",
-      "mode": "enforcing"
     },
     "guard-unattended.py": {
       "failure_class": "destructive-or-exfiltrating action from a session (rm/force-git/key-read/unknown-host/destructive-SQL)",
@@ -738,29 +700,10 @@
           ]
         },
         "rule_description": "a row for settings-change-gate.py in out/hook-telemetry.jsonl whose register is block, reopen, or announce (the gate spoke or blocked, rather than firing silently) -- the same 'intervened' definition ops/hook-telemetry-rollup.py already uses for its retire-candidate rule.",
-        "note": ""
+        "note": "Mode moved enforcing -> announce 2026-08-27 (WR-000019 slice S3): the PreToolUse half no longer denies an unreasoned settings change; it announces, and the reason's durable home moved to the PR-description convention. PostToolUse still records the outcome unconditionally, which is what this catch_metric actually measures either way."
       },
       "review_date": "2026-11-24",
-      "mode": "enforcing"
-    },
-    "staging-attribution-gate.py": {
-      "failure_class": "staged change with no attributed owner",
-      "catch_metric": {
-        "log_path": "out/staging-attribution-gate.jsonl",
-        "log_format": "jsonl",
-        "ts_field": "ts",
-        "hook_filter": {
-          "field": "hook",
-          "equals": "staging-attribution-gate"
-        },
-        "true_positive": {
-          "kind": "row_exists"
-        },
-        "rule_description": "every row written to out/staging-attribution-gate.jsonl already represents a flagged pattern (classes/patterns non-empty by construction), so presence in the window is the catch.",
-        "note": "dedicated log named in the S5 design guidance."
-      },
-      "review_date": "2026-11-24",
-      "mode": "enforcing"
+      "mode": "announce"
     },
     "staging-observation-tracker.py": {
       "failure_class": "observation tracking for staged work",

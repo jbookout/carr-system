@@ -251,15 +251,6 @@
       ],
       "failure_mode": "PreToolUse deny"
     },
-    "git_writer": {
-      "implementation": [
-        "hooks/git-writer-gate.py"
-      ],
-      "test": [
-        "ops/git-writer-gate-selftest.py"
-      ],
-      "failure_mode": "PreToolUse deny"
-    },
     "escalation": {
       "implementation": [
         "hooks/escalation-gate.py"
@@ -322,23 +313,12 @@
     "loose_work": {
       "implementation": [
         "hooks/loose-work-gate.py",
-        "hooks/staging-attribution-gate.py",
         "hooks/staging-observation-tracker.py"
       ],
       "test": [
         "ops/loose-work-gate-selftest.py"
       ],
       "failure_mode": "Stop block"
-    },
-    "canonical_edit": {
-      "implementation": [
-        "hooks/canonical-edit-gate.py",
-        "hooks/worktree-self-plumb.py"
-      ],
-      "test": [
-        "ops/canonical-edit-gate-selftest.py"
-      ],
-      "failure_mode": "PreToolUse deny"
     },
     "close_before_open": {
       "implementation": [
@@ -378,7 +358,7 @@
       "test": [
         "ops/gate-edit-gate-selftest.py"
       ],
-      "failure_mode": "PreToolUse deny"
+      "failure_mode": "PreToolUse announce (WR-000019 S3, 2026-08-27: no longer a deny — a gate edit rides a worktree PR under CODEOWNERS + required CI instead of an in-session sign-off; the gate-admission card for a brand-new BLOCKING gate still denies)"
     },
     "gate_integrity": {
       "implementation": [
@@ -437,7 +417,7 @@
       "test": [
         "ops/settings-change-gate-selftest.py"
       ],
-      "failure_mode": "Pre+PostToolUse deny"
+      "failure_mode": "PreToolUse announce + PostToolUse record (WR-000019 S3, 2026-08-27: the PreToolUse half no longer denies an unreasoned settings change — it announces, and the reason's durable home moved to the PR-description convention; PostToolUse still records the outcome unconditionally)"
     },
     "stale_count": {
       "implementation": [
@@ -710,9 +690,9 @@
     },
     "308ef1de": {
       "category": "hard_pre_action",
-      "enforcement_class": "deny_gate",
+      "enforcement_class": "unbuilt",
       "binding_moment": "before shared-tree git action",
-      "control": "git_writer",
+      "planned_control": "WR-000019 S3 (2026-08-27) retired hooks/git-writer-gate.py and its control_catalog entry git_writer — the only concrete mechanism that carried this rule. Nothing installed refuses a shared-tree git write today; a replacement (if any is judged worth building) is the triage slice's call, not this slice's — pending classification 2026-08-27.",
       "exceptions": "named writer/claimed work"
     },
     "647f843d": {
@@ -1816,11 +1796,11 @@
     },
     "4a53ff82": {
       "category": "hard_pre_action",
-      "enforcement_class": "deny_gate",
+      "enforcement_class": "unbuilt",
       "binding_moment": "before the first write to a tracked file in the canonical checkout",
-      "control": "canonical_edit",
+      "planned_control": "WR-000019 S3 (2026-08-27) retired hooks/canonical-edit-gate.py — the edit-time rail this rule named is gone. The property this rule cared about (a canonical-tree edit landing on main without review) is still guaranteed server-side by the PR-only main ruleset with required CI, which a session cannot bypass; what is gone is the EARLIER, edit-time catch. Whether that gap is worth a replacement control is the triage slice's call — pending classification 2026-08-27.",
       "exceptions": "registered worktrees; integration-lane work (nightly chain, merges/landings, pulls)",
-      "note": "Corrected 2026-08-15. This read unbuilt, with a planned_control describing a hook that had already been built the day before as hooks/canonical-edit-gate.py, blessed in the gate baseline and live in the PreToolUse set. A session working the unbuilt list came one step from building a second gate for an already-enforced rule. ops/enforcement-coverage-check.py now fails on any blessed gate no control names."
+      "note": "Corrected 2026-08-15, then reverted to unbuilt 2026-08-27 (WR-000019 S3). This read unbuilt once before, with a planned_control describing a hook that had already been built the day before as hooks/canonical-edit-gate.py, blessed in the gate baseline and live in the PreToolUse set — that correction is what taught ops/enforcement-coverage-check.py to fail on any blessed gate no control names. The gate that correction was about has since retired for a different, considered reason (the PR-only ruleset now carries the property server-side), not through the same kind of drift."
     },
     "596f7549": {
       "category": "judgment_advisory",
@@ -2704,11 +2684,11 @@
         "why": "An installed deny gate delivers this at its binding moment."
       },
       "308ef1de": {
-        "load_layer": "control",
+        "load_layer": "pack",
         "packs": [
           "engineering-git"
         ],
-        "why": "An installed deny gate delivers this at its binding moment."
+        "why": "WR-000019 S3 (2026-08-27) retired hooks/git-writer-gate.py, the installed control that used to deliver this at its binding moment; moved to pack delivery so the rule still reaches a session doing git work in a shared tree, pending the triage slice's reclassification."
       },
       "30a189fb": {
         "load_layer": "layer0",
@@ -2830,11 +2810,11 @@
         "why": "Claims about what the record layer cannot do arise in every domain."
       },
       "4a53ff82": {
-        "load_layer": "control",
+        "load_layer": "pack",
         "packs": [
           "engineering-git"
         ],
-        "why": "An installed deny gate delivers this at its binding moment."
+        "why": "WR-000019 S3 (2026-08-27) retired hooks/canonical-edit-gate.py, the installed control that used to deliver this at its binding moment; moved to pack delivery so the rule still reaches a session editing the canonical checkout, pending the triage slice's reclassification. The PR-only main ruleset with required CI still guarantees the underlying property server-side regardless of delivery."
       },
       "4a9188f3": {
         "load_layer": "pack",
