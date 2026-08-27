@@ -65,7 +65,7 @@ test("slice 4 accepts only digest-backed active stops into the canonical project
 
 
 test("slice 4 defaults neither revised route seam to public execution nor incomplete routes to canonical", () => {
-  assert.match(migration, /revoke all on function ops\.append_tour_route_version\(text,uuid,integer,uuid,jsonb,jsonb,text,text,uuid,jsonb,text,integer,text\),ops\.append_tour_route_stop\(text,uuid,uuid,integer,text,text,timestamptz,timestamptz,boolean,integer,integer,text,text\) from public,carr_reader,carr_writer,carr_jobs,carr_authority/i);
+  assert.match(migration, /revoke all on function ops\.append_tour_route_version\(text,uuid,integer,uuid,jsonb,jsonb,text,text,uuid,jsonb,text,integer,text\),ops\.append_tour_route_stop\(text,uuid,uuid,integer,text,text,timestamp with time zone,timestamp with time zone,boolean,integer,integer,text,text\) from public,carr_reader,carr_writer,carr_jobs,carr_authority/i);
   assert.match(migration, /route acceptance requires at least one active stop/i);
   assert.match(migration, /route acceptance requires an explicit transition for every new route stop/i);
 });

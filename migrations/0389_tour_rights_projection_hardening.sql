@@ -478,15 +478,15 @@ revoke all on function ops.tour_rights_provider_policy_lock(text,text,text),
   ops.tour_share_revocation_receipt_guard(),ops.seal_tour_public_projection(text,uuid,jsonb,text,text)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.append_tour_rights_receipt(jsonb),
-  ops.revoke_tour_rights_receipt(text,uuid,timestamptz,text,text),
+  ops.revoke_tour_rights_receipt(text,uuid,timestamp with time zone,text,text),
   ops.append_tour_source_evidence(jsonb),ops.append_tour_field_assertion(jsonb),
-  ops.create_tour_public_projection_draft(text,uuid,integer,integer,timestamptz),
+  ops.create_tour_public_projection_draft(text,uuid,integer,integer,timestamp with time zone),
   ops.read_tour_public_projection(text,uuid)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 grant execute on function ops.append_tour_rights_receipt(jsonb),
-  ops.revoke_tour_rights_receipt(text,uuid,timestamptz,text,text) to carr_authority;
+  ops.revoke_tour_rights_receipt(text,uuid,timestamp with time zone,text,text) to carr_authority;
 grant execute on function ops.append_tour_source_evidence(jsonb),
-  ops.create_tour_public_projection_draft(text,uuid,integer,integer,timestamptz) to carr_writer;
+  ops.create_tour_public_projection_draft(text,uuid,integer,integer,timestamp with time zone) to carr_writer;
 grant execute on function ops.append_tour_field_assertion(jsonb) to carr_authority;
 grant execute on function ops.read_tour_public_projection(text,uuid)
   to carr_reader,carr_writer,carr_jobs,carr_authority;

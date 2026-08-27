@@ -146,11 +146,11 @@ PATCH_PATH = re.compile(r"^(?:\+\+\+ b/|\*\*\* (?:Update|Add) File: )(.+)$", re.
 # deliberately narrow exceptions avoid turning known reads such as
 # `review-queue` into writes merely because they share a word with review-deal.
 WRITE_ACTION_PREFIXES = {
-    "accept", "activate", "add", "admit", "amend", "approve", "assign", "attach", "attest", "begin", "change", "claim", "close",
+    "accept", "activate", "add", "admit", "amend", "append", "approve", "assign", "attach", "attest", "begin", "change", "claim", "close",
     "complete", "confirm", "create", "deactivate", "decide", "decline", "detach", "end", "link",
     "disable", "log", "measure", "merge", "new", "patch", "prepare", "promote", "propose",
-    "reassign", "record", "register", "release", "resolve", "retire",
-    "revert", "score", "set", "stamp", "start", "teach", "triage",
+    "reassign", "record", "register", "release", "resolve", "restore", "retire",
+    "revert", "revoke", "score", "seal", "set", "stamp", "start", "teach", "triage",
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
