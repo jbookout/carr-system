@@ -1,6 +1,7 @@
 {
   "schema": "rule-delivery-activation-overlay/v1",
-  "base_map_sha256": "c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997",
+  "_note": "base_map_sha256 updated 2026-08-27 (WR-000019 slice S3) for the same reason as the guidance-situation-curation review's re-pin in PR #542: the byte digest moved because the file moved, but none of the nine reviewed rule ids here (25fcddee, 3fa17fa0, 72e06bdf, 581cb3fe, 113b3833, 57d13061, c66dc739, 49533583, 557838a5) appear anywhere in this slice's diff of rule-enforcement-map.json -- verified by grepping the diff (against HEAD, re-checked after every further edit) for each id. The slice touched only 308ef1de and 4a53ff82 (reassigned from their retired gates to the new pr_only_main_ruleset control, staying enforcement_class deny_gate/category hard_pre_action -- not reclassified), plus the loose_work control_catalog entry and gate_edit/settings_change failure_mode text. If that reading is wrong, revert this file alone.",
+  "base_map_sha256": "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218",
   "targets": [
     {"short_id":"25fcddee","scope":"shared","pack":"governance-rules","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
     {"short_id":"3fa17fa0","scope":"shared","pack":"client-deal","from_control":"session_boot","from_enforcement_class":"surfacing","to_control":"pack_delivery","to_enforcement_class":"stop_gate"},
