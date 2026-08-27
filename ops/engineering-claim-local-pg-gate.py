@@ -331,7 +331,7 @@ def successor_fixture(cur, prior_job_id, prior_envelope_id):
 def assert_static_lock_contract():
     """Pin the two production lock paths to the same lineage/session contract."""
     repo = Path(__file__).resolve().parents[1]
-    currentness = (repo / "migrations/0326_engineering_controller_currentness.sql").read_text()
+    currentness = (repo / "migrations/0335_engineering_controller_currentness.sql").read_text()
     successor = (repo / "migrations/0319_engineering_envelope_writer_successor.sql").read_text()
     runtime = (repo / "mcp-server/src/engineering-runtime.js").read_text()
     compact_currentness = re.sub(r"\s+", " ", currentness)

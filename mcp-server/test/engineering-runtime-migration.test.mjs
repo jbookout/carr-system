@@ -8,7 +8,7 @@ const controllerMigration = fs.readFileSync(new URL("../../migrations/0312_engin
 const successorPermissionRepair = fs.readFileSync(new URL("../../migrations/0319_engineering_envelope_writer_successor.sql", import.meta.url), "utf8");
 const claimOutputRepair = fs.readFileSync(new URL("../../migrations/0323_engineering_claim_output_qualification.sql", import.meta.url), "utf8");
 const claimEligibilityRepair = fs.readFileSync(new URL("../../migrations/0325_engineering_claim_envelope_eligibility.sql", import.meta.url), "utf8");
-const currentnessRepair = fs.readFileSync(new URL("../../migrations/0326_engineering_controller_currentness.sql", import.meta.url), "utf8");
+const currentnessRepair = fs.readFileSync(new URL("../../migrations/0335_engineering_controller_currentness.sql", import.meta.url), "utf8");
 const engineeringMigrationCorpus = fs.readdirSync(new URL("../../migrations/", import.meta.url))
   .filter(name => /^\d+_.*engineering.*\.sql$/i.test(name))
   .map(name => fs.readFileSync(new URL(`../../migrations/${name}`, import.meta.url), "utf8"))
@@ -131,7 +131,7 @@ test("0325 refuses stale Engineering envelopes before a lease is created", () =>
   assert.doesNotMatch(claimEligibilityRepair, /grant\s+(?:all|select|insert|update|delete)\s+on\s+/i);
 });
 
-test("0326 makes controller eligibility current, safe to parse, and receipt-race safe", () => {
+test("0335 makes controller eligibility current, safe to parse, and receipt-race safe", () => {
   assert.match(currentnessRepair, /add column if not exists lease_expires_at/);
   assert.match(currentnessRepair, /engineering_safe_timestamptz/);
   assert.match(currentnessRepair, /exception when others/);
@@ -254,11 +254,11 @@ test("Hermes keeps execution controller-only while retaining its existing captur
   for (const verb of ["register-engineering-slice-plan", "admit-engineering-slice", "review-engineering-slice"]) assert.doesNotMatch(match[1], new RegExp(`['\"]${verb}['\"]`));
 });
 
-test("0326 reviewer and SIEP authority seams have closed function and trigger boundaries", () => {
+test("0335 reviewer and SIEP authority seams have closed function and trigger boundaries", () => {
   assert.match(currentnessRepair, /create or replace function ops\.guard_engineering_reviewer_fact_insert\(\)\s+returns trigger[\s\S]*?as \$\$\s*declare[\s\S]*?begin[\s\S]*?if new\.contract_version is not null then[\s\S]*?new\.contract_version:='engineering-review\.v1';[\s\S]*?return new;\s*end \$\$;/i);
   assert.match(currentnessRepair, /drop trigger if exists engineering_reviewer_fact_contract_guard[\s\S]*?create trigger engineering_reviewer_fact_contract_guard\s+before insert on ops\.engineering_reviewer_fact\s+for each row execute function ops\.guard_engineering_reviewer_fact_insert\(\);/i);
   assert.match(currentnessRepair, /create or replace function ops\.guard_siep_engineering_evidence_binding\(\)[\s\S]*?if new\.engineering_contract_version is not null then[\s\S]*?new\.engineering_contract_version:='engineering-review\.v1';/i);
-  assert.match(currentnessRepair, /siep_bind_evidence_job_unchecked_0324[\s\S]*?historical SIEP Engineering evidence binding is not 0326 verified/i);
+  assert.match(currentnessRepair, /siep_bind_evidence_job_unchecked_0324[\s\S]*?historical SIEP Engineering evidence binding is not 0335 verified/i);
   assert.match(currentnessRepair, /create or replace function ops\.siep_current_evidence_digest\(\s*p_ledger_kind text,p_ledger_id uuid\s*\)[\s\S]*?engineering_contract_version='engineering-review\.v1'/i);
   assert.match(currentnessRepair, /revoke all on function ops\.siep_bind_evidence_job_unchecked_0324\(text,integer,text,uuid,uuid\)[\s\S]*?from public,carr_reader,carr_writer,carr_jobs,carr_authority/i);
   assert.match(currentnessRepair, /revoke all on function ops\.siep_current_evidence_digest\(text,uuid\)[\s\S]*?from public,carr_reader,carr_writer,carr_jobs,carr_authority/i);

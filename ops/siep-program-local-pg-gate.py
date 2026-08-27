@@ -533,7 +533,7 @@ def main() -> int:
                 raise RuntimeError("SIEP Engineering contract guard was not restored after historical fixture")
             cur.execute("set session authorization carr_authority_joe")
             refusal(cur, "select ops.siep_bind_evidence_job('00',5,'migration',%s,%s)",
-                    (generic_job_id, historical_key), "historical SIEP Engineering evidence binding is not 0326 verified")
+                    (generic_job_id, historical_key), "historical SIEP Engineering evidence binding is not 0335 verified")
             binding_keys: dict[str, uuid.UUID] = {}
             for kind, bound_job_id in evidence_jobs.items():
                 binding_key = uuid.uuid4()

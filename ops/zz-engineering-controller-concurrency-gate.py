@@ -391,7 +391,7 @@ def assert_weak_receipt_review_refused(cur, fixture_row, claim, mutate, label):
 
 def seed_malformed_dependency_refusal(cur, fixture_row, claim, dependent_slice_ref, receipt_mutate, envelope_label,
                                       reviewed_deviation_refs=None):
-    """Seed pre-0326 malformed A evidence, then prove five-arg B enqueue stays empty."""
+    """Seed pre-0335 malformed A evidence, then prove five-arg B enqueue stays empty."""
     payload = receipt_payload(cur, fixture_row, claim, "claimed_complete")
     receipt_mutate(payload)
     receipt_digest = canonical_digest(payload)
@@ -443,7 +443,7 @@ def seed_malformed_dependency_refusal(cur, fixture_row, claim, dependent_slice_r
 
 
 def assert_static_contract():
-    migration = (ROOT / "migrations/0326_engineering_controller_currentness.sql").read_text()
+    migration = (ROOT / "migrations/0335_engineering_controller_currentness.sql").read_text()
     engineering_migrations = "\n".join(
         path.read_text() for path in (ROOT / "migrations").glob("*_engineering*.sql")
     )
@@ -911,7 +911,7 @@ def create_dag_b(conn, a_fixture, a_claim, b_ref):
     with conn.cursor() as cur:
         issued_at = one(cur, "select to_char(date_trunc('second',now()) at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")[0]
         session_lease = one(cur, "select to_char(lease_expires_at at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') from ops.capability_agent_session where id=%s", (b_session,))[0]
-        # 0326 compares the JSON expiry to the relational session lease.  Do
+        # 0335 compares the JSON expiry to the relational session lease.  Do
         # not independently sample now() here: crossing a second boundary
         # would mint an envelope that the real claim gate correctly refuses.
         expires_at = session_lease

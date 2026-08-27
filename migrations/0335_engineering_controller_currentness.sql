@@ -1,4 +1,4 @@
--- 0326_engineering_controller_currentness.sql
+-- 0335_engineering_controller_currentness.sql
 --
 -- INC-20260826-02: an Engineering Passport job may receive a lease only while
 -- its exact immutable envelope, the server session, and every JSON binding are
@@ -1257,7 +1257,7 @@ drop trigger if exists engineering_reviewer_fact_contract_guard
 create trigger engineering_reviewer_fact_contract_guard
   before insert on ops.engineering_reviewer_fact
   for each row execute function ops.guard_engineering_reviewer_fact_insert();
--- this migration; pre-0326 bindings remain historical evidence, never replay
+-- this migration; pre-0335 bindings remain historical evidence, never replay
 -- authority.
 alter table ops.siep_job_evidence_binding
   add column if not exists engineering_contract_version text;
@@ -1326,7 +1326,7 @@ begin
         and review.reviewer_actor_id<>receipt.executor_actor_id
         and exists (select 1 from ops.job_receipt jr where jr.job_id=j.id and jr.attempt=j.attempt and jr.kind='completion')
      ) then
-    raise exception 'SIEP evidence binding requires a 0326-verified Engineering receipt and review';
+    raise exception 'SIEP evidence binding requires a 0335-verified Engineering receipt and review';
   end if;
   new.engineering_contract_version:='engineering-review.v1';
   return new;
@@ -1350,7 +1350,7 @@ begin
   result:=ops.siep_bind_evidence_job_unchecked_0324(p_component,p_base_version,p_evidence_kind,p_job_id,p_idempotency_key);
   select b.engineering_contract_version into contract_version from ops.siep_job_evidence_binding b where b.job_id=p_job_id;
   if contract_version is distinct from 'engineering-review.v1' then
-    raise exception 'historical SIEP Engineering evidence binding is not 0326 verified';
+    raise exception 'historical SIEP Engineering evidence binding is not 0335 verified';
   end if;
   return result;
 end $$;
@@ -2025,7 +2025,7 @@ declare fn text;
 begin
   if to_regprocedure('ops.engineering_controller_binding(uuid,uuid)') is not null
      or to_regprocedure('ops.engineering_envelope_is_executable(uuid,uuid,integer)') is not null then
-    raise exception '0326 FAILED: obsolete Engineering overload remains executable';
+    raise exception '0335 FAILED: obsolete Engineering overload remains executable';
   end if;
   if (select count(*) from pg_proc where pronamespace='ops'::regnamespace
         and proname='engineering_controller_binding')<>1
@@ -2033,7 +2033,7 @@ begin
      or (select count(*) from pg_proc where pronamespace='ops'::regnamespace
           and proname='engineering_envelope_is_executable')<>1
      or to_regprocedure('ops.engineering_envelope_is_executable(uuid,uuid)') is null then
-    raise exception '0326 FAILED: Engineering overload catalog is not exact';
+    raise exception '0335 FAILED: Engineering overload catalog is not exact';
   end if;
 
   for fn in select unnest(array[
@@ -2063,7 +2063,7 @@ begin
        or has_function_privilege('carr_writer',fn::regprocedure,'EXECUTE')
        or has_function_privilege('carr_jobs',fn::regprocedure,'EXECUTE')
        or has_function_privilege('carr_authority',fn::regprocedure,'EXECUTE') then
-      raise exception '0326 FAILED: private Engineering function is executable by a runtime role: %',fn;
+      raise exception '0335 FAILED: private Engineering function is executable by a runtime role: %',fn;
     end if;
   end loop;
 
@@ -2082,7 +2082,7 @@ begin
        or has_function_privilege('carr_writer',fn::regprocedure,'EXECUTE')
        or has_function_privilege('carr_authority',fn::regprocedure,'EXECUTE')
        or not has_function_privilege('carr_jobs',fn::regprocedure,'EXECUTE') then
-      raise exception '0326 FAILED: scoped Engineering controller ACL is widened or incomplete: %',fn;
+      raise exception '0335 FAILED: scoped Engineering controller ACL is widened or incomplete: %',fn;
     end if;
   end loop;
 
@@ -2114,7 +2114,7 @@ begin
      or has_table_privilege('carr_jobs','ops.work_request','SELECT')
      or has_table_privilege('carr_jobs','ops.job','UPDATE')
      or has_table_privilege('carr_jobs','ops.job_attempt','INSERT') then
-    raise exception '0326 FAILED: Engineering controller least-privilege boundary widened or is incomplete';
+    raise exception '0335 FAILED: Engineering controller least-privilege boundary widened or is incomplete';
   end if;
   if exists (
        select 1 from pg_proc p
@@ -2129,7 +2129,7 @@ begin
           'ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)'::regprocedure,'EXECUTE')
      or not has_function_privilege('carr_authority',
           'ops.siep_bind_evidence_job(text,integer,text,uuid,uuid)'::regprocedure,'EXECUTE') then
-    raise exception '0326 FAILED: SIEP evidence binding authority ACL is widened or incomplete';
+    raise exception '0335 FAILED: SIEP evidence binding authority ACL is widened or incomplete';
   end if;
 
 end $$;
