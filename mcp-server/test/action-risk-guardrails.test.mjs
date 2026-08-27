@@ -189,7 +189,11 @@ test("freeform nested business data may use reserved-like names without widening
 
 test("set-lead is a human-only optimistic-concurrency mutation", async () => {
   const tool = TOOLS["set-lead"];
-  assert.equal(tool.humanOnly, true);
+  // humanOnly LABEL RETIRED (WR-000019 slice S1, 2026-08-27): dead since
+  // executeRegisteredTool stopped reading it 2026-08-26 (decision dc57f62d);
+  // this slice drops the stale declaration from tools.js. The behavioral
+  // proof that a machine actor is admitted now lives in the assertion below.
+  assert.equal(tool.humanOnly, undefined);
   assert.ok(tool.inputSchema.required.includes("base_version"));
   assert.ok(Object.hasOwn(tool.inputSchema.properties, "base_version"));
 

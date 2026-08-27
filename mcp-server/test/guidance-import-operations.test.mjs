@@ -33,9 +33,12 @@ async function rejected(fn) {
 }
 
 test("guidance import decision and registry deactivation are human authority operations", () => {
+  // humanOnly LABEL RETIRED, authorityOnly UNCHANGED (WR-000019 slice S1,
+  // 2026-08-27) — see control-plane-authority-boundary.test.mjs for the same
+  // retirement note.
   for (const name of ["decide-guidance-import-batch", "deactivate-guidance-registry"]) {
     assert.equal(TOOLS[name].write, true, name);
-    assert.equal(TOOLS[name].humanOnly, true, name);
+    assert.equal(TOOLS[name].humanOnly, undefined, name);
     assert.equal(TOOLS[name].authorityOnly, true, name);
     assert.ok(TOOLS[name].inputSchema.required.includes("idempotency_key"), name);
     assert.ok(TOOLS[name].inputSchema.required.includes("manifest_digest"), name);

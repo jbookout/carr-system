@@ -23,7 +23,10 @@ function fakeClient(route) {
 
 test("admit-rule is an explicit human-only authority verb with all four D-04 dimensions", () => {
   const tool = TOOLS["admit-rule"];
-  assert.equal(tool.humanOnly, true);
+  // humanOnly LABEL RETIRED (WR-000019 slice S1, 2026-08-27): dead since
+  // executeRegisteredTool stopped reading it 2026-08-26 (decision dc57f62d);
+  // this slice drops the stale declaration from tools.js.
+  assert.equal(tool.humanOnly, undefined);
   const required = new Set(tool.inputSchema.required);
   for (const field of ["rule_id", "enforcement_class", "binding_moment",
                        "applicability", "projection", "reachability", "input_contract",
@@ -60,7 +63,9 @@ test("activate-rule is retired so approval can never be separated from enforceme
 
 test("approve-rule is one human authority act, not separate admission and activation", () => {
   const tool = TOOLS["approve-rule"];
-  assert.equal(tool.humanOnly, true);
+  // humanOnly LABEL RETIRED, authorityOnly UNCHANGED (WR-000019 slice S1,
+  // 2026-08-27) — see the admit-rule test above for the same retirement.
+  assert.equal(tool.humanOnly, undefined);
   assert.equal(tool.authorityOnly, true);
   assert.deepEqual(new Set(tool.inputSchema.required), new Set([
     "idempotency_key", "rule_id", "policy_kind", "control_keys", "reason",

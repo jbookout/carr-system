@@ -33,9 +33,13 @@ test("memory kernel exposes observe, recall, promote, correct, and forget", () =
     assert.ok(TOOLS[name], name);
   assert.equal(TOOLS["recall-memory"].write, undefined);
   assert.equal(TOOLS["observe-memory"].write, true);
-  assert.equal(TOOLS["promote-memory"].humanOnly, true);
-  assert.equal(TOOLS["correct-memory"].humanOnly, true);
-  assert.equal(TOOLS["forget-memory"].humanOnly, true);
+  // humanOnly LABEL RETIRED (WR-000019 slice S1, 2026-08-27): dead since
+  // executeRegisteredTool stopped reading it 2026-08-26 (Joe's ruling, decision
+  // dc57f62d); this slice drops the stale declaration in memory.js. The real
+  // gate — humanOnlyDirect, kept as a documented no-op — is unchanged.
+  assert.equal(TOOLS["promote-memory"].humanOnly, undefined);
+  assert.equal(TOOLS["correct-memory"].humanOnly, undefined);
+  assert.equal(TOOLS["forget-memory"].humanOnly, undefined);
   assert.ok(TOOLS["review-memory"]);
 });
 

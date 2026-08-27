@@ -43,9 +43,13 @@ class AcceptanceAuthorityFake {
 }
 
 test("control-plane authority operations are explicit human authority verbs", () => {
+  // humanOnly LABEL RETIRED, authorityOnly UNCHANGED (WR-000019 slice S1,
+  // 2026-08-27): the label was dead since executeRegisteredTool stopped
+  // reading it 2026-08-26 (decision dc57f62d); this slice drops the stale
+  // declarations from tools.js. authorityOnly is the live gate here.
   for (const name of ["accept-workflow", "disable-legacy-schedule", "activate-guidance-registry",
     "decide-guidance-import-batch", "deactivate-guidance-registry"]) {
-    assert.equal(TOOLS[name].humanOnly, true);
+    assert.equal(TOOLS[name].humanOnly, undefined);
     assert.equal(TOOLS[name].authorityOnly, true);
   }
 });

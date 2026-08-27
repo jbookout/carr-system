@@ -351,7 +351,7 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
       },
     },
     "start-capability-project": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Create the server-persisted build session for only the current ready project and perform the actual ready→claimed transition. The named executor must be an active CARR actor; arbitrary session strings are not accepted. This does not begin work, merge, deploy, spend or communicate.",
       inputSchema: { type: "object", additionalProperties: false, properties: { ...projectFields, executor_actor: { type: "string" }, source_commit_sha: { type: "string" }, worktree_ref: { type: "string" }, scope_ref: { type: "string" } }, required: ["idempotency_key","sequence","base_version","executor_actor","source_commit_sha","worktree_ref"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "start-capability-project", args, async () => {
@@ -373,7 +373,7 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
       }),
     },
     "begin-capability-project": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Perform the separate claimed→in_progress transition for the persisted current capability session. It cannot create or substitute a session.",
       inputSchema: { type: "object", additionalProperties: false, properties: { ...projectFields, capability_agent_session_id: { type: "string" } }, required: ["idempotency_key","sequence","base_version","capability_agent_session_id"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "begin-capability-project", args, async () => {
@@ -389,7 +389,7 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
       }),
     },
     "prepare-capability-project": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Freeze exactly one candidate for independent verification. The candidate is bound to the persisted session and may never be changed. This does not accept completion or advance the queue.",
       inputSchema: { type: "object", additionalProperties: false, properties: { ...projectFields, capability_agent_session_id: { type: "string" }, completion_kind: { type: "string", enum: COMPLETION_KINDS }, candidate_evidence: candidateEvidenceSchema }, required: ["idempotency_key","sequence","base_version","capability_agent_session_id","completion_kind","candidate_evidence"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "prepare-capability-project", args, async () => {
@@ -409,7 +409,7 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
       }),
     },
     "attest-capability-project": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Persist an independent pass or fail against the frozen current candidate. The server rejects an executor attesting its own work and records both the evidence and source now, never at completion time.",
       inputSchema: { type: "object", additionalProperties: false, properties: { ...projectFields, capability_agent_session_id: { type: "string" }, outcome: { type: "string", enum: ["pass","fail"] }, verification_evidence_ref: { type: "string" }, source_ref: { type: "string" }, note: { type: "string" } }, required: ["idempotency_key","sequence","base_version","capability_agent_session_id","outcome","verification_evidence_ref","source_ref"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "attest-capability-project", args, async () => {
@@ -426,7 +426,7 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
       }),
     },
     "complete-capability-project": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Close only the current project from its frozen candidate plus a stored independent PASS attestation, then expose exactly the next ordered Work Request. It accepts no caller-supplied artifact, test or verifier references, and an executor cannot self-complete.",
       inputSchema: { type: "object", additionalProperties: false, properties: { ...projectFields, capability_agent_session_id: { type: "string" }, completion_kind: { type: "string", enum: COMPLETION_KINDS }, completion_evidence: completionEvidenceSchema }, required: ["idempotency_key","sequence","base_version","capability_agent_session_id","completion_kind","completion_evidence"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "complete-capability-project", args, async () => {
@@ -519,7 +519,7 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
     // still refuses a stale read. Passing the id is allowed and is verified when
     // given.
     "cancel-capability-session": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Abandon the one open build session on a capability project and return that project to ready, so a row left mid-flight can be worked again. It records a reason, keeps the cancelled session and every attestation already made, and can never reopen a confirmed_closed project.",
       inputSchema: { type: "object", additionalProperties: false, properties: { ...projectFields, reason: { type: "string" }, capability_agent_session_id: { type: "string" } }, required: ["idempotency_key", "sequence", "base_version", "reason"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "cancel-capability-session", args, async () => {

@@ -3283,7 +3283,6 @@ export const TOOLS = {
 
   "record-executed-lease": {
     write: true,
-    humanOnly: true,
     authorityOnly: true,
     description: "Record the current executed lease/abstract that CARR actually holds for a deal. This is the authenticated first-party renewal authority: expiration_on must be an exact sourced date, evidence_kind/evidence_ref are mandatory, and a replacement needs the current lease version. It never infers a date from a term, listing, comp, NPPES, or web research. Only the deal's current owning partner may write it.",
     inputSchema: { type: "object", properties: {
@@ -3383,7 +3382,7 @@ export const TOOLS = {
   },
 
   "new-deal": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Create a deal on an existing client. THE GAP THIS CLOSES: until 2026-08-07 nothing in the record layer could create a deal — new-client makes only a client row, reassign-deal and set-lead both need a deal that already exists, and the ONLY insert into `deal` in the whole repo was pipelines/import_wave1.py, the one-time bulk import. So every deal in the book traced back to that import, and the six deals the 2026-08-07 Salesforce read found had nowhere to land. The client must exist first (new-client over a party): a deal hangs off a client, never free-floating, and this verb will not invent one. humanOnly on purpose — a new deal is a real commitment in a partner's book, and salesforce-diff deliberately never auto-adds one. deal_type and phase are validated by the database against deal_type_ref and deal_phase, so a bad slug is refused with the live list rather than guessed at. Refuses a duplicate name and a salesforce_id already in use, naming the deal that holds it. Commission and close date from Salesforce are PLACEHOLDERS and land in the two labelled placeholder columns, never in won_value.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -3466,7 +3465,7 @@ export const TOOLS = {
   },
 
   "reassign-deal": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Move a deal onto the client it actually belongs to. THIS IS THE ONLY VERB THAT CHANGES deal.client_id — update-deal refuses that field on purpose, because re-pointing a deal changes whose book it sits in and is structural, not a field edit (the same reason set-lead owns the owner). Built 2026-08-02 for the Musicologie finding: an import filed THIRTEEN deals under C-131, twelve of them belonging to other franchisees who each had their own client record, so nine clients rendered as 'Active deal – no deal on file' while their deals sat under someone else's name. Requires base_version from a fresh read. Refuses a no-op, refuses a merged-away target, and records the old and new client on the event so the move is auditable. It does NOT touch the client rows themselves: a parent/sub-client structure (a national account over its franchisees) is expressed by party.org_id, not by moving deals up to the parent.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
@@ -3515,7 +3514,7 @@ export const TOOLS = {
   },
 
   "set-lead": {
-    write: true, humanOnly: true,
+    write: true,
     description: "THE human ownership handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Ownership is a matter between the two humans, never a machine's call. Requires base_version from a fresh read; the locked deal version makes simultaneous handoffs conflict instead of silently replacing one another. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
@@ -3892,7 +3891,6 @@ export const TOOLS = {
 
   "decline-candidate": {
     write: true,
-    humanOnly: true,
     description: "Record that a HUMAN looked at a candidate and said no. This is promote-pool's missing counterpart, and it is the only thing that makes the claim card shorter. Measured 2026-08-09: six lanes had accumulated 9,870 candidates and promoted zero, ever, because a candidate rejected at the board stayed exactly as claimable as before and came back on every future card forever. A decline is NOT a suppression: suppression is a machine's assertion about identity and can be wrong, a decline is a human's judgment about fit and no sweep re-litigates it. The reason is REQUIRED and is the input to the lane-retirement decision, since 'no contact channel' is a fixable lane defect, 'out of territory' is a mis-scoped lane, and 'not a fit' is a lane working correctly with a low hit rate. Nothing is deleted: the row keeps its research and its provenance, it just stops being presented. Read the row from v_claim_card or v_pool first and pass its version as base_version.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -3952,7 +3950,6 @@ export const TOOLS = {
 
   "log-outreach": {
     write: true,
-    humanOnly: true,
     description: "THE DISPOSITION STEP: say what happened after you actually tried to reach someone, in ONE action. Completes your open ball on that subject, logs the touch at its real time, and either sets the next ball or closes the lead out. Use this instead of calling log-activity and set-next-action separately, because separately is how a touch gets logged with no next step or a next step gets set with no touch, and both halves are needed for the follow-up cadence to run. Outcomes: 'connected' you spoke with them · 'left_message' you tried and did not reach them · 'sent' you sent an email or text · 'no_channel' the number or address does not work · 'not_interested' they said no · 'do_not_contact' they asked you to stop. The first four REQUIRE a next date, because a touch with no next step is how a lead dies quietly. The last two close the lead and refuse a next date.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -4785,7 +4782,7 @@ export const TOOLS = {
   },
 
   "confirm-merge": {
-    write: true, humanOnly: true,
+    write: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
@@ -4948,7 +4945,7 @@ export const TOOLS = {
   // V-MSC-024), and the build sweep found a third pair the loop never named
   // (T-004+T-040). Backlog #119/#120's "executed" claims were true-but-incomplete.
   "merge-vendor-rows": {
-    write: true, humanOnly: true,
+    write: true,
     description: "HUMAN-confirmed merge of two vendor rows that ride the SAME party — a duplicate role, not a duplicate person. Survivorship is deterministic (rule 4c21d86b applied at role level): the survivor keeps every value it has, its NULLs fill from the loser, and a field where both rows disagree is REPORTED untouched for a human to settle — never coin-flipped. Activities, findings and next actions move to the survivor; the loser becomes a tombstone (merged_into) that v_ref_index still resolves with merged=true, and renders exclude. Different-party duplicates are confirm-merge's lane, and this verb refuses them. Nothing auto-merges, ever: a human picks the pair and the survivor. Survivor choice per rule 4c21d86b: more corroborated identity, then more linked records, then oldest.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5190,7 +5187,7 @@ export const TOOLS = {
   },
 
   "teach": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
@@ -5255,7 +5252,7 @@ export const TOOLS = {
   },
 
   "admit-rule": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Normalize and admit one PROPOSED rule into executable authority. Capture remains free; this is the separate human gate. Applicability, projection, reachability, input contract, binding moment, fixtures, and enforcement points are all explicit. A machine-enforceable rule is refused unless at least one installed enforcement point and fixture are named. Admission writes an immutable authority receipt but does not activate the rule; activate-rule remains a second explicit human act.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5368,7 +5365,7 @@ export const TOOLS = {
   },
 
   "approve-rule": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Approve one captured system rule in a single Joe-authority act. Approval means the server atomically verifies exact registered enforcement, records the immutable authority receipt, and activates the rule in the same transaction. There is no approved-but-inactive or active-but-pending state. If enforcement is missing, approval refuses so the system must build and verify the control before carrying Joe's already-recorded approval. Dell retains teaching, review and optional participation capability but cannot replace Joe as the required system authority. Advisory guidance is not mislabeled as an unbreakable rule.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5396,7 +5393,7 @@ export const TOOLS = {
   },
 
   "activate-rule": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Retired compatibility verb. Direct activation is forbidden because it could separate human approval from verified enforcement. Use approve-rule, which succeeds only when it can enforce and activate the rule atomically.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5423,7 +5420,7 @@ export const TOOLS = {
   },
 
   "accept-workflow": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Authority acceptance of a completed workflow run. Shadow acceptance remains available to either admitted human partner; canary acceptance is Joe-only and is enforced by the authenticated authority database session, never a caller field. Uses the authority connection, derives the partner from that connection's authenticated session, and refuses an arbitrary receipt reference.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, workflow_key: { type: "string" },
@@ -5441,7 +5438,7 @@ export const TOOLS = {
   },
 
   "disable-legacy-schedule": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Joe-only authority readback after native legacy schedules are disabled. Requires accepted shadow/canary evidence plus immutable enabled and disabled observations for the exact registered surface; a duplicate group additionally requires all four observations for both surfaces. It never performs a native disable.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, workflow_key: { type: "string" }, reason: { type: "string" },
@@ -5477,7 +5474,7 @@ export const TOOLS = {
   },
 
   "activate-guidance-registry": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Activate the typed Guidance Registry after its 5–10-item constitution and complete coverage pass. Uses the human authority connection, derives the approving partner from its authenticated database session, and atomically records the registry-bound manifest-digest receipt and activation event.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, registry_id: { type: "string" },
@@ -5497,7 +5494,7 @@ export const TOOLS = {
   },
 
   "decide-guidance-import-batch": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Joe-only authority decision for one staged typed-guidance import batch. The human authority database session derives Joe; the caller supplies only the exact reviewed batch id, manifest digest, idempotency key, and recorded reason. It activates the batch's immutable decisions but does not activate the registry itself.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, batch_id: { type: "string" },
@@ -5517,7 +5514,7 @@ export const TOOLS = {
   },
 
   "deactivate-guidance-registry": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Joe-only authority operation to deactivate the active typed Guidance Registry. The authority database session derives Joe and the supplied digest must exactly bind the registry activation being withdrawn. This is append-only history; it never edits a guidance revision.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, registry_id: { type: "string" },
@@ -5537,7 +5534,7 @@ export const TOOLS = {
   },
 
   "retire-rule": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Joe-authority retirement of a proposed or active rule through one database transaction. It writes an immutable retirement receipt bound to the exact rule version, statement hash, prior approval, reason and replacement before changing status. Direct writer updates cannot retire a rule. Retirement preserves the frozen rule text and history; a changed rule must be taught and approved separately.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5595,7 +5592,7 @@ export const TOOLS = {
   // already established that a durable record can be corrected rather than
   // re-litigated; rules simply never got the same affordance.
   "amend-rule": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Correct the WORDS of a PROPOSED rule in place, keeping its id, created_at, taught_by and quote. THE LINE: amend = same proposed rule, better words; teach + retire = a different rule. Once approved, the exact statement, quote, scope, audience and enforcement preimage are frozen by the database: changing any of them would make an old receipt appear to approve new substance. Correct an ACTIVE rule by teaching and approving the corrected replacement, then retiring the old rule. human_quote is immutable once set and may only be filled when absent on a proposed import. Requires base_version from a fresh read; a conflict is never retried blind.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -7678,7 +7675,6 @@ Object.assign(TOOLS, {
 
   "create-national-account": {
     write: true,
-    humanOnly: true,
     description: "Create one national-account parent org/client and assign its accountable partner. It does not create market deals or duplicate a brand that already exists.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, name: { type: "string" },
@@ -7718,7 +7714,6 @@ Object.assign(TOOLS, {
 
   "create-national-market-deal": {
     write: true,
-    humanOnly: true,
     description: "Create one market transaction under a national account: reuse or create the named franchisee sub-client under the parent org, then create exactly one deal and optional stated market-agent assignment.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, account_client_id: { type: "string" },
@@ -7836,7 +7831,6 @@ Object.assign(TOOLS, {
 
   "resolve-candidate": {
     write: true,
-    humanOnly: true,
     description: "Human gate for one capture proposal. Rejecting only skips it. Accepting invokes its mapped live verb as the confirming partner, then confirms the candidate only after that write returns a real record reference.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, candidate_id: { type: "string" },
@@ -7895,7 +7889,6 @@ Object.assign(TOOLS, {
 
   "resolve-post-call-candidate": {
     write: true,
-    humanOnly: true,
     description: "Human-only resolution for one Call Mode proposal. assigned_action creates a real next action for the explicit Joe or Dell assignee. email_draft only confirms metadata and its local body hash: it never creates or sends an email or Outlook draft.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, candidate_id: { type: "string" },
