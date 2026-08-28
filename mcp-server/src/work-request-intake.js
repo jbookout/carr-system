@@ -436,7 +436,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         situation: { type: "string", minLength: 1, maxLength: 1000 }, title: { type: "string", minLength: 1, maxLength: 200 },
         desired_outcome: { type: "string", minLength: 1, maxLength: 2000 }, acceptance_criteria: { type: "array", minItems: 1, maxItems: 12,
           items: { type: "object", additionalProperties: false, required: ["id", "text"], properties: {
-            id: { type: "string", minLength: 1, maxLength: 64 }, text: { type: "string", minLength: 1, maxLength: 500 },
+            id: { type: "string", minLength: 2, maxLength: 64, pattern: "^[A-Z][A-Z0-9-]{1,63}$" }, text: { type: "string", minLength: 1, maxLength: 500 },
           } } },
       }, additionalProperties: false, required: ["idempotency_key", "situation", "title", "desired_outcome", "acceptance_criteria"] },
       handler: async (c, actor, args) => {
@@ -672,7 +672,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
         human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$" }, base_version: { type: "integer", minimum: 1 },
         plan_hash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
-        criterion_results: { type: "array", minItems: 1, maxItems: 12, items: { type: "object", additionalProperties: false, required: ["id", "result"], properties: { id: { type: "string", minLength: 1, maxLength: 64 }, result: { type: "string", enum: ["met", "not_met", "not_observed"] } } } },
+        criterion_results: { type: "array", minItems: 1, maxItems: 12, items: { type: "object", additionalProperties: false, required: ["id", "result"], properties: { id: { type: "string", minLength: 2, maxLength: 64, pattern: "^[A-Z][A-Z0-9-]{1,63}$" }, result: { type: "string", enum: ["met", "not_met", "not_observed"] } } } },
         evidence_refs: { type: "array", minItems: 1, maxItems: 12, items: { type: "string", minLength: 6, maxLength: 300 } },
         blocker_code: { type: "string", enum: ["none", "evidence_missing", "criterion_not_met", "external_dependency", "system_error"] },
         result_summary: { type: "string", minLength: 1, maxLength: 500 },
