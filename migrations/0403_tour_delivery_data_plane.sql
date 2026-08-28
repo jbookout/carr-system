@@ -69,6 +69,7 @@ create table if not exists ops.tour_public_projection_map_point (
 -- therefore closes a previously approved map without mutating history.
 create table if not exists ops.tour_map_promotion_receipt (
   id uuid primary key default gen_random_uuid(), organization_tenant_id text not null,
+  receipt_sequence bigint generated always as identity,
   projection_id uuid not null, reviewer_actor_id text not null,
   reviewed_at timestamptz not null, decision text not null check (decision in ('approved','rejected')),
   brief_version text not null, canonical_dataset_version text not null,
@@ -583,7 +584,7 @@ returns boolean language sql stable security definer set search_path=pg_catalog,
       join ops.tour t on t.organization_tenant_id=p.organization_tenant_id and t.id=p.tour_id
       where r.organization_tenant_id=p_tenant and r.projection_id=p_projection_id
         and r.route_version=p.route_version and r.canonical_dataset_version=t.canonical_dataset_version
-      order by r.reviewed_at desc,r.created_at desc,r.id desc limit 1
+      order by r.receipt_sequence desc limit 1
     ),false);
 $$;
 

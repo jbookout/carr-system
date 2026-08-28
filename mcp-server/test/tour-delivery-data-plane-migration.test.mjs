@@ -51,7 +51,8 @@ test("public packet and map reads remain sealed facts-only projections", () => {
   assert.match(migration, /tour_public_map_projection_evidence_ready/i);
   assert.match(migration, /tour_map_promotion_receipt[\s\S]*mobile_test_evidence[\s\S]*native_navigation_test_evidence[\s\S]*offline_test_evidence/i);
   assert.match(migration, /current_setting\('carr\.verified_human_actor_slug',true\)[\s\S]*tour map promotion requires a verified human authority session/i);
-  assert.match(migration, /select r\.decision='approved'[\s\S]*order by r\.reviewed_at desc,r\.created_at desc,r\.id desc limit 1/i);
+  assert.match(migration, /tour_map_promotion_receipt \([\s\S]*receipt_sequence bigint generated always as identity/i);
+  assert.match(migration, /select r\.decision='approved'[\s\S]*order by r\.receipt_sequence desc limit 1/i);
   assert.equal((migration.match(/not ops\.tour_public_map_projection_ready\(p_tenant,p_projection_id\)/g) || []).length, 2);
   assert.match(migration, /and ops\.tour_public_map_projection_ready\(p\.organization_tenant_id,p\.id\)/i);
   assert.match(migration, /allowed_field_classes \? 'coordinates'/i);

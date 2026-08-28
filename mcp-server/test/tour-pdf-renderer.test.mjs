@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { PDFDocument, PDFName } from "pdf-lib";
+import { PDFDocument, PDFName, StandardFonts } from "pdf-lib";
 import { inspectStoredTourPacketPdf, renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "../src/tour-pdf-renderer.js";
 
 const fontRoot = new URL("../assets/", import.meta.url);
@@ -63,15 +63,22 @@ test("PDF renderer rejects authoritative content that cannot fit instead of trun
   await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
 });
 
-test("PDF renderer measures route-label bounds and stored inspection rejects absent layout proof", async () => {
+test("PDF renderer measures route-label bounds and stored inspection decodes actual page geometry", async () => {
   const overflow = structuredClone(packet);
   overflow.properties[0].route_label = "W".repeat(80);
   await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
 
   const rendered = await renderTourPacketPdf(packet, fonts);
   const document = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
-  document.catalog.delete(PDFName.of("CARRLayoutBoundsValidated"));
+  document.catalog.delete(PDFName.of("CARRLayoutBoundsProofVersion"));
   const unmeasured = await document.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
   const observed = await inspectStoredTourPacketPdf(unmeasured);
   assert.ok(observed.pages.every(page => page.clipped_box_count === 1));
+
+  const outOfBounds = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  const font = await outOfBounds.embedFont(StandardFonts.Helvetica);
+  outOfBounds.getPage(0).drawText("OUTSIDE", { x: -20, y: 50, size: 10, font });
+  const tampered = await outOfBounds.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  const tamperedObservation = await inspectStoredTourPacketPdf(tampered);
+  assert.equal(tamperedObservation.pages[0].clipped_box_count, 1);
 });

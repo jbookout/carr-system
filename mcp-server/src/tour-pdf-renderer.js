@@ -1,8 +1,8 @@
 import fontkit from "@pdf-lib/fontkit";
-import { PDFDocument, PDFName, PDFString, rgb } from "pdf-lib";
+import { decodePDFRawStream, PDFDocument, PDFName, PDFString, rgb } from "pdf-lib";
 import { formatApprovedMetric, renderTourPacket } from "./tour-packet-render.js";
 
-export const TOUR_PDF_RENDERER_VERSION = "1.0.1";
+export const TOUR_PDF_RENDERER_VERSION = "1.0.2";
 export const TOUR_PDF_TEMPLATE_VERSION = "1.0.0";
 
 const PAGE = [612, 792];
@@ -107,7 +107,7 @@ export async function renderTourPacketPdf(input, fonts, proof = {}) {
     CARRRendererDigest: proof.renderer_digest,
     CARRQcRulesetDigest: proof.qc_ruleset_digest,
     CARRFontDigests: JSON.stringify([regularDigest, boldDigest]),
-    CARRLayoutBoundsValidated: "true",
+    CARRLayoutBoundsProofVersion: "decoded-content-geometry.v1",
   };
   for (const [key, value] of Object.entries(catalogProof)) {
     if (typeof value === "string" && value) document.catalog.set(PDFName.of(key), PDFString.of(value));
@@ -166,19 +166,51 @@ function decoded(object) {
   return object && typeof object.decodeText === "function" ? object.decodeText() : null;
 }
 
+function pageContent(document, page) {
+  const contents = page.node.Contents();
+  const references = contents && typeof contents.asArray === "function" ? contents.asArray() : contents ? [contents] : [];
+  const decoder = new TextDecoder();
+  return references.map(reference => {
+    const stream = document.context.lookup(reference);
+    try { return decoder.decode(decodePDFRawStream(stream).decode()); }
+    catch { return ""; }
+  }).join("\n");
+}
+
+function decodedGeometryWithinPage(content, width, height) {
+  const number = "[-+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)";
+  const inside = (x, y) => Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= width && y <= height;
+  let operatorCount = 0;
+  for (const match of content.matchAll(new RegExp(`(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+Tm`, "g"))) {
+    operatorCount += 1;
+    if (!inside(Number(match[5]), Number(match[6]))) return false;
+  }
+  for (const match of content.matchAll(new RegExp(`(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+re`, "g"))) {
+    operatorCount += 1;
+    const [x, y, boxWidth, boxHeight] = match.slice(1).map(Number);
+    if (!inside(x, y) || !Number.isFinite(boxWidth) || !Number.isFinite(boxHeight) || boxWidth < 0 || boxHeight < 0 || x + boxWidth > width || y + boxHeight > height) return false;
+  }
+  for (const match of content.matchAll(new RegExp(`(${number})\\s+(${number})\\s+(?:m|l)`, "g"))) {
+    operatorCount += 1;
+    if (!inside(Number(match[1]), Number(match[2]))) return false;
+  }
+  return operatorCount > 0;
+}
+
 /** Parse stored PDF bytes so QC observations do not trust the render model. */
 export async function inspectStoredTourPacketPdf(readback) {
   const document = await PDFDocument.load(readback, { updateMetadata: false });
   const catalog = key => decoded(document.catalog.get(PDFName.of(key)));
-  const layoutBoundsValidated = catalog("CARRLayoutBoundsValidated") === "true";
+  const layoutProofCurrent = catalog("CARRLayoutBoundsProofVersion") === "decoded-content-geometry.v1";
   const pages = document.getPages().map((page, index) => {
     const size = page.getSize();
     const propertyRef = decoded(page.node.get(PDFName.of("CARRPropertyRef")));
     const propertyMarker = decoded(page.node.get(PDFName.of("CARRPropertyMarker")));
     const hasContent = Boolean(page.node.get(PDFName.of("Contents")));
+    const geometryWithinPage = decodedGeometryWithinPage(pageContent(document, page), size.width, size.height);
     return {
       page_number: index + 1, property_ref: propertyRef, property_marker: propertyMarker,
-      clipped_box_count: size.width === 612 && size.height === 792 && hasContent && propertyRef && propertyMarker && layoutBoundsValidated ? 0 : 1,
+      clipped_box_count: size.width === 612 && size.height === 792 && hasContent && propertyRef && propertyMarker && layoutProofCurrent && geometryWithinPage ? 0 : 1,
     };
   });
   let fontDigests = [];
