@@ -33,7 +33,7 @@ declare
   v_fact_count integer;
   v_seal_count integer;
   v_expected_vector constant text :=
-    'sha256:e90eb72059a5d2a423f2d120433bef86f3b611f740a12f29039143e67909b0bc';
+    'sha256:73c90187e235a2e7262bf8de28ea4b61f69721cb8e60e8876092d3337d134bb7';
 begin
   -- Direct approved projection DML is refused by the database-owned
   -- draft-only creation guard, even for the owner session.

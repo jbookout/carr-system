@@ -1038,7 +1038,8 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   for tour_pg_proof in \
     mcp-server/test/tour-operations-slice2-postgres.sql \
     mcp-server/test/tour-property-identity-jurisdiction-postgres.sql \
-    mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql; do
+    mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql \
+    mcp-server/test/tour-delivery-data-plane-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \

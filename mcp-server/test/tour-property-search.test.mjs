@@ -18,7 +18,7 @@ function harness() {
   const calls = [], events = [], envelopes = [];
   const client = { async query(sql, params) {
     calls.push({ sql, params });
-    if (sql.includes("search_tour_properties")) return { rows: [{ search: { count: 1, has_more: false, cursor: "next_1", provider: "private", items: [{ property_id: ids.propertyA, property_ref: propertyRef, name: "Medical Plaza", address: "100 Clinic Way", county: "Escambia", state: "FL", property_type: "medical_office", availability: "available", size: { value: 4200, unit: "SF", verifier: "private" }, asking_economics: { value: 24, currency: "USD", period: "NNN" }, entrance_verified: true, public_projection_ready: false, photos_available: true, photo_count: 2, rights_receipt_id: ids.propertyB }] } }] };
+    if (sql.includes("search_tour_properties")) return { rows: [{ search: { count: 1, has_more: true, cursor: "25", provider: "private", items: [{ property_id: ids.propertyA, property_ref: propertyRef, name: "Medical Plaza", address: "100 Clinic Way", county: "Escambia", state: "FL", property_type: "medical_office", availability: "available", size: { value: 4200, unit: "SF", verifier: "private" }, asking_economics: { value: 24, currency: "USD", period: "NNN" }, entrance_verified: true, public_projection_ready: false, photos_available: true, photo_count: 2, rights_receipt_id: ids.propertyB }] } }] };
     if (sql.includes("append_tour_selection_cart_version")) return { rows: [{ selection_version_id: ids.selection }] };
     if (sql.includes("read_tour_selection_cart")) return { rows: [{ cart: { tour_id: ids.tour, selection_version_id: ids.selection, selection_version: 2, property_ids: [ids.propertyA], updated_at: "2026-08-27T12:00:00Z", token_digest: selectionDigest } }] };
     throw new Error(sql);
@@ -42,6 +42,8 @@ test("specialist search is five-county, facts-only, deterministic, and sanitized
   assert.equal(result.search.items[0].property_id, ids.propertyA);
   assert.equal(result.search.items[0].property_ref, propertyRef);
   assert.deepEqual(result.search.items[0].size, { value: 4200, unit: "SF" });
+  assert.equal(result.search.cursor, "25");
+  assert.equal(result.search.has_more, true);
   assert.doesNotMatch(JSON.stringify(result), /provider|rights|evidence|verifier|contact|token_digest/);
   assert.deepEqual(h.calls[0].params.slice(0, 2), ["carr-internal", actor.id]);
   assert.deepEqual(JSON.parse(h.calls[0].params[2]), searchArgs);
@@ -53,6 +55,7 @@ test("search refuses out-of-scope counties, advice-like sorts, invalid ranges, a
     { ...searchArgs, sort: "best_for_client" },
     { ...searchArgs, min_square_feet: 9000, max_square_feet: 8000 },
     { ...searchArgs, organization_tenant_id: "other" },
+    { ...searchArgs, cursor: "next_1" },
   ]) {
     const h = harness();
     await assert.rejects(h.tools["search-tour-properties"].handler(h.client, actor, input), error => error instanceof ToolError);

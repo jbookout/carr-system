@@ -120,9 +120,13 @@ export function canonicalProjectionDigest(input) {
     compareUtf8(left.property_id || "", right.property_id || "") ||
     compareUtf8(left.display_field_key || "", right.display_field_key || "") ||
     compareUtf8(left.field_assertion_id || "", right.field_assertion_id || ""));
+  const mapPoints = (Array.isArray(input?.map_points) ? input.map_points : []).slice().sort((left, right) =>
+    compareUtf8(left.property_id || "", right.property_id || "") ||
+    compareUtf8(left.coordinate_candidate_id || "", right.coordinate_candidate_id || "") ||
+    compareUtf8(left.entrance_verification_receipt_id || "", right.entrance_verification_receipt_id || ""));
   const encoded = value => Buffer.from(String(value), "utf8").toString("base64");
   const lines = [
-    "public-tour-projection-digest.v1",
+    "public-tour-projection-digest.v2",
     encoded(projection.organization_tenant_id),
     String(projection.tour_id),
     String(projection.id),
@@ -135,6 +139,12 @@ export function canonicalProjectionDigest(input) {
       fact.route_version,
       encoded(fact.display_field_key),
     ].join("|")),
+    ...(mapPoints.length ? ["map", ...mapPoints.map(point => [
+      point.property_id,
+      point.coordinate_candidate_id,
+      point.entrance_verification_receipt_id,
+      point.route_version,
+    ].join("|"))] : []),
   ];
   return "sha256:" + sha256(lines.join("\n"));
 }

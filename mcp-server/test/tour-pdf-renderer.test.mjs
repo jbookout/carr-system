@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { PDFDocument } from "pdf-lib";
-import { renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "../src/tour-pdf-renderer.js";
+import { inspectStoredTourPacketPdf, renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "../src/tour-pdf-renderer.js";
 
 const fontRoot = new URL("../assets/", import.meta.url);
 const fonts = {
@@ -37,4 +37,28 @@ test("PDF renderer is byte-deterministic with exactly one Letter page per proper
 test("PDF renderer fails closed without both pinned embedded fonts", async () => {
   await assert.rejects(renderTourPacketPdf(packet, { regular: fonts.regular }), /bold must be nonempty font bytes/);
   await assert.rejects(renderTourPacketPdf(packet, { bold: fonts.bold }), /regular must be nonempty font bytes/);
+});
+
+test("stored PDF inspection derives pages, markers, component digests, and embedded fonts from bytes", async () => {
+  const proof = {
+    projection_digest: `sha256:${"1".repeat(64)}`,
+    template_digest: `sha256:${"2".repeat(64)}`,
+    renderer_digest: `sha256:${"3".repeat(64)}`,
+    qc_ruleset_digest: `sha256:${"4".repeat(64)}`,
+  };
+  const rendered = await renderTourPacketPdf(packet, fonts, proof);
+  const observed = await inspectStoredTourPacketPdf(rendered.bytes);
+  assert.equal(observed.page_count, 2);
+  assert.deepEqual(observed.pages.map(page => page.property_ref), rendered.propertyRefs);
+  assert.deepEqual(observed.pages.map(page => page.property_marker), rendered.markers);
+  assert.ok(observed.pages.every(page => page.clipped_box_count === 0));
+  for (const [key, value] of Object.entries(proof)) assert.equal(observed[key], value);
+  assert.deepEqual(observed.fonts.map(font => font.digest), rendered.fontDigests);
+  assert.ok(observed.fonts.every(font => font.embedded));
+});
+
+test("PDF renderer rejects authoritative content that cannot fit instead of truncating it", async () => {
+  const overflow = structuredClone(packet);
+  overflow.properties[0].name = Array.from({ length: 12 }, () => "Authoritative").join(" ");
+  await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
 });

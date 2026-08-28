@@ -5,6 +5,7 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const migration = fs.readFileSync(path.join(root, "migrations/0403_tour_delivery_data_plane.sql"), "utf8");
+const ci = fs.readFileSync(path.join(root, "ops/ci.sh"), "utf8");
 
 test("Tour delivery data plane implements every registered SQL seam", () => {
   for (const name of [
@@ -22,7 +23,7 @@ test("Tour delivery data plane implements every registered SQL seam", () => {
 test("Tour delivery state is append-only, tenant-qualified, digest-only, and least privilege", () => {
   for (const table of [
     "tour_selection_cart_version", "tour_share_session", "tour_public_asset",
-    "tour_pdf_render_job", "tour_pdf_render_result", "tour_pdf_human_review",
+    "tour_public_projection_map_point", "tour_pdf_render_job", "tour_pdf_render_result", "tour_pdf_human_review",
   ]) {
     assert.match(migration, new RegExp(`create table if not exists ops\\.${table}`, "i"), table);
     assert.match(migration, new RegExp(`['\"]${table}['\"]`, "i"), table);
@@ -40,9 +41,24 @@ test("public packet and map reads remain sealed facts-only projections", () => {
   assert.match(migration, /tour_public_projection_seal_receipt/i);
   assert.match(migration, /tour_public_value_safe/i);
   assert.match(migration, /tour_coordinate_entrance_verification_receipt/i);
+  assert.match(migration, /public-tour-projection-digest\.v2/i);
+  assert.match(migration, /tour_public_projection_map_point/i);
+  assert.match(migration, /ops\.read_tour_public_projection\(p\.organization_tenant_id,p\.id\) is not null/i);
+  assert.match(migration, /tour map share requires one sealed entrance coordinate per property/i);
   assert.match(migration, /tour_share_session_grant\(p_session_digest,'view_packet'\)/i);
   assert.match(migration, /tour_share_session_grant\(p_session_digest,'view_map'\)/i);
   assert.doesNotMatch(migration, /tour_cheat_sheet_revision[\s\S]{0,200}read_tour_share_packet/i);
+});
+
+test("property search cursor paginates in the requested stable order", () => {
+  assert.match(migration, /row_number\(\) over \(order by/i);
+  assert.match(migration, /result_position>v_offset/i);
+  assert.match(migration, /limit v_limit\+1/i);
+  assert.match(migration, /jsonb_build_object\('count',v_count,'has_more',v_has_more,'cursor',v_cursor/i);
+});
+
+test("the repository migration class executes the 0403 PostgreSQL acceptance proof", () => {
+  assert.match(ci, /mcp-server\/test\/tour-delivery-data-plane-postgres\.sql/);
 });
 
 test("route preparation always derives transitions from the accepted canonical base", () => {

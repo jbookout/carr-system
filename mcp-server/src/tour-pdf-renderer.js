@@ -1,5 +1,5 @@
 import fontkit from "@pdf-lib/fontkit";
-import { PDFDocument, rgb } from "pdf-lib";
+import { PDFDocument, PDFName, PDFString, rgb } from "pdf-lib";
 import { formatApprovedMetric, renderTourPacket } from "./tour-packet-render.js";
 
 export const TOUR_PDF_RENDERER_VERSION = "1.0.0";
@@ -43,11 +43,7 @@ function wrap(value, font, size, width, maximumLines) {
   }
   if (line) lines.push(line);
   if (lines.length <= maximumLines) return lines;
-  const visible = lines.slice(0, maximumLines);
-  let last = visible[maximumLines - 1];
-  while (last && font.widthOfTextAtSize(`${last}...`, size) > width) last = last.slice(0, -1);
-  visible[maximumLines - 1] = `${last}...`;
-  return visible;
+  throw new RangeError(`tour_pdf_content_overflow:${maximumLines}:${width}`);
 }
 
 function drawLines(page, lines, options) {
@@ -79,7 +75,7 @@ async function sha256(value) {
 }
 
 /** Generate a fixed Letter packet with exactly one polished page per property. */
-export async function renderTourPacketPdf(input, fonts) {
+export async function renderTourPacketPdf(input, fonts, proof = {}) {
   const packet = renderTourPacket(input);
   const regularBytes = bytes(fonts?.regular, "regular");
   const boldBytes = bytes(fonts?.bold, "bold");
@@ -95,6 +91,18 @@ export async function renderTourPacketPdf(input, fonts) {
   document.setProducer(`CARR deterministic PDF renderer ${TOUR_PDF_RENDERER_VERSION}`);
   document.setCreationDate(fixedDate);
   document.setModificationDate(fixedDate);
+  const regularDigest = await sha256(regularBytes);
+  const boldDigest = await sha256(boldBytes);
+  const catalogProof = {
+    CARRProjectionDigest: proof.projection_digest,
+    CARRTemplateDigest: proof.template_digest,
+    CARRRendererDigest: proof.renderer_digest,
+    CARRQcRulesetDigest: proof.qc_ruleset_digest,
+    CARRFontDigests: JSON.stringify([regularDigest, boldDigest]),
+  };
+  for (const [key, value] of Object.entries(catalogProof)) {
+    if (typeof value === "string" && value) document.catalog.set(PDFName.of(key), PDFString.of(value));
+  }
 
   packet.facts.properties.forEach((property, index) => {
     const page = document.addPage(PAGE);
@@ -121,6 +129,8 @@ export async function renderTourPacketPdf(input, fonts) {
     drawLines(page, wrap(property.caveat, regular, 9.5, 494, 5), { x: 58, y: 184, size: 9.5, lineHeight: 13, font: regular, color: MUTED });
 
     const marker = packet.markers[index];
+    page.node.set(PDFName.of("CARRPropertyRef"), PDFString.of(property.property_ref));
+    page.node.set(PDFName.of("CARRPropertyMarker"), PDFString.of(marker));
     page.drawText(`Packet ref: ${property.property_ref}`, { x: 42, y: 76, size: 6.5, font: regular, color: MUTED });
     page.drawText(`Property marker: ${marker}`, { x: 42, y: 63, size: 6.5, font: regular, color: MUTED });
     const pageLabel = `${index + 1} / ${packet.propertyCount}`;
@@ -131,11 +141,42 @@ export async function renderTourPacketPdf(input, fonts) {
   return Object.freeze({
     bytes: pdfBytes,
     artifactDigest: await sha256(pdfBytes),
-    fontDigests: Object.freeze([await sha256(regularBytes), await sha256(boldBytes)]),
+    fontDigests: Object.freeze([regularDigest, boldDigest]),
     rendererVersion: TOUR_PDF_RENDERER_VERSION,
     templateVersion: TOUR_PDF_TEMPLATE_VERSION,
     propertyCount: packet.propertyCount,
     propertyRefs: packet.propertyRefs,
     markers: packet.markers,
   });
+}
+
+function decoded(object) {
+  return object && typeof object.decodeText === "function" ? object.decodeText() : null;
+}
+
+/** Parse stored PDF bytes so QC observations do not trust the render model. */
+export async function inspectStoredTourPacketPdf(readback) {
+  const document = await PDFDocument.load(readback, { updateMetadata: false });
+  const catalog = key => decoded(document.catalog.get(PDFName.of(key)));
+  const pages = document.getPages().map((page, index) => {
+    const size = page.getSize();
+    const propertyRef = decoded(page.node.get(PDFName.of("CARRPropertyRef")));
+    const propertyMarker = decoded(page.node.get(PDFName.of("CARRPropertyMarker")));
+    const hasContent = Boolean(page.node.get(PDFName.of("Contents")));
+    return {
+      page_number: index + 1, property_ref: propertyRef, property_marker: propertyMarker,
+      clipped_box_count: size.width === 612 && size.height === 792 && hasContent && propertyRef && propertyMarker ? 0 : 1,
+    };
+  });
+  let fontDigests = [];
+  try { fontDigests = JSON.parse(catalog("CARRFontDigests") || "[]"); } catch { fontDigests = []; }
+  const serialized = new TextDecoder().decode(readback);
+  const embeddedFontPrograms = (serialized.match(/\/FontFile(?:2|3)\b/g) || []).length;
+  return {
+    page_count: document.getPageCount(), pages,
+    projection_digest: catalog("CARRProjectionDigest"), template_digest: catalog("CARRTemplateDigest"),
+    renderer_digest: catalog("CARRRendererDigest"), qc_ruleset_digest: catalog("CARRQcRulesetDigest"),
+    fonts: Array.isArray(fontDigests) ? fontDigests.map(value => ({ digest: value, embedded: embeddedFontPrograms >= fontDigests.length })) : [],
+    asset_digests: [], link_checks: [],
+  };
 }

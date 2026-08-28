@@ -1,7 +1,7 @@
 import latoRegular from "../assets/lato-regular.ttf";
 import latoBold from "../assets/lato-bold.ttf";
 import { inspectTourPdfProof, DELIVERABLE_QC_RULESET_VERSION } from "./deliverable-qc.js";
-import { renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "./tour-pdf-renderer.js";
+import { inspectStoredTourPacketPdf, renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "./tour-pdf-renderer.js";
 
 const encoder = new TextEncoder();
 
@@ -17,11 +17,14 @@ function fontBytes(value) {
 
 export async function prepareTourPdfArtifact(renderInput) {
   const packet = renderInput?.packet;
-  const rendered = await renderTourPacketPdf(packet, { regular: fontBytes(latoRegular), bold: fontBytes(latoBold) });
   const packetDigest = await digest(JSON.stringify(packet));
   const templateDigest = await digest(`tour-pdf-template:${TOUR_PDF_TEMPLATE_VERSION}`);
   const rendererDigest = await digest(`tour-pdf-renderer:${TOUR_PDF_RENDERER_VERSION}`);
   const qcRulesetDigest = await digest(`deliverable-qc:${DELIVERABLE_QC_RULESET_VERSION}`);
+  const rendered = await renderTourPacketPdf(packet, { regular: fontBytes(latoRegular), bold: fontBytes(latoBold) }, {
+    projection_digest: renderInput.projection_digest, template_digest: templateDigest,
+    renderer_digest: rendererDigest, qc_ruleset_digest: qcRulesetDigest,
+  });
   const markersDigest = await digest(JSON.stringify(rendered.markers));
   const expected = {
     page_count: rendered.propertyCount, property_refs: rendered.propertyRefs, markers: rendered.markers,
@@ -45,15 +48,7 @@ export async function storeAndVerifyTourPdf(env, tenant, renderJobId, prepared) 
   const readback = new Uint8Array(await stored.arrayBuffer());
   const readbackDigest = await digest(readback);
   if (readbackDigest !== prepared.rendered.artifactDigest) throw new Error("tour_pdf_storage_readback_mismatch");
-  const observed = {
-    page_count: prepared.rendered.propertyCount,
-    pages: prepared.rendered.propertyRefs.map((propertyRef, index) => ({ page_number: index + 1, property_ref: propertyRef, property_marker: prepared.rendered.markers[index], clipped_box_count: 0 })),
-    projection_digest: prepared.expected.projection_digest, template_digest: prepared.templateDigest,
-    renderer_digest: prepared.rendererDigest, qc_ruleset_digest: prepared.qcRulesetDigest,
-    artifact_digest: prepared.rendered.artifactDigest, r2_readback_digest: readbackDigest,
-    fonts: prepared.rendered.fontDigests.map(fontDigest => ({ digest: fontDigest, embedded: true })),
-    asset_digests: [], link_checks: [],
-  };
+  const observed = { ...(await inspectStoredTourPacketPdf(readback)), artifact_digest: readbackDigest, r2_readback_digest: readbackDigest };
   const qc = inspectTourPdfProof({ expected: prepared.expected, observed });
   const qcRunDigest = await digest(JSON.stringify({ ruleset: DELIVERABLE_QC_RULESET_VERSION, expected: prepared.expected, observed, findings: qc.findings }));
   return { storageRef, contentLength: readback.byteLength, qc, qcRunDigest };

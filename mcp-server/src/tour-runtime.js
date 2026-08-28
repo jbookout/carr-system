@@ -86,6 +86,14 @@ async function sha256Bytes(value) {
   return `sha256:${[...hash].map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+async function derivedIdempotencyUuid(namespace, value) {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${namespace}:${value}`)));
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes.slice(0, 16)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const PDF_ARTIFACT_READS = Object.freeze({
   review: {
     sql: "select ops.read_tour_pdf_artifact_for_review($1::text,$2::uuid,$3::text) as data",
@@ -180,7 +188,7 @@ export function createTourRuntimeAdapters() {
       const stored = await storeAndVerifyTourPdf(context.env, tenant, renderJobId, prepared);
       const artifactRef = `artifact:tour-pdf:${renderJobId.replaceAll("-", "")}`;
       const recorded = await invoke(context, "record-tour-pdf-render-result", {
-        idempotency_key: crypto.randomUUID(), render_job_id: renderJobId,
+        idempotency_key: await derivedIdempotencyUuid("tour-pdf-render-result", context.input.idempotency_key), render_job_id: renderJobId,
         status: stored.qc.blocked ? "qc_blocked" : "review_ready", artifact_ref: artifactRef,
         artifact_digest: prepared.rendered.artifactDigest, storage_ref: stored.storageRef,
         content_length: stored.contentLength, page_count: prepared.rendered.propertyCount,

@@ -88,8 +88,8 @@ function propertyIds(value, ToolError) {
 }
 function cursor(value, ToolError) {
   if (value === null) return null;
-  const candidate = text(value, "cursor", ToolError, 256);
-  if (!/^[A-Za-z0-9_-]{1,256}$/.test(candidate)) fail(ToolError, { error: "tour_input_invalid", field: "cursor" });
+  const candidate = text(value, "cursor", ToolError, 9);
+  if (!/^[0-9]{1,9}$/.test(candidate)) fail(ToolError, { error: "tour_input_invalid", field: "cursor" });
   return candidate;
 }
 function metric(value) {
@@ -121,7 +121,7 @@ function projectSearchItem(value) {
 export function projectTourPropertySearch(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const output = { items: Array.isArray(value.items) ? value.items.map(projectSearchItem).filter(Boolean) : [] };
-  if (typeof value.cursor === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(value.cursor)) output.cursor = value.cursor;
+  if (typeof value.cursor === "string" && /^[0-9]{1,9}$/.test(value.cursor)) output.cursor = value.cursor;
   if (typeof value.has_more === "boolean") output.has_more = value.has_more;
   if (Number.isInteger(value.count) && value.count >= 0) output.count = value.count;
   return output;
@@ -152,7 +152,7 @@ export function tourPropertySearchTools({ withEnvelope, writeEvent, ToolError })
         public_projection_ready: { type: ["boolean", "null"] },
         photos_available: { type: ["boolean", "null"] },
         sort: { type: "string", enum: [...SORT] },
-        cursor: { type: ["string", "null"], maxLength: 256 },
+        cursor: { type: ["string", "null"], pattern: "^[0-9]{1,9}$" },
         limit: { type: "integer", minimum: 1, maximum: 100 },
       }, [...SEARCH_FIELDS]),
       handler: async (client, actor, args) => {

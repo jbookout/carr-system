@@ -104,7 +104,19 @@ test("canonical projection digest matches the database UTF-8 byte contract vecto
     ],
   };
   assert.equal(canonicalProjectionDigest(input),
-    "sha256:e90eb72059a5d2a423f2d120433bef86f3b611f740a12f29039143e67909b0bc");
+    "sha256:73c90187e235a2e7262bf8de28ea4b61f69721cb8e60e8876092d3337d134bb7");
+});
+
+test("canonical projection digest binds immutable public-map coordinate selection", () => {
+  const base = { ...withProjectionBody("approved"), map_points: [{
+    property_id: membership.property_id,
+    coordinate_candidate_id: "10000000-0000-4000-8000-000000000070",
+    entrance_verification_receipt_id: "10000000-0000-4000-8000-000000000071",
+    route_version: projection.route_version,
+  }] };
+  const digest = canonicalProjectionDigest(base);
+  assert.notEqual(digest, canonicalProjectionDigest({ ...base, map_points: [] }));
+  assert.throws(() => assertProjectionDigest({ ...base, map_points: [{ ...base.map_points[0], coordinate_candidate_id: "10000000-0000-4000-8000-000000000072" }] }, digest), /PROJECTION_DIGEST_MISMATCH/);
 });
 
 test("projection creation is draft-only and a complete seal requires the full selected, rights-checked fact set", () => {
