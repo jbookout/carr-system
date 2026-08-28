@@ -356,3 +356,11 @@ footer{background:var(--navy);color:#fff;padding:26px 44px 30px;margin-top:34px}
      only way it can be: the footer takes its own sheet and arrives whole. */
   footer{break-inside:avoid;page-break-inside:avoid;break-before:page;page-break-before:always}
 }
+
+@media print{
+  /* A written note is reference material on a sheet that has a fixed budget. */
+  .usernote{font-size:11px;line-height:1.4;margin:0 0 6px;padding:7px 10px}
+}
+
+/* A card whose note replaced the About column gives the remaining list the width. */
+.twocol.onecol{grid-template-columns:1fr}

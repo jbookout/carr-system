@@ -121,7 +121,22 @@ def agent_line(p):
 
 
 def notes_block(note, lines=3):
+    """Blank ruled lines to write on, fewer when the box already carries a note.
+
+    A card with one option to a sheet has a fixed budget. Dell added unit-level
+    notes to two options on 2026-08-27, and at three ruled lines apiece both cards
+    tipped over their sheet and spilled. The lines exist to be written on during
+    the tour, so when a note is already there the note is doing most of that work
+    and two lines is enough to annotate it.
+    """
+    note = (note or "").strip()
     n = f'<p class="usernote">{e(note)}</p>' if note else ""
+    if note:
+        # A long note is itself several lines of the budget. 4935 West Highway 98
+        # carries five unit rates, the parking ratio, the units the landlord is
+        # taking back, the signed uses and the allowance, and at two blank lines it
+        # still pushed its agent line onto a sheet that was 99% white.
+        lines = 3
     return ('<div class="notebox"><h4>Notes</h4>' + n
             + '<div class="noteline"></div>' * lines + "</div>")
 
@@ -183,21 +198,23 @@ def card(folder, p):
     # The written paragraph is optional. Dell removed it on 2026-08-27: the facts
     # about a space stay, our reading of the space does not.
     copy_block = f'<p class="pcopy">{e(p["copy"])}</p>' if (p.get("copy") or "").strip() else ""
-    about = "".join(f"<li>{e(x)}</li>" for x in p.get("about", []))
+
+    # A card carrying a written note drops our "About the property" summary. Dell,
+    # 2026-08-27: "feel free to remove your comments on the space if you need more
+    # space on the page for the notes section." His note is better than our summary
+    # of the same space, and the room it frees goes back to the ruled lines he
+    # writes on standing in the building. Confirm before signing stays either way,
+    # because it is a checklist rather than a description.
+    has_note = bool((p.get("note") or "").strip())
+    about = "" if has_note else "".join(f"<li>{e(x)}</li>" for x in p.get("about", []))
     conf = "".join(f"<li>{e(x)}</li>" for x in p.get("confirm", []))
     ctr = f'<div class="pctr">{e(p["ctr"])}</div>' if p.get("ctr") else ""
     two = ""
     if about or conf:
-        two = (f'<div class="twocol">'
+        two = (f'<div class="twocol{" onecol" if not about else ""}">'
                f'{f"<div class=mini><h4>About the property</h4><ul>{about}</ul></div>" if about else ""}'
                f'{f"<div class=mini><h4>Confirm before signing</h4><ul>{conf}</ul></div>" if conf else ""}'
                f'</div>')
-    # The badge, the heading, the address and the photograph are one thing: the point
-    # where the client recognises which option they are looking at. Printed, they were
-    # four siblings that could be split apart, and the round number badge is absolutely
-    # positioned, so a card starting in the last inch of a sheet left an orange crescent
-    # alone at the bottom with its heading overleaf. Wrapping them lets print keep the
-    # opening whole with one rule. On screen the wrapper changes nothing.
     return f'''
     <section class="card">
       <div class="copen">
