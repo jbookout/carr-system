@@ -132,7 +132,6 @@
         "street": "4506-4546 Highway 20 East, Suite 4536, Niceville, FL 32578",
         "near": "Winn-Dixie anchored center on the Highway 20 corridor, east side of the center, retail facing."
       },
-      "copy": "The only space in this search already fit out as medical. A Winn-Dixie anchored grocery center of about 105,599 SF in the heart of the Niceville trade area, with over 33,000 vehicles a day on Highway 20, ample parking, and prominent pylon signage. For a startup the draw is a traffic base you do not have to build yourself and a suite that is not a conversion. At 4,000 SF it sits above your target band, so the question to put to the landlord is whether it will demise toward 3,400.",
       "facts": [
         [
           "Available",
@@ -203,7 +202,7 @@
       "agent": "Bellcore Commercial, Harry Bell Jr.",
       "src": "Crexi",
       "photo": "bluewater.jpg",
-      "limit": "At 4,000 SF it sits above your target band"
+      "limit": "Available"
     },
     {
       "n": "02",
@@ -213,7 +212,6 @@
         "street": "1501 Merchants Way, Suite 1507, Niceville, FL 32578",
         "near": "Office complex behind the Highway 20 shopping center, office facing, to the rear."
       },
-      "copy": "The second Bluewater Bay space, and worth understanding as a separate building rather than another suite in the same strip. It sits in the office complex on Merchants Way behind the shopping center, so it shares the center's parking and signage but not its storefront visibility. Same 4,000 SF and the same $22.00 asking rate as the medical suite, but the operating expenses are materially higher at $9.03 a foot, which makes it the more expensive of the two on your budget despite the identical headline rate.",
       "facts": [
         [
           "Available",
@@ -279,7 +277,7 @@
       "agent": "Bellcore Commercial, Harry Bell Jr.",
       "src": "Crexi",
       "photo": "bluewater-office.jpg",
-      "limit": "the operating expenses are materially higher at $9.03 a foot"
+      "limit": "Operating exp."
     },
     {
       "n": "03",
@@ -289,7 +287,6 @@
         "street": "10916 Emerald Coast Parkway, Miramar Beach, FL 32550",
         "near": "Highway 98 corridor, Miramar Beach."
       },
-      "copy": "An off market opportunity on the Highway 98 corridor, not published on any listing service, brought to us directly. Two units of roughly 3,000 SF each, and one side is now in the legal phase with another party, which is further along than a negotiation and means you should plan on the remaining unit rather than the pair. That single unit sits inside your band on its own. Everything else about it, the rate, the expenses, the floor and the condition, is unpublished and has to come straight from the landlord. We are including it because an unlisted space is a space you are not bidding against the whole market for, and that is worth a look even under time pressure.",
       "facts": [
         [
           "Available",
@@ -348,7 +345,7 @@
       "agent": "Direct to landlord",
       "src": "Off market",
       "photo_absent_reason": "No photograph exists for this one. It is off market, never published on CoStar, Crexi, ECAR, or Moody's, and it came to us directly. We will see it for the first time together on the tour.",
-      "limit": "one side is now in the legal phase with another party, which is further along than a negotiation and means you should plan on the remaining unit rather than the pair"
+      "limit": "Status"
     },
     {
       "n": "04",
@@ -358,7 +355,6 @@
         "street": "215 Grand Boulevard, Suite 102, Miramar Beach, FL 32550",
         "near": "Grand Boulevard lifestyle center at the Sandestin gate, west end of the center."
       },
-      "copy": "The strongest address on the tour. Grand Boulevard is a mixed use lifestyle center by the Sandestin gate with heavy daytime traffic and a professional setting that does a lot of work for a new practice. This is the ground floor suite at the west end of the center with signage, at the bottom of the range Grand Boulevard is asking. It comes as buildout space, so the fit-out is a real cost, and it does not deliver until February 2027, which makes your target opening date the deciding question rather than the rent.",
       "facts": [
         [
           "Available",
@@ -417,7 +413,7 @@
       "agent": "Unlisted",
       "src": "CoStar",
       "photo": "grandblvd.jpg",
-      "limit": "it does not deliver until February 2027"
+      "limit": "Available from"
     },
     {
       "n": "05",
@@ -427,7 +423,6 @@
         "street": "4935 West Highway 98, Santa Rosa Beach, FL 32459",
         "near": "Premier retail and flex complex delivering on Highway 98."
       },
-      "copy": "The only Santa Rosa Beach space on the tour. A Class A retail, showroom, and flex complex now delivering on Highway 98, with 24 foot ceilings, roll-up doors, and coastal finishes. The single 3,600 SF flex unit lists at $28.50 a foot, and the landlord is offering five months free rent on flex spaces, which is real leverage on a startup budget. Signed tenants already include a medical spa, a fitness concept, and a coffee shop, so the co-tenancy leans service and wellness rather than trade. Some units carry a 730 SF second floor office mezzanine, which is worth asking about as staff or admin space above a ground floor clinical layout.",
       "facts": [
         [
           "Available",
@@ -498,7 +493,7 @@
       "agent": "Unlisted",
       "src": "CoStar",
       "photo": "4935.jpg",
-      "limit": "Some units carry a 730 SF second floor office mezzanine"
+      "limit": "Condition"
     },
     {
       "n": "06",
@@ -509,7 +504,6 @@
         "near": "Corporate Woods, north side of Highway 20, about 265 feet west of Blueberry Road.",
         "parcel": "16-1S-19-23000-001-0002"
       },
-      "copy": "We set this one aside in the first pass, and it has come back. The objection was suite size: the units run 568 and 747 SF, so reaching your band meant combining six or more of them. Building A is exactly that, six 747 SF units at 4,482 SF, and the campus is offered by the unit, the floor, or the whole building, to lease or to buy. That makes it the only space on this tour where you could own the real estate instead of renting it. It is Class A construction built for medical and professional use, not a conversion, with 102 parking spaces across the campus at about 4.5 per 1,000 SF. Two costs to weigh against that. At $35.00 a foot plus $5.85 in common area charges it is $40.85 all in, which on the full building is about $15,257 a month and the most expensive monthly figure in this search by a wide margin. And it is under development, with Phase 1 not delivering until late 2026 or early 2027, so this is the option you cannot move into next year.",
       "facts": [
         [
           "Available",
@@ -595,7 +589,7 @@
         "Whether buying changes the operating expense, and what the condominium documents require."
       ],
       "photo": "corpwoods.jpg",
-      "limit": "it is $40.85 all in, which on the full building is about $15,257 a month and the most expensive monthly figure in this search by a wide margin",
+      "limit": "All in",
       "agent": "Century 21 All Points Realty, Jim Ball",
       "src": "ECAR / FlexMLS"
     }
