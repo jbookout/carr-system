@@ -104,6 +104,25 @@ WRITES_ANYWHERE = (
                + TABLE + r"[^;]{0,4000}?\bas\s+(?:with|select)", re.I | re.S),
 )
 
+# ROW EVIDENCE IS A NARROWER QUESTION THAN PRESENCE, AND THE TWO DIRECTIONS WANT
+# DIFFERENT ANSWERS. Reading both from one set left the carried direction a NAME
+# test for one statement shape.
+#
+# `copy public.deal_phase from '/tmp/x.csv';` is a real write when a migration
+# runs it, and an artifact carrying that line is still something to refuse if the
+# table is EXCLUDED -- business or runtime data entering a tracked file is the one
+# outcome this whole design prevents, so presence stays deliberately broad there.
+# But it is not evidence the artifact CARRIES rows: the data sits in a file the
+# snapshot does not contain and a rebuild would never see. A carried table must
+# not pass on the strength of its name.
+#
+# So the carried direction reads this narrower set. COPY FROM stdin is absent
+# from it on purpose: copy_blocks() already counts those blocks, and it counts
+# ROWS, which is the whole reason that direction is a row test.
+ARTIFACT_ROW_WRITES = tuple(
+    pattern for pattern in WRITES_ANYWHERE
+    if "copy" not in pattern.pattern[:8].lower())
+
 # SELECT ... INTO IS DELIBERATELY NOT DETECTED, and the reason is worth stating so
 # nobody adds it back. In plain SQL it creates a table; in PL/pgSQL the identical
 # syntax assigns a variable. Every occurrence across all 264 migrations is the
@@ -455,7 +474,18 @@ def _blank(text, spans):
 
 
 def tables_with_data(artifact):
-    """Tables the artifact actually carries ROWS for.
+    """Returns (present, carrying_rows) -- two answers, because the two directions
+    of the check are asking different questions.
+
+    PRESENT is deliberately broad: anything that would land rows counts, including
+    a file-sourced COPY whose data the artifact does not contain. That set drives
+    the excluded direction, where the failure being caught is business or runtime
+    data entering a tracked file and a name is reason enough to stop.
+
+    CARRYING_ROWS is the row test: COPY blocks are counted only when they hold
+    rows, and a file-sourced COPY does not count at all. That set drives the
+    carried direction, where the failure being caught is a snapshot that cannot
+    rebuild its own database, and a table's NAME appearing proves nothing.
 
     Two passes, and each one can change an answer. COPY blocks are counted, because
     a header above an empty block carries nothing. Everything else is read from
@@ -471,6 +501,7 @@ def tables_with_data(artifact):
         if rows:
             found.add(name)
         spans.append((start, stop))
+    rows_only = set(found)
     top, do_bodies, routines = scan_sql(_blank(region, spans))
     segments = [top, *do_bodies]
     for bodies in routines.values():
@@ -478,7 +509,9 @@ def tables_with_data(artifact):
     for segment in segments:
         for pattern in WRITES_ANYWHERE:
             found.update(normalise(hit.group(1)) for hit in pattern.finditer(segment))
-    return found
+        for pattern in ARTIFACT_ROW_WRITES:
+            rows_only.update(normalise(hit.group(1)) for hit in pattern.finditer(segment))
+    return found, rows_only
 
 
 def load_classification(repo):
@@ -508,7 +541,7 @@ def check(repo, artifact_text):
     rel_config = os.path.relpath(config_path, repo)
     applied = applied_migrations(artifact_text)
     seeds, missing = seeded_tables(repo, applied)
-    present = tables_with_data(artifact_text)
+    present, carrying_rows = tables_with_data(artifact_text)
     failures = []
 
     boundary = check_region_boundary(artifact_text)
@@ -550,7 +583,7 @@ def check(repo, artifact_text):
             f"    Remove it, or say why detection changed.")
 
     for table in sorted(set(carried) | set(subset)):
-        if table not in present:
+        if table not in carrying_rows:
             failures.append(
                 f"DECLARED CARRIED BUT ABSENT: {table}\n"
                 f"    {rel_config} says this snapshot carries it, and it is not in the artifact.\n"
