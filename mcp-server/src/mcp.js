@@ -27,8 +27,9 @@ const json = (body, status = 200) =>
 // for sponsored and machine actors; Tour entrance verification checks it as a
 // second, narrower boundary.
 export async function setWriterActorContext(client, actor) {
+  const authorizationClass = actor?.authorization_class || authorizationClassForActor(actor);
   const verifiedHumanSlug = actor?.human === true &&
-    actor?.authorization_class === "verified_partner" ? actor.slug : "";
+    authorizationClass === "verified_partner" ? actor.slug : "";
   await client.query(
     "select set_config('carr.acting_actor_slug',$1::text,true), " +
     "set_config('carr.verified_human_actor_slug',$2::text,true) /* writer-actor-context */",

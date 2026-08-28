@@ -93,6 +93,10 @@ test("static shell has no raw-token persistence/logging and stays in dealroom/to
   assert.match(js, /new Uint8Array\(32\)/); assert.match(js, /crypto\.getRandomValues/); assert.match(js, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(js, /https:\/\/reports\.doctorcre\.com\/share#token=\$\{raw\}/);
   assert.match(html, /value="view_map"/);
+  assert.match(html, /id="share-grants"/);
+  assert.match(js, /grant\.status === "active"/);
+  assert.match(js, /dataset\.shareGrantId/);
+  assert.match(js, /issueShare\(id\(state\.shareGrantId\)\)/);
   assert.doesNotMatch(html, /value="(?:download_pdf|comment|react)"/);
   assert.match(html, /future governed scope amendment/);
   assert.match(css, /#002F6C/); assert.match(css, /#F57F29/);

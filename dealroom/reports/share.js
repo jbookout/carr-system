@@ -32,6 +32,11 @@
     return Number.isFinite(item?.route_sequence) ? item.route_sequence : index + 1;
   }
 
+  function propertyAddress(item, fallback) {
+    const parts = [item?.address, item?.suite].filter(value => typeof value === "string" && value.trim());
+    return parts.length ? parts.join(" · ") : fallback;
+  }
+
   function render(report) {
     const title = text(report?.tour_name || report?.title || report?.name, "Tour report");
     const items = Array.isArray(report?.stops) ? report.stops :
@@ -52,7 +57,7 @@
       const heading = document.createElement("h3");
       heading.textContent = text(item.name, text(item.title, "Tour property"));
       const detail = document.createElement("p");
-      detail.textContent = text(item.summary, text(item.status, text(item.address, "Details available in the packet.")));
+      detail.textContent = text(item.summary, text(item.status, propertyAddress(item, "Details available in the packet.")));
       row.append(route, heading, detail);
       list.append(row);
     }
@@ -95,7 +100,7 @@
       const popupTitle = document.createElement("strong");
       popupTitle.textContent = text(property.name, `Stop ${point.route_sequence}`);
       const popupAddress = document.createElement("div");
-      popupAddress.textContent = text(property.address, "Verified access point");
+      popupAddress.textContent = propertyAddress(property, "Verified access point");
       popupBody.append(popupTitle, popupAddress);
       new Marker({ element: marker }).setLngLat([point.longitude, point.latitude])
         .setPopup(new Popup({ offset: 18 }).setDOMContent(popupBody)).addTo(mapInstance);
@@ -105,14 +110,14 @@
     });
   }
 
-  async function loadReport() {
+  async function fetchReport() {
     const payload = await request("/api/share/report");
-    render(payload.data || {});
+    return payload.data || {};
   }
 
-  async function loadMap() {
-    try { const payload = await request("/api/share/map"); await renderMap(payload.data || {}); }
-    catch { document.querySelector("#map-section").hidden = true; }
+  async function fetchMap() {
+    const payload = await request("/api/share/map");
+    return payload.data || {};
   }
 
   async function openTour() {
@@ -126,9 +131,22 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ token }),
       });
-      await loadReport();
-      await loadMap();
-      setStatus("Report loaded.");
+      // Packet and map are independently scoped. Fetch both, then render in a
+      // stable order so a valid map-only or packet-only grant still opens.
+      const [reportResult, mapResult] = await Promise.allSettled([fetchReport(), fetchMap()]);
+      const reportLoaded = reportResult.status === "fulfilled";
+      const mapLoaded = mapResult.status === "fulfilled";
+      if (!reportLoaded && !mapLoaded) throw new Error("share_scope_unavailable");
+      if (reportLoaded) render(reportResult.value);
+      else {
+        document.querySelector("#report-title").textContent = "Shared tour map";
+        summary.textContent = "Verified access points included in this share.";
+        list.textContent = "This link includes the interactive map only.";
+        list.setAttribute("aria-busy", "false");
+      }
+      if (mapLoaded) await renderMap(mapResult.value);
+      else document.querySelector("#map-section").hidden = true;
+      setStatus(reportLoaded && mapLoaded ? "Report and map loaded." : reportLoaded ? "Report loaded." : "Map loaded.");
     } catch {
       setStatus("This shared report is unavailable.");
       list.setAttribute("aria-busy", "false");

@@ -20,7 +20,7 @@ const auditDigest = `sha256:${"d".repeat(64)}`;
 const propertyRef = "property:public:abcdefghijklmnop";
 const packetFixture = {
   tour_name: "Tour", summary: "Two stops", provider: "private", allow_comments: true,
-  stops: [{ name: "Medical Plaza", address: "100 Clinic Way", property_ref: propertyRef,
+  stops: [{ name: "Medical Plaza", address: "100 Clinic Way", suite: "Suite 200", property_ref: propertyRef,
     route_sequence: 1, route_label: "A", access_notes: "private", latest_reaction: "interested",
     size: { value: 1200, unit: "sf", verifier: "no" },
     photos: [{ asset_ref: "asset:public:abcdefghijklmnop", alt: "Front", source: "provider" }] }],
@@ -98,6 +98,7 @@ test("public and internal projections strip secrets and unsupported scopes", asy
   const packet = projectTourClientPacket(packetFixture);
   assert.equal(packet.allow_comments, undefined);
   assert.equal(packet.stops[0].access_notes, undefined);
+  assert.equal(packet.stops[0].suite, "Suite 200");
   assert.deepEqual(packet.stops[0].size, { value: 1200, unit: "sf" });
   assert.equal(packet.stops[0].latest_reaction, undefined);
   assert.deepEqual(projectTourPublicAsset({ media_type: "image/jpeg", provider: "private" }, "asset:public:abcdefghijklmnop"),

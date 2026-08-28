@@ -80,3 +80,10 @@ test("sharing history uses a bounded offset cursor and advertises continuation",
   assert.match(migration, /'has_more',v_count>v_limit/i);
   assert.match(migration, /'cursor',case when v_count>v_limit then \(v_offset\+v_limit\)::text end/i);
 });
+
+test("internal detail binds route and PDF controls to visible property and projection identity", () => {
+  assert.match(migration, /'property_name'[\s\S]*tour_field_assertion[\s\S]*field_key='display\.name'/i);
+  assert.match(migration, /'property_address'[\s\S]*tour_field_assertion[\s\S]*field_key='display\.address'/i);
+  assert.match(migration, /'render_job_id',j\.id,'projection_id',j\.projection_id/i);
+  assert.match(migration, /p\.id=\(select current_projection\.id[\s\S]*status in \('approved','published'\)[\s\S]*projection_version desc/i);
+});

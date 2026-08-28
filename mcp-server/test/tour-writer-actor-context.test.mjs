@@ -13,7 +13,7 @@ function client() {
 test("writer transactions set server-derived actor context before Tour mutations", async () => {
   const human = client();
   await setWriterActorContext(human, {
-    slug: "joe", human: true, authorization_class: "verified_partner",
+    slug: "joe", human: true,
   });
   assert.match(human.calls[0].sql, /carr\.acting_actor_slug/);
   assert.match(human.calls[0].sql, /carr\.verified_human_actor_slug/);

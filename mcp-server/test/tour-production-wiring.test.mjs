@@ -32,7 +32,8 @@ test("Worker production router mounts authenticated Tours and public reports", (
 
 test("production Tour runtime preserves tool envelopes and digest-only public access", () => {
   const runtime = read("mcp-server/src/tour-runtime.js");
-  assert.match(runtime, /callTool\(\{ \.\.\.env, ctx \}, actor, verb, args\)/);
+  assert.match(runtime, /authorization_class:\s*actor\?\.authorization_class \|\| authorizationClassForActor\(actor\)/);
+  assert.match(runtime, /callTool\(\{ \.\.\.env, ctx \}, runtimeActor, verb, args\)/);
   assert.match(runtime, /tourSharingBrowserAccess/);
   assert.match(runtime, /sharing\.exchange/);
   assert.match(runtime, /sharing\.readPacket/);
@@ -82,7 +83,7 @@ test("production Tour runtime presents the exact browser view without promoting 
   const detail = projectTourDetail({
     id: "tour", tour_name: "Bay County", tour_status: "draft", route_version: 1,
     routes: [
-      { id: "draft-route", route_version: 2, accepted: false, stops: [{ id: "stop", route_sequence: 1, route_label: "A" }] },
+      { id: "draft-route", route_version: 2, accepted: false, stops: [{ id: "stop", route_sequence: 1, route_label: "A", property_name: "Alpha Clinic", property_address: "100 Main St" }] },
       { id: "accepted-route", route_version: 1, accepted: true, stops: [] },
     ],
     projections: [{ id: "draft-projection", status: "draft" }, { id: "approved-projection", status: "approved" }],
@@ -95,7 +96,8 @@ test("production Tour runtime presents the exact browser view without promoting 
   assert.equal(detail.route_version_id, "draft-route");
   assert.equal(detail.route_version_state, "draft");
   assert.equal(detail.accepted_route_version, 1);
-  assert.equal(detail.stops[0].label, "A");
+  assert.equal(detail.stops[0].label, "A · Alpha Clinic");
+  assert.equal(detail.stops[0].address, "100 Main St");
   assert.equal(detail.projection_id, "approved-projection", "draft projections never become share authority");
   assert.equal(detail.share_grant_id, "active-share");
 });
@@ -108,4 +110,26 @@ test("expired sharing projection retains the immutable grant ID for rotation", (
   });
   assert.equal(detail.share_grant_id, "expired-share");
   assert.equal(detail.share_status, "expired");
+});
+
+test("prior active links remain manageable when a newer projection is approved", () => {
+  const detail = projectTourDetail({
+    routes: [],
+    projections: [{ id: "projection-v2", status: "approved" }, { id: "projection-v1", status: "approved" }],
+    shares: [{ share_grant_id: "active-v1", projection_id: "projection-v1", status: "active", expires_at: "2026-09-01T00:00:00Z", permission_scopes: ["view_packet"] }],
+  });
+  assert.equal(detail.share_grant_id, null, "a prior grant cannot be rotated onto the current projection");
+  assert.deepEqual(detail.share_grants, [{
+    share_grant_id: "active-v1", projection_id: "projection-v1", status: "active",
+    expires_at: "2026-09-01T00:00:00Z", grant_version: undefined, permission_scopes: ["view_packet"],
+  }]);
+});
+
+test("a PDF from an older projection is never presented as the current packet", () => {
+  const detail = projectTourDetail({
+    routes: [], projections: [{ id: "projection-v2", status: "approved" }], shares: [],
+    pdf_render: { render_job_id: "pdf-v1", projection_id: "projection-v1", status: "available", qc_run_digest: `sha256:${"a".repeat(64)}` },
+  });
+  assert.equal(detail.pdf_render_job_id, null);
+  assert.equal(detail.pdf_status, "missing");
 });

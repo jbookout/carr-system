@@ -4,7 +4,7 @@ import { tourArtifactTools, trustedTourRendererResult } from "../src/tour-artifa
 
 class ToolError extends Error { constructor(payload) { super(payload.error); this.payload = payload; } }
 const actor = { id: "actor-00000000-0000-4000-8000-000000000001", slug: "codex" };
-const humanActor = { id: "actor-00000000-0000-4000-8000-000000000002", slug: "joe", human: true, authorization_class: "verified_partner" };
+const humanActor = { id: "actor-00000000-0000-4000-8000-000000000002", slug: "joe", human: true };
 const ids = { projection: "10000000-0000-4000-8000-000000000001", job: "20000000-0000-4000-8000-000000000001", result: "25000000-0000-4000-8000-000000000001", review: "30000000-0000-4000-8000-000000000001", idempotency: "40000000-0000-4000-8000-000000000001" };
 const digest = character => `sha256:${character.repeat(64)}`;
 

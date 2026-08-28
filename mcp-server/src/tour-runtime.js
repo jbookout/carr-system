@@ -6,7 +6,7 @@ import { callTool } from "./mcp.js";
 import { ToolError } from "./tool-error.js";
 import { trustedTourRendererResult } from "./tour-artifacts.js";
 import { tourSharingBrowserAccess } from "./tour-sharing.js";
-import { organizationTenantForActor } from "./identity.js";
+import { authorizationClassForActor, organizationTenantForActor } from "./identity.js";
 
 const sharing = tourSharingBrowserAccess({ ToolError });
 
@@ -47,13 +47,21 @@ export function projectTourDetail(raw) {
     .find(projection => projection?.status === "approved" || projection?.status === "published");
   const draftProjection = (Array.isArray(raw.projections) ? raw.projections : [])
     .find(projection => projection?.status === "draft");
-  const projectionShares = (Array.isArray(raw.shares) ? raw.shares : [])
+  const shares = Array.isArray(raw.shares) ? raw.shares : [];
+  const projectionShares = shares
     .filter(share => share?.projection_id === approvedProjection?.id);
   const activeShare = projectionShares.find(share => share?.status === "active");
   // The SQL projection is newest-first. Keep the latest expired grant visible
   // so the operator can rotate it; issue is intentionally unique per sealed
   // projection and cannot recover an expired row without this immutable ID.
   const rotatableShare = activeShare || projectionShares.find(share => share?.status === "expired");
+  const manageableShares = shares.filter(share => share?.status === "active" ||
+    (share?.status === "expired" && share.projection_id === approvedProjection?.id)).map(share => ({
+      share_grant_id: share.share_grant_id, projection_id: share.projection_id,
+      status: share.status, expires_at: share.expires_at, grant_version: share.grant_version,
+      permission_scopes: Array.isArray(share.permission_scopes) ? [...share.permission_scopes] : [],
+    }));
+  const pdfRender = raw.pdf_render?.projection_id === approvedProjection?.id ? raw.pdf_render : null;
   return {
     ...raw,
     name: raw.tour_name,
@@ -63,22 +71,32 @@ export function projectTourDetail(raw) {
     route_version_state: latestRoute?.accepted ? "accepted" : latestRoute ? "draft" : "missing",
     accepted_route_version: Number.isInteger(acceptedRoute?.route_version) ? acceptedRoute.route_version : 0,
     stops: Array.isArray(latestRoute?.stops) ? latestRoute.stops.map(stop => ({
-      ...stop, label: stop.route_label || (Number.isInteger(stop.route_sequence) ? `Stop ${stop.route_sequence}` : "Tour stop"),
+      ...stop,
+      name: stop.property_name || null,
+      address: stop.property_address || null,
+      label: [stop.route_label || (Number.isInteger(stop.route_sequence) ? `Stop ${stop.route_sequence}` : "Tour stop"),
+        stop.property_name || stop.property_address].filter(Boolean).join(" · "),
     })) : [],
     projection_id: approvedProjection?.id || null,
     projection_draft_id: draftProjection?.id || null,
     projection_status: approvedProjection?.status || draftProjection?.status || "missing",
     share_grant_id: rotatableShare?.share_grant_id || null,
     share_status: rotatableShare?.status || "missing",
-    pdf_render_job_id: raw.pdf_render?.render_job_id || null,
-    pdf_status: raw.pdf_render?.status || "missing",
-    pdf_qc_run_digest: raw.pdf_render?.qc_run_digest || null,
-    pdf_human_review_state: raw.pdf_render?.human_review_state || "pending",
+    share_grants: manageableShares,
+    pdf_render_job_id: pdfRender?.render_job_id || null,
+    pdf_status: pdfRender?.status || "missing",
+    pdf_qc_run_digest: pdfRender?.qc_run_digest || null,
+    pdf_human_review_state: pdfRender?.human_review_state || "pending",
   };
 }
 
 async function invoke({ env, ctx, actor }, verb, args) {
-  return toolData(await callTool({ ...env, ctx }, actor, verb, args));
+  const runtimeActor = {
+    ...actor,
+    authorization_class: actor?.authorization_class || authorizationClassForActor(actor),
+    organization_tenant_id: actor?.organization_tenant_id || organizationTenantForActor(actor),
+  };
+  return toolData(await callTool({ ...env, ctx }, runtimeActor, verb, args));
 }
 
 async function internalRead({ env, actor }, sql, params) {

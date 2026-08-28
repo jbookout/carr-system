@@ -1,7 +1,7 @@
 // Immutable Tour PDF render-request and human-review record seams. Rendering,
 // queue ownership, R2 access, QC execution, and publication remain separate.
 
-import { organizationTenantForActor } from "./identity.js";
+import { authorizationClassForActor, organizationTenantForActor } from "./identity.js";
 import { requiredTimestamp } from "./tour-operations-contract.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -58,7 +58,8 @@ function tenant(actor, ToolError) {
   return value;
 }
 function verifiedHuman(actor, ToolError) {
-  if (actor?.human !== true || actor?.authorization_class !== "verified_partner")
+  if (actor?.human !== true ||
+      (actor.authorization_class || authorizationClassForActor(actor)) !== "verified_partner")
     fail(ToolError, { error: "tour_verified_human_required" });
 }
 
