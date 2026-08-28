@@ -11,7 +11,7 @@ const read = file => fs.readFileSync(path.join(root, file), "utf8");
 test("production tool registry contains every Tour delivery verb", () => {
   for (const name of [
     "search-tour-properties", "append-tour-selection-cart-version", "read-tour-selection-cart",
-    "prepare-tour-route-version", "issue-tour-share-grant", "rotate-tour-share-grant",
+    "prepare-tour-route-version", "record-tour-map-promotion-receipt", "issue-tour-share-grant", "rotate-tour-share-grant",
     "revoke-tour-share-grant", "read-tour-sharing-library", "request-tour-pdf-render",
     "read-tour-pdf-render", "record-tour-pdf-render-result", "record-tour-pdf-human-review",
   ]) assert.ok(TOOLS[name], name);

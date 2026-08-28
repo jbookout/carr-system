@@ -25,6 +25,7 @@ import { tourPropertyJurisdictionTools } from "./tour-property-jurisdiction.js";
 import { tourDomainTools } from "./tour-domain.js";
 import { tourPropertySearchTools } from "./tour-property-search.js";
 import { tourSharingTools } from "./tour-sharing.js";
+import { tourMapPromotionTools } from "./tour-map-promotion.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
@@ -157,6 +158,7 @@ const TOUR_DOMAIN_SERIALIZED_WRITES = new Set([
   "append-tour-cheat-sheet-revision",
   "restore-tour-cheat-sheet-revision",
   "append-tour-selection-cart-version",
+  "record-tour-map-promotion-receipt",
   "issue-tour-share-grant",
   "rotate-tour-share-grant",
   "revoke-tour-share-grant",
@@ -8508,5 +8510,6 @@ Object.assign(TOOLS, tourDomainTools({ withEnvelope, writeEvent, ToolError }));
 // Tour Operations delivery surfaces: governed property search and cart,
 // confidential sharing, and deterministic PDF request/review records.
 Object.assign(TOOLS, tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }));
+Object.assign(TOOLS, tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }));
 Object.assign(TOOLS, tourSharingTools({ withEnvelope, writeEvent, ToolError }));
 Object.assign(TOOLS, tourArtifactTools({ withEnvelope, writeEvent, ToolError }));

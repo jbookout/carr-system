@@ -2,7 +2,7 @@ import fontkit from "@pdf-lib/fontkit";
 import { PDFDocument, PDFName, PDFString, rgb } from "pdf-lib";
 import { formatApprovedMetric, renderTourPacket } from "./tour-packet-render.js";
 
-export const TOUR_PDF_RENDERER_VERSION = "1.0.0";
+export const TOUR_PDF_RENDERER_VERSION = "1.0.1";
 export const TOUR_PDF_TEMPLATE_VERSION = "1.0.0";
 
 const PAGE = [612, 792];
@@ -48,6 +48,14 @@ function wrap(value, font, size, width, maximumLines) {
 
 function drawLines(page, lines, options) {
   lines.forEach((line, index) => page.drawText(line, { ...options, y: options.y - index * options.lineHeight }));
+}
+
+function measuredSingleLine(value, font, size, maximumWidth) {
+  const lines = wrap(value, font, size, maximumWidth, 1);
+  const width = font.widthOfTextAtSize(lines[0], size);
+  if (!Number.isFinite(width) || width < 0 || width > maximumWidth)
+    throw new RangeError(`tour_pdf_content_overflow:1:${maximumWidth}`);
+  return { text: lines[0], width };
 }
 
 function factValue(property, field) {
@@ -99,6 +107,7 @@ export async function renderTourPacketPdf(input, fonts, proof = {}) {
     CARRRendererDigest: proof.renderer_digest,
     CARRQcRulesetDigest: proof.qc_ruleset_digest,
     CARRFontDigests: JSON.stringify([regularDigest, boldDigest]),
+    CARRLayoutBoundsValidated: "true",
   };
   for (const [key, value] of Object.entries(catalogProof)) {
     if (typeof value === "string" && value) document.catalog.set(PDFName.of(key), PDFString.of(value));
@@ -108,7 +117,8 @@ export async function renderTourPacketPdf(input, fonts, proof = {}) {
     const page = document.addPage(PAGE);
     page.drawText("CARR", { x: 42, y: 741, size: 19, font: bold, color: NAVY });
     const stop = property.route_label || `Stop ${property.route_sequence}`;
-    page.drawText(stop.toUpperCase(), { x: 570 - bold.widthOfTextAtSize(stop.toUpperCase(), 9), y: 746, size: 9, font: bold, color: NAVY });
+    const measuredStop = measuredSingleLine(stop.toUpperCase(), bold, 9, 240);
+    page.drawText(measuredStop.text, { x: 570 - measuredStop.width, y: 746, size: 9, font: bold, color: NAVY });
     page.drawRectangle({ x: 42, y: 727, width: 528, height: 3, color: ORANGE });
     drawLines(page, wrap(property.name, bold, 24, 528, 2), { x: 42, y: 687, size: 24, lineHeight: 28, font: bold, color: NAVY });
     drawLines(page, wrap(`${property.address}${property.suite ? ` - ${property.suite}` : ""}`, regular, 11.5, 528, 2), { x: 42, y: 622, size: 11.5, lineHeight: 15, font: regular, color: MUTED });
@@ -129,10 +139,12 @@ export async function renderTourPacketPdf(input, fonts, proof = {}) {
     drawLines(page, wrap(property.caveat, regular, 9.5, 494, 5), { x: 58, y: 184, size: 9.5, lineHeight: 13, font: regular, color: MUTED });
 
     const marker = packet.markers[index];
+    const packetRefLine = measuredSingleLine(`Packet ref: ${property.property_ref}`, regular, 6.5, 528);
+    const markerLine = measuredSingleLine(`Property marker: ${marker}`, regular, 6.5, 450);
     page.node.set(PDFName.of("CARRPropertyRef"), PDFString.of(property.property_ref));
     page.node.set(PDFName.of("CARRPropertyMarker"), PDFString.of(marker));
-    page.drawText(`Packet ref: ${property.property_ref}`, { x: 42, y: 76, size: 6.5, font: regular, color: MUTED });
-    page.drawText(`Property marker: ${marker}`, { x: 42, y: 63, size: 6.5, font: regular, color: MUTED });
+    page.drawText(packetRefLine.text, { x: 42, y: 76, size: 6.5, font: regular, color: MUTED });
+    page.drawText(markerLine.text, { x: 42, y: 63, size: 6.5, font: regular, color: MUTED });
     const pageLabel = `${index + 1} / ${packet.propertyCount}`;
     page.drawText(pageLabel, { x: 570 - regular.widthOfTextAtSize(pageLabel, 7), y: 63, size: 7, font: regular, color: MUTED });
   });
@@ -158,6 +170,7 @@ function decoded(object) {
 export async function inspectStoredTourPacketPdf(readback) {
   const document = await PDFDocument.load(readback, { updateMetadata: false });
   const catalog = key => decoded(document.catalog.get(PDFName.of(key)));
+  const layoutBoundsValidated = catalog("CARRLayoutBoundsValidated") === "true";
   const pages = document.getPages().map((page, index) => {
     const size = page.getSize();
     const propertyRef = decoded(page.node.get(PDFName.of("CARRPropertyRef")));
@@ -165,7 +178,7 @@ export async function inspectStoredTourPacketPdf(readback) {
     const hasContent = Boolean(page.node.get(PDFName.of("Contents")));
     return {
       page_number: index + 1, property_ref: propertyRef, property_marker: propertyMarker,
-      clipped_box_count: size.width === 612 && size.height === 792 && hasContent && propertyRef && propertyMarker ? 0 : 1,
+      clipped_box_count: size.width === 612 && size.height === 792 && hasContent && propertyRef && propertyMarker && layoutBoundsValidated ? 0 : 1,
     };
   });
   let fontDigests = [];

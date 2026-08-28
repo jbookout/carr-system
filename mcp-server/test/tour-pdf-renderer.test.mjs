@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, PDFName } from "pdf-lib";
 import { inspectStoredTourPacketPdf, renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "../src/tour-pdf-renderer.js";
 
 const fontRoot = new URL("../assets/", import.meta.url);
@@ -61,4 +61,17 @@ test("PDF renderer rejects authoritative content that cannot fit instead of trun
   const overflow = structuredClone(packet);
   overflow.properties[0].name = Array.from({ length: 12 }, () => "Authoritative").join(" ");
   await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
+});
+
+test("PDF renderer measures route-label bounds and stored inspection rejects absent layout proof", async () => {
+  const overflow = structuredClone(packet);
+  overflow.properties[0].route_label = "W".repeat(80);
+  await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
+
+  const rendered = await renderTourPacketPdf(packet, fonts);
+  const document = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  document.catalog.delete(PDFName.of("CARRLayoutBoundsValidated"));
+  const unmeasured = await document.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  const observed = await inspectStoredTourPacketPdf(unmeasured);
+  assert.ok(observed.pages.every(page => page.clipped_box_count === 1));
 });

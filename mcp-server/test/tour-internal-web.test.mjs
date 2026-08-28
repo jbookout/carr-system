@@ -98,6 +98,9 @@ test("static shell has no raw-token persistence/logging and stays in dealroom/to
   assert.match(js, /dataset\.shareGrantId/);
   assert.match(js, /issueShare\(id\(state\.shareGrantId\)\)/);
   assert.match(js, /stops\(\)\.filter\(\(stop\) => stop\.stop_state === "active"\)\.map/);
+  assert.match(js, /state\.cheatDirty \? "Unsaved changes"/);
+  assert.match(js, /#cheat-content"\)\.addEventListener\("input"/);
+  assert.match(js, /if \(!state\.cheatDirty \|\| state\.cheatDraftTourId !== tour\.id\)/);
   assert.doesNotMatch(html, /value="(?:download_pdf|comment|react)"/);
   assert.match(html, /future governed scope amendment/);
   assert.match(css, /#002F6C/); assert.match(css, /#F57F29/);
@@ -118,11 +121,20 @@ test("route seams enforce their exact body contracts", async () => {
 });
 
 test("known optimistic races remain conflicts rather than service outages", async () => {
-  const surface = handler({ createRouteVersionFn: async () => { throw new Error("tour route preparation refuses stale state"); } });
   const body = { tour_id: tourId, expected_route_version: 1, stop_ids: [stopA], idempotency_key: routeId };
-  const response = await surface.fetch(request("/api/tours/route-version", { method: "POST", headers: postHeaders, body: JSON.stringify(body) }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);
-  assert.equal(response.status, 409);
-  assert.deepEqual(await response.json(), { error: "conflict" });
+  for (const message of [
+    "tour route preparation refuses stale state",
+    "route version refuses concurrent or stale route state",
+    "route acceptance refuses concurrent or stale route state",
+    "cheat sheet revision refuses concurrent or stale version",
+    "cheat sheet restore refuses unavailable or stale revision",
+    "tour selection refuses stale version",
+  ]) {
+    const surface = handler({ createRouteVersionFn: async () => { throw new Error(message); } });
+    const response = await surface.fetch(request("/api/tours/route-version", { method: "POST", headers: postHeaders, body: JSON.stringify(body) }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);
+    assert.equal(response.status, 409, message);
+    assert.deepEqual(await response.json(), { error: "conflict" });
+  }
 });
 
 test("internal PDF routes require exact authority-safe contracts and accepted download state", async () => {

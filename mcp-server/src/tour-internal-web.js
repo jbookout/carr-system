@@ -146,9 +146,9 @@ function safeFailure(result) {
 const CONFLICT_MESSAGES = new Set([
   "tour route preparation refuses stale state",
   "route version refuses concurrent or stale route state",
-  "route acceptance refuses stale state",
-  "cheat sheet autosave refuses stale revision",
-  "cheat sheet restore refuses stale revision",
+  "route acceptance refuses concurrent or stale route state",
+  "cheat sheet revision refuses concurrent or stale version",
+  "cheat sheet restore refuses unavailable or stale revision",
   "tour selection refuses stale version",
 ]);
 function dependencyFailure(error) {
