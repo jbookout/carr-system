@@ -50,6 +50,12 @@ begin
  n:=ops.append_tour_route_stop('tour-slice4-proof',r3,'40000000-0000-4000-8000-000000000003',1,'A','active',null,null,false,10,5,'approved','sha256:'||repeat('7',64));
  select id into oa from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000001';
  select id into oh from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000002';
+ begin
+   perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,r3,oa,n,'reordered');
+   raise exception 'expected cross-property reorder refusal';
+ exception when raise_exception then
+   if sqlerrm<>'route transition property identity mismatch' then raise; end if;
+ end;
  perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,r3,oa,na,'reordered');
  perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,r3,oh,nh,'held');
  perform ops.append_tour_route_stop_transition('tour-slice4-proof',null,r3,null,n,'added');

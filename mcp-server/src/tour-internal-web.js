@@ -25,9 +25,16 @@ const METHODS = new Map([
   ["/api/tours/cheat-sheet/autosave", "POST"],
   ["/api/tours/cheat-sheet/restore", "POST"],
   ["/api/tours/projection", "POST"],
+  ["/api/tours/projection/candidates", "GET"],
+  ["/api/tours/projection/seal", "POST"],
   ["/api/tours/share/issue", "POST"],
   ["/api/tours/share/rotate", "POST"],
   ["/api/tours/share/revoke", "POST"],
+  ["/api/tours/pdf/render", "POST"],
+  ["/api/tours/pdf/status", "GET"],
+  ["/api/tours/pdf/review", "POST"],
+  ["/api/tours/pdf/preview", "GET"],
+  ["/api/tours/pdf/download", "GET"],
 ]);
 
 function json(body, status = 200, headers = {}) {
@@ -103,9 +110,12 @@ const VALID = {
   "/api/tours/cheat-sheet/autosave": (v) => exact(v, ["tour_id", "content", "expected_revision_number", "idempotency_key"]) && validId(v.tour_id) && validContent(v.content) && Number.isInteger(v.expected_revision_number) && v.expected_revision_number >= 0 && validId(v.idempotency_key),
   "/api/tours/cheat-sheet/restore": (v) => exact(v, ["tour_id", "restore_revision_id", "expected_revision_number", "idempotency_key"]) && validId(v.tour_id) && validId(v.restore_revision_id) && Number.isInteger(v.expected_revision_number) && v.expected_revision_number >= 0 && validId(v.idempotency_key),
   "/api/tours/projection": (v) => exact(v, ["tour_id", "route_version_id", "as_of", "idempotency_key"]) && validId(v.tour_id) && validId(v.route_version_id) && iso(v.as_of) && validId(v.idempotency_key),
+  "/api/tours/projection/seal": (v) => exact(v, ["projection_id", "candidate_digest", "receipt_digest", "idempotency_key"]) && validId(v.projection_id) && validDigest(v.candidate_digest) && validDigest(v.receipt_digest) && validId(v.idempotency_key),
   "/api/tours/share/issue": (v) => exact(v, ["projection_id", "token_digest", "permission_scopes", "expires_at", "receipt_digest", "idempotency_key"]) && validId(v.projection_id) && validDigest(v.token_digest) && scopes(v.permission_scopes) && iso(v.expires_at) && validDigest(v.receipt_digest) && validId(v.idempotency_key),
   "/api/tours/share/rotate": (v) => exact(v, ["share_grant_id", "projection_id", "token_digest", "permission_scopes", "expires_at", "receipt_digest", "idempotency_key"]) && validId(v.share_grant_id) && validId(v.projection_id) && validDigest(v.token_digest) && scopes(v.permission_scopes) && iso(v.expires_at) && validDigest(v.receipt_digest) && validId(v.idempotency_key),
   "/api/tours/share/revoke": (v) => exact(v, ["share_grant_id", "reason", "revoked_at", "receipt_digest", "idempotency_key"]) && validId(v.share_grant_id) && typeof v.reason === "string" && v.reason.trim().length > 0 && v.reason.length <= 240 && iso(v.revoked_at) && validDigest(v.receipt_digest) && validId(v.idempotency_key),
+  "/api/tours/pdf/render": (v) => exact(v, ["projection_id", "idempotency_key"]) && validId(v.projection_id) && validId(v.idempotency_key),
+  "/api/tours/pdf/review": (v) => exact(v, ["render_job_id", "qc_run_digest", "decision", "reviewed_at", "review_receipt_digest", "reason", "idempotency_key"]) && validId(v.render_job_id) && validDigest(v.qc_run_digest) && ["accept", "reject"].includes(v.decision) && iso(v.reviewed_at) && validDigest(v.review_receipt_digest) && typeof v.reason === "string" && v.reason.trim().length > 0 && v.reason.length <= 500 && validId(v.idempotency_key),
 };
 
 const SEAMS = {
@@ -117,9 +127,16 @@ const SEAMS = {
   "/api/tours/cheat-sheet/autosave": "autosaveCheatSheetFn",
   "/api/tours/cheat-sheet/restore": "restoreCheatSheetFn",
   "/api/tours/projection": "createProjectionFn",
+  "/api/tours/projection/candidates": "readProjectionCandidatesFn",
+  "/api/tours/projection/seal": "sealProjectionFn",
   "/api/tours/share/issue": "issueShareGrantFn",
   "/api/tours/share/rotate": "rotateShareGrantFn",
   "/api/tours/share/revoke": "revokeShareGrantFn",
+  "/api/tours/pdf/render": "renderPdfFn",
+  "/api/tours/pdf/status": "readPdfRenderFn",
+  "/api/tours/pdf/review": "reviewPdfFn",
+  "/api/tours/pdf/preview": "previewPdfFn",
+  "/api/tours/pdf/download": "downloadPdfFn",
 };
 
 function safeFailure(result) {
@@ -139,7 +156,7 @@ async function staticAsset(env, request, pathname) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-async function api(request, env, actor, session, dependencies, pathname) {
+async function api(request, env, ctx, actor, session, dependencies, pathname) {
   const origin = originFor(request, env);
   if (!origin || !actorSession(actor, session)) return json({ error: "unauthorized" }, 401);
   const seamName = SEAMS[pathname];
@@ -150,6 +167,12 @@ async function api(request, env, actor, session, dependencies, pathname) {
     if (pathname === "/api/tours/detail") {
       if ([...url.searchParams.keys()].length !== 1 || !validId(url.searchParams.get("tour_id"))) return json({ error: "invalid_request" }, 400);
       input = { tour_id: url.searchParams.get("tour_id") };
+    } else if (pathname === "/api/tours/projection/candidates") {
+      if ([...url.searchParams.keys()].length !== 1 || !validId(url.searchParams.get("projection_id"))) return json({ error: "invalid_request" }, 400);
+      input = { projection_id: url.searchParams.get("projection_id") };
+    } else if (pathname === "/api/tours/pdf/status" || pathname === "/api/tours/pdf/preview" || pathname === "/api/tours/pdf/download") {
+      if ([...url.searchParams.keys()].length !== 1 || !validId(url.searchParams.get("render_job_id"))) return json({ error: "invalid_request" }, 400);
+      input = { render_job_id: url.searchParams.get("render_job_id") };
     } else if ([...url.searchParams.keys()].length) return json({ error: "invalid_request" }, 400);
   } else {
     if (!sameOriginPost(request, origin) || !equal(request.headers.get("x-carr-csrf"), session.csrfToken)) return json({ error: "forbidden" }, 403);
@@ -159,7 +182,8 @@ async function api(request, env, actor, session, dependencies, pathname) {
     input = parsed.value;
   }
   try {
-    const result = await dependencies[seamName]({ env, actor, input });
+    const result = await dependencies[seamName]({ env, ctx, actor, input });
+    if ((pathname === "/api/tours/pdf/preview" || pathname === "/api/tours/pdf/download") && result?.ok && result.response instanceof Response) return result.response;
     if (!result?.ok || !plain(result.data)) return safeFailure(result);
     return json({ data: result.data, csrf_token: request.method === "GET" ? session.csrfToken : undefined });
   } catch { return json({ error: "tour_unavailable" }, 503); }
@@ -187,7 +211,7 @@ export function createTourInternalWebHandler(overrides = {}) {
     const method = METHODS.get(url.pathname);
     if (!method) return withSecurityHeaders(json({ error: "not_found" }, 404));
     if (request.method !== method) return withSecurityHeaders(methodNotAllowed(method));
-    return withSecurityHeaders(await api(request, env, actor, session, overrides, url.pathname));
+    return withSecurityHeaders(await api(request, env, _ctx, actor, session, overrides, url.pathname));
   } };
 }
 

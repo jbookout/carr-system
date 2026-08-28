@@ -32,7 +32,12 @@ function handler(overrides = {}) {
     listToursFn: async () => ({ ok: true, data: { tours: [] } }), readTourFn: async () => ({ ok: true, data: { id: tourId } }),
     createRouteVersionFn: success, reorderRouteStopsFn: success, acceptRouteVersionFn: success,
     autosaveCheatSheetFn: success, restoreCheatSheetFn: success, createProjectionFn: success,
-    issueShareGrantFn: success, rotateShareGrantFn: success, revokeShareGrantFn: success, ...overrides,
+    readProjectionCandidatesFn: success, sealProjectionFn: success,
+    issueShareGrantFn: success, rotateShareGrantFn: success, revokeShareGrantFn: success,
+    renderPdfFn: success, readPdfRenderFn: success, reviewPdfFn: success,
+    previewPdfFn: async () => ({ ok: true, response: new Response("pdf", { headers: { "content-type": "application/pdf", "content-disposition": "inline" } }) }),
+    downloadPdfFn: async () => ({ ok: true, response: new Response("pdf", { headers: { "content-type": "application/pdf" } }) }),
+    ...overrides,
   });
 }
 const postHeaders = { origin: ORIGIN, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-carr-csrf": SESSION.csrfToken };
@@ -103,4 +108,38 @@ test("route seams enforce their exact body contracts", async () => {
   assert.equal(response.status, 200); assert.deepEqual(calls[0].input, body);
   const duplicate = { ...body, stop_ids: [stopA, stopA] };
   assert.equal((await surface.fetch(request("/api/tours/route-version", { method: "POST", headers: postHeaders, body: JSON.stringify(duplicate) }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION)).status, 400);
+});
+
+test("internal PDF routes require exact authority-safe contracts and accepted download state", async () => {
+  let renderInput; let reviewInput;
+  const surface = handler({
+    renderPdfFn: async context => { renderInput = context.input; return { ok: true, data: { render_job_id: routeId, status: "review_ready" } }; },
+    reviewPdfFn: async context => { reviewInput = context.input; return { ok: true, data: { decision: "accept" } }; },
+  });
+  const env = { APP_HOST: "app.doctorcre.com" };
+  const renderBody = { projection_id: projectionId, idempotency_key: routeId };
+  assert.equal((await surface.fetch(request("/api/tours/pdf/render", { method: "POST", headers: postHeaders, body: JSON.stringify(renderBody) }), env, {}, ACTOR, SESSION)).status, 200);
+  assert.deepEqual(renderInput, renderBody);
+  const reviewBody = { render_job_id: routeId, qc_run_digest: digest, decision: "accept", reviewed_at: "2027-01-02T03:04:05.000Z", review_receipt_digest: digest, reason: "Human checked the rendered pages", idempotency_key: grantId };
+  assert.equal((await surface.fetch(request("/api/tours/pdf/review", { method: "POST", headers: postHeaders, body: JSON.stringify(reviewBody) }), env, {}, ACTOR, SESSION)).status, 200);
+  assert.deepEqual(reviewInput, reviewBody);
+  assert.equal((await surface.fetch(request(`/api/tours/pdf/download?render_job_id=${routeId}`), env, {}, ACTOR, SESSION)).headers.get("content-type"), "application/pdf");
+  assert.match((await surface.fetch(request(`/api/tours/pdf/preview?render_job_id=${routeId}`), env, {}, ACTOR, SESSION)).headers.get("content-disposition"), /inline/);
+  assert.equal((await surface.fetch(request(`/api/tours/pdf/status?render_job_id=${routeId}&x=1`), env, {}, ACTOR, SESSION)).status, 400);
+  assert.equal((await surface.fetch(request("/api/tours/pdf/review", { method: "POST", headers: postHeaders, body: JSON.stringify({ ...reviewBody, decision: "publish" }) }), env, {}, ACTOR, SESSION)).status, 400);
+});
+
+test("projection approval binds the human action to the exact reviewed candidate digest", async () => {
+  let readInput; let sealInput;
+  const surface = handler({
+    readProjectionCandidatesFn: async context => { readInput = context.input; return { ok: true, data: { projection_id: projectionId, candidate_digest: digest, preview: [] } }; },
+    sealProjectionFn: async context => { sealInput = context.input; return { ok: true, data: { projection_id: projectionId, status: "approved" } }; },
+  });
+  const env = { APP_HOST: "app.doctorcre.com" };
+  assert.equal((await surface.fetch(request(`/api/tours/projection/candidates?projection_id=${projectionId}`), env, {}, ACTOR, SESSION)).status, 200);
+  assert.deepEqual(readInput, { projection_id: projectionId });
+  const body = { projection_id: projectionId, candidate_digest: digest, receipt_digest: digest, idempotency_key: routeId };
+  assert.equal((await surface.fetch(request("/api/tours/projection/seal", { method: "POST", headers: postHeaders, body: JSON.stringify(body) }), env, {}, ACTOR, SESSION)).status, 200);
+  assert.deepEqual(sealInput, body);
+  assert.equal((await surface.fetch(request("/api/tours/projection/seal", { method: "POST", headers: postHeaders, body: JSON.stringify({ ...body, selected_facts: [] }) }), env, {}, ACTOR, SESSION)).status, 400);
 });

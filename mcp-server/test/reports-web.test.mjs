@@ -31,13 +31,15 @@ function handler(overrides = {}) {
   return createReportsWebHandler({
     exchangeShareTokenFn: async () => ({ ok: true }),
     readShareFn: async () => ({ ok: true, data: { title: "Client tour", items: [] } }),
+    readMapFn: async () => ({ ok: true, data: { points: [] } }),
     ...overrides,
   });
 }
 
-test("reports adapter is limited to the reports origin and current read-only routes", async () => {
+test("reports adapter is limited to the reports origin and scoped read-only routes", async () => {
   assert.equal(isReportsRequest(request("/share")), true);
   assert.equal(isReportsRequest(request("/api/share/report")), true);
+  assert.equal(isReportsRequest(request("/api/share/map")), true);
   for (const path of ["/api/share/pdf", "/api/share/comment", "/api/share/reaction", "/sw.js"])
     assert.equal(isReportsRequest(request(path)), false, path);
   assert.equal(isReportsRequest(new Request("https://app.doctorcre.com/share")), false);
@@ -51,8 +53,19 @@ test("reports adapter is limited to the reports origin and current read-only rou
   assert.equal(assets.requests[0].headers.get("cookie"), null);
   assert.equal(assets.requests[0].headers.get("x-private-header"), null);
   assert.equal(share.headers.get("access-control-allow-origin"), null);
-  assert.match(share.headers.get("content-security-policy"), /worker-src 'none'/);
+  assert.match(share.headers.get("content-security-policy"), /worker-src 'self'/);
   assert.equal((await surface.fetch(request("/api/share/pdf"), {})).status, 404);
+});
+
+test("authenticated map read forwards only the opaque session digest", async () => {
+  let input;
+  const surface = handler({ readMapFn: async value => { input = value; return { ok: true, data: { points: [] } }; } });
+  const cookie = "__Host-tour_share_session=session_abcdefghijklmnopqrstuvwxyz";
+  const response = await surface.fetch(request("/api/share/map", { headers: { cookie } }), {});
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { data: { points: [] } });
+  assert.deepEqual(Object.keys(input).sort(), ["env", "sessionDigest"]);
+  assert.equal(input.sessionDigest, await sha256Digest(cookie.slice("__Host-tour_share_session=".length)));
 });
 
 test("exchange passes only SHA-256 digests and sets a host-only session cookie", async () => {
@@ -97,6 +110,10 @@ test("static bootstrap removes the fragment and exposes no ungoverned client mut
   assert.match(script, /\/api\/share\/exchange/);
   assert.match(script, /route_sequence/);
   assert.match(script, /property:public/);
+  assert.match(script, /maplibre-gl-6\.1\.0/);
+  assert.match(script, /setWorkerUrl\("\/vendor\/maplibre-gl-6\.1\.0\/maplibre-gl-worker\.mjs"\)/);
+  assert.match(script, /\/api\/share\/map/);
+  assert.match(html, /id="tour-map"/);
   assert.doesNotMatch(script + html, /\/api\/share\/(?:pdf|comment|reaction)|allow_(?:comments|reactions|pdf_download)|latest_reaction/);
   assert.doesNotMatch(script, /authorization|serviceWorker|\/sw\.js|register\s*\(/i);
   assert.match(css, /[@]media/);

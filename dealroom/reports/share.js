@@ -1,3 +1,7 @@
+import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl, Popup, setWorkerUrl } from "/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs";
+
+setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
+
 (() => {
   "use strict";
 
@@ -6,6 +10,8 @@
   const list = document.querySelector("#report-list");
   const openButton = document.querySelector("#open-tour");
   let shareToken = "";
+  let reportProperties = new globalThis.Map();
+  let mapInstance = null;
 
   function setStatus(message) { status.textContent = message; }
 
@@ -48,6 +54,7 @@
     const properties = items.map((item, index) => ({ item, index }))
       .filter(({ item }) => validPropertyRef(item?.property_ref))
       .sort((left, right) => routeOrder(left.item, left.index) - routeOrder(right.item, right.index));
+    reportProperties = new globalThis.Map(properties.map(({ item }) => [item.property_ref, item]));
     document.querySelector("#report-title").textContent = title;
     summary.textContent = text(report?.summary, `${properties.length} property${properties.length === 1 ? "" : "ies"} in this report.`);
     list.replaceChildren();
@@ -68,9 +75,62 @@
     list.setAttribute("aria-busy", "false");
   }
 
+  function validMapPoint(point) {
+    return validPropertyRef(point?.property_ref) && Number.isInteger(point?.route_sequence) && point.route_sequence > 0 &&
+      Number.isFinite(point?.latitude) && point.latitude >= -90 && point.latitude <= 90 &&
+      Number.isFinite(point?.longitude) && point.longitude >= -180 && point.longitude <= 180;
+  }
+
+  function renderMap(payload) {
+    const points = (Array.isArray(payload?.points) ? payload.points : []).filter(validMapPoint)
+      .sort((left, right) => left.route_sequence - right.route_sequence);
+    if (!points.length) return;
+    const mapSection = document.querySelector("#map-section");
+    mapSection.hidden = false;
+    if (mapInstance) mapInstance.remove();
+    mapInstance = new MapLibreMap({
+      container: "tour-map",
+      style: { version: 8, sources: {}, layers: [{ id: "background", type: "background", paint: { "background-color": "#eef4f8" } }] },
+      center: [points[0].longitude, points[0].latitude], zoom: 11, attributionControl: false,
+    });
+    mapInstance.addControl(new NavigationControl({ showCompass: false }), "top-right");
+    const routeCoordinates = [];
+    const bounds = new LngLatBounds();
+    for (const point of points) {
+      const coordinate = [point.longitude, point.latitude];
+      routeCoordinates.push(coordinate);
+      bounds.extend(coordinate);
+      const property = reportProperties.get(point.property_ref) || {};
+      const marker = document.createElement("button");
+      marker.type = "button";
+      marker.textContent = typeof point.route_label === "string" ? point.route_label : String(point.route_sequence);
+      marker.setAttribute("aria-label", `Stop ${point.route_sequence}: ${text(property.name, "Tour property")}`);
+      const popupBody = document.createElement("div");
+      const popupTitle = document.createElement("strong");
+      popupTitle.textContent = text(property.name, `Stop ${point.route_sequence}`);
+      const popupAddress = document.createElement("div");
+      popupAddress.textContent = text(property.address, "Verified access point");
+      popupBody.append(popupTitle, popupAddress);
+      new Marker({ element: marker }).setLngLat([point.longitude, point.latitude])
+        .setPopup(new Popup({ offset: 18 }).setDOMContent(popupBody)).addTo(mapInstance);
+    }
+    mapInstance.on("load", () => {
+      if (routeCoordinates.length > 1) {
+        mapInstance.addSource("tour-route", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: routeCoordinates } } });
+        mapInstance.addLayer({ id: "tour-route", type: "line", source: "tour-route", paint: { "line-color": "#F57F29", "line-width": 4, "line-opacity": .9 } });
+        mapInstance.fitBounds(bounds, { padding: 56, maxZoom: 14, duration: 0 });
+      }
+    });
+  }
+
   async function loadReport() {
     const payload = await request("/api/share/report");
     render(payload.data || {});
+  }
+
+  async function loadMap() {
+    try { const payload = await request("/api/share/map"); renderMap(payload.data || {}); }
+    catch { document.querySelector("#map-section").hidden = true; }
   }
 
   async function openTour() {
@@ -85,6 +145,7 @@
         body: JSON.stringify({ token }),
       });
       await loadReport();
+      await loadMap();
       setStatus("Report loaded.");
     } catch {
       setStatus("This shared report is unavailable.");

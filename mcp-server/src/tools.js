@@ -23,6 +23,9 @@ import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { tourRightsProjectionTools } from "./tour-rights-projection.js";
 import { tourPropertyJurisdictionTools } from "./tour-property-jurisdiction.js";
 import { tourDomainTools } from "./tour-domain.js";
+import { tourPropertySearchTools } from "./tour-property-search.js";
+import { tourSharingTools } from "./tour-sharing.js";
+import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
          personalScopeForActor } from "./identity.js";
@@ -147,11 +150,19 @@ async function requestHash(args) {
 const TOUR_DOMAIN_SERIALIZED_WRITES = new Set([
   "create-tour-domain",
   "append-tour-route-version",
+  "prepare-tour-route-version",
   "append-tour-route-stop",
   "append-tour-route-stop-transition",
   "accept-tour-route-version",
   "append-tour-cheat-sheet-revision",
   "restore-tour-cheat-sheet-revision",
+  "append-tour-selection-cart-version",
+  "issue-tour-share-grant",
+  "rotate-tour-share-grant",
+  "revoke-tour-share-grant",
+  "request-tour-pdf-render",
+  "record-tour-pdf-render-result",
+  "record-tour-pdf-human-review",
 ]);
 
 export function auditIdentity(actor) {
@@ -8493,3 +8504,9 @@ Object.assign(TOOLS, tourPropertyJurisdictionTools({ withEnvelope, writeEvent, T
 // Tour Operations Slice 4: immutable Tour route versions and internal-only
 // cheat-sheet revisions. Route acceptance is authority-only; publication is absent.
 Object.assign(TOOLS, tourDomainTools({ withEnvelope, writeEvent, ToolError }));
+
+// Tour Operations delivery surfaces: governed property search and cart,
+// confidential sharing, and deterministic PDF request/review records.
+Object.assign(TOOLS, tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }));
+Object.assign(TOOLS, tourSharingTools({ withEnvelope, writeEvent, ToolError }));
+Object.assign(TOOLS, tourArtifactTools({ withEnvelope, writeEvent, ToolError }));

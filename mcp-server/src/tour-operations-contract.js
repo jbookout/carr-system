@@ -10,10 +10,21 @@ export const PUBLIC_TOUR_FIELD_KEYS = new Set([
 export const REQUIRED_PUBLIC_PROPERTY_FIELDS = Object.freeze(["display.name", "display.address"]);
 export const PUBLIC_ASSET_REFERENCE_RE = /^asset:public:[A-Za-z0-9_-]{16,256}$/;
 
-const scalar = value => value === null || ["string", "number", "boolean"].includes(typeof value);
-const objectWithOnly = (value, keys) => value && !Array.isArray(value) &&
-  typeof value === "object" &&
-  Object.entries(value).every(([key, nested]) => keys.has(key) && scalar(nested));
+const metricValue = value =>
+  (typeof value === "number" && Number.isFinite(value)) ||
+  (typeof value === "string" && value.trim().length > 0 && value.trim().length <= 120);
+function approvedMetricIsSafe(value) {
+  if (!value || Array.isArray(value) || typeof value !== "object") return false;
+  const keys = new Set(["value", "unit", "min", "max", "currency", "period", "label"]);
+  if (Object.keys(value).some(key => !keys.has(key)) ||
+      !["value", "min", "max"].some(key => Object.hasOwn(value, key))) return false;
+  for (const key of ["value", "min", "max"])
+    if (Object.hasOwn(value, key) && !metricValue(value[key])) return false;
+  for (const key of ["unit", "currency", "period", "label"])
+    if (Object.hasOwn(value, key) &&
+        (typeof value[key] !== "string" || !value[key].trim() || value[key].trim().length > 120)) return false;
+  return !(typeof value.min === "number" && typeof value.max === "number" && value.min > value.max);
+}
 export function requiredTimestamp(value) {
   if (typeof value !== "string" ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return false;
@@ -93,8 +104,7 @@ export function publicValueIsSafe(fieldKey, value) {
     "parking", "access", "source_attribution", "as_of", "caveat"].includes(fieldKey))
     return typeof value === "string";
   if (["size", "asking_economics"].includes(fieldKey))
-    return objectWithOnly(value, new Set(["value", "unit", "min", "max", "currency",
-      "period", "label"]));
+    return approvedMetricIsSafe(value);
   if (["photos", "floor_plan"].includes(fieldKey))
     return Array.isArray(value) && value.every(publicAssetIsSafe);
   return false;

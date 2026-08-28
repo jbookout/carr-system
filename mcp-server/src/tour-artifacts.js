@@ -8,6 +8,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$/;
 const ARTIFACT_REF = /^artifact:tour-pdf:[A-Za-z0-9_-]{16,128}$/;
+const STORAGE_REF = /^tour-pdf\/[A-Za-z0-9._/-]{16,400}\.pdf$/;
 const STATUSES = new Set(["queued", "rendering", "qc_blocked", "review_ready", "rejected", "available", "failed"]);
 const DECISIONS = new Set(["accept", "reject"]);
 const AUTHORITY = new Set(["tenant", "tenant_id", "organization_tenant_id", "actor", "actor_id", "reviewer", "identity", "authorization", "authorization_class", "sponsor", "human_slug"]);
@@ -18,6 +19,10 @@ const REQUEST_FIELDS = new Set([
   "expected_markers_digest", "expected_asset_digests", "expected_font_digests",
 ]);
 const READ_FIELDS = new Set(["render_job_id"]);
+const RESULT_FIELDS = new Set([
+  "idempotency_key", "render_job_id", "status", "artifact_ref", "artifact_digest",
+  "storage_ref", "content_length", "page_count", "blocking_finding_count", "qc_run_digest",
+]);
 const REVIEW_FIELDS = new Set([
   "idempotency_key", "render_job_id", "qc_run_digest", "decision",
   "reviewed_at", "review_receipt_digest", "reason",
@@ -109,6 +114,7 @@ export function tourArtifactTools({ withEnvelope, writeEvent, ToolError }) {
       },
     },
     "read-tour-pdf-render": {
+      writerConnection: true,
       description: "Read sanitized internal PDF render/QC state. R2 keys, leases, provider data, and session material are never returned.",
       inputSchema: schema({ render_job_id: { type: "string" } }, [...READ_FIELDS]),
       handler: async (client, actor, args) => {
@@ -120,6 +126,30 @@ export function tourArtifactTools({ withEnvelope, writeEvent, ToolError }) {
         const render = projectRender(result.rows[0]?.render);
         if (!render) fail(ToolError, { error: "tour_pdf_render_not_found" });
         return { ok: true, render };
+      },
+    },
+    "record-tour-pdf-render-result": {
+      write: true,
+      authorityOnly: true,
+      description: "Authority-bound server renderer receipt after exact R2 readback and deterministic QC. This cannot approve, publish, or grant client download authority.",
+      inputSchema: schema({ ...idempotency, render_job_id: { type: "string" }, status: { type: "string", enum: ["review_ready", "qc_blocked", "failed"] }, artifact_ref: { type: "string" }, artifact_digest: { type: "string" }, storage_ref: { type: "string" }, content_length: { type: "integer", minimum: 1 }, page_count: { type: "integer", minimum: 1, maximum: 50 }, blocking_finding_count: { type: "integer", minimum: 0 }, qc_run_digest: { type: "string" } }, [...RESULT_FIELDS]),
+      handler: async (client, actor, args) => {
+        exact(args, RESULT_FIELDS, ToolError);
+        uuid(args.idempotency_key, "idempotency_key", ToolError);
+        const renderJobId = uuid(args.render_job_id, "render_job_id", ToolError);
+        if (!["review_ready", "qc_blocked", "failed"].includes(args.status) || !ARTIFACT_REF.test(args.artifact_ref || "") || !STORAGE_REF.test(args.storage_ref || "") || !Number.isInteger(args.content_length) || args.content_length < 1 || !Number.isInteger(args.page_count) || args.page_count < 1 || args.page_count > 50 || !Number.isInteger(args.blocking_finding_count) || args.blocking_finding_count < 0 || (args.status === "review_ready" && args.blocking_finding_count !== 0)) fail(ToolError, { error: "tour_input_invalid", field: "render_result" });
+        const artifactDigest = digest(args.artifact_digest, "artifact_digest", ToolError);
+        const qcRunDigest = digest(args.qc_run_digest, "qc_run_digest", ToolError);
+        return withEnvelope(client, actor, "record-tour-pdf-render-result", args, async () => {
+          const result = await client.query(
+            "select ops.record_tour_pdf_render_result($1::text,$2::uuid,$3::text,$4::text,$5::text,$6::text,$7::integer,$8::integer,$9::integer,$10::text,$11::text) as render_result_id /* tour-artifacts:render-result */",
+            [tenant(actor, ToolError), renderJobId, args.status, args.artifact_ref, artifactDigest, args.storage_ref, args.content_length, args.page_count, args.blocking_finding_count, qcRunDigest, actor.id],
+          );
+          const id = result.rows[0]?.render_result_id;
+          if (!UUID.test(id || "")) fail(ToolError, { error: "tour_write_refused", entity: "pdf_render_result" });
+          await writeEvent(client, actor, "record-tour-pdf-render-result", "tour_pdf_render_result", id, { field: "status", new: { render_job_id: renderJobId, status: args.status, artifact_digest: artifactDigest, page_count: args.page_count, blocking_finding_count: args.blocking_finding_count, qc_run_digest: qcRunDigest }, idempotency_key: args.idempotency_key });
+          return { ok: true, render_result_id: id, render_job_id: renderJobId, status: args.status };
+        });
       },
     },
     "record-tour-pdf-human-review": {

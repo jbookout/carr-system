@@ -51,6 +51,18 @@ test("public assets use opaque public references and never arbitrary URLs", () =
   }
 });
 
+test("public metrics match the deterministic packet renderer contract", () => {
+  for (const value of [
+    { value: 4200, unit: "SF" },
+    { min: 18, max: 24, currency: "USD", period: "SF/YR" },
+    { value: "Call for pricing", label: "Asking economics" },
+  ]) assert.equal(publicValueIsSafe("size", value), true, JSON.stringify(value));
+  for (const value of [
+    {}, { value: null }, { value: true }, { unit: "SF" },
+    { value: "" }, { min: 25, max: 20 }, { value: 4200, unit: null },
+  ]) assert.equal(publicValueIsSafe("size", value), false, JSON.stringify(value));
+});
+
 test("existing projection fact validation retains established fail-closed rights errors", () => {
   const { projection_fact: fact, field_assertion: assertion, membership, projection, rights_receipt: rights } = fixture;
   assert.equal(validateProjectionFact(fact, assertion, membership, projection, rights), true);

@@ -17,6 +17,9 @@ h3 { margin: 0; font-size: 1rem; }
 .summary, .status { max-width: 65ch; color: #4a5568; line-height: 1.55; }
 .status { min-height: 1.5rem; margin: 1rem 0; }
 .report-list { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
+#tour-map { width: 100%; height: clamp(280px, 52vh, 520px); border: 1px solid #b8c6d8; border-radius: .65rem; overflow: hidden; background: #eef4f8; }
+.maplibregl-marker { display: grid; place-items: center; width: 2rem; height: 2rem; border: 3px solid #fff; border-radius: 50%; color: #fff; background: #002F6C; box-shadow: 0 2px 7px rgb(0 47 108 / 35%); font-size: .78rem; font-weight: 800; }
+.maplibregl-popup-content { color: #172033; font: .85rem/1.4 Inter, ui-sans-serif, system-ui, sans-serif; }
 .report-item { padding: 1rem; border: 1px solid #d7deea; border-radius: .5rem; background: #fff; box-shadow: 0 1px 2px rgb(23 32 51 / 6%); }
 .report-item p { margin: .45rem 0 0; color: #4a5568; }
 .route-label, .reaction-state { font-size: .9rem; }
@@ -33,4 +36,6 @@ button:focus-visible, .download-link:focus-visible, select:focus-visible, textar
 @media (max-width: 480px) {
   .shell { width: min(100% - 1.25rem, 760px); padding-top: 1.25rem; }
   .report-item { padding: .85rem; }
+  #tour-map { height: 340px; }
 }
+.maplibregl-marker { min-height: 2rem; padding: 0; border: 3px solid #fff; border-radius: 50%; background: #002F6C; }

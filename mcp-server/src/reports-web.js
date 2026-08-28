@@ -3,7 +3,8 @@
 // A share bearer is accepted once, from the fragment bootstrap, and is exchanged
 // for an opaque host-only cookie.  This module intentionally has no map, GIS,
 // service-worker, CORS, or database implementation: those concerns belong to
-// its injected record-layer seams and to a later routing integration.
+// its injected record-layer seams. MapLibre is self-hosted and consumes only
+// the separately scoped, entrance-verified public map projection.
 
 export const REPORTS_ORIGIN = "https://reports.doctorcre.com";
 export const REPORTS_ASSET_DIRECTORY = "../dealroom/reports";
@@ -15,10 +16,15 @@ const STATIC_ASSETS = new Map([
   ["/share", "/reports/share.html"],
   ["/share.js", "/reports/share.js"],
   ["/share.css", "/reports/share.css"],
+  ["/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs"],
+  ["/vendor/maplibre-gl-6.1.0/maplibre-gl-shared.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl-shared.mjs"],
+  ["/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs"],
+  ["/vendor/maplibre-gl-6.1.0/maplibre-gl.css", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl.css"],
 ]);
 const API_METHODS = new Map([
   ["/api/share/exchange", "POST"],
   ["/api/share/report", "GET"],
+  ["/api/share/map", "GET"],
 ]);
 const REPORTS_CSP = [
   "default-src 'none'",
@@ -31,7 +37,7 @@ const REPORTS_CSP = [
   "img-src 'self' data:",
   "font-src 'self'",
   "connect-src 'self'",
-  "worker-src 'none'",
+  "worker-src 'self'",
   "child-src 'none'",
   "manifest-src 'none'",
 ].join("; ");
@@ -132,11 +138,12 @@ async function staticAsset(env, request, pathname) {
   headers.set("cache-control", "no-store");
   if (pathname.endsWith(".html")) headers.set("content-type", "text/html; charset=utf-8");
   if (pathname.endsWith(".js")) headers.set("content-type", "application/javascript; charset=utf-8");
+  if (pathname.endsWith(".mjs")) headers.set("content-type", "application/javascript; charset=utf-8");
   if (pathname.endsWith(".css")) headers.set("content-type", "text/css; charset=utf-8");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-async function exchange(request, env, dependencies) {
+async function exchange(request, env, ctx, dependencies) {
   if (!sameOriginPost(request)) return json({ error: "forbidden" }, 403);
   const body = await jsonBody(request);
   if (body.error) return body.error;
@@ -152,7 +159,7 @@ async function exchange(request, env, dependencies) {
   const auditDigest = await sha256Digest(`tour-share-exchange\n${tokenDigest}\n${sessionDigest}\n${sessionExpiresAt}`);
   let result;
   try {
-    result = await dependencies.exchangeShareTokenFn({ env, tokenDigest, sessionDigest, sessionExpiresAt, auditDigest });
+    result = await dependencies.exchangeShareTokenFn({ env, ...(ctx ? { ctx } : {}), tokenDigest, sessionDigest, sessionExpiresAt, auditDigest });
   } catch { return json({ error: "share_unavailable" }, 503); }
   if (!result?.ok) return dependencyFailure(result);
   // Deliberately acknowledge only the exchange.  Never return or log the
@@ -160,12 +167,12 @@ async function exchange(request, env, dependencies) {
   return json({ ok: true }, 200, { "set-cookie": sessionCookie(session) });
 }
 
-async function read(request, env, dependencies) {
+async function read(request, env, ctx, dependencies, dependencyName) {
   const session = cookieValue(request, SESSION_COOKIE);
   if (!session) return json({ error: "unauthorized" }, 401);
-  if (typeof dependencies.readShareFn !== "function") return json({ error: "not_found" }, 404);
+  if (typeof dependencies[dependencyName] !== "function") return json({ error: "not_found" }, 404);
   let result;
-  try { result = await dependencies.readShareFn({ env, sessionDigest: await sha256Digest(session) }); }
+  try { result = await dependencies[dependencyName]({ env, ...(ctx ? { ctx } : {}), sessionDigest: await sha256Digest(session) }); }
   catch { return json({ error: "share_unavailable" }, 503); }
   if (!result?.ok || !isPlainRecord(result.data)) return dependencyFailure(result);
   return publicResponse(result);
@@ -188,7 +195,7 @@ function withSecurityHeaders(response) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-async function handleRequest(request, env, dependencies) {
+async function handleRequest(request, env, ctx, dependencies) {
   if (!reportsRequest(request)) return json({ error: "not_found" }, 404);
   const pathname = new URL(request.url).pathname;
   const asset = STATIC_ASSETS.get(pathname);
@@ -196,14 +203,14 @@ async function handleRequest(request, env, dependencies) {
   const method = API_METHODS.get(pathname);
   if (!method) return json({ error: "not_found" }, 404);
   if (request.method !== method) return methodNotAllowed(method);
-  if (pathname === "/api/share/exchange") return exchange(request, env, dependencies);
-  return read(request, env, dependencies);
+  if (pathname === "/api/share/exchange") return exchange(request, env, ctx, dependencies);
+  return read(request, env, ctx, dependencies, pathname === "/api/share/map" ? "readMapFn" : "readShareFn");
 }
 
 /** Injectable seams keep this browser gate independent from Worker, DB, and MCP wiring. */
 export function createReportsWebHandler(overrides = {}) {
   const dependencies = { now: () => Date.now(), ...overrides };
-  return { fetch: async (request, env, _ctx) => withSecurityHeaders(await handleRequest(request, env, dependencies)) };
+  return { fetch: async (request, env, ctx) => withSecurityHeaders(await handleRequest(request, env, ctx, dependencies)) };
 }
 
 export function isReportsRequest(request) {

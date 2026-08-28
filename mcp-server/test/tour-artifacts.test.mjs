@@ -4,7 +4,7 @@ import { tourArtifactTools } from "../src/tour-artifacts.js";
 
 class ToolError extends Error { constructor(payload) { super(payload.error); this.payload = payload; } }
 const actor = { id: "actor-00000000-0000-4000-8000-000000000001", slug: "codex" };
-const ids = { projection: "10000000-0000-4000-8000-000000000001", job: "20000000-0000-4000-8000-000000000001", review: "30000000-0000-4000-8000-000000000001", idempotency: "40000000-0000-4000-8000-000000000001" };
+const ids = { projection: "10000000-0000-4000-8000-000000000001", job: "20000000-0000-4000-8000-000000000001", result: "25000000-0000-4000-8000-000000000001", review: "30000000-0000-4000-8000-000000000001", idempotency: "40000000-0000-4000-8000-000000000001" };
 const digest = character => `sha256:${character.repeat(64)}`;
 
 function harness() {
@@ -12,6 +12,7 @@ function harness() {
   const client = { async query(sql, params) {
     calls.push({ sql, params });
     if (sql.includes("request_tour_pdf_render")) return { rows: [{ render_job_id: ids.job }] };
+    if (sql.includes("record_tour_pdf_render_result")) return { rows: [{ render_result_id: ids.result }] };
     if (sql.includes("read_tour_pdf_render")) return { rows: [{ render: { render_job_id: ids.job, status: "review_ready", artifact_ref: "artifact:tour-pdf:abcdefghijklmnop", artifact_digest: digest("a"), projection_digest: digest("b"), page_count: 2, expected_property_count: 2, blocking_finding_count: 0, human_review_state: "pending", r2_key: "private", lease_digest: digest("c"), token_digest: digest("d") } }] };
     if (sql.includes("record_tour_pdf_human_review")) return { rows: [{ review_receipt_id: ids.review }] };
     throw new Error(sql);
@@ -29,7 +30,8 @@ const request = {
 
 test("render request binds every immutable input and cannot approve or publish", async () => {
   const h = harness();
-  assert.deepEqual(Object.keys(h.tools).sort(), ["read-tour-pdf-render", "record-tour-pdf-human-review", "request-tour-pdf-render"]);
+  assert.deepEqual(Object.keys(h.tools).sort(), ["read-tour-pdf-render", "record-tour-pdf-human-review", "record-tour-pdf-render-result", "request-tour-pdf-render"]);
+  assert.equal(h.tools["record-tour-pdf-render-result"].authorityOnly, true);
   assert.equal(h.tools["record-tour-pdf-human-review"].authorityOnly, true);
   assert.deepEqual(await h.tools["request-tour-pdf-render"].handler(h.client, actor, request), { ok: true, render_job_id: ids.job, status: "queued" });
   assert.deepEqual(h.calls[0].params.slice(0, 2), ["carr-internal", actor.id]);
@@ -37,6 +39,21 @@ test("render request binds every immutable input and cannot approve or publish",
   assert.deepEqual(JSON.parse(h.calls[0].params[2]), expectedRequest);
   assert.equal(h.events.length, 1); assert.doesNotMatch(JSON.stringify(h.events), /asset_digests|font_digests|packet_digest/);
   assert.equal(Object.hasOwn(h.tools, "publish-tour-pdf"), false); assert.equal(Object.hasOwn(h.tools, "approve-tour-pdf"), false);
+});
+
+test("renderer result records exact R2/QC evidence without granting approval", async () => {
+  const h = harness();
+  const result = {
+    idempotency_key: ids.idempotency, render_job_id: ids.job, status: "review_ready",
+    artifact_ref: "artifact:tour-pdf:abcdefghijklmnop", artifact_digest: digest("4"),
+    storage_ref: `tour-pdf/carr-internal/${ids.job}/artifact.pdf`, content_length: 12345,
+    page_count: 2, blocking_finding_count: 0, qc_run_digest: digest("5"),
+  };
+  assert.deepEqual(await h.tools["record-tour-pdf-render-result"].handler(h.client, actor, result), { ok: true, render_result_id: ids.result, render_job_id: ids.job, status: "review_ready" });
+  assert.match(h.calls[0].sql, /record_tour_pdf_render_result/);
+  assert.equal(h.events.length, 1);
+  assert.doesNotMatch(JSON.stringify(h.events), /storage_ref/);
+  assert.equal(Object.hasOwn(result, "decision"), false);
 });
 
 test("render request refuses unpinned, duplicate, oversized, and caller-authority inputs", async () => {

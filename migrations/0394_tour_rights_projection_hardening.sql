@@ -124,7 +124,23 @@ create or replace function ops.tour_public_value_safe(p_field_key text, p_value 
 returns boolean language sql immutable as $$
   select case
     when p_field_key in ('display.name','display.address','suite','property_type','availability','parking','access','source_attribution','as_of','caveat') then jsonb_typeof(p_value) = 'string'
-    when p_field_key in ('size','asking_economics') then jsonb_typeof(p_value) = 'object' and not exists (select 1 from jsonb_each(p_value) e where e.key not in ('value','unit','min','max','currency','period','label') or jsonb_typeof(e.value) not in ('string','number','boolean','null'))
+    when p_field_key in ('size','asking_economics') then
+      jsonb_typeof(p_value) = 'object'
+      and (p_value ? 'value' or p_value ? 'min' or p_value ? 'max')
+      and not exists (
+        select 1 from jsonb_each(p_value) e
+         where e.key not in ('value','unit','min','max','currency','period','label')
+            or (e.key in ('value','min','max') and (
+                 jsonb_typeof(e.value) not in ('string','number')
+                 or (jsonb_typeof(e.value)='string' and (btrim(e.value #>> '{}')='' or char_length(btrim(e.value #>> '{}'))>120))))
+            or (e.key in ('unit','currency','period','label') and (
+                 jsonb_typeof(e.value)<>'string'
+                 or btrim(e.value #>> '{}')='' or char_length(btrim(e.value #>> '{}'))>120))
+      )
+      and not (
+        jsonb_typeof(p_value->'min')='number' and jsonb_typeof(p_value->'max')='number'
+        and (p_value->>'min')::numeric > (p_value->>'max')::numeric
+      )
     when p_field_key in ('photos','floor_plan') then jsonb_typeof(p_value) = 'array' and not exists (
       select 1 from jsonb_array_elements(p_value) item
        where jsonb_typeof(item) <> 'object'
