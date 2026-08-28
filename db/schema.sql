@@ -6344,8 +6344,19 @@ begin
     raise exception 'heavy-build classification requires typed dependency refs and caps';
   end if;
 
+  -- THE PLAN'S WORDING IS NOT EVIDENCE ABOUT THE WORK. p_scope_summary used to
+  -- join this signal text, which meant the tier could be flipped by rewording the
+  -- summary while the change itself stayed identical. Observed 2026-08-27: the
+  -- same four-step additive guard classified heavy with the word "schema" in its
+  -- summary and standard without it, and the plan was accepted on the second
+  -- wording. A gate that a rewrite can pass teaches sessions to write around it
+  -- rather than through it. Heaviness is now a property of the REQUEST -- its
+  -- title, its desired outcome, its acceptance criteria -- plus the plan's SHAPE,
+  -- which the scale signals below still read from caps and dependency refs.
+  -- Nothing is relaxed: every signal that fired before still fires, and a request
+  -- that was heavy is heavy no matter how its plan is phrased.
   signal_text := lower(concat_ws(' ', w.title, w.desired_outcome,
-    coalesce(w.acceptance_criteria::text, ''), coalesce(p_scope_summary, '')));
+    coalesce(w.acceptance_criteria::text, '')));
   criteria_count := case when jsonb_typeof(w.acceptance_criteria) = 'array' then jsonb_array_length(w.acceptance_criteria) else 0 end;
   dependency_count := jsonb_array_length(coalesce(p_dependency_refs, '[]'::jsonb));
   step_count := case when coalesce(p_caps->>'max_steps','') ~ '^[0-9]+$' then (p_caps->>'max_steps')::integer else 0 end;
@@ -25071,10 +25082,11 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
             'receipt_missing'::text AS text
           WHERE (NOT (EXISTS ( SELECT 1
                    FROM weekly)))
-        ), raw AS (
-         SELECT 'client'::text AS subject_type,
+        ), salesforce_clients AS (
+         SELECT 1 AS tier_rank,
+            'client'::text AS subject_type,
             c.id AS subject_id,
-            max(d.created_at) AS newest_deal_at
+            row_number() OVER (ORDER BY (max(d.created_at)) DESC NULLS LAST, c.id) AS tier_seq
            FROM ((public.client c
              JOIN public.party p ON ((p.id = c.party_id)))
              JOIN public.deal d ON ((d.client_id = c.id)))
@@ -25082,10 +25094,23 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
                    FROM public.record_flag f
                   WHERE ((f.subject_type = 'client'::text) AND (f.subject_id = c.id) AND (f.kind = 'verified'::text) AND ((f.expires_on IS NULL) OR (f.expires_on >= CURRENT_DATE)))))))
           GROUP BY c.id
-        UNION ALL
-         SELECT 'party'::text AS text,
-            dp.party_id,
-            max(d.created_at) AS max
+        ), pipeline_clients AS (
+         SELECT 2 AS tier_rank,
+            'client'::text AS subject_type,
+            c.id AS subject_id,
+            row_number() OVER (ORDER BY c.created_at DESC, c.id) AS tier_seq
+           FROM (public.client c
+             JOIN public.party p ON ((p.id = c.party_id)))
+          WHERE ((c.status = ANY (ARRAY['active_deal'::text, 'engaged'::text])) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM salesforce_clients sc
+                  WHERE (sc.subject_id = c.id)))) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.record_flag f
+                  WHERE ((f.subject_type = 'client'::text) AND (f.subject_id = c.id) AND (f.kind = 'verified'::text) AND ((f.expires_on IS NULL) OR (f.expires_on >= CURRENT_DATE)))))))
+        ), counterparties AS (
+         SELECT 3 AS tier_rank,
+            'party'::text AS subject_type,
+            dp.party_id AS subject_id,
+            row_number() OVER (ORDER BY (max(d.created_at)) DESC NULLS LAST, dp.party_id) AS tier_seq
            FROM ((public.deal_participant dp
              JOIN public.deal d ON ((d.id = dp.deal_id)))
              JOIN public.party p ON ((p.id = dp.party_id)))
@@ -25093,12 +25118,46 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
                    FROM public.record_flag f
                   WHERE ((f.subject_type = 'party'::text) AND (f.subject_id = dp.party_id) AND (f.kind = 'verified'::text) AND ((f.expires_on IS NULL) OR (f.expires_on >= CURRENT_DATE)))))))
           GROUP BY dp.party_id
+        ), identity_anomalies AS (
+         SELECT 4 AS tier_rank,
+            'client'::text AS subject_type,
+            c.id AS subject_id,
+            row_number() OVER (ORDER BY c.created_at DESC, c.id) AS tier_seq
+           FROM (public.client c
+             JOIN public.party p ON ((p.id = c.party_id)))
+          WHERE ((c.roster_ref IS NULL) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM salesforce_clients sc
+                  WHERE (sc.subject_id = c.id)))) AND (NOT (EXISTS ( SELECT 1
+                   FROM pipeline_clients pc
+                  WHERE (pc.subject_id = c.id)))))
         ), ranked AS (
-         SELECT r_1.subject_type,
-            r_1.subject_id,
-            r_1.newest_deal_at,
-            (row_number() OVER (ORDER BY r_1.newest_deal_at DESC NULLS LAST, r_1.subject_type, r_1.subject_id))::integer AS priority
-           FROM raw r_1
+         SELECT tiers.tier_rank,
+            tiers.subject_type,
+            tiers.subject_id,
+            (row_number() OVER (ORDER BY tiers.tier_rank, tiers.tier_seq))::integer AS priority
+           FROM ( SELECT salesforce_clients.tier_rank,
+                    salesforce_clients.tier_seq,
+                    salesforce_clients.subject_type,
+                    salesforce_clients.subject_id
+                   FROM salesforce_clients
+                UNION ALL
+                 SELECT pipeline_clients.tier_rank,
+                    pipeline_clients.tier_seq,
+                    pipeline_clients.subject_type,
+                    pipeline_clients.subject_id
+                   FROM pipeline_clients
+                UNION ALL
+                 SELECT counterparties.tier_rank,
+                    counterparties.tier_seq,
+                    counterparties.subject_type,
+                    counterparties.subject_id
+                   FROM counterparties
+                UNION ALL
+                 SELECT identity_anomalies.tier_rank,
+                    identity_anomalies.tier_seq,
+                    identity_anomalies.subject_type,
+                    identity_anomalies.subject_id
+                   FROM identity_anomalies) tiers
         )
  SELECT r.subject_type,
     r.subject_id,
@@ -25119,7 +25178,7 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
 -- Name: VIEW v_control_plane_deal_history_queue; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.v_control_plane_deal_history_queue IS 'Deal-history research queue. receipt_missing keeps an unverified backlog visible when no typed Thursday completion receipt exists, but supplies no execution cap or receipt metadata. receipt_bound rows carry the exact 15/25 cap and receipt evidence required by the execution collector.';
+COMMENT ON VIEW public.v_control_plane_deal_history_queue IS 'Deal-history research queue, four priority bands in the order deal-history-research-weekly.SKILL.md documents: (1) clients on a Salesforce-tagged deal with no verified flag, newest-imported first, (2) any active_deal/engaged client never verified, (3) deal_participant counterparties with no verified flag, (4) clients missing roster_ref. receipt_missing keeps an unverified backlog visible when no typed Thursday completion receipt exists, but supplies no execution cap or receipt metadata. receipt_bound rows carry the exact 15/25 cap and receipt evidence required by the execution collector.';
 
 
 --
@@ -25171,20 +25230,147 @@ COMMENT ON VIEW public.v_expired_verification IS 'The re-verify queue (0071, ord
 --
 
 CREATE VIEW public.v_control_plane_enrichment_queue AS
+ WITH reverify_scoped AS (
+         SELECT q.subject_type,
+            q.subject_id,
+            q.reason,
+            q.observed_at,
+            q.expires_on,
+            q.past_age_floor,
+            q.subject_touches,
+                CASE q.subject_type
+                    WHEN 'party'::text THEN q.subject_id
+                    WHEN 'vendor'::text THEN v.party_id
+                    WHEN 'lead'::text THEN l.party_id
+                    WHEN 'client'::text THEN c.party_id
+                    ELSE NULL::uuid
+                END AS resolved_party_id
+           FROM (((public.v_expired_verification q
+             LEFT JOIN public.vendor v ON (((q.subject_type = 'vendor'::text) AND (v.id = q.subject_id))))
+             LEFT JOIN public.lead l ON (((q.subject_type = 'lead'::text) AND (l.id = q.subject_id))))
+             LEFT JOIN public.client c ON (((q.subject_type = 'client'::text) AND (c.id = q.subject_id))))
+          WHERE (q.subject_type = ANY (ARRAY['party'::text, 'vendor'::text, 'lead'::text, 'client'::text]))
+        ), reverify AS (
+         SELECT 0 AS tier_rank,
+            row_number() OVER (ORDER BY rs.past_age_floor DESC, rs.subject_touches DESC, rs.observed_at, rs.subject_id) AS tier_seq,
+            rs.subject_type,
+            rs.subject_id,
+            rs.reason AS reverification_due,
+            COALESCE((rs.expires_on)::timestamp with time zone, rs.observed_at) AS expired_at
+           FROM (reverify_scoped rs
+             JOIN public.party p ON ((p.id = rs.resolved_party_id)))
+          WHERE (p.contact_state <> 'do_not_contact'::text)
+        ), needs_type AS (
+         SELECT 1 AS tier_rank,
+            row_number() OVER (ORDER BY v.is_target DESC, v.relationship_level DESC NULLS LAST, p.name) AS tier_seq,
+            'vendor'::text AS subject_type,
+            v.id AS subject_id,
+            'not_recorded'::text AS reverification_due,
+            v.created_at AS expired_at
+           FROM (public.vendor v
+             JOIN public.party p ON ((p.id = v.party_id)))
+          WHERE ((v.category_slug IS NULL) AND (v.disposition = 'active'::text) AND (p.contact_state <> 'do_not_contact'::text))
+        ), needs_location AS (
+         SELECT 2 AS tier_rank,
+            row_number() OVER (ORDER BY p.name, v.id) AS tier_seq,
+            'vendor'::text AS subject_type,
+            v.id AS subject_id,
+            'not_recorded'::text AS reverification_due,
+            v.created_at AS expired_at
+           FROM (public.vendor v
+             JOIN public.party p ON ((p.id = v.party_id)))
+          WHERE ((v.disposition = 'active'::text) AND ((p.city IS NULL) OR (p.county IS NULL)) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM needs_type nt
+                  WHERE (nt.subject_id = v.id)))))
+        ), needs_verticals AS (
+         SELECT 3 AS tier_rank,
+            row_number() OVER (ORDER BY p.name, v.id) AS tier_seq,
+            'vendor'::text AS subject_type,
+            v.id AS subject_id,
+            'not_recorded'::text AS reverification_due,
+            v.created_at AS expired_at
+           FROM (public.vendor v
+             JOIN public.party p ON ((p.id = v.party_id)))
+          WHERE ((v.disposition = 'active'::text) AND ((v.verticals IS NULL) OR (cardinality(v.verticals) = 0)) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM needs_type nt
+                  WHERE (nt.subject_id = v.id)))) AND (NOT (EXISTS ( SELECT 1
+                   FROM needs_location nl
+                  WHERE (nl.subject_id = v.id)))))
+        ), lead_client_gaps AS (
+         SELECT 4 AS tier_rank,
+            row_number() OVER (ORDER BY x.expired_at, x.subject_type, x.subject_id) AS tier_seq,
+            x.subject_type,
+            x.subject_id,
+            'not_recorded'::text AS reverification_due,
+            x.expired_at
+           FROM ( SELECT 'lead'::text AS subject_type,
+                    l.id AS subject_id,
+                    l.created_at AS expired_at
+                   FROM (public.lead l
+                     JOIN public.party p ON ((p.id = l.party_id)))
+                  WHERE ((p.contact_state <> 'do_not_contact'::text) AND ((p.title IS NULL) OR (p.org_id IS NULL) OR (p.email IS NULL) OR ((p.phone IS NULL) AND (p.cell IS NULL))))
+                UNION ALL
+                 SELECT 'client'::text AS text,
+                    c.id,
+                    c.created_at
+                   FROM (public.client c
+                     JOIN public.party p ON ((p.id = c.party_id)))
+                  WHERE ((p.contact_state <> 'do_not_contact'::text) AND ((p.title IS NULL) OR (p.org_id IS NULL) OR (p.email IS NULL) OR ((p.phone IS NULL) AND (p.cell IS NULL))))) x
+        ), combined AS (
+         SELECT reverify.tier_rank,
+            reverify.tier_seq,
+            reverify.subject_type,
+            reverify.subject_id,
+            reverify.reverification_due,
+            reverify.expired_at
+           FROM reverify
+        UNION ALL
+         SELECT needs_type.tier_rank,
+            needs_type.tier_seq,
+            needs_type.subject_type,
+            needs_type.subject_id,
+            needs_type.reverification_due,
+            needs_type.expired_at
+           FROM needs_type
+        UNION ALL
+         SELECT needs_location.tier_rank,
+            needs_location.tier_seq,
+            needs_location.subject_type,
+            needs_location.subject_id,
+            needs_location.reverification_due,
+            needs_location.expired_at
+           FROM needs_location
+        UNION ALL
+         SELECT needs_verticals.tier_rank,
+            needs_verticals.tier_seq,
+            needs_verticals.subject_type,
+            needs_verticals.subject_id,
+            needs_verticals.reverification_due,
+            needs_verticals.expired_at
+           FROM needs_verticals
+        UNION ALL
+         SELECT lead_client_gaps.tier_rank,
+            lead_client_gaps.tier_seq,
+            lead_client_gaps.subject_type,
+            lead_client_gaps.subject_id,
+            lead_client_gaps.reverification_due,
+            lead_client_gaps.expired_at
+           FROM lead_client_gaps
+        )
  SELECT subject_type,
     subject_id,
-    reason AS reverification_due,
+    reverification_due,
     'not_current'::text AS current_verification_status,
-    (row_number() OVER (ORDER BY past_age_floor DESC, subject_touches DESC, observed_at, subject_id))::integer AS priority,
-    COALESCE((expires_on)::timestamp with time zone, observed_at) AS expired_at
-   FROM public.v_expired_verification q;
+    (row_number() OVER (ORDER BY tier_rank, tier_seq))::integer AS priority,
+    expired_at
+   FROM combined;
 
 
 --
 -- Name: VIEW v_control_plane_enrichment_queue; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.v_control_plane_enrichment_queue IS 'Control-plane re-verification projection. Every row is expired or unstamped volatile evidence, so this view never calls a fact verified or current.';
+COMMENT ON VIEW public.v_control_plane_enrichment_queue IS 'Control-plane re-verification/enrichment projection, five priority bands in the order contact-enrichment-weekly.SKILL.md documents: (0) scoped expired/unstamped-volatile re-verifications, (1) active vendors with no category, (2) active vendors missing city/county, (3) active vendors missing verticals, (4) leads/clients missing title, org, email, or phone. do_not_contact parties are excluded from every band. priority is one contiguous row_number() across all bands, so a short queue is a valid 1..N prefix, never a gap.';
 
 
 --
@@ -41644,6 +41830,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0363_rule_delivery_activation_digest_repin.sql	03133d0627cf63d2a0a2a7dd8a392065bc19ba17d56d0b2cfabd3dbccafdcb65	2026-08-27 18:56:57.366645+00
 0382_standing_guidance_reader_boundary.sql	a6ffe5f29e9224f263b0c6a90c414b4828915a5ed3265e52e8fadbe31ef8c2bc	2026-08-27 20:40:05.019334+00
 0383_control_plane_not_configured_state.sql	f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa	2026-08-27 20:40:05.784788+00
+0387_control_plane_record_queue_priority_tiers.sql	ba2f9ce18e54f8ceca330a5478ad66d72b76bbc832aba9c20734ebe8a701310e	2026-08-28 00:10:44.481308+00
+0388_heaviness_is_a_property_of_the_request_repin.sql	c0e0d353ef0a5f8363b15f41a51ccae7cad4aabe3176929c46e2741e7f51f3f8	2026-08-28 00:10:44.565762+00
 \.
 
 
@@ -42514,7 +42702,7 @@ insert into ops.siep_component_alias select * from jsonb_populate_record(null::o
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-14", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-15", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-16", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26"}'::jsonb) on conflict do nothing;
-select pg_catalog.setval('ops.work_request_ref_seq', 33, true);
+select pg_catalog.setval('ops.work_request_ref_seq', 35, true);
 alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
 alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
 alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
