@@ -31,6 +31,8 @@ DESK_SPEC_PATH = REPO / "ops" / "config" / "engineering-codex-desk.v1.json"
 # local adapter identity, just like the fixed desk name below.
 DEDICATED_REGISTRY_PATH = Path.home() / ".config" / "carr" / "hermes-desks.json"
 DISPATCH_MINIMUM_RUNWAY = timedelta(seconds=930)
+EXECUTOR_TIMEOUT_SECONDS = 900
+EXECUTOR_RECEIPT_RESERVE_SECONDS = 120
 AUTHORIZED_WRITABLE_ROOTS = (
     "/Users/booko/carr-system/.git",
     "/Users/booko/carr-system/out",
@@ -156,7 +158,18 @@ def _prompt(packet: dict, task: dict) -> str:
         "a full-set fallback.\n\n"
         "The controller—not you—owns the database lease, identity, authority, and lifecycle. "
         "Do not connect directly to any database, do not claim/retry/complete a job, do not reuse a session, "
-        "and do not widen the accepted slice. Work only inside a fresh isolated Git worktree.\n\n"
+        "and do not widen the accepted slice. Work only inside the controller's isolated Git worktree.\n\n"
+        f"HARD EXECUTION BUDGET: the local adapter stops this native turn after {EXECUTOR_TIMEOUT_SECONDS} seconds. "
+        f"Reserve the final {EXECUTOR_RECEIPT_RESERVE_SECONDS} seconds for the required commit/push/PR steps when "
+        "the slice is complete and for the single typed JSON receipt in every outcome. Never begin a broad or "
+        "unbounded check late in the turn. Run the smallest declared-scope fixture/snapshot checks first; broader "
+        "repository gates belong after those bounded checks and only when enough time remains. If completion cannot "
+        "be proven inside the budget, stop work and return a typed blocked receipt before the adapter deadline.\n\n"
+        "RECOVERY FIRST: this fresh native session may follow an expired predecessor envelope. Before broad source "
+        "reconstruction, inspect the current branch and Git status. If the isolated worktree already contains only "
+        "declared-scope files for this exact slice, treat them as an untrusted checkpoint: review them, continue them, "
+        "and cite fresh checks. Do not discard or recreate valid declared-scope progress merely because the native "
+        "session is fresh; never inherit the predecessor transcript or its unverified conclusions.\n\n"
         "Complete the bounded slice below. Run the declared checks and preserve any unrelated dirty work. "
         "If the work cannot be completed within the envelope, return a typed failed or blocked receipt; do not "
         "invent success. Your final response must be a single JSON object and nothing else: an exact "
