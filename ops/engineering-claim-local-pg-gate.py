@@ -751,9 +751,18 @@ def main() -> int:
                      where definition_key<>'engineering-slice' and state in ('queued','retry_wait')"""
             )
             # The supported wrapper reruns this gate after DB programs that may
-            # commit their own eligible Engineering fixtures. Make this
-            # rollback-only happy path unambiguously first without changing
+            # commit their own eligible Engineering fixtures. Isolate both
+            # intended claims from those committed rows while leaving this
+            # gate's invalid-currentness fixtures queued for the assertions
+            # below. This transaction is rollback-only and does not change
             # runtime privileges or production queue ordering.
+            cur.execute(
+                """update ops.job set next_attempt_at=now()+interval '1 day'
+                     where definition_key='engineering-slice'
+                       and id<>all(%s)
+                       and state in ('queued','retry_wait')""",
+                ([job_id, successor_job],),
+            )
             cur.execute(
                 "update ops.job set scheduled_for=now()-interval '100 years' where id=%s",
                 (job_id,),
