@@ -430,8 +430,7 @@ def main() -> int:
         env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
         overrides = (
             "sandbox_workspace_write.network_access=true",
-            "features.network_proxy.enabled=true",
-            'features.network_proxy.domains."github.com"="allow"',
+            'features.network_proxy={enabled=true,domains={"github.com"="allow","api.github.com"="allow"}}',
         )
         dispatch.dispatch(
             "codex-desk", "deliver one reviewed branch", registry=reg,

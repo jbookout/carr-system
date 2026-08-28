@@ -128,9 +128,7 @@ def test_writable_roots_are_exactly_the_two_authorized_machine_paths():
 def test_network_access_is_exactly_the_two_github_delivery_hosts():
     assert adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES == (
         "sandbox_workspace_write.network_access=true",
-        "features.network_proxy.enabled=true",
-        'features.network_proxy.domains."github.com"="allow"',
-        'features.network_proxy.domains."api.github.com"="allow"',
+        'features.network_proxy={enabled=true,domains={"github.com"="allow","api.github.com"="allow"}}',
     )
     assert not any(
         'domains."*"' in value for value in adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES)
