@@ -167,9 +167,24 @@ def find_postgres_binaries() -> PostgresBinaries:
     )
 
 
-def _failure_detail(result: CommandResult) -> str:
-    detail = (result.stderr or result.stdout).strip().splitlines()
-    return detail[-1][:240] if detail else "command failed without output"
+def _failure_detail(result: CommandResult, lines: int = 12) -> str:
+    """The tail of a failed command's output, not just its last line.
+
+    This used to return `detail[-1]` alone, and that one line is routinely the
+    least informative one in the whole output. initdb's final line is the
+    literal string "Examine the log output." -- so a hosted failure printed
+    `local-db-ci setup failed: Examine the log output.` and named no cause,
+    while the cause sat two lines above in output this function had already
+    been handed. Keep the tail instead: the last line is still there, with
+    whatever actually failed above it.
+    """
+    stream = result.stderr.strip() or result.stdout.strip()
+    detail = [line for line in stream.splitlines() if line.strip()]
+    if not detail:
+        return "command failed without output"
+    tail = detail[-lines:]
+    prefix = "" if len(detail) <= lines else f"(last {lines} of {len(detail)} lines) "
+    return prefix + " | ".join(line.strip()[:240] for line in tail)
 
 
 def run_local_ci(
