@@ -635,6 +635,127 @@ def main():
         case("a DO block a megabyte behind the tail bound is still a DO block",
              any("ops.far_do_seed" in f for f in found))
 
+        # DYNAMIC SQL. `execute '<statement>'` is a string that lands rows, and
+        # blanking it detected nothing. The negative control matters as much as
+        # the positive one: a literal that is NOT an execute argument stays inert,
+        # or every migration mentioning a table in prose becomes a false alarm.
+        dyn = ("do $$ begin execute 'insert into ops.dyn_seed values (1)'; end $$;\n"
+               "do $$ begin raise notice 'insert into ops.dyn_prose values (1)'; end $$;\n")
+        repo = build_repo(tmp + "/r6dyn", {"0100_dyn.sql": dyn}, {"carried": {}, "excluded": {}})
+        found = module.check(repo, artifact(["0100_dyn.sql"]))
+        case("execute of a string literal is a seed, not inert text",
+             any("ops.dyn_seed" in f for f in found))
+        case("a literal that is not an execute argument stays inert",
+             not any("ops.dyn_prose" in f for f in found))
+
+        fmt = "do $$ begin execute format('insert into ops.fmt_seed values (%L)', 1); end $$;\n"
+        repo = build_repo(tmp + "/r6fmt", {"0100_fmt.sql": fmt}, {"carried": {}, "excluded": {}})
+        case("execute format() reads the literal table name in its format string",
+             any("ops.fmt_seed" in f for f in module.check(repo, artifact(["0100_fmt.sql"]))))
+
+        # T42/T43. _scanned's docstring claims a body's own routines and DO blocks
+        # are folded in with it. Nothing held that claim.
+        nested = ("create function ops.outer_fn() returns void language plpgsql as $outer$\n"
+                  "begin\n"
+                  "  do $d$ begin insert into ops.nested_do_seed values (1); end $d$;\n"
+                  "end $outer$;\n"
+                  "select ops.outer_fn();\n")
+        repo = build_repo(tmp + "/r6nest", {"0100_nest.sql": nested}, {"carried": {}, "excluded": {}})
+        case("a DO block nested inside a called routine body is folded in",
+             any("ops.nested_do_seed" in f for f in module.check(repo, artifact(["0100_nest.sql"]))))
+
+        dollar_exec = ("do $$ begin execute $q$ insert into ops.dollar_dyn_seed values (1); $q$; end $$;\n")
+        repo = build_repo(tmp + "/r6de", {"0100_de.sql": dollar_exec}, {"carried": {}, "excluded": {}})
+        case("execute of a DOLLAR-quoted body is a seed too",
+             any("ops.dollar_dyn_seed" in f for f in module.check(repo, artifact(["0100_de.sql"]))))
+
+        # T43. The other half of _scanned's claim: a routine DEFINED AND CALLED
+        # inside a called routine's body is reached when the outer one runs, so
+        # its body has to be folded in too. The DO-block case above cannot hold
+        # this; only a nested routine can.
+        nested_fn = ("create function ops.outer2() returns void language plpgsql as $o$\n"
+                     "begin\n"
+                     "  create function ops.inner2() returns void language plpgsql as $i$\n"
+                     "  begin insert into ops.nested_routine_seed values (1); end $i$;\n"
+                     "  perform ops.inner2();\n"
+                     "end $o$;\n"
+                     "select ops.outer2();\n")
+        repo = build_repo(tmp + "/r6nf", {"0100_nf.sql": nested_fn}, {"carried": {}, "excluded": {}})
+        case("a routine defined and called inside a called routine body is folded in",
+             any("ops.nested_routine_seed" in f
+                 for f in module.check(repo, artifact(["0100_nf.sql"]))))
+
+        # T22. When CREATE_ROUTINE misses the header - a quoted identifier, for one
+        # - the `as` branch has no name to file the body under. It must still SCAN
+        # the body: the fallback is what stops a seed vanishing with its header.
+        quoted = ('create function ops."Quoted Fn"() returns void language plpgsql as $$\n'
+                  "begin\n  insert into ops.quoted_hdr_seed values (1);\nend $$;\n")
+        repo = build_repo(tmp + "/r6q", {"0100_q.sql": quoted}, {"carried": {}, "excluded": {}})
+        case("a routine body whose header the regex misses is still scanned",
+             any("ops.quoted_hdr_seed" in f for f in module.check(repo, artifact(["0100_q.sql"]))))
+
+        # T51. An unterminated dollar-quote is kept verbatim rather than dropped,
+        # so statements after the break are still read.
+        unterm = ("insert into ops.before_unterm values (1);\n"
+                  "select $$ never closed\n"
+                  "insert into ops.after_unterm values (1);\n")
+        repo = build_repo(tmp + "/r6ut", {"0100_ut.sql": unterm}, {"carried": {}, "excluded": {}})
+        found = module.check(repo, artifact(["0100_ut.sql"]))
+        case("an unterminated dollar-quote is kept verbatim, not dropped",
+             any("ops.after_unterm" in f for f in found))
+
+        # T46. COPY blocks are EXCISED before scanning, not merely blanked as
+        # literals. copy_blocks says the span exists because COPY data is not SQL
+        # and one apostrophe in a data row sends a literal scanner inside-out. The
+        # jsonb case passes on literal blanking, so it cannot hold this. An
+        # ODD number of apostrophes in the data is what separates them: excised,
+        # the statement after the block is read normally; scanned, that lone quote
+        # opens a literal that swallows it.
+        odd_quote = "COPY public.deal_phase (name) FROM stdin;\nO'Brien\n\\.\n\n"
+        after = "insert into party (name) values ('acme');\n\n"
+        repo_ex = build_repo(tmp + "/r6ex",
+                             {"0100_ex.sql": "insert into deal_phase (name) values ('x');\n"},
+                             {"carried": {"deal_phase": "closed vocabulary"},
+                              "excluded": {"party": "business data"}})
+        found = module.check(repo_ex, artifact(["0100_ex.sql"], [odd_quote + after]))
+        case("an apostrophe in COPY data cannot hide the statement after the block",
+             any("DECLARED EXCLUDED BUT PRESENT" in f and "party" in f for f in found))
+
+        # T44. tables_with_data reads the artifact's ROUTINE BODIES too. A routine
+        # in the snapshot whose body writes an excluded table is that table
+        # arriving in a tracked file, and dropping the routine scan hid it.
+        body_write = ("CREATE FUNCTION public.sneak() RETURNS void LANGUAGE plpgsql\n"
+                      "    AS $sneak$\nbegin\n  insert into party (name) values ('x');\nend $sneak$;\n\n")
+        repo_b = build_repo(tmp + "/r6bw",
+                            {"0100_bw.sql": "insert into deal_phase (name) values ('x');\n"},
+                            {"carried": {}, "excluded": {"party": "business data"}})
+        found = module.check(repo_b, artifact(["0100_bw.sql"], [body_write]))
+        case("an excluded table written from a routine body in the artifact is present",
+             any("DECLARED EXCLUDED BUT PRESENT" in f and "party" in f for f in found))
+
+        # T49. The COPY header pattern is anchored to a line start. Unanchored, a
+        # COPY header appearing mid-line INSIDE another block's data would open a
+        # phantom block and take the rest of the region with it.
+        # The phantom must HIDE something to be worth a case. deal_phase is
+        # CARRIED and genuinely absent here; a mid-line header for it inside
+        # another table's data would mint rows it does not have and silence the
+        # absence, so the anchored form must refuse and the unanchored one pass.
+        phantom = ("COPY public.some_other (name) FROM stdin;\n"
+                   "note: COPY public.deal_phase (name) FROM stdin; is quoted here\n"
+                   "\\.\n\n")
+        repo_ph = build_repo(tmp + "/r6ph",
+                             {"0100_ph.sql": "insert into deal_phase (name) values ('x');\n"},
+                             {"carried": {"deal_phase": "closed vocabulary"}, "excluded": {}})
+        found = module.check(repo_ph, artifact(["0100_ph.sql"], [phantom]))
+        case("a COPY header quoted mid-line inside data cannot mint rows for a carried table",
+             any("DECLARED CARRIED BUT ABSENT" in f and "deal_phase" in f for f in found))
+
+        # T13. The data region STARTS AT the ledger's COPY header, not after it,
+        # so copy_blocks excises the ledger's own rows before anything scans them.
+        # Starting after the header leaves that data loose in the region.
+        case("the data region starts at the ledger COPY header, so its rows are excised",
+             module.data_region(artifact(["0100_x.sql"])).startswith("COPY public.schema_migrations"))
+
         # Whitespace is legal around the schema separator.
         repo = build_repo(tmp + "/r6sp",
                           {"0100_sp.sql": "insert into ops . spaced_table (k) values (1);\n"},
