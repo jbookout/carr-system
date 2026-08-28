@@ -263,8 +263,9 @@ function decodedGeometryWithinPage(document, page, content, width, height) {
   if (!tokens || !fonts) return false;
   const inside = point => point.every(Number.isFinite) && point[0] >= 0 && point[1] >= 0 && point[0] <= width && point[1] <= height;
   const identity = () => [1, 0, 0, 1, 0, 0];
-  let state = { ctm: identity() };
+  let state = { ctm: identity(), lineWidth: 1 };
   const graphics = [];
+  let path = [];
   let operands = [];
   let inText = false;
   let font = null;
@@ -275,6 +276,13 @@ function decodedGeometryWithinPage(document, page, content, width, height) {
   let geometryCount = 0;
   const numbers = (count) => operands.length === count && operands.every(Number.isFinite) ? operands : null;
   const pointInside = (x, y) => inside(transformPoint(state.ctm, x, y));
+  const transformed = (x, y) => transformPoint(state.ctm, x, y);
+  const strokeWithinPage = () => {
+    if (!path.length || !Number.isFinite(state.lineWidth) || state.lineWidth < 0) return false;
+    const scale = Math.max(Math.hypot(state.ctm[0], state.ctm[1]), Math.hypot(state.ctm[2], state.ctm[3]));
+    const margin = Math.max(state.lineWidth, 1) * scale * 5;
+    return Number.isFinite(margin) && path.every(([x, y]) => x >= margin && y >= margin && x <= width - margin && y <= height - margin);
+  };
   const allCornersInside = (matrix, box) => [
     [box[0], box[1]], [box[0], box[3]], [box[2], box[1]], [box[2], box[3]],
   ].every(([x, y]) => inside(transformPoint(matrix, x, y)));
@@ -284,29 +292,41 @@ function decodedGeometryWithinPage(document, page, content, width, height) {
       if (token.startsWith("/") || token.startsWith("<") || token.startsWith("[")) { operands.push(token); continue; }
       if (token === "q") {
         if (operands.length) return false;
-        graphics.push({ ctm: [...state.ctm] });
+        graphics.push({ ctm: [...state.ctm], lineWidth: state.lineWidth });
       } else if (token === "Q") {
-        if (operands.length || !graphics.length) return false;
+        if (operands.length || !graphics.length || path.length) return false;
         state = graphics.pop();
       } else if (token === "cm") {
         const values = numbers(6); if (!values) return false;
         state.ctm = multiplyMatrix(state.ctm, values);
       } else if (["rg", "RG"].includes(token)) {
         if (!numbers(3)) return false;
-      } else if (["g", "G", "w"].includes(token)) {
+      } else if (["g", "G"].includes(token)) {
         if (!numbers(1)) return false;
+      } else if (token === "w") {
+        const values = numbers(1); if (!values || values[0] < 0) return false;
+        state.lineWidth = values[0];
       } else if (token === "d") {
         if (operands.length !== 2 || typeof operands[0] !== "string" || !operands[0].startsWith("[") || !Number.isFinite(operands[1])) return false;
       } else if (["m", "l"].includes(token)) {
         const values = numbers(2); if (!values || !pointInside(values[0], values[1])) return false;
+        path.push(transformed(values[0], values[1]));
         geometryCount += 1;
       } else if (token === "re") {
         const values = numbers(4); if (!values) return false;
         const [x, y, boxWidth, boxHeight] = values;
-        if (![[x, y], [x + boxWidth, y], [x, y + boxHeight], [x + boxWidth, y + boxHeight]].every(([px, py]) => pointInside(px, py))) return false;
+        const corners = [[x, y], [x + boxWidth, y], [x, y + boxHeight], [x + boxWidth, y + boxHeight]];
+        if (!corners.every(([px, py]) => pointInside(px, py))) return false;
+        path.push(...corners.map(([px, py]) => transformed(px, py)));
         geometryCount += 1;
-      } else if (["h", "f", "F", "f*", "S", "s", "B", "B*", "b", "b*", "n"].includes(token)) {
+      } else if (token === "h") {
+        if (operands.length || !path.length) return false;
+      } else if (["S", "s", "B", "B*", "b", "b*"].includes(token)) {
+        if (operands.length || !strokeWithinPage()) return false;
+        path = [];
+      } else if (["f", "F", "f*", "n"].includes(token)) {
         if (operands.length) return false;
+        path = [];
       } else if (token === "BT") {
         if (operands.length || inText) return false;
         inText = true; font = null; fontSize = null; leading = 0; textMatrix = identity(); textLineMatrix = identity();
@@ -341,6 +361,7 @@ function decodedGeometryWithinPage(document, page, content, width, height) {
           if (!allCornersInside(matrix, glyphBox)) return false;
           cursor += glyphWidth * scale;
         }
+        textMatrix = multiplyMatrix(textMatrix, [1, 0, 0, 1, cursor, 0]);
         geometryCount += 1;
       } else {
         return false;
@@ -348,7 +369,7 @@ function decodedGeometryWithinPage(document, page, content, width, height) {
       operands = [];
     }
   } catch { return false; }
-  return !inText && !graphics.length && !operands.length && geometryCount > 0;
+  return !inText && !graphics.length && !path.length && !operands.length && geometryCount > 0;
 }
 
 /** Parse stored PDF bytes so QC observations do not trust the render model. */

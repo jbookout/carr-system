@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import fontkit from "@pdf-lib/fontkit";
 import {
-  clip, degrees, endPath, PDFDocument, PDFName, popGraphicsState,
-  pushGraphicsState, rectangle, StandardFonts,
+  beginText, clip, degrees, endPath, endText, PDFDocument, PDFName, popGraphicsState,
+  pushGraphicsState, rectangle, setFontAndSize, setTextMatrix, showText, StandardFonts,
 } from "pdf-lib";
 import { inspectStoredTourPacketPdf, renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "../src/tour-pdf-renderer.js";
 
@@ -94,6 +94,19 @@ test("PDF renderer measures route-label bounds and stored inspection decodes tex
   const transformedBytes = await transformed.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
   const transformedObservation = await inspectStoredTourPacketPdf(transformedBytes);
   assert.equal(transformedObservation.pages[0].clipped_box_count, 1);
+
+  const consecutive = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  consecutive.registerFontkit(fontkit);
+  const consecutiveFont = await consecutive.embedFont(fonts.regular, { subset: true });
+  const consecutivePage = consecutive.getPage(0);
+  const consecutiveFontName = consecutivePage.node.newFontDictionary(consecutiveFont.name, consecutiveFont.ref);
+  const glyph = consecutiveFont.encodeText("W");
+  consecutivePage.pushOperators(
+    pushGraphicsState(), beginText(), setFontAndSize(consecutiveFontName, 24), setTextMatrix(1, 0, 0, 1, 500, 100),
+    ...Array.from({ length: 20 }, () => showText(glyph)), endText(), popGraphicsState(),
+  );
+  const consecutiveBytes = await consecutive.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  assert.equal((await inspectStoredTourPacketPdf(consecutiveBytes)).pages[0].clipped_box_count, 1);
 });
 
 test("stored inspection fails closed on clipping paths and Form XObjects", async () => {
@@ -111,6 +124,11 @@ test("stored inspection fails closed on clipping paths and Form XObjects", async
   clippedPage.pushOperators(popGraphicsState());
   const clippedBytes = await clipped.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
   assert.equal((await inspectStoredTourPacketPdf(clippedBytes)).pages[0].clipped_box_count, 1);
+
+  const stroked = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  stroked.getPage(0).drawLine({ start: { x: 0, y: 400 }, end: { x: 500, y: 400 }, thickness: 40 });
+  const strokedBytes = await stroked.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  assert.equal((await inspectStoredTourPacketPdf(strokedBytes)).pages[0].clipped_box_count, 1);
 
   const donor = await PDFDocument.create();
   const donorPage = donor.addPage([20, 20]);
