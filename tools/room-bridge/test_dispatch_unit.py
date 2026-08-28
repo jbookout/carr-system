@@ -420,9 +420,32 @@ def main() -> int:
         argv = [json.loads(l) for l in argv_log.read_text().splitlines() if l.strip()][-1]
         assert "--add-dir" not in argv, argv
         assert "--dangerously-bypass-approvals-and-sandbox" not in argv, argv
+        assert "sandbox_workspace_write.network_access=true" not in argv, argv
+        assert not any("network_proxy" in value for value in argv), argv
 
     check("a desk that asked for nothing extra stays as locked down as before",
           default_desks_stay_locked_down)
+
+    def a_call_scoped_codex_posture_is_exact_and_not_registered():
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        overrides = (
+            "sandbox_workspace_write.network_access=true",
+            "features.network_proxy.enabled=true",
+            'features.network_proxy.domains."github.com"="allow"',
+        )
+        dispatch.dispatch(
+            "codex-desk", "deliver one reviewed branch", registry=reg,
+            results_path=results, env=env, fresh=True,
+            config_overrides=overrides,
+        )
+        argv = [json.loads(l) for l in argv_log.read_text().splitlines() if l.strip()][-1]
+        pairs = [argv[i:i + 2] for i in range(len(argv) - 1)]
+        for value in overrides:
+            assert ["-c", value] in pairs, argv
+        assert "config_overrides" not in reg.resolve("codex-desk"), reg.resolve("codex-desk")
+
+    check("a reviewed call-scoped Codex posture is exact and not registry authority",
+          a_call_scoped_codex_posture_is_exact_and_not_registered)
 
     def dispatched_codex_fires_its_hooks():
         """A dispatched seat must behave like a hand-run one.
@@ -446,7 +469,7 @@ def main() -> int:
 
     def results_are_ndjson():
         lines = [l for l in results.read_text().splitlines() if l.strip()]
-        assert len(lines) == 8, f"expected one line per dispatch, got {len(lines)}"
+        assert len(lines) == 9, f"expected one line per dispatch, got {len(lines)}"
         rows = [json.loads(l) for l in lines]
         assert rows[0]["desk"] == "claude-desk", rows[0]
         assert rows[0]["kind"] == "claude-session", rows[0]

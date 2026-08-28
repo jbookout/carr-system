@@ -125,6 +125,17 @@ def test_writable_roots_are_exactly_the_two_authorized_machine_paths():
         assert _resolve_live_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
 
 
+def test_network_access_is_exactly_the_two_github_delivery_hosts():
+    assert adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES == (
+        "sandbox_workspace_write.network_access=true",
+        "features.network_proxy.enabled=true",
+        'features.network_proxy.domains."github.com"="allow"',
+        'features.network_proxy.domains."api.github.com"="allow"',
+    )
+    assert not any(
+        'domains."*"' in value for value in adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES)
+
+
 def test_bridge_auth_observations_are_allowed_but_malformed_metadata_refuses():
     for auth in (True, None):
         class AuthStampedDesk(ValidEngineeringDesk):
@@ -167,6 +178,7 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
             os.environ["CARR_DB_JOBS_URL"] = old
     assert result["ok"] is True
     assert seen["desk"] == "engineering-codex" and seen["fresh"] is True
+    assert seen["config_overrides"] == adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES
     assert "CARR_DB_JOBS_URL" not in seen["env"]
     assert "SERVER-ISSUED SLICE PACKET" in seen["prompt"]
     assert "RULE-DELIVERY WORKFLOW: engineering-slice" in seen["prompt"]
@@ -187,6 +199,11 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert "inspect the current branch and Git status" in seen["prompt"]
     assert "treat them as an untrusted checkpoint" in seen["prompt"]
     assert "review them, continue them, and cite fresh checks" in seen["prompt"]
+    assert "inspect local Git branches named for this exact slice" in seen["prompt"]
+    assert "review the exact commit and declared-scope diff" in seen["prompt"]
+    assert "Never select work from another slice" in seen["prompt"]
+    assert "push an unreviewed checkpoint" in seen["prompt"]
+    assert "reuse a predecessor envelope" in seen["prompt"]
     assert "never inherit the predecessor transcript" in seen["prompt"]
     assert "or its unverified conclusions" in seen["prompt"]
     prompt_record = {"type": "response_item", "payload": {"type": "message",

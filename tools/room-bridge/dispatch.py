@@ -110,7 +110,13 @@ def _codex_events(stdout: str) -> list[dict]:
     return out
 
 
-def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> dict:
+def _to_codex(
+    entry: dict,
+    task: str,
+    env: dict | None,
+    fresh: bool = False,
+    config_overrides: tuple[str, ...] = (),
+) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
     The thread is what makes this an equal seat rather than a shot: Codex
@@ -141,6 +147,17 @@ def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> 
             "-c", f"model_reasoning_effort={entry['effort']}",
             "-o", str(last),
         ]
+        # Callers may carry a reviewed, desk-specific Codex posture without
+        # teaching the shared registry or CLI how to widen every desk. The
+        # Engineering adapter is the only production caller and supplies an
+        # exact constant tuple; ordinary dispatches keep this empty and stay
+        # offline. -c is valid on both fresh and resumed exec paths.
+        for override in config_overrides:
+            if not isinstance(override, str) or not override.strip():
+                raise DeskError(
+                    "bad_codex_config",
+                    "Codex config overrides must be non-empty strings")
+            argv += ["-c", override]
         # `codex exec resume` does not accept -C/-s/--add-dir at all — a
         # resumed session already carries the cwd, sandbox and extra dirs it
         # was FIRST started with, and passing them again is a hard CLI parse
@@ -221,6 +238,7 @@ def dispatch(
     results_path: Path | None = None,
     env: dict | None = None,
     fresh: bool = False,
+    config_overrides: tuple[str, ...] = (),
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable."""
     registry = registry or Registry()
@@ -254,7 +272,9 @@ def dispatch(
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])
     else:
-        outcome = _to_codex(entry, task, env, fresh=fresh)
+        outcome = _to_codex(
+            entry, task, env, fresh=fresh, config_overrides=config_overrides,
+        )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])
