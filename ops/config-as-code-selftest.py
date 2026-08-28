@@ -345,10 +345,20 @@ def main():
             # and it was the only thing standing between that detector and being
             # wired into the nightly chain. A test that leaves a live job behind
             # is not isolated, however green it reports.
-            (launchd / "com.carr.synthetic-load-failure.plist").unlink(missing_ok=True)
-            mod.subprocess.run(
-                ["launchctl", "bootout", f"gui/{os.getuid()}/com.carr.synthetic-load-failure"],
-                capture_output=True, text=True, check=False)
+            # BOTH synthetic labels are cleaned up, not just the load-failure
+            # one. The definition-only fixture was added 2026-08-27 when the
+            # real control-plane tick was released from the hold, and it leaked
+            # the same way the comment above describes: on 2026-08-28
+            # scheduler-truth found com.carr.synthetic-definition-only loaded
+            # with no plist behind it, from a temp HOME deleted moments later.
+            # A fixture that can be loaded must be booted out by the same block
+            # that created it, whatever the assertions did.
+            for _label in ("com.carr.synthetic-load-failure",
+                           "com.carr.synthetic-definition-only"):
+                (launchd / f"{_label}.plist").unlink(missing_ok=True)
+                mod.subprocess.run(
+                    ["launchctl", "bootout", f"gui/{os.getuid()}/{_label}"],
+                    capture_output=True, text=True, check=False)
         mod.IS_PRIMARY = original_primary
         mod.DEFINITION_ONLY.clear()
         mod.DEFINITION_ONLY.update(original_definition_only)
