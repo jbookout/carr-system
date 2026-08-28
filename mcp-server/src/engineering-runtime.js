@@ -477,7 +477,7 @@ export function isCurrentRepositoryWriteEnvelope(row) {
     JSON.stringify(envelope.request?.allowed_actions) === JSON.stringify(ENGINEERING_REPOSITORY_ACTIONS));
 }
 
-function isDispatchableCurrentEnvelope(row) {
+function isDispatchableCurrentEnvelope(row, agentSessionLeaseExpiresAt) {
   const envelope = row?.envelope;
   const issued = Date.parse(envelope?.issued_at);
   const expiry = Date.parse(envelope?.expires_at);
@@ -490,7 +490,7 @@ function isDispatchableCurrentEnvelope(row) {
     Number.isFinite(issued) && Number.isFinite(expiry) && expiry > issued && expiry - issued <= 30 * 60 * 1000 &&
     hasDispatchRunway(envelope.expires_at, 930) &&
     envelope.agent_session.lease_expires_at === envelope.expires_at &&
-    envelope.agent_session.lease_expires_at === row?.agent_session_lease_expires_at &&
+    envelope.agent_session.lease_expires_at === agentSessionLeaseExpiresAt &&
     envelope.agent_session.id === `session:${row?.agent_session_id}`;
 }
 
@@ -833,8 +833,11 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
     // on an unspecified row order (which could resend an expired/read-only
     // predecessor); the most recently issued envelope is the only candidate
     // that may receive this fresh lease.
+    // carr_jobs intentionally cannot read capability sessions directly.  The
+    // SECURITY DEFINER controller binding below supplies the revalidated
+    // session lease after enforcing the canonical lock/currentness boundary.
     const bound = await c.query(
-      "select e.*, to_char(s.lease_expires_at at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') as agent_session_lease_expires_at from ops.engineering_execution_envelope e join ops.capability_agent_session s on s.id=e.agent_session_id where e.job_id=$1 order by e.issued_at desc, e.id desc limit 1",
+      "select e.* from ops.engineering_execution_envelope e where e.job_id=$1 order by e.issued_at desc, e.id desc limit 1",
       [job.job_id],
     );
     if (!bound.rows.length || !bound.rows[0].envelope) {
@@ -842,19 +845,17 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
       continue;
     }
     const envelopeRow = bound.rows[0];
-    if (!isDispatchableCurrentEnvelope(envelopeRow)) {
-      rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
-        envelope_digest: envelopeRow.envelope_digest, controller_error: "engineering_envelope_currentness_invalid" });
-      continue;
-    }
     const bindingResult = await c.query(
       "select ops.engineering_controller_binding($1::uuid,$2::uuid,$3::uuid) as binding",
       [envelopeRow.id, job.job_id, job.lease_token],
     );
     const binding = bindingResult.rows[0]?.binding;
-    if (!binding || typeof binding !== "object") {
+    if (!binding || typeof binding !== "object" ||
+        !isDispatchableCurrentEnvelope(envelopeRow, binding.agent_session_lease_expires_at)) {
       rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
-        envelope_digest: envelopeRow.envelope_digest, controller_error: "engineering_controller_binding_missing" });
+        envelope_digest: envelopeRow.envelope_digest,
+        controller_error: binding && typeof binding === "object"
+          ? "engineering_envelope_currentness_invalid" : "engineering_controller_binding_missing" });
       continue;
     }
     rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
