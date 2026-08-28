@@ -71,6 +71,15 @@ jobs:
       # ci.yml states: a tag is mutable by whoever controls the action repo.
       # These are the same two pins ci.yml uses; keep them in step.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # FULL HISTORY, for the same reason ci.yml gives: checkout defaults to
+          # depth 1, and gates that read history cannot work without it. Here it
+          # is ops/atomic-rule-compat-migration-gate.py, which resolves a pinned
+          # pre-0228 snapshot blob by commit sha — on a shallow clone that sha is
+          # simply not present and the gate fails as "snapshot blob is
+          # unavailable", which reads like a missing file rather than a missing
+          # clone.
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
