@@ -88,6 +88,14 @@ def main() -> int:
                 "direct_effects": [
                     {
                         "kind": "execute",
+                        "function_signature": "ops.a(A)",
+                    },
+                    {
+                        "kind": "execute",
+                        "function_signature": "ops.a(a)",
+                    },
+                    {
+                        "kind": "execute",
                         "function_signature": "ops.record_event(uuid,text)",
                     },
                     {
@@ -225,6 +233,19 @@ def main() -> int:
             expect_refusal(
                 cur, "select ops.scac_bind_trusted_principal(%s::jsonb,%s)",
                 (json.dumps(wrong_partner), str(uuid.uuid4())),
+                "actor kind, sponsor, or authority",
+            )
+            cur.execute("reset session authorization")
+
+            null_authority_manifest = {**principal_manifest,
+                "session_principal": "carr_authority_dell",
+                "privilege_bundle": "carr_authority",
+                "sponsoring_human_slug": None, "authority_sponsor_slug": None}
+            null_authority = signed(null_authority_manifest)
+            cur.execute("set session authorization carr_authority_dell")
+            expect_refusal(
+                cur, "select ops.scac_bind_trusted_principal(%s::jsonb,%s)",
+                (json.dumps(null_authority), str(uuid.uuid4())),
                 "actor kind, sponsor, or authority",
             )
             cur.execute("reset session authorization")

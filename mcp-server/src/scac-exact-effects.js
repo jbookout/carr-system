@@ -36,6 +36,17 @@ export class ExactEffectRefusal extends Error {
   }
 }
 
+const UTF8_ENCODER = new TextEncoder();
+function compareUtf8(left, right) {
+  const a = UTF8_ENCODER.encode(left);
+  const b = UTF8_ENCODER.encode(right);
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return a.length < b.length ? -1 : a.length > b.length ? 1 : 0;
+}
+
 function exactObject(value, keys, label) {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new TypeError(`${label}_malformed`);
@@ -62,7 +73,7 @@ function sortedUniqueStrings(values, pattern, label, { allowEmpty = false } = {}
   if (!Array.isArray(values) || (!allowEmpty && values.length === 0) ||
       values.some(value => typeof value !== "string" || !pattern.test(value)))
     throw new TypeError(`${label}_malformed`);
-  const sorted = [...values].sort();
+  const sorted = [...values].sort(compareUtf8);
   if (new Set(sorted).size !== sorted.length || sorted.some((value, index) => value !== values[index]))
     throw new TypeError(`${label}_not_canonical`);
   return sorted;
@@ -101,7 +112,8 @@ export function canonicalExactEffectContract(contract) {
     throw new TypeError("scac_exact_effect_contract_value_malformed");
   const effects = contract.direct_effects.map(canonicalExactEffect);
   const keys = effects.map(effectKey);
-  if (new Set(keys).size !== keys.length || keys.some((key, index) => index > 0 && key < keys[index - 1]))
+  if (new Set(keys).size !== keys.length ||
+      keys.some((key, index) => index > 0 && compareUtf8(key, keys[index - 1]) < 0))
     throw new TypeError("scac_exact_effects_not_canonical");
   const delegates = sortedUniqueStrings(contract.delegates_to, INGRESS,
     "scac_exact_effect_delegates", { allowEmpty: true });
@@ -160,7 +172,7 @@ export function resolveExactEffects(ingressKey, contracts = SCAC_EXACT_EFFECT_CO
     throw new ExactEffectRefusal("effect_ingress_malformed", ingressKey);
   visit(ingressKey);
   if (effects.size === 0) throw new ExactEffectRefusal("effect_contract_empty", ingressKey);
-  return Object.freeze([...effects.entries()].sort(([a], [b]) => a.localeCompare(b))
+  return Object.freeze([...effects.entries()].sort(([a], [b]) => compareUtf8(a, b))
     .map(([, effect]) => effect));
 }
 

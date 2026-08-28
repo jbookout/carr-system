@@ -237,16 +237,34 @@ begin
   if expected_bundle is null then
     raise exception 'scac.refusal.identity_unverified: SIEP-18 runtime session refused'; end if;
   if p_idempotency_key is null or not ops.scac_json_has_exact_keys(p_server_principal,expected_keys) or
-     p_server_principal->>'schema_version'<>'scac-trusted-principal.v1' or
-     p_server_principal->>'organization_tenant_id'<>'carr-internal' or
-     p_server_principal->>'source'<>'server_authenticated_actor_plus_database_readback' or
-     coalesce((p_server_principal->>'production_enforcement_active')::boolean,true) or
-     jsonb_typeof(p_server_principal->'human')<>'boolean' or
-     jsonb_typeof(p_server_principal->'native_agent_verified')<>'boolean' or
+     jsonb_typeof(p_server_principal->'actor_id') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'actor_kind') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'actor_slug') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'authorization_class') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'organization_tenant_id') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'principal_digest') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'privilege_bundle') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'schema_version') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'session_principal') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'source') is distinct from 'string' or
+     jsonb_typeof(p_server_principal->'backend_pid') is distinct from 'number' or
+     jsonb_typeof(p_server_principal->'human') is distinct from 'boolean' or
+     jsonb_typeof(p_server_principal->'native_agent_verified') is distinct from 'boolean' or
+     jsonb_typeof(p_server_principal->'production_enforcement_active') is distinct from 'boolean' or
+     coalesce(jsonb_typeof(p_server_principal->'authority_sponsor_slug') not in ('string','null'),true) or
+     coalesce(jsonb_typeof(p_server_principal->'client_id') not in ('string','null'),true) or
+     coalesce(jsonb_typeof(p_server_principal->'sponsoring_human_slug') not in ('string','null'),true) or
+     coalesce(jsonb_typeof(p_server_principal->'via') not in ('string','null'),true) or
+     p_server_principal->>'schema_version' is distinct from 'scac-trusted-principal.v1' or
+     p_server_principal->>'organization_tenant_id' is distinct from 'carr-internal' or
+     p_server_principal->>'source' is distinct from 'server_authenticated_actor_plus_database_readback' or
+     p_server_principal->'production_enforcement_active' is distinct from 'false'::jsonb or
+     coalesce(p_server_principal->>'actor_id','')!~
+       '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' or
      p_server_principal->>'actor_kind' not in ('human','automation','system') or
-     p_server_principal->>'session_principal'<>session_user or
-     p_server_principal->>'privilege_bundle'<>expected_bundle or
-     (p_server_principal->>'backend_pid')::integer<>pg_backend_pid() or
+     p_server_principal->>'session_principal' is distinct from session_user or
+     p_server_principal->>'privilege_bundle' is distinct from expected_bundle or
+     p_server_principal->'backend_pid' is distinct from to_jsonb(pg_backend_pid()) or
      coalesce(p_server_principal->>'principal_digest','')!~'^sha256:[0-9a-f]{64}$' then
     raise exception 'scac.refusal.identity_unverified: SIEP-18 trusted principal malformed or session-mismatched';
   end if;
@@ -259,15 +277,15 @@ begin
       and slug=p_server_principal->>'actor_slug' and active for key share;
   if actor_row.id is null then
     raise exception 'scac.refusal.identity_unverified: SIEP-18 authenticated actor unavailable'; end if;
-  if actor_row.kind<>p_server_principal->>'actor_kind' or
-     (p_server_principal->>'human')::boolean<>(actor_row.kind='human') or
+  if actor_row.kind is distinct from p_server_principal->>'actor_kind' or
+     p_server_principal->'human' is distinct from to_jsonb(actor_row.kind='human') or
      (actor_row.kind='human' and
        (actor_row.slug not in ('joe','dell') or
-        p_server_principal->>'sponsoring_human_slug'<>actor_row.slug or
-        p_server_principal->>'authorization_class'<>'verified_partner' or
-        (p_server_principal->>'native_agent_verified')::boolean)) or
+        p_server_principal->>'sponsoring_human_slug' is distinct from actor_row.slug or
+        p_server_principal->>'authorization_class' is distinct from 'verified_partner' or
+        p_server_principal->'native_agent_verified' is distinct from 'false'::jsonb)) or
      (actor_row.kind='automation' and
-       (p_server_principal->>'authorization_class'<>case
+       (p_server_principal->>'authorization_class' is distinct from case
           when p_server_principal->>'sponsoring_human_slug' in ('joe','dell')
             then 'sponsored_agent' else 'unsponsored_agent' end or
         (p_server_principal->>'sponsoring_human_slug' is not null and not (
@@ -277,15 +295,17 @@ begin
           (actor_row.slug='dell-local' and p_server_principal->>'sponsoring_human_slug'='dell'))))) or
      actor_row.kind='system' or
      (expected_bundle='carr_authority' and
-       (p_server_principal->>'authority_sponsor_slug' not in ('joe','dell') or
-        p_server_principal->>'authority_sponsor_slug'<>
+       (p_server_principal->>'authority_sponsor_slug' is null or
+        p_server_principal->>'authority_sponsor_slug' not in ('joe','dell') or
+        p_server_principal->>'authority_sponsor_slug' is distinct from
           p_server_principal->>'sponsoring_human_slug' or
-        session_user<>'carr_authority_'||(p_server_principal->>'authority_sponsor_slug') or
-        (actor_row.kind='human' and actor_row.slug<>
+        session_user is distinct from
+          'carr_authority_'||(p_server_principal->>'authority_sponsor_slug') or
+        (actor_row.kind='human' and actor_row.slug is distinct from
           p_server_principal->>'authority_sponsor_slug') or
         (actor_row.kind='automation' and
           (actor_row.slug not in ('codex','claude','joe-local','dell-local') or
-           not (p_server_principal->>'native_agent_verified')::boolean)))) or
+           p_server_principal->'native_agent_verified' is distinct from 'true'::jsonb)))) or
      (expected_bundle<>'carr_authority' and
        p_server_principal->>'authority_sponsor_slug' is not null) then
     raise exception 'scac.refusal.identity_unverified: SIEP-18 actor kind, sponsor, or authority semantics mismatched';

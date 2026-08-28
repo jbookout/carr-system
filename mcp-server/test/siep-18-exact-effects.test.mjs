@@ -26,18 +26,22 @@ const execute = function_signature => ({ kind: "execute", function_signature });
 
 test("exact DML and EXECUTE contracts are finite, canonical, closed, and immutable", () => {
   const reviewed = canonicalExactEffectContract(contract("mcp-tool:leaf", [
+    execute("ops.a(A)"),
+    execute("ops.a(a)"),
     execute("ops.record_event(uuid,text)"),
     insert("public.event", ["actor_id", "kind", "subject_id"]),
     update("public.loop_item", ["status", "updated_at", "updated_by"]),
   ]));
   assert.deepEqual(resolveExactEffects("mcp-tool:leaf", immutableExactEffectContracts([reviewed])), [
+    execute("ops.a(A)"),
+    execute("ops.a(a)"),
     execute("ops.record_event(uuid,text)"),
     insert("public.event", ["actor_id", "kind", "subject_id"]),
     update("public.loop_item", ["status", "updated_at", "updated_by"]),
   ]);
   assert.equal(Object.isFrozen(reviewed), true);
   assert.equal(Object.isFrozen(reviewed.direct_effects), true);
-  assert.equal(Object.isFrozen(reviewed.direct_effects[1].columns), true);
+  assert.equal(Object.isFrozen(reviewed.direct_effects[3].columns), true);
   assert.throws(() => canonicalExactEffectContract({ ...reviewed, inferred_from_write: true }),
     /open_or_incomplete/);
   assert.throws(() => canonicalExactEffectContract(contract("mcp-tool:leaf", [
@@ -163,15 +167,18 @@ test("0392 persists exact effects and trusted principals without activating enfo
     /create or replace function ops\.scac_exact_effect_union/i,
     /with recursive walk/i,
     /create or replace function ops\.scac_bind_trusted_principal/i,
-    /p_server_principal->>'session_principal'<>session_user/i,
-    /p_server_principal->>'privilege_bundle'<>expected_bundle/i,
-    /p_server_principal->>'backend_pid'\)::integer<>pg_backend_pid\(\)/i,
-    /actor_row\.kind<>p_server_principal->>'actor_kind'/i,
-    /p_server_principal->>'human'\)::boolean<>\(actor_row\.kind='human'\)/i,
-    /p_server_principal->>'authorization_class'<>case/i,
+    /jsonb_typeof\(p_server_principal->'actor_id'\) is distinct from 'string'/i,
+    /jsonb_typeof\(p_server_principal->'backend_pid'\) is distinct from 'number'/i,
+    /jsonb_typeof\(p_server_principal->'authority_sponsor_slug'\) not in \('string','null'\)/i,
+    /p_server_principal->>'session_principal' is distinct from session_user/i,
+    /p_server_principal->>'privilege_bundle' is distinct from expected_bundle/i,
+    /p_server_principal->'backend_pid' is distinct from to_jsonb\(pg_backend_pid\(\)\)/i,
+    /actor_row\.kind is distinct from p_server_principal->>'actor_kind'/i,
+    /p_server_principal->'human' is distinct from to_jsonb\(actor_row\.kind='human'\)/i,
+    /p_server_principal->>'authorization_class' is distinct from case/i,
     /actor_row\.slug='joe-local'.*sponsoring_human_slug'='joe'/is,
-    /session_user<>'carr_authority_'\|\|\(p_server_principal->>'authority_sponsor_slug'\)/i,
-    /actor_row\.slug<>.*authority_sponsor_slug/is,
+    /session_user is distinct from\s*'carr_authority_'\|\|\(p_server_principal->>'authority_sponsor_slug'\)/i,
+    /actor_row\.slug is distinct from.*authority_sponsor_slug/is,
     /where id=\(p_server_principal->>'actor_id'\)::uuid/i,
     /and slug=p_server_principal->>'actor_slug' and active/i,
     /recorded_by text not null check \(recorded_by='joe'\)/i,
