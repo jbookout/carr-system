@@ -72,6 +72,7 @@ create table if not exists ops.tour_map_promotion_receipt (
   receipt_sequence bigint generated always as identity,
   projection_id uuid not null, reviewer_actor_id text not null,
   reviewed_at timestamptz not null, decision text not null check (decision in ('approved','rejected')),
+  decision_reason text not null check (char_length(btrim(decision_reason)) between 1 and 500),
   brief_version text not null, canonical_dataset_version text not null,
   selected_prototype_id text not null, component_registry_version text not null,
   route_version integer not null check (route_version>0),
@@ -509,7 +510,7 @@ declare
 begin
   if jsonb_typeof(p_payload)<>'object'
      or (select array_agg(k order by k) from jsonb_object_keys(p_payload) k) is distinct from array[
-       'brief_version','canonical_dataset_version','component_registry_version','decision',
+       'brief_version','canonical_dataset_version','component_registry_version','decision','decision_reason',
        'mobile_test_evidence','native_navigation_test_evidence','offline_test_evidence',
        'provider_rights_receipt_ids','receipt_digest','required_checks','reviewed_at',
        'route_version','selected_prototype_id']
@@ -526,6 +527,9 @@ begin
   if not found or v_projection.id is null
      or not ops.tour_public_map_projection_evidence_ready(p_tenant,p_projection_id)
      or p_payload->>'decision' not in ('approved','rejected')
+     or nullif(btrim(p_payload->>'decision_reason'),'') is null
+     or char_length(btrim(p_payload->>'decision_reason'))>500
+     or p_payload->>'decision_reason' ~ '[[:cntrl:]]'
      or (p_payload->>'reviewed_at')::timestamptz>now()
      or nullif(btrim(p_payload->>'brief_version'),'') is null
      or nullif(btrim(p_payload->>'selected_prototype_id'),'') is null
@@ -543,7 +547,17 @@ begin
      or jsonb_typeof(p_payload->'offline_test_evidence')<>'object' or p_payload->'offline_test_evidence'='{}'::jsonb
      or jsonb_typeof(p_payload->'required_checks')<>'object'
      or (select array_agg(k order by k) from jsonb_object_keys(p_payload->'required_checks') k) is distinct from v_required_check_keys
-     or exists(select 1 from jsonb_each(p_payload->'required_checks') check_row where check_row.value<>'true'::jsonb)
+     or exists(select 1 from jsonb_each(p_payload->'required_checks') check_row where check_row.value not in ('true'::jsonb,'false'::jsonb))
+     or (p_payload->>'decision'='approved' and (
+       exists(select 1 from jsonb_each(p_payload->'required_checks') check_row where check_row.value<>'true'::jsonb)
+       or p_payload#>>'{mobile_test_evidence,status}' is distinct from 'passed'
+       or p_payload#>>'{native_navigation_test_evidence,status}' is distinct from 'passed'
+       or p_payload#>>'{offline_test_evidence,status}' is distinct from 'passed'))
+     or (p_payload->>'decision'='rejected' and not (
+       exists(select 1 from jsonb_each(p_payload->'required_checks') check_row where check_row.value='false'::jsonb)
+       or p_payload#>>'{mobile_test_evidence,status}'='failed'
+       or p_payload#>>'{native_navigation_test_evidence,status}'='failed'
+       or p_payload#>>'{offline_test_evidence,status}'='failed'))
   then raise exception 'tour map promotion receipt is invalid or incomplete'; end if;
   if exists (
     (select x::uuid from jsonb_array_elements_text(p_payload->'provider_rights_receipt_ids') x
@@ -561,11 +575,11 @@ begin
      select x::uuid from jsonb_array_elements_text(p_payload->'provider_rights_receipt_ids') x)
   ) then raise exception 'tour map promotion provider-rights evidence mismatch'; end if;
   insert into ops.tour_map_promotion_receipt(
-    organization_tenant_id,projection_id,reviewer_actor_id,reviewed_at,decision,
+    organization_tenant_id,projection_id,reviewer_actor_id,reviewed_at,decision,decision_reason,
     brief_version,canonical_dataset_version,selected_prototype_id,component_registry_version,
     route_version,provider_rights_receipt_ids,mobile_test_evidence,native_navigation_test_evidence,
     offline_test_evidence,required_checks,receipt_digest)
-  values(p_tenant,p_projection_id,p_actor_id,(p_payload->>'reviewed_at')::timestamptz,p_payload->>'decision',
+  values(p_tenant,p_projection_id,p_actor_id,(p_payload->>'reviewed_at')::timestamptz,p_payload->>'decision',btrim(p_payload->>'decision_reason'),
     p_payload->>'brief_version',p_payload->>'canonical_dataset_version',p_payload->>'selected_prototype_id',
     p_payload->>'component_registry_version',(p_payload->>'route_version')::integer,
     p_payload->'provider_rights_receipt_ids',p_payload->'mobile_test_evidence',
@@ -685,7 +699,7 @@ $$;
 create or replace function ops.read_tour_share_packet(p_session_digest text)
 returns jsonb language sql stable security definer set search_path=pg_catalog,ops,public,pg_temp as $$
   with grant_row as (select (ops.tour_share_session_grant(p_session_digest,'view_packet')).*), projection as (
-    select p.*,t.tour_name from grant_row g join ops.tour_public_projection p on p.organization_tenant_id=g.organization_tenant_id and p.id=g.projection_id join ops.tour t on t.organization_tenant_id=p.organization_tenant_id and t.id=p.tour_id
+    select p.* from grant_row g join ops.tour_public_projection p on p.organization_tenant_id=g.organization_tenant_id and p.id=g.projection_id
     where p.status='approved' and exists(select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id and s.canonical_projection_digest=p.projection_digest)
       and ops.read_tour_public_projection(p.organization_tenant_id,p.id) is not null
   ), stops as (
@@ -703,7 +717,7 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
     join ops.tour_public_projection_fact f on f.organization_tenant_id=p.organization_tenant_id and f.projection_id=p.id and f.property_id=m.property_id
     join ops.tour_field_assertion a on a.organization_tenant_id=f.organization_tenant_id and a.id=f.field_assertion_id and ops.tour_public_value_safe(a.field_key,a.value)
     group by p.organization_tenant_id,p.id,m.property_id,m.route_sequence,m.route_label
-  ) select jsonb_build_object('tour_name',p.tour_name,'as_of',p.as_of,'caveat','Facts only; verify current availability and economics.','stops',coalesce((select jsonb_agg(to_jsonb(stops) order by route_sequence) from stops),'[]'::jsonb)) from projection p;
+  ) select jsonb_build_object('as_of',p.as_of,'caveat','Facts only; verify current availability and economics.','stops',coalesce((select jsonb_agg(to_jsonb(stops) order by route_sequence) from stops),'[]'::jsonb)) from projection p;
 $$;
 
 create or replace function ops.read_tour_share_map(p_session_digest text)

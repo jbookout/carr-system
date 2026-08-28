@@ -24,13 +24,14 @@ const args = {
   idempotency_key: "20000000-0000-4000-8000-000000000001",
   projection_id: "30000000-0000-4000-8000-000000000001",
   decision: "approved", reviewed_at: "2026-08-28T12:00:00.000Z",
+  decision_reason: "All required map promotion checks passed.",
   brief_version: "tour-map-brief.v1", canonical_dataset_version: "dataset-v7",
   selected_prototype_id: "carr-map-tour-v1", component_registry_version: "maplibre-6.1.0",
   route_version: 7,
   provider_rights_receipt_ids: ["40000000-0000-4000-8000-000000000001"],
-  mobile_test_evidence: { phone: "passed", ipad: "passed", digest: `sha256:${"1".repeat(64)}` },
-  native_navigation_test_evidence: { apple_maps: "passed", digest: `sha256:${"2".repeat(64)}` },
-  offline_test_evidence: { ordered_itinerary: "passed", digest: `sha256:${"3".repeat(64)}` },
+  mobile_test_evidence: { status: "passed", phone: "passed", ipad: "passed", digest: `sha256:${"1".repeat(64)}` },
+  native_navigation_test_evidence: { status: "passed", apple_maps: "passed", digest: `sha256:${"2".repeat(64)}` },
+  offline_test_evidence: { status: "passed", ordered_itinerary: "passed", digest: `sha256:${"3".repeat(64)}` },
   required_checks: checks, receipt_digest: `sha256:${"4".repeat(64)}`,
 };
 
@@ -54,7 +55,7 @@ test("map promotion records the complete verified-human doctrine receipt", async
   assert.equal(h.events.length, 1);
 });
 
-test("map promotion refuses machine actors, false checks, and nested authority selectors", async () => {
+test("map promotion refuses machine actors, incomplete approvals, and nested authority selectors", async () => {
   const tool = harness().tools["record-tour-map-promotion-receipt"];
   await assert.rejects(tool.handler(harness().client, { ...actor, human: false, authorization_class: "sponsored_agent" }, structuredClone(args)),
     error => error instanceof ToolError && error.payload.error === "tour_verified_human_required");
@@ -62,4 +63,21 @@ test("map promotion refuses machine actors, false checks, and nested authority s
     error => error instanceof ToolError && error.payload.error === "tour_map_promotion_checks_incomplete");
   await assert.rejects(tool.handler(harness().client, actor, { ...structuredClone(args), mobile_test_evidence: { actor_id: "caller-chosen" } }),
     error => error instanceof ToolError && error.payload.error === "caller_authority_field_forbidden");
+});
+
+test("map rejection records a bounded reason and at least one truthful failed check", async () => {
+  const h = harness(); const tool = h.tools["record-tour-map-promotion-receipt"];
+  const rejected = structuredClone(args);
+  rejected.decision = "rejected";
+  rejected.decision_reason = "Native navigation handoff failed on the reviewed device.";
+  rejected.required_checks.exact_native_navigation_handoff = false;
+  rejected.native_navigation_test_evidence.status = "failed";
+  const result = await tool.handler(h.client, actor, rejected);
+  assert.equal(result.decision, "rejected");
+  assert.equal(JSON.parse(h.calls[0].params[2]).decision_reason, rejected.decision_reason);
+
+  await assert.rejects(tool.handler(harness().client, actor, { ...structuredClone(args), decision: "rejected" }),
+    error => error instanceof ToolError && error.payload.error === "tour_map_promotion_checks_incomplete");
+  await assert.rejects(tool.handler(harness().client, actor, { ...structuredClone(rejected), decision_reason: "" }),
+    error => error instanceof ToolError && error.payload.error === "tour_input_invalid" && error.payload.field === "decision_reason");
 });

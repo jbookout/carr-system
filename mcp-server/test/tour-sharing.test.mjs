@@ -89,6 +89,8 @@ test("browser exchange and reads are digest-only and expose no feedback or PDF a
   const map = await h.browser.readMap(h.client, { session_digest: sessionDigest });
   const asset = await h.browser.resolveAsset(h.client, { session_digest: sessionDigest, asset_ref: "asset:public:abcdefghijklmnop" });
   assert.equal(packet.packet.allow_comments, undefined);
+  assert.equal(packet.packet.tour_name, undefined);
+  assert.equal(packet.packet.summary, undefined);
   assert.equal(packet.packet.stops[0].latest_reaction, undefined);
   assert.equal(map.map.points[0].verifier, undefined);
   assert.deepEqual(asset.asset, { asset_ref: "asset:public:abcdefghijklmnop", media_type: "image/jpeg", content_length: 12 });
@@ -96,6 +98,8 @@ test("browser exchange and reads are digest-only and expose no feedback or PDF a
 
 test("public and internal projections strip secrets and unsupported scopes", async () => {
   const packet = projectTourClientPacket(packetFixture);
+  assert.equal(packet.tour_name, undefined);
+  assert.equal(packet.summary, undefined);
   assert.equal(packet.allow_comments, undefined);
   assert.equal(packet.stops[0].access_notes, undefined);
   assert.equal(packet.stops[0].suite, "Suite 200");

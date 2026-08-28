@@ -2,7 +2,7 @@ import fontkit from "@pdf-lib/fontkit";
 import { decodePDFRawStream, PDFDocument, PDFName, PDFString, rgb } from "pdf-lib";
 import { formatApprovedMetric, renderTourPacket } from "./tour-packet-render.js";
 
-export const TOUR_PDF_RENDERER_VERSION = "1.0.2";
+export const TOUR_PDF_RENDERER_VERSION = "1.0.3";
 export const TOUR_PDF_TEMPLATE_VERSION = "1.0.0";
 
 const PAGE = [612, 792];
@@ -107,7 +107,7 @@ export async function renderTourPacketPdf(input, fonts, proof = {}) {
     CARRRendererDigest: proof.renderer_digest,
     CARRQcRulesetDigest: proof.qc_ruleset_digest,
     CARRFontDigests: JSON.stringify([regularDigest, boldDigest]),
-    CARRLayoutBoundsProofVersion: "decoded-content-geometry.v1",
+    CARRLayoutBoundsProofVersion: "decoded-content-geometry.v2",
   };
   for (const [key, value] of Object.entries(catalogProof)) {
     if (typeof value === "string" && value) document.catalog.set(PDFName.of(key), PDFString.of(value));
@@ -177,40 +177,197 @@ function pageContent(document, page) {
   }).join("\n");
 }
 
-function decodedGeometryWithinPage(content, width, height) {
-  const number = "[-+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)";
-  const inside = (x, y) => Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= width && y <= height;
-  let operatorCount = 0;
-  for (const match of content.matchAll(new RegExp(`(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+Tm`, "g"))) {
-    operatorCount += 1;
-    if (!inside(Number(match[5]), Number(match[6]))) return false;
+function numeric(object) {
+  try { return object && typeof object.asNumber === "function" ? object.asNumber() : null; }
+  catch { return null; }
+}
+
+function objects(object) {
+  try { return object && typeof object.asArray === "function" ? object.asArray() : null; }
+  catch { return null; }
+}
+
+function lookedUp(document, object) {
+  try { return object ? document.context.lookup(object) : null; }
+  catch { return null; }
+}
+
+function pageFontMetrics(document, page) {
+  const resources = lookedUp(document, page.node.Resources());
+  const fonts = resources && lookedUp(document, resources.get(PDFName.of("Font")));
+  if (!fonts || typeof fonts.entries !== "function") return null;
+  const result = new Map();
+  for (const [resourceName, reference] of fonts.entries()) {
+    const font = lookedUp(document, reference);
+    const descendants = font && objects(font.get(PDFName.of("DescendantFonts")));
+    if (decoded(font?.get(PDFName.of("Subtype"))) !== "Type0" ||
+        decoded(font?.get(PDFName.of("Encoding"))) !== "Identity-H" || descendants?.length !== 1) return null;
+    const descendant = lookedUp(document, descendants[0]);
+    const descriptor = descendant && lookedUp(document, descendant.get(PDFName.of("FontDescriptor")));
+    const box = descriptor && objects(descriptor.get(PDFName.of("FontBBox")))?.map(numeric);
+    const widthsArray = descendant && objects(descendant.get(PDFName.of("W")));
+    if (!box || box.length !== 4 || box.some(value => !Number.isFinite(value)) || !widthsArray) return null;
+    const widths = new Map();
+    for (let index = 0; index < widthsArray.length;) {
+      const start = numeric(widthsArray[index++]);
+      if (!Number.isInteger(start) || index >= widthsArray.length) return null;
+      const nextWidths = objects(widthsArray[index]);
+      if (nextWidths) {
+        index += 1;
+        for (let offset = 0; offset < nextWidths.length; offset += 1) {
+          const glyphWidth = numeric(nextWidths[offset]);
+          if (!Number.isFinite(glyphWidth)) return null;
+          widths.set(start + offset, glyphWidth);
+        }
+      } else {
+        const end = numeric(widthsArray[index++]);
+        const glyphWidth = numeric(widthsArray[index++]);
+        if (!Number.isInteger(end) || end < start || !Number.isFinite(glyphWidth)) return null;
+        for (let code = start; code <= end; code += 1) widths.set(code, glyphWidth);
+      }
+    }
+    const defaultWidth = numeric(descendant.get(PDFName.of("DW"))) ?? 1000;
+    if (!Number.isFinite(defaultWidth)) return null;
+    result.set(decoded(resourceName), { box, defaultWidth, widths });
   }
-  for (const match of content.matchAll(new RegExp(`(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+re`, "g"))) {
-    operatorCount += 1;
-    const [x, y, boxWidth, boxHeight] = match.slice(1).map(Number);
-    if (!inside(x, y) || !Number.isFinite(boxWidth) || !Number.isFinite(boxHeight) || boxWidth < 0 || boxHeight < 0 || x + boxWidth > width || y + boxHeight > height) return false;
+  return result.size ? result : null;
+}
+
+function multiplyMatrix(left, right) {
+  return [
+    left[0] * right[0] + left[2] * right[1], left[1] * right[0] + left[3] * right[1],
+    left[0] * right[2] + left[2] * right[3], left[1] * right[2] + left[3] * right[3],
+    left[0] * right[4] + left[2] * right[5] + left[4], left[1] * right[4] + left[3] * right[5] + left[5],
+  ];
+}
+
+function transformPoint(matrix, x, y) {
+  return [matrix[0] * x + matrix[2] * y + matrix[4], matrix[1] * x + matrix[3] * y + matrix[5]];
+}
+
+function contentTokens(content) {
+  const expression = /%[^\r\n]*|<[0-9A-Fa-f\s]*>|\/(?:#[0-9A-Fa-f]{2}|[^\s<>\[\](){}%])+|\[[^\]]*\]|[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)|[A-Za-z*'"]+/g;
+  const tokens = [];
+  let end = 0;
+  for (const match of content.matchAll(expression)) {
+    if (content.slice(end, match.index).trim()) return null;
+    end = match.index + match[0].length;
+    if (!match[0].startsWith("%")) tokens.push(match[0]);
   }
-  for (const match of content.matchAll(new RegExp(`(${number})\\s+(${number})\\s+(?:m|l)`, "g"))) {
-    operatorCount += 1;
-    if (!inside(Number(match[1]), Number(match[2]))) return false;
-  }
-  return operatorCount > 0;
+  return content.slice(end).trim() ? null : tokens;
+}
+
+function decodedGeometryWithinPage(document, page, content, width, height) {
+  const tokens = contentTokens(content);
+  const fonts = pageFontMetrics(document, page);
+  if (!tokens || !fonts) return false;
+  const inside = point => point.every(Number.isFinite) && point[0] >= 0 && point[1] >= 0 && point[0] <= width && point[1] <= height;
+  const identity = () => [1, 0, 0, 1, 0, 0];
+  let state = { ctm: identity() };
+  const graphics = [];
+  let operands = [];
+  let inText = false;
+  let font = null;
+  let fontSize = null;
+  let leading = 0;
+  let textMatrix = identity();
+  let textLineMatrix = identity();
+  let geometryCount = 0;
+  const numbers = (count) => operands.length === count && operands.every(Number.isFinite) ? operands : null;
+  const pointInside = (x, y) => inside(transformPoint(state.ctm, x, y));
+  const allCornersInside = (matrix, box) => [
+    [box[0], box[1]], [box[0], box[3]], [box[2], box[1]], [box[2], box[3]],
+  ].every(([x, y]) => inside(transformPoint(matrix, x, y)));
+  try {
+    for (const token of tokens) {
+      if (/^[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$/.test(token)) { operands.push(Number(token)); continue; }
+      if (token.startsWith("/") || token.startsWith("<") || token.startsWith("[")) { operands.push(token); continue; }
+      if (token === "q") {
+        if (operands.length) return false;
+        graphics.push({ ctm: [...state.ctm] });
+      } else if (token === "Q") {
+        if (operands.length || !graphics.length) return false;
+        state = graphics.pop();
+      } else if (token === "cm") {
+        const values = numbers(6); if (!values) return false;
+        state.ctm = multiplyMatrix(state.ctm, values);
+      } else if (["rg", "RG"].includes(token)) {
+        if (!numbers(3)) return false;
+      } else if (["g", "G", "w"].includes(token)) {
+        if (!numbers(1)) return false;
+      } else if (token === "d") {
+        if (operands.length !== 2 || typeof operands[0] !== "string" || !operands[0].startsWith("[") || !Number.isFinite(operands[1])) return false;
+      } else if (["m", "l"].includes(token)) {
+        const values = numbers(2); if (!values || !pointInside(values[0], values[1])) return false;
+        geometryCount += 1;
+      } else if (token === "re") {
+        const values = numbers(4); if (!values) return false;
+        const [x, y, boxWidth, boxHeight] = values;
+        if (![[x, y], [x + boxWidth, y], [x, y + boxHeight], [x + boxWidth, y + boxHeight]].every(([px, py]) => pointInside(px, py))) return false;
+        geometryCount += 1;
+      } else if (["h", "f", "F", "f*", "S", "s", "B", "B*", "b", "b*", "n"].includes(token)) {
+        if (operands.length) return false;
+      } else if (token === "BT") {
+        if (operands.length || inText) return false;
+        inText = true; font = null; fontSize = null; leading = 0; textMatrix = identity(); textLineMatrix = identity();
+      } else if (token === "ET") {
+        if (operands.length || !inText) return false;
+        inText = false;
+      } else if (token === "Tf") {
+        if (!inText || operands.length !== 2 || typeof operands[0] !== "string" || !operands[0].startsWith("/") || !Number.isFinite(operands[1]) || operands[1] <= 0) return false;
+        font = fonts.get(operands[0].slice(1)); fontSize = operands[1];
+        if (!font) return false;
+      } else if (token === "TL") {
+        const values = numbers(1); if (!inText || !values) return false;
+        leading = values[0];
+      } else if (token === "Tm") {
+        const values = numbers(6); if (!inText || !values) return false;
+        textMatrix = [...values]; textLineMatrix = [...values];
+      } else if (token === "T*") {
+        if (!inText || operands.length || !Number.isFinite(leading)) return false;
+        textLineMatrix = multiplyMatrix(textLineMatrix, [1, 0, 0, 1, 0, -leading]);
+        textMatrix = [...textLineMatrix];
+      } else if (token === "Tj") {
+        if (!inText || operands.length !== 1 || typeof operands[0] !== "string" || !operands[0].startsWith("<") || !font || !Number.isFinite(fontSize)) return false;
+        const hex = operands[0].slice(1, -1).replace(/\s/g, "");
+        if (!hex || hex.length % 4) return false;
+        const matrix = multiplyMatrix(state.ctm, textMatrix);
+        const scale = fontSize / 1000;
+        let cursor = 0;
+        for (let offset = 0; offset < hex.length; offset += 4) {
+          const code = Number.parseInt(hex.slice(offset, offset + 4), 16);
+          const glyphWidth = font.widths.get(code) ?? font.defaultWidth;
+          const glyphBox = [cursor + font.box[0] * scale, font.box[1] * scale, cursor + font.box[2] * scale, font.box[3] * scale];
+          if (!allCornersInside(matrix, glyphBox)) return false;
+          cursor += glyphWidth * scale;
+        }
+        geometryCount += 1;
+      } else {
+        return false;
+      }
+      operands = [];
+    }
+  } catch { return false; }
+  return !inText && !graphics.length && !operands.length && geometryCount > 0;
 }
 
 /** Parse stored PDF bytes so QC observations do not trust the render model. */
 export async function inspectStoredTourPacketPdf(readback) {
   const document = await PDFDocument.load(readback, { updateMetadata: false });
   const catalog = key => decoded(document.catalog.get(PDFName.of(key)));
-  const layoutProofCurrent = catalog("CARRLayoutBoundsProofVersion") === "decoded-content-geometry.v1";
+  const layoutProofCurrent = catalog("CARRLayoutBoundsProofVersion") === "decoded-content-geometry.v2";
   const pages = document.getPages().map((page, index) => {
     const size = page.getSize();
     const propertyRef = decoded(page.node.get(PDFName.of("CARRPropertyRef")));
     const propertyMarker = decoded(page.node.get(PDFName.of("CARRPropertyMarker")));
     const hasContent = Boolean(page.node.get(PDFName.of("Contents")));
-    const geometryWithinPage = decodedGeometryWithinPage(pageContent(document, page), size.width, size.height);
+    const crop = page.getCropBox();
+    const pageFrameCurrent = page.getRotation().angle === 0 && crop.x === 0 && crop.y === 0 &&
+      crop.width === size.width && crop.height === size.height;
+    const geometryWithinPage = decodedGeometryWithinPage(document, page, pageContent(document, page), size.width, size.height);
     return {
       page_number: index + 1, property_ref: propertyRef, property_marker: propertyMarker,
-      clipped_box_count: size.width === 612 && size.height === 792 && hasContent && propertyRef && propertyMarker && layoutProofCurrent && geometryWithinPage ? 0 : 1,
+      clipped_box_count: size.width === 612 && size.height === 792 && pageFrameCurrent && hasContent && propertyRef && propertyMarker && layoutProofCurrent && geometryWithinPage ? 0 : 1,
     };
   });
   let fontDigests = [];

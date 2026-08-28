@@ -38,15 +38,14 @@
   }
 
   function render(report) {
-    const title = text(report?.tour_name || report?.title || report?.name, "Tour report");
     const items = Array.isArray(report?.stops) ? report.stops :
       (Array.isArray(report?.items) ? report.items : (Array.isArray(report?.properties) ? report.properties : []));
     const properties = items.map((item, index) => ({ item, index }))
       .filter(({ item }) => validPropertyRef(item?.property_ref))
       .sort((left, right) => routeOrder(left.item, left.index) - routeOrder(right.item, right.index));
     reportProperties = new globalThis.Map(properties.map(({ item }) => [item.property_ref, item]));
-    document.querySelector("#report-title").textContent = title;
-    summary.textContent = text(report?.summary, `${properties.length} property${properties.length === 1 ? "" : "ies"} in this report.`);
+    document.querySelector("#report-title").textContent = "Tour report";
+    summary.textContent = `${properties.length} property${properties.length === 1 ? "" : "ies"} in this report.`;
     list.replaceChildren();
     for (const { item, index } of properties) {
       const row = document.createElement("li");

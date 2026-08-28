@@ -50,7 +50,7 @@ values
 
 set local carr.verified_human_actor_slug='joe';
 do $map_promotion$
-declare v_actor_id text; v_digest text; v_share uuid;
+declare v_actor_id text; v_digest text; v_share uuid; v_packet jsonb;
 begin
   select id::text into strict v_actor_id from public.actor where slug='joe' and active and kind='human';
   perform ops.append_tour_entrance_verification_receipt(jsonb_build_object(
@@ -81,6 +81,7 @@ begin
   end;
   perform ops.record_tour_map_promotion_receipt('tour-delivery-proof','ac000000-0000-4000-8000-000000000001',jsonb_build_object(
     'decision','approved','reviewed_at',to_char(now(),'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    'decision_reason','All required map promotion checks passed.',
     'brief_version','tour-map-brief.v1','canonical_dataset_version','proof-v1','selected_prototype_id','carr-map-tour-v1',
     'component_registry_version','maplibre-6.1.0','route_version',1,
     'provider_rights_receipt_ids',jsonb_build_array('a5000000-0000-4000-8000-000000000001'),
@@ -95,16 +96,22 @@ begin
   if not ops.tour_public_map_projection_ready('tour-delivery-proof','ac000000-0000-4000-8000-000000000001') then
     raise exception 'approved map promotion did not open readiness';
   end if;
-  v_share:=ops.issue_tour_share_grant('tour-delivery-proof','ac000000-0000-4000-8000-000000000001','sha256:'||repeat('a',64),'["view_map"]',now()+interval '1 day','sha256:'||repeat('b',64),v_actor_id);
+  v_share:=ops.issue_tour_share_grant('tour-delivery-proof','ac000000-0000-4000-8000-000000000001','sha256:'||repeat('a',64),'["view_map","view_packet"]',now()+interval '1 day','sha256:'||repeat('b',64),v_actor_id);
+  perform ops.exchange_tour_share_token('sha256:'||repeat('a',64),'sha256:'||repeat('2',64),now()+interval '1 day','sha256:'||repeat('3',64));
+  v_packet:=ops.read_tour_share_packet('sha256:'||repeat('2',64));
+  if v_packet is null or v_packet ? 'tour_name' or v_packet::text like '%Delivery proof%' then
+    raise exception 'internal tour name crossed the sealed public share boundary';
+  end if;
   perform ops.record_tour_map_promotion_receipt('tour-delivery-proof','ac000000-0000-4000-8000-000000000001',jsonb_build_object(
     'decision','rejected','reviewed_at',to_char(now()-interval '1 year','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    'decision_reason','Mobile, native-navigation, and offline evidence failed.',
     'brief_version','tour-map-brief.v1','canonical_dataset_version','proof-v1','selected_prototype_id','carr-map-tour-v1',
     'component_registry_version','maplibre-6.1.0','route_version',1,
     'provider_rights_receipt_ids',jsonb_build_array('a5000000-0000-4000-8000-000000000001'),
     'mobile_test_evidence',jsonb_build_object('status','failed'),'native_navigation_test_evidence',jsonb_build_object('status','failed'),
     'offline_test_evidence',jsonb_build_object('status','failed'),'required_checks',jsonb_build_object(
       'canonical_address_and_coordinate_review',true,'claims_and_layers_have_source_as_of_rights_and_review_state',true,
-      'deterministic_rebuild_from_canonical_record',true,'exact_native_navigation_handoff',true,
+      'deterministic_rebuild_from_canonical_record',true,'exact_native_navigation_handoff',false,
       'locked_appointments_dwell_and_buffers_preserved',true,'map_list_route_offline_order_parity',true,
       'no_unresolved_route_critical_unknown_or_conflict',true,'optional_context_layers_progressively_disclosed',true,
       'ordered_offline_itinerary_verified',true,'phone_and_ipad_interaction_test',true,

@@ -26,6 +26,7 @@ const REQUIRED_CHECKS = Object.freeze([
 ]);
 const FIELDS = new Set([
   "idempotency_key", "projection_id", "decision", "reviewed_at", "brief_version",
+  "decision_reason",
   "canonical_dataset_version", "selected_prototype_id", "component_registry_version",
   "route_version", "provider_rights_receipt_ids", "mobile_test_evidence",
   "native_navigation_test_evidence", "offline_test_evidence", "required_checks",
@@ -85,12 +86,13 @@ export function tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }) {
       write: true,
       authorityOnly: true,
       humanOnly: true,
-      description: "Record an immutable verified-human Tour map promotion decision bound to exact projection, dataset, route, provider-rights, component, mobile, native-navigation, offline, and doctrine-check evidence. Unknown or false checks are refused; this receipt alone does not issue a share.",
+      description: "Record an immutable verified-human Tour map promotion decision bound to exact projection, dataset, route, provider-rights, component, mobile, native-navigation, offline, and doctrine-check evidence. Approvals require every check to pass; rejections require a failed check and a reason. This receipt alone does not issue a share.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
           idempotency_key: { type: "string" }, projection_id: { type: "string" },
           decision: { type: "string", enum: ["approved", "rejected"] }, reviewed_at: { type: "string" },
+          decision_reason: { type: "string", minLength: 1, maxLength: 500 },
           brief_version: { type: "string" }, canonical_dataset_version: { type: "string" },
           selected_prototype_id: { type: "string" }, component_registry_version: { type: "string" },
           route_version: { type: "integer", minimum: 1 },
@@ -98,7 +100,7 @@ export function tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }) {
           mobile_test_evidence: { type: "object" }, native_navigation_test_evidence: { type: "object" },
           offline_test_evidence: { type: "object" },
           required_checks: { type: "object", additionalProperties: false,
-            properties: Object.fromEntries(REQUIRED_CHECKS.map(key => [key, { const: true }])), required: [...REQUIRED_CHECKS] },
+            properties: Object.fromEntries(REQUIRED_CHECKS.map(key => [key, { type: "boolean" }])), required: [...REQUIRED_CHECKS] },
           receipt_digest: { type: "string" },
         },
         required: [...FIELDS],
@@ -108,13 +110,24 @@ export function tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }) {
         uuid(args.idempotency_key, "idempotency_key", ToolError);
         const checks = evidence(args.required_checks, "required_checks", ToolError);
         if (Object.keys(checks).sort().join("\n") !== [...REQUIRED_CHECKS].sort().join("\n") ||
-            REQUIRED_CHECKS.some(key => checks[key] !== true))
+            REQUIRED_CHECKS.some(key => typeof checks[key] !== "boolean"))
           fail(ToolError, { error: "tour_map_promotion_checks_incomplete" });
         if (!Array.isArray(args.provider_rights_receipt_ids) || !args.provider_rights_receipt_ids.length ||
             args.provider_rights_receipt_ids.length > 100 || new Set(args.provider_rights_receipt_ids).size !== args.provider_rights_receipt_ids.length)
           fail(ToolError, { error: "tour_input_invalid", field: "provider_rights_receipt_ids" });
+        const decision = ["approved", "rejected"].includes(args.decision) ? args.decision : fail(ToolError, { error: "tour_input_invalid", field: "decision" });
+        const mobileEvidence = evidence(args.mobile_test_evidence, "mobile_test_evidence", ToolError);
+        const nativeEvidence = evidence(args.native_navigation_test_evidence, "native_navigation_test_evidence", ToolError);
+        const offlineEvidence = evidence(args.offline_test_evidence, "offline_test_evidence", ToolError);
+        const failedCheck = REQUIRED_CHECKS.some(key => checks[key] === false) ||
+          [mobileEvidence, nativeEvidence, offlineEvidence].some(item => item.status === "failed");
+        const allPassed = REQUIRED_CHECKS.every(key => checks[key] === true) &&
+          [mobileEvidence, nativeEvidence, offlineEvidence].every(item => item.status === "passed");
+        if ((decision === "approved" && !allPassed) || (decision === "rejected" && !failedCheck))
+          fail(ToolError, { error: "tour_map_promotion_checks_incomplete" });
         const payload = {
-          decision: ["approved", "rejected"].includes(args.decision) ? args.decision : fail(ToolError, { error: "tour_input_invalid", field: "decision" }),
+          decision,
+          decision_reason: text(args.decision_reason, "decision_reason", ToolError, 500),
           reviewed_at: requiredTimestamp(args.reviewed_at) ? args.reviewed_at : fail(ToolError, { error: "tour_input_invalid", field: "reviewed_at" }),
           brief_version: text(args.brief_version, "brief_version", ToolError),
           canonical_dataset_version: text(args.canonical_dataset_version, "canonical_dataset_version", ToolError),
@@ -122,9 +135,9 @@ export function tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }) {
           component_registry_version: text(args.component_registry_version, "component_registry_version", ToolError),
           route_version: Number.isInteger(args.route_version) && args.route_version > 0 ? args.route_version : fail(ToolError, { error: "tour_input_invalid", field: "route_version" }),
           provider_rights_receipt_ids: args.provider_rights_receipt_ids.map(value => uuid(value, "provider_rights_receipt_ids", ToolError)),
-          mobile_test_evidence: evidence(args.mobile_test_evidence, "mobile_test_evidence", ToolError),
-          native_navigation_test_evidence: evidence(args.native_navigation_test_evidence, "native_navigation_test_evidence", ToolError),
-          offline_test_evidence: evidence(args.offline_test_evidence, "offline_test_evidence", ToolError),
+          mobile_test_evidence: mobileEvidence,
+          native_navigation_test_evidence: nativeEvidence,
+          offline_test_evidence: offlineEvidence,
           required_checks: checks,
           receipt_digest: digest(args.receipt_digest, "receipt_digest", ToolError),
         };

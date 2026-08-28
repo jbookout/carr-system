@@ -40,6 +40,8 @@ test("Tour delivery state is append-only, tenant-qualified, digest-only, and lea
 });
 
 test("public packet and map reads remain sealed facts-only projections", () => {
+  const publicPacketFunction = migration.split("create or replace function ops.read_tour_share_packet", 2)[1]
+    .split("create or replace function ops.read_tour_share_map", 1)[0];
   assert.match(migration, /p\.status='approved'/i);
   assert.match(migration, /tour_public_projection_seal_receipt/i);
   assert.match(migration, /tour_public_value_safe/i);
@@ -53,11 +55,15 @@ test("public packet and map reads remain sealed facts-only projections", () => {
   assert.match(migration, /current_setting\('carr\.verified_human_actor_slug',true\)[\s\S]*tour map promotion requires a verified human authority session/i);
   assert.match(migration, /tour_map_promotion_receipt \([\s\S]*receipt_sequence bigint generated always as identity/i);
   assert.match(migration, /select r\.decision='approved'[\s\S]*order by r\.receipt_sequence desc limit 1/i);
+  assert.match(migration, /decision_reason text not null[\s\S]*between 1 and 500/i);
+  assert.match(migration, /decision'='approved'[\s\S]*status}' is distinct from 'passed'/i);
+  assert.match(migration, /decision'='rejected'[\s\S]*check_row\.value='false'[\s\S]*status}'='failed'/i);
   assert.equal((migration.match(/not ops\.tour_public_map_projection_ready\(p_tenant,p_projection_id\)/g) || []).length, 2);
   assert.match(migration, /and ops\.tour_public_map_projection_ready\(p\.organization_tenant_id,p\.id\)/i);
   assert.match(migration, /allowed_field_classes \? 'coordinates'/i);
   assert.match(migration, /tour_share_session_grant\(p_session_digest,'view_packet'\)/i);
   assert.match(migration, /tour_share_session_grant\(p_session_digest,'view_map'\)/i);
+  assert.doesNotMatch(publicPacketFunction, /tour_name|join ops\.tour\b/i);
   assert.doesNotMatch(migration, /tour_cheat_sheet_revision[\s\S]{0,200}read_tour_share_packet/i);
 });
 

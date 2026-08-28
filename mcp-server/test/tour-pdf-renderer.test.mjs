@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { PDFDocument, PDFName, StandardFonts } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
+import {
+  clip, degrees, endPath, PDFDocument, PDFName, popGraphicsState,
+  pushGraphicsState, rectangle, StandardFonts,
+} from "pdf-lib";
 import { inspectStoredTourPacketPdf, renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "../src/tour-pdf-renderer.js";
 
 const fontRoot = new URL("../assets/", import.meta.url);
@@ -63,7 +67,7 @@ test("PDF renderer rejects authoritative content that cannot fit instead of trun
   await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
 });
 
-test("PDF renderer measures route-label bounds and stored inspection decodes actual page geometry", async () => {
+test("PDF renderer measures route-label bounds and stored inspection decodes text extents and transformations", async () => {
   const overflow = structuredClone(packet);
   overflow.properties[0].route_label = "W".repeat(80);
   await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
@@ -76,9 +80,45 @@ test("PDF renderer measures route-label bounds and stored inspection decodes act
   assert.ok(observed.pages.every(page => page.clipped_box_count === 1));
 
   const outOfBounds = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
-  const font = await outOfBounds.embedFont(StandardFonts.Helvetica);
-  outOfBounds.getPage(0).drawText("OUTSIDE", { x: -20, y: 50, size: 10, font });
+  outOfBounds.registerFontkit(fontkit);
+  const font = await outOfBounds.embedFont(fonts.regular, { subset: true });
+  outOfBounds.getPage(0).drawText("OUTSIDE", { x: 610, y: 50, size: 24, font });
   const tampered = await outOfBounds.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
   const tamperedObservation = await inspectStoredTourPacketPdf(tampered);
   assert.equal(tamperedObservation.pages[0].clipped_box_count, 1);
+
+  const transformed = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  transformed.registerFontkit(fontkit);
+  const transformedFont = await transformed.embedFont(fonts.regular, { subset: true });
+  transformed.getPage(0).drawText("ROTATED", { x: 600, y: 760, size: 24, rotate: degrees(45), font: transformedFont });
+  const transformedBytes = await transformed.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  const transformedObservation = await inspectStoredTourPacketPdf(transformedBytes);
+  assert.equal(transformedObservation.pages[0].clipped_box_count, 1);
+});
+
+test("stored inspection fails closed on clipping paths and Form XObjects", async () => {
+  const rendered = await renderTourPacketPdf(packet, fonts);
+  const cropped = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  cropped.getPage(0).setCropBox(0, 0, 100, 100);
+  const croppedBytes = await cropped.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  assert.equal((await inspectStoredTourPacketPdf(croppedBytes)).pages[0].clipped_box_count, 1);
+
+  const clipped = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  const clippedPage = clipped.getPage(0);
+  clippedPage.pushOperators(pushGraphicsState(), rectangle(0, 0, 20, 20), clip(), endPath());
+  const clippedFont = await clipped.embedFont(StandardFonts.Helvetica);
+  clippedPage.drawText("CLIPPED", { x: 30, y: 30, size: 12, font: clippedFont });
+  clippedPage.pushOperators(popGraphicsState());
+  const clippedBytes = await clipped.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  assert.equal((await inspectStoredTourPacketPdf(clippedBytes)).pages[0].clipped_box_count, 1);
+
+  const donor = await PDFDocument.create();
+  const donorPage = donor.addPage([20, 20]);
+  const donorFont = await donor.embedFont(StandardFonts.Helvetica);
+  donorPage.drawText("X", { x: 2, y: 2, size: 12, font: donorFont });
+  const withXObject = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  const [embeddedPage] = await withXObject.embedPdf(await donor.save());
+  withXObject.getPage(0).drawPage(embeddedPage, { x: 10, y: 10, width: 20, height: 20 });
+  const xObjectBytes = await withXObject.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  assert.equal((await inspectStoredTourPacketPdf(xObjectBytes)).pages[0].clipped_box_count, 1);
 });
