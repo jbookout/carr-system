@@ -77,6 +77,47 @@ with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=True):
     else:
         check("hosted runner refuses", False)
 
+# The declared hosted lane (.github/workflows/db-acceptance.yml) is the one
+# caller allowed through, and every clause is load-bearing. Dropping any one of
+# them would re-open the blanket hole the refusal exists to keep shut, so each
+# is tested by removing exactly that clause and requiring a refusal.
+DECLARED_HOSTED = {
+    "CARR_LOCAL_PG_ALLOW_HOSTED": "1",
+    "GITHUB_ACTIONS": "true",
+    "GITHUB_REPOSITORY": "jbookout/carr-system",
+    "GITHUB_RUN_ID": "1234567890",
+}
+with patch.dict(os.environ, DECLARED_HOSTED, clear=True):
+    try:
+        mod.refuse_hosted_execution()
+    except mod.LocalPGRefusal:
+        check("the declared hosted lane is allowed", False)
+    else:
+        check("the declared hosted lane is allowed", True)
+
+for dropped in sorted(DECLARED_HOSTED):
+    if dropped == "GITHUB_ACTIONS":
+        # Without the hosted marker this is simply not a hosted runner, and the
+        # refusal is not meant to fire at all — a developer shell is the norm.
+        continue
+    partial = {k: v for k, v in DECLARED_HOSTED.items() if k != dropped}
+    with patch.dict(os.environ, partial, clear=True):
+        try:
+            mod.refuse_hosted_execution()
+        except mod.LocalPGRefusal:
+            check(f"hosted refuses without {dropped}", True)
+        else:
+            check(f"hosted refuses without {dropped}", False)
+
+# A fork running the same workflow must not inherit the opt-in.
+with patch.dict(os.environ, {**DECLARED_HOSTED, "GITHUB_REPOSITORY": "someone/fork"}, clear=True):
+    try:
+        mod.refuse_hosted_execution()
+    except mod.LocalPGRefusal:
+        check("a fork is refused", True)
+    else:
+        check("a fork is refused", False)
+
 # The remaining cases use a fully mocked local runner. Clear the ambient hosted
 # marker after testing the refusal so CI and a developer shell exercise the
 # exact same hermetic fixtures below.

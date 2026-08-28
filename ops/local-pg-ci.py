@@ -87,8 +87,38 @@ def port_is_available(port: int) -> bool:
     return True
 
 
+def hosted_execution_is_declared(source: Mapping[str, str] | None = None) -> bool:
+    """True only for the one workflow that deliberately drives this lane.
+
+    The blanket hosted refusal below kept this lane off runners from the day it
+    was written, and the cost of that was not visible until it was measured: the
+    acceptance programs this module runs after ci.sh had NO hosted coverage on
+    any commit, ever, and the rule-delivery cutover acceptance sat red on main
+    across four map re-pins while the required strict context stayed green.
+    Defect fa03017b.
+
+    The refusal is kept as the DEFAULT rather than deleted, because what it
+    prevents is real: a runner that quietly initdbs clusters is a surprise, and
+    nothing should reach this lane by merely happening to set GITHUB_ACTIONS.
+    Opting in takes an explicit variable AND this repository AND a real run id --
+    the same shape the acceptance gates already use for `hosted_disposable`
+    (see ops/zz-engineering-controller-concurrency-gate.py). A fork, a local
+    shell exporting GITHUB_ACTIONS by accident, and any workflow that has not
+    said so in as many words all still refuse.
+    """
+    env = os.environ if source is None else source
+    return (
+        env.get("CARR_LOCAL_PG_ALLOW_HOSTED") == "1"
+        and env.get("GITHUB_ACTIONS", "").lower() == "true"
+        and env.get("GITHUB_REPOSITORY") == "jbookout/carr-system"
+        and bool(env.get("GITHUB_RUN_ID"))
+    )
+
+
 def refuse_hosted_execution() -> None:
     if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        if hosted_execution_is_declared():
+            return
         raise LocalPGRefusal("local-db-ci cannot run on a hosted GitHub runner")
 
 
