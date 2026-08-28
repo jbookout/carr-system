@@ -51,20 +51,17 @@ def main() -> int:
     module = load_checker()
     artifact = SNAPSHOT.read_text(encoding="utf-8", errors="replace")
 
-    # A guard that passes because it read nothing is the failure mode this whole
-    # file exists to prevent, so the inputs are asserted before the verdict is
-    # trusted. An empty ledger would make every seeded table undetectable and the
-    # check would report clean on a file that carries nothing.
+    # NO INPUT FLOORS HERE, and the reason is worth recording because an earlier
+    # version had them and they were decoration. They asserted the ledger held at
+    # least 100 migrations and detection found at least 50 tables, meaning to catch
+    # a collapsed read reporting green over nothing. They could never fire: with the
+    # ledger emptied, check() itself returns 90 findings, one per classified table
+    # that nothing seeds any more, and it returns them before any floor could speak.
+    # Measured, not assumed. A guard that cannot reach its own failure case is not a
+    # guard, and leaving it in place claims a protection that check() was already
+    # providing more loudly. Found by the seventh independent review.
     applied = module.applied_migrations(artifact)
-    if len(applied) < 100:
-        print(f"  FAIL the committed snapshot's ledger holds only {len(applied)} migrations; "
-              f"the check would be reading almost nothing")
-        return 1
     seeds, _missing = module.seeded_tables(str(ROOT), applied)
-    if len(seeds) < 50:
-        print(f"  FAIL only {len(seeds)} seeded tables detected from {len(applied)} applied "
-              f"migrations; detection has collapsed and a clean verdict would mean nothing")
-        return 1
 
     # A BUDGET, because the cost of this check is not a fixed price. scan_sql was
     # quadratic in artifact size -- 1.5s at 0.5MB, 7.4s at 1MB, 28.9s at 1.5MB --

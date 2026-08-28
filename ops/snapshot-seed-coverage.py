@@ -413,16 +413,32 @@ def copy_blocks(region):
     The span is returned so the caller can take the block OUT before scanning. COPY
     data is not SQL: an apostrophe in a data row would send a literal scanner
     inside-out over everything after it, which is finding 4 one region over.
+
+    ONLY `FROM stdin` BLOCKS ARE COUNTED, and the asymmetry is deliberate rather
+    than overlooked. A `COPY t FROM '/path'` has no inline block to count, so its
+    rows can only be confirmed by reading a file this check cannot see; presence of
+    the statement is all there is, and it stays a name test. bin/schema-snapshot.sh
+    emits no such form -- pg_dump uses stdin -- so nothing in this artifact takes
+    that path today, and a suite case pins that it would still register rather than
+    vanish if one ever appeared.
     """
-    blocks = []
+    blocks, unterminated = [], []
     for head in COPY_BLOCK.finditer(region):
         end = region.find("\n\\.", head.end())
-        stop = len(region) if end == -1 else end + 3
-        body = region[head.end():end] if end != -1 else region[head.end():]
+        if end == -1:
+            # NOT blanked to end of file, which is what this used to do. A COPY with
+            # no terminator swallowed everything after it, so a truncated artifact
+            # hid every later statement -- including an excluded table's rows, the
+            # one thing the presence direction exists to catch. Silence is the worst
+            # available answer to a malformed artifact, so it is reported instead and
+            # the block contributes nothing.
+            unterminated.append(normalise(head.group(1)))
+            continue
+        body = region[head.end():end]
         blocks.append((normalise(head.group(1)),
                        any(line.strip() for line in body.split("\n")),
-                       head.start(), stop))
-    return blocks
+                       head.start(), end + 3))
+    return blocks, unterminated
 
 
 def _blank(text, spans):
@@ -450,7 +466,8 @@ def tables_with_data(artifact):
     """
     region = data_region(artifact)
     found, spans = set(), []
-    for name, rows, start, stop in copy_blocks(region):
+    blocks, _unterminated = copy_blocks(region)
+    for name, rows, start, stop in blocks:
         if rows:
             found.add(name)
         spans.append((start, stop))
@@ -497,6 +514,15 @@ def check(repo, artifact_text):
     boundary = check_region_boundary(artifact_text)
     if boundary:
         failures.append(boundary)
+
+    _blocks, unterminated = copy_blocks(data_region(artifact_text))
+    for table in unterminated:
+        failures.append(
+            f"COPY BLOCK NEVER ENDS: {table}\n"
+            f"    Its COPY ... FROM stdin has no terminating line, so the artifact is\n"
+            f"    truncated or malformed. Nothing after it can be read as a statement,\n"
+            f"    which would hide an excluded table's rows rather than report them.\n"
+            f"    Regenerate the snapshot; do not hand-edit around this.")
 
     for name in missing:
         failures.append(
