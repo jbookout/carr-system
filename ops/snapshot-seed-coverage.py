@@ -139,6 +139,27 @@ def normalise(table):
     return table[len("public."):] if table.startswith("public.") else table
 
 
+# HOW FAR BACK THE TWO BACKWARD-LOOKING TESTS MAY REACH. Both are anchored to
+# the END of the accumulated buffer, so the cut is always thousands of characters
+# away from what they inspect: the keyword test reads the word immediately before
+# the dollar-quote, and the `do language <lang>` form spans well under a hundred
+# characters. Neither can see the truncation.
+HEAD_TAIL = 4096
+
+# The routine-header scan is bounded far more generously because it looks for the
+# LAST `create function` header before this body, which sits behind the whole
+# parameter list rather than adjacent to the quote.
+#
+# ITS DEGRADATION DIRECTION IS THE SAFE ONE, which is why a bound is acceptable
+# here at all. If the header falls outside the window, `headers` comes back empty
+# and the body is appended to the top-level text instead of being filed under a
+# routine name. Top-level text is scanned unconditionally, so the body's tables
+# are still detected -- they simply stop being gated on the routine being CALLED.
+# That is a false alarm at worst, never a missed seed, and this file's whole
+# purpose is to refuse rather than to miss.
+ROUTINE_TAIL = 65536
+
+
 def _tail(parts, count):
     """The last `count` characters of an accumulated buffer, without joining it.
 
@@ -262,7 +283,7 @@ def scan_sql(sql):
                 top.append(sql[i:])
                 break
             body = sql[match.end():end]
-            head = "".join(top)
+            head = _tail(top, HEAD_TAIL)
             previous = re.search(r"([A-Za-z_]+)\s*$", head)
             keyword = previous.group(1).lower() if previous else ""
             # `do language plpgsql $$ ... $$` is the same statement as `do $$ ... $$`.
@@ -271,7 +292,7 @@ def scan_sql(sql):
             if keyword != "do" and re.search(r"(?:^|;|\s)do\s+language\s+[a-z_]+\s*$", head, re.I):
                 keyword = "do"
             if keyword == "as":
-                headers = list(CREATE_ROUTINE.finditer("".join(top)))
+                headers = list(CREATE_ROUTINE.finditer(_tail(top, ROUTINE_TAIL)))
                 if headers:
                     routines.setdefault(normalise(headers[-1].group(1)), []).append(_scanned(body))
                 else:
