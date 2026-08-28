@@ -39,9 +39,7 @@ AUTHORIZED_WRITABLE_ROOTS = (
 )
 AUTHORIZED_CODEX_CONFIG_OVERRIDES = (
     "sandbox_workspace_write.network_access=true",
-    "features.network_proxy.enabled=true",
-    'features.network_proxy.domains."github.com"="allow"',
-    'features.network_proxy.domains."api.github.com"="allow"',
+    'features.network_proxy={enabled=true,domains={"github.com"="allow","api.github.com"="allow"}}',
 )
 
 
