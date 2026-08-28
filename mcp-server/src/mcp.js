@@ -16,6 +16,8 @@ import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
   auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
 import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { deriveTrustedPrincipalBinding,
+  SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -573,7 +575,13 @@ export async function callTool(env, actor, name, args, profile = "full") {
     if (!a.rows.length) throw new ToolError({ error: "actor_not_provisioned", slug: actor.slug,
       hint: "the token authenticates as this actor but no row exists in the actor table — " +
             "provision the actor before any write verb will run" });
-    const fullActor = { ...actor, id: a.rows[0].id };
+    const actorWithId = { ...actor, id: a.rows[0].id };
+    const principalReadback = await client.query(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text);
+    if (principalReadback.rows.length !== 1)
+      throw new ToolError({ error: "trusted_database_principal_unavailable" });
+    const trustedPrincipal = await deriveTrustedPrincipalBinding(actorWithId,
+      principalReadback.rows[0], tool.authorityOnly ? "carr_authority" : "carr_writer");
+    const fullActor = { ...actorWithId, trusted_principal: trustedPrincipal };
     const result = await executeRegisteredTool(client, fullActor, name, args || {});
     await client.query("commit");
     return result;

@@ -151,7 +151,7 @@ export const SIEP18_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
-  digest: "sha256:77f78187fa6c79c864ae6f33d8ac53ca983fbfc62d6eddf824373f26afb67407",
+  digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
 });
 
 export function canonicalize(value) {

@@ -185,8 +185,9 @@ def test_reviewed_controller_transaction_artifact_is_exact() -> None:
         "0363_rule_delivery_activation_digest_repin.sql",
         "0382_standing_guidance_reader_boundary.sql",
         "0383_control_plane_not_configured_state.sql",
+        "0387_control_plane_record_queue_priority_tiers.sql",
     }
-    check("the reviewed controller transaction allowlist is three exact artifacts",
+    check("the reviewed controller transaction allowlist is four exact artifacts",
           set(artifacts) == expected_names
           and not set(artifacts) & set(migrate.HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS))
     exact = True

@@ -20,7 +20,7 @@ from lib.control_plane_scheduler_cutover import scheduler_launchd_rows  # noqa: 
 
 JOB_DEFINITION_CATALOG = {
     "count": 26,
-    "digest": "sha256:77f78187fa6c79c864ae6f33d8ac53ca983fbfc62d6eddf824373f26afb67407",
+    "digest": "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
 }
 
 def fail(message: str) -> int:
