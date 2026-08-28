@@ -471,7 +471,10 @@ def engineering_workflow_packs(record):
         return []
     if (value.count("SERVER-ISSUED SLICE PACKET (immutable):") != 1
             or value.count("CONTROLLER TASK BINDING (immutable):") != 1
-            or "FIRST: call `standing-context` with exactly the four packs above" not in value
+            or ('FIRST: call `standing-context` with exactly this input and read the returned rules: '
+                '{"packs":["engineering-git","delegation-council",'
+                '"scheduled-automation","source-study"]}') not in value
+            or "Do not pass `workflow`" not in value
             or "REFUSE before inspecting the envelope, source, or job" not in value):
         return []
     packet_marker = "SERVER-ISSUED SLICE PACKET (immutable):\n"
