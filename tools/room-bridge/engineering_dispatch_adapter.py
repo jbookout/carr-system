@@ -31,10 +31,61 @@ DESK_SPEC_PATH = REPO / "ops" / "config" / "engineering-codex-desk.v1.json"
 # local adapter identity, just like the fixed desk name below.
 DEDICATED_REGISTRY_PATH = Path.home() / ".config" / "carr" / "hermes-desks.json"
 DISPATCH_MINIMUM_RUNWAY = timedelta(seconds=930)
+AUTHORIZED_WRITABLE_ROOTS = (
+    "/Users/booko/carr-system/.git",
+    "/Users/booko/carr-system/out",
+)
 
 
 class DispatchRefusal(RuntimeError):
     pass
+
+
+def _git_common_dir() -> Path:
+    """Resolve the shared Git metadata root without trusting a child process."""
+    dotgit = REPO / ".git"
+    if dotgit.is_dir():
+        common = dotgit.resolve()
+    elif dotgit.is_file():
+        try:
+            marker = dotgit.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise DispatchRefusal("Engineering repository Git metadata is unavailable") from exc
+        prefix = "gitdir: "
+        if not marker.startswith(prefix) or "\n" in marker:
+            raise DispatchRefusal("Engineering repository Git metadata is malformed")
+        git_dir = Path(marker[len(prefix):])
+        if not git_dir.is_absolute():
+            git_dir = REPO / git_dir
+        git_dir = git_dir.resolve()
+        commondir = git_dir / "commondir"
+        if commondir.is_file():
+            try:
+                common_ref = commondir.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise DispatchRefusal("Engineering repository common Git metadata is unavailable") from exc
+            if not common_ref or "\n" in common_ref:
+                raise DispatchRefusal("Engineering repository common Git metadata is malformed")
+            common = (git_dir / common_ref).resolve()
+        else:
+            common = git_dir
+    else:
+        raise DispatchRefusal("Engineering repository Git metadata is unavailable")
+    if not common.is_dir() or not (common / "HEAD").is_file() or common.name != ".git":
+        raise DispatchRefusal("Engineering repository common Git metadata is invalid")
+    return common
+
+
+def _dedicated_writable_roots() -> list[str]:
+    """The exact two shared lock roots authorized for repository-write slices."""
+    common = _git_common_dir()
+    shared_out = (common.parent / "out").resolve()
+    if not shared_out.is_dir():
+        raise DispatchRefusal("Engineering shared output root is unavailable")
+    roots = [str(common), str(shared_out)]
+    if tuple(roots) != AUTHORIZED_WRITABLE_ROOTS:
+        raise DispatchRefusal("Engineering desk writable roots do not match the authorized machine boundary")
+    return roots
 
 
 def _canonical_utc_second(value: object) -> datetime:
@@ -139,7 +190,8 @@ def install_dedicated_codex_desk(registry: desks.Registry) -> dict:
     """Bootstrap only the tracked unseated desk, then return its exact readback."""
     spec = _desk_spec()
     entry = registry.register(spec["name"], spec["kind"], model=spec["model"], effort=spec["effort"],
-                              cwd=str(REPO), sandbox=spec["sandbox"])
+                              cwd=str(REPO), sandbox=spec["sandbox"],
+                              add_dirs=_dedicated_writable_roots())
     return _dedicated_codex_desk(registry)
 
 
@@ -154,7 +206,7 @@ def _dedicated_codex_desk(registry: desks.Registry) -> dict:
     # characteristics.  The fixed desk itself is the local native surface.
     spec = _desk_spec()
     allowed_fields = {
-        "name", "kind", "model", "effort", "cwd", "sandbox", "room_seat", "thread_id", "registered_at",
+        "name", "kind", "model", "effort", "cwd", "sandbox", "add_dirs", "room_seat", "thread_id", "registered_at",
         # These are bridge-owned liveness/auth observations, never execution
         # choices. They are allowed to change without widening the desk.
         "last_seen", "last_live", "last_auth", "last_auth_at",
@@ -162,7 +214,8 @@ def _dedicated_codex_desk(registry: desks.Registry) -> dict:
     if set(entry) - allowed_fields:
         raise DispatchRefusal("dedicated Engineering desk has an unapproved execution field")
     expected = {"kind": spec["kind"], "model": spec["model"], "effort": spec["effort"],
-                "cwd": str(REPO), "sandbox": spec["sandbox"]}
+                "cwd": str(REPO), "sandbox": spec["sandbox"],
+                "add_dirs": _dedicated_writable_roots()}
     if entry.get("name") != ENGINEERING_DESK or any(entry.get(key) != value for key, value in expected.items()) or entry.get("room_seat") is not None:
         raise DispatchRefusal("dedicated Engineering desk is not a modeled Codex session")
     if (entry.get("thread_id") is not None and not isinstance(entry["thread_id"], str)) or (
@@ -236,12 +289,12 @@ def main() -> int:
         if sys.argv[1:] == ["--preflight"]:
             entry = _dedicated_codex_desk(desks.Registry(DEDICATED_REGISTRY_PATH))
             print(json.dumps({"ok": True, "desk": {key: entry[key] for key in
-                  ("name", "kind", "model", "effort", "cwd", "sandbox")}}, separators=(",", ":")))
+                  ("name", "kind", "model", "effort", "cwd", "sandbox", "add_dirs")}}, separators=(",", ":")))
             return 0
         if sys.argv[1:] == ["--install-desk"]:
             entry = install_dedicated_codex_desk(desks.Registry(DEDICATED_REGISTRY_PATH))
             print(json.dumps({"ok": True, "desk": {key: entry[key] for key in
-                  ("name", "kind", "model", "effort", "cwd", "sandbox")}}, separators=(",", ":")))
+                  ("name", "kind", "model", "effort", "cwd", "sandbox", "add_dirs")}}, separators=(",", ":")))
             return 0
         if len(sys.argv) != 1:
             raise DispatchRefusal("engineering adapter received unsupported arguments")

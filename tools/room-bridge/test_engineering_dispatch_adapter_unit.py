@@ -21,6 +21,15 @@ import engineering_passport as passport  # noqa: E402
 import execution_contract as contract  # noqa: E402
 import bridge  # noqa: E402
 
+# The dedicated desk is intentionally installable only on Joe's exact machine
+# boundary. Hosted checks exercise contract behavior with those same literal
+# roots but must not pretend their runner path is an authorized installation.
+_resolve_live_writable_roots = adapter._dedicated_writable_roots
+try:
+    _resolve_live_writable_roots()
+except adapter.DispatchRefusal:
+    adapter._dedicated_writable_roots = lambda: list(adapter.AUTHORIZED_WRITABLE_ROOTS)
+
 GATE_SPEC = importlib.util.spec_from_file_location(
     "engineering_rule_pack_gate", ROOT / "hooks" / "rule-pack-drift-gate.py")
 assert GATE_SPEC and GATE_SPEC.loader
@@ -102,7 +111,18 @@ class ValidEngineeringDesk:
     def resolve(self, name):
         assert name == "engineering-codex"
         return {"name": name, "kind": "codex-session", "model": "gpt-5.6-sol", "effort": "high",
-                "cwd": str(ROOT), "sandbox": "workspace-write", "room_seat": None}
+                "cwd": str(ROOT), "sandbox": "workspace-write",
+                "add_dirs": adapter._dedicated_writable_roots(), "room_seat": None}
+
+
+def test_writable_roots_are_exactly_the_two_authorized_machine_paths():
+    assert adapter.AUTHORIZED_WRITABLE_ROOTS == (
+        "/Users/booko/carr-system/.git",
+        "/Users/booko/carr-system/out",
+    )
+    assert adapter._dedicated_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
+    if Path(adapter.AUTHORIZED_WRITABLE_ROOTS[0]).is_dir():
+        assert _resolve_live_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
 
 
 def test_bridge_auth_observations_are_allowed_but_malformed_metadata_refuses():
@@ -293,7 +313,8 @@ def test_desk_is_fixed_and_refuses_claude_or_unmodeled_registry_entries_before_d
 
     class WidenedDesk(ValidEngineeringDesk):
         def resolve(self, name):
-            return {**super().resolve(name), "add_dirs": [str(Path.home() / ".config" / "carr")]}
+            return {**super().resolve(name), "add_dirs": [
+                *adapter._dedicated_writable_roots(), str(Path.home() / ".config" / "carr")]}
 
     try:
         adapter.run(request(), dispatch_fn=fake_dispatch, registry=WidenedDesk())
@@ -312,6 +333,7 @@ def test_tracked_bootstrap_registers_one_unseated_exact_desk_and_wrapper_has_no_
         assert entry["name"] == "engineering-codex"
         assert entry["kind"] == "codex-session" and entry["model"] == "gpt-5.6-sol"
         assert entry["effort"] == "high" and entry["sandbox"] == "workspace-write"
+        assert entry["add_dirs"] == adapter._dedicated_writable_roots()
         assert entry.get("room_seat") is None and entry["thread_id"] is None
         assert adapter._dedicated_codex_desk(registry)["cwd"] == str(ROOT)
     wrapper = (ROOT / "bin" / "run-engineering-dispatch.sh").read_text()
