@@ -103,6 +103,17 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-17
           /usr/lib/postgresql/17/bin/initdb --version
+          # THE SOCKET DIRECTORY IS THE ONE REAL PLATFORM DIFFERENCE.
+          # ops/local-pg-ci.py starts the server with only -h/-p and leaves
+          # unix_socket_directories at the build default. Homebrew compiles that
+          # default to /tmp, which any user can write, so the lane has always
+          # worked on a developer Mac. Debian's PGDG build compiles it to
+          # /var/run/postgresql, which exists only for the `postgres` user — so
+          # the postmaster could not create its socket and pg_ctl failed with
+          # "could not start server". Creating it for the runner user fixes the
+          # environment rather than teaching the shared module about Debian,
+          # which would put a platform quirk in the code path a developer runs.
+          sudo install -d -m 0775 -o "$USER" -g "$(id -gn)" /var/run/postgresql
 
       - name: Run the disposable-Postgres migration lane
         env:
