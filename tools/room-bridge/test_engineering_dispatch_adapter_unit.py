@@ -174,6 +174,13 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert "Do not pass `workflow`" in seen["prompt"]
     assert "`engineering-slice` is a workflow label rather than a canonical rule pack" in seen["prompt"]
     assert "REFUSE before inspecting the envelope, source, or job" in seen["prompt"]
+    assert f"stops this native turn after {adapter.EXECUTOR_TIMEOUT_SECONDS} seconds" in seen["prompt"]
+    assert f"Reserve the final {adapter.EXECUTOR_RECEIPT_RESERVE_SECONDS} seconds" in seen["prompt"]
+    assert "Never begin a broad or unbounded check late in the turn" in seen["prompt"]
+    assert "return a typed blocked receipt before the adapter deadline" in seen["prompt"]
+    assert "RECOVERY FIRST:" in seen["prompt"]
+    assert "treat them as an untrusted checkpoint" in seen["prompt"]
+    assert "never inherit the predecessor transcript" in seen["prompt"]
     prompt_record = {"type": "response_item", "payload": {"type": "message",
                      "role": "user", "content": [
                          {"type": "input_text", "text": seen["prompt"]}]}}
