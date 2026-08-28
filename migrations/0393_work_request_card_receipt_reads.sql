@@ -1,4 +1,4 @@
--- 0389_work_request_card_receipt_reads.sql
+-- 0393_work_request_card_receipt_reads.sql
 --
 -- work-request-card has been DOWN in production since the loop-542 deploy.  Every
 -- call returns "permission denied for table work_request_triage_receipt"
@@ -56,7 +56,7 @@ begin
                            'ops.sourced_work_request_outcome_feedback_acceptance_receipt']
   loop
     if not has_table_privilege('carr_reader', t, 'select') then
-      raise exception '0389 FAILED: carr_reader still cannot select %', t;
+      raise exception '0393 FAILED: carr_reader still cannot select %', t;
     end if;
     -- Column privileges are not table privileges: has_table_privilege is false for
     -- a column-scoped grant, so tool_call is asserted below with
@@ -66,19 +66,19 @@ begin
     if has_table_privilege('carr_reader', t, 'insert')
        or has_table_privilege('carr_reader', t, 'update')
        or has_table_privilege('carr_reader', t, 'delete') then
-      raise exception '0389 FAILED: reader was given write access to %', t;
+      raise exception '0393 FAILED: reader was given write access to %', t;
     end if;
   end loop;
 
   foreach t in array array['idempotency_key','authorization_class','via','actor_id']
   loop
     if not has_column_privilege('carr_reader', 'public.tool_call', t, 'select') then
-      raise exception '0389 FAILED: carr_reader cannot select public.tool_call.%', t;
+      raise exception '0393 FAILED: carr_reader cannot select public.tool_call.%', t;
     end if;
   end loop;
   -- The scope is the point. If the reader can see a column the card never asked
   -- for, this grant has widened past the feature that needed it.
   if has_column_privilege('carr_reader', 'public.tool_call', 'response', 'select') then
-    raise exception '0389 FAILED: reader can read tool_call.response; the grant widened';
+    raise exception '0393 FAILED: reader can read tool_call.response; the grant widened';
   end if;
 end $$;

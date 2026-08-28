@@ -445,7 +445,7 @@ select format('grant execute on function %s.%s(%s) to %s;',
   join pg_roles r on r.oid = a.grantee
  where r.rolname in (select rolname from app)
    and lower(a.privilege_type) = 'execute'
- order by n.nspname, p.proname, r.rolname;
+ order by n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), r.rolname;
 
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),

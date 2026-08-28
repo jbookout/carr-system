@@ -40809,6 +40809,8 @@ grant insert, select, update on table ops.service_environment to carr_writer;
 grant insert, select on table ops.settings_change to carr_jobs;
 grant select on table ops.settings_change to carr_reader;
 grant insert, select on table ops.settings_change to carr_writer;
+grant select on table ops.sourced_work_request_outcome_feedback_acceptance_receipt to carr_reader;
+grant select on table ops.sourced_work_request_plan_acceptance_receipt to carr_reader;
 grant select on table ops.staging_deployment_attempt to carr_authority;
 grant select on table ops.staging_deployment_attempt to carr_jobs;
 grant select on table ops.staging_deployment_attempt to carr_reader;
@@ -40920,6 +40922,7 @@ grant select on table ops.v_work_shape_current to carr_writer;
 grant select on table ops.work_request to carr_reader;
 grant select, update on table ops.work_request to carr_writer;
 grant select on table ops.work_request_execution_environment_binding to carr_authority;
+grant select on table ops.work_request_triage_receipt to carr_reader;
 grant select on table ops.work_shape_revision to carr_reader;
 grant insert, select on table ops.work_shape_revision to carr_writer;
 grant select on table ops.workflow_acceptance to carr_jobs;
@@ -41307,6 +41310,7 @@ grant select (id) on table public.placement to carr_jobs;
 grant select (id, status) on table public.rule to carr_jobs;
 grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
 grant select (key, value) on table public.system_config to carr_jobs;
+grant select (idempotency_key, actor_id, via, authorization_class) on table public.tool_call to carr_reader;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
 grant execute on function ops.accept_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_feedback_hash text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.accept_sourced_work_request_plan(p_work_request text, p_base_version integer, p_plan_hash text, p_idempotency_key uuid) to carr_authority;
@@ -41322,8 +41326,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
@@ -41434,8 +41438,8 @@ grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observ
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
 grant execute on function ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_program5_forward_fix_verifiers;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
@@ -41832,6 +41836,11 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0383_control_plane_not_configured_state.sql	f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa	2026-08-27 20:40:05.784788+00
 0387_control_plane_record_queue_priority_tiers.sql	ba2f9ce18e54f8ceca330a5478ad66d72b76bbc832aba9c20734ebe8a701310e	2026-08-28 00:10:44.481308+00
 0388_heaviness_is_a_property_of_the_request_repin.sql	c0e0d353ef0a5f8363b15f41a51ccae7cad4aabe3176929c46e2741e7f51f3f8	2026-08-28 00:10:44.565762+00
+0389_acting_identity_receipt_read_grants.sql	f1f9cd9f3b3a517d6658228fcd987749f0663e8cf66bcb98a03dd55f49fc144a	2026-08-28 04:10:58.095773+00
+0390_acting_identity_reader_ledger_grants.sql	dee8bbd22ff4c130e5ff166cdbe0b61bfbb5d6ea22a20d218a139c3e9c536f81	2026-08-28 04:13:08.703849+00
+0391_acting_identity_definer_projection.sql	a785566265e1e6198c2d231bef329c08a5b09735f9420aa899c41c3dde590283	2026-08-28 04:30:44.093845+00
+0392_acting_identity_grant_rollback.sql	144da15fa947384eb92abd9081957704eb84cad16dbd8fcc2ba862d7d72ee375	2026-08-28 04:35:05.900703+00
+0393_work_request_card_receipt_reads.sql	b9556d0589d78b95b6f46b707f82d8f747eb119f2e7b87b02c08f3c58480af2a	2026-08-28 04:35:06.161008+00
 \.
 
 
@@ -42702,7 +42711,7 @@ insert into ops.siep_component_alias select * from jsonb_populate_record(null::o
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-14", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-15", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-16", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26"}'::jsonb) on conflict do nothing;
-select pg_catalog.setval('ops.work_request_ref_seq', 35, true);
+select pg_catalog.setval('ops.work_request_ref_seq', 36, true);
 alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
 alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
 alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
