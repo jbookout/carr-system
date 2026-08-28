@@ -45,7 +45,7 @@
       .sort((left, right) => routeOrder(left.item, left.index) - routeOrder(right.item, right.index));
     reportProperties = new globalThis.Map(properties.map(({ item }) => [item.property_ref, item]));
     document.querySelector("#report-title").textContent = "Tour report";
-    summary.textContent = `${properties.length} property${properties.length === 1 ? "" : "ies"} in this report.`;
+    summary.textContent = `${properties.length} ${properties.length === 1 ? "property" : "properties"} in this report.`;
     list.replaceChildren();
     for (const { item, index } of properties) {
       const row = document.createElement("li");

@@ -122,6 +122,8 @@ test("static bootstrap removes the fragment and exposes no ungoverned client mut
   assert.match(script, /Promise\.allSettled\(\[fetchReport\(\), fetchMap\(\)\]\)/);
   assert.match(script, /if \(!shareToken\)[\s\S]*void loadTour\(\)/);
   assert.match(script, /propertyAddress\(item/);
+  assert.match(script, /properties\.length === 1 \? "property" : "properties"/);
+  assert.doesNotMatch(script, /propertyies/);
   assert.doesNotMatch(script, /report\?\.(?:tour_name|title|name|summary)/);
   assert.match(script, /interactive map only/);
   assert.match(script, /await import\("\/vendor\/maplibre-gl-6\.1\.0\/maplibre-gl\.mjs"\)/);
