@@ -11,6 +11,8 @@ import {
   SCAC_EXACT_EFFECT_CONTRACTS,
   SCAC_TRUSTED_PRINCIPAL_READBACK_SQL,
 } from "../src/scac-exact-effects.js";
+import { executeWithTrustedPrincipal } from "../src/mcp.js";
+import { ToolError } from "../src/tools.js";
 const migration = fs.readFileSync(new URL(
   "../../migrations/0392_siep18_exact_effects_trusted_principal.sql", import.meta.url), "utf8");
 
@@ -28,6 +30,11 @@ test("exact DML and EXECUTE contracts are finite, canonical, closed, and immutab
     insert("public.event", ["actor_id", "kind", "subject_id"]),
     update("public.loop_item", ["status", "updated_at", "updated_by"]),
   ]));
+  assert.deepEqual(resolveExactEffects("mcp-tool:leaf", immutableExactEffectContracts([reviewed])), [
+    execute("ops.record_event(uuid,text)"),
+    insert("public.event", ["actor_id", "kind", "subject_id"]),
+    update("public.loop_item", ["status", "updated_at", "updated_by"]),
+  ]);
   assert.equal(Object.isFrozen(reviewed), true);
   assert.equal(Object.isFrozen(reviewed.direct_effects), true);
   assert.equal(Object.isFrozen(reviewed.direct_effects[1].columns), true);
@@ -89,7 +96,7 @@ test("trusted principal binds server actor fields to the actual DB session readb
   assert.match(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text, /pg_backend_pid\(\)/);
   const actor = {
     id: "10000000-0000-4000-8000-000000000001", slug: "joe", display: "Joe Bookout",
-    human: true, via: "oauth-google", client_id: "trusted-client", sponsoring_human_slug: null,
+    actor_kind: "human", human: true, via: "oauth-google", client_id: "trusted-client", sponsoring_human_slug: null,
     human_slug: null, sponsor_required: false,
   };
   const readback = { session_principal: "carr_writer", current_principal: "carr_writer",
@@ -97,8 +104,9 @@ test("trusted principal binds server actor fields to the actual DB session readb
   const bound = await deriveTrustedPrincipalBinding(actor, readback, "carr_writer");
   assert.deepEqual({ ...bound, principal_digest: undefined }, {
     schema_version: "scac-trusted-principal.v1", organization_tenant_id: "carr-internal",
-    actor_id: actor.id, actor_slug: "joe", human: true, via: "oauth-google",
+    actor_id: actor.id, actor_slug: "joe", actor_kind: "human", human: true, via: "oauth-google",
     client_id: "trusted-client", sponsoring_human_slug: "joe",
+    native_agent_verified: false, authority_sponsor_slug: null,
     authorization_class: "verified_partner", session_principal: "carr_writer",
     privilege_bundle: "carr_writer", backend_pid: 4123, principal_digest: undefined,
     source: "server_authenticated_actor_plus_database_readback",
@@ -109,7 +117,7 @@ test("trusted principal binds server actor fields to the actual DB session readb
 });
 
 test("caller labels and mismatched or elevated database principals cannot create a binding", async () => {
-  const actor = { id: "10000000-0000-4000-8000-000000000001", slug: "joe", human: true };
+  const actor = { id: "10000000-0000-4000-8000-000000000001", slug: "joe", actor_kind: "human", human: true };
   const writer = { session_principal: "carr_writer", current_principal: "carr_writer",
     privilege_bundle: "carr_writer", backend_pid: 9 };
   await assert.rejects(deriveTrustedPrincipalBinding(actor, { ...writer, claimed_actor: "dell" },
@@ -133,6 +141,20 @@ test("caller labels and mismatched or elevated database principals cannot create
   error => error instanceof ExactEffectRefusal && error.error === "trusted_database_principal_mismatch");
 });
 
+test("dispatch translates principal mismatch before handler entry", async () => {
+  let handlerCalls = 0;
+  const actor = { id: "10000000-0000-4000-8000-000000000001", slug: "joe",
+    actor_kind: "human", human: true };
+  const wrong = { session_principal: "carr_jobs", current_principal: "carr_jobs",
+    privilege_bundle: "carr_jobs", backend_pid: 9 };
+  await assert.rejects(executeWithTrustedPrincipal(actor, wrong, "carr_writer", async () => {
+    handlerCalls += 1;
+  }), error => error instanceof ToolError &&
+    error.payload.error === "trusted_database_principal_mismatch" &&
+    error.payload.security_boundary === "scac_trusted_principal");
+  assert.equal(handlerCalls, 0);
+});
+
 test("0392 persists exact effects and trusted principals without activating enforcement", () => {
   for (const fragment of [
     /create table ops\.scac_exact_effect_contract/i,
@@ -144,8 +166,12 @@ test("0392 persists exact effects and trusted principals without activating enfo
     /p_server_principal->>'session_principal'<>session_user/i,
     /p_server_principal->>'privilege_bundle'<>expected_bundle/i,
     /p_server_principal->>'backend_pid'\)::integer<>pg_backend_pid\(\)/i,
-    /p_server_principal->>'sponsoring_human_slug' not in \('joe','dell'\)/i,
-    /session_user<>'carr_authority_'\|\|/i,
+    /actor_row\.kind<>p_server_principal->>'actor_kind'/i,
+    /p_server_principal->>'human'\)::boolean<>\(actor_row\.kind='human'\)/i,
+    /p_server_principal->>'authorization_class'<>case/i,
+    /actor_row\.slug='joe-local'.*sponsoring_human_slug'='joe'/is,
+    /session_user<>'carr_authority_'\|\|\(p_server_principal->>'authority_sponsor_slug'\)/i,
+    /actor_row\.slug<>.*authority_sponsor_slug/is,
     /where id=\(p_server_principal->>'actor_id'\)::uuid/i,
     /and slug=p_server_principal->>'actor_slug' and active/i,
     /recorded_by text not null check \(recorded_by='joe'\)/i,

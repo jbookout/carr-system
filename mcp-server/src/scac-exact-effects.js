@@ -1,5 +1,6 @@
 import { authorizationClassForActor, organizationTenantForActor,
   personalScopeForActor } from "./identity.js";
+import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 
 const INGRESS = /^[a-z][a-z0-9_-]+:[^\n\r\t]{1,980}$/;
 const RELATION = /^[a-z_][a-z0-9_$]*\.[a-z_][a-z0-9_$]*$/;
@@ -170,8 +171,11 @@ export async function deriveTrustedPrincipalBinding(actor, readback, requiredBun
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(actor.id) ||
       typeof actor.slug !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(actor.slug))
     throw new ExactEffectRefusal("trusted_actor_unavailable", null);
+  const actorKind = actor.human === true ? "human" : "automation";
   const scope = personalScopeForActor(actor);
   if (scope.status === "error") throw new ExactEffectRefusal("trusted_actor_scope_unavailable", null);
+  const authoritySponsor = requiredBundle === "carr_authority"
+    ? partnerAuthoritySlugForActor(actor) : null;
   const observedBundle = SESSION_PRINCIPALS.get(readback.session_principal);
   const expectedAuthoritySession = scope.status === "personal"
     ? `carr_authority_${scope.sponsor}` : null;
@@ -179,6 +183,7 @@ export async function deriveTrustedPrincipalBinding(actor, readback, requiredBun
       !["carr_writer", "carr_jobs", "carr_authority"].includes(requiredBundle) ||
       observedBundle !== requiredBundle || readback.current_principal !== readback.session_principal ||
       (requiredBundle === "carr_authority" && readback.session_principal !== expectedAuthoritySession) ||
+      (requiredBundle === "carr_authority" && authoritySponsor !== scope.sponsor) ||
       !Number.isSafeInteger(readback.backend_pid) || readback.backend_pid <= 0)
     throw new ExactEffectRefusal("trusted_database_principal_mismatch", null);
   const manifest = {
@@ -186,10 +191,13 @@ export async function deriveTrustedPrincipalBinding(actor, readback, requiredBun
     organization_tenant_id: organizationTenantForActor(actor),
     actor_id: actor.id,
     actor_slug: actor.slug,
+    actor_kind: actorKind,
     human: actor.human === true,
     via: actor.via || null,
     client_id: actor.client_id || null,
     sponsoring_human_slug: scope.status === "personal" ? scope.sponsor : null,
+    native_agent_verified: actor.native_agent_verified === true,
+    authority_sponsor_slug: authoritySponsor,
     authorization_class: authorizationClassForActor(actor),
     session_principal: readback.session_principal,
     privilege_bundle: observedBundle,

@@ -17,7 +17,7 @@ import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
 import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { deriveTrustedPrincipalBinding,
-  SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
+  ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -419,6 +419,21 @@ export function authorityDsnForActor(env, runtimeActor) {
   return partner === "joe" ? env?.CARR_DB_AUTHORITY_URL || null : null;
 }
 
+export async function executeWithTrustedPrincipal(actor, readback, requiredBundle, handler) {
+  let trustedPrincipal;
+  try {
+    trustedPrincipal = await deriveTrustedPrincipalBinding(actor, readback, requiredBundle);
+  } catch (error) {
+    if (error instanceof ExactEffectRefusal) {
+      throw new ToolError({ error: error.error,
+        security_boundary: "scac_trusted_principal",
+        ...(error.detail === null ? {} : { detail: error.detail }) });
+    }
+    throw error;
+  }
+  return handler({ ...actor, trusted_principal: trustedPrincipal });
+}
+
 // Exported for deterministic no-network identity-gate tests. It remains the
 // single normal dispatcher path; callers receive no additional route or grant.
 export async function callTool(env, actor, name, args, profile = "full") {
@@ -579,10 +594,9 @@ export async function callTool(env, actor, name, args, profile = "full") {
     const principalReadback = await client.query(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text);
     if (principalReadback.rows.length !== 1)
       throw new ToolError({ error: "trusted_database_principal_unavailable" });
-    const trustedPrincipal = await deriveTrustedPrincipalBinding(actorWithId,
-      principalReadback.rows[0], tool.authorityOnly ? "carr_authority" : "carr_writer");
-    const fullActor = { ...actorWithId, trusted_principal: trustedPrincipal };
-    const result = await executeRegisteredTool(client, fullActor, name, args || {});
+    const result = await executeWithTrustedPrincipal(actorWithId, principalReadback.rows[0],
+      tool.authorityOnly ? "carr_authority" : "carr_writer",
+      fullActor => executeRegisteredTool(client, fullActor, name, args || {}));
     await client.query("commit");
     return result;
   } catch (e) {

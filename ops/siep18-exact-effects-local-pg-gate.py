@@ -87,6 +87,10 @@ def main() -> int:
                 "ingress_key": "mcp-tool:log-activity",
                 "direct_effects": [
                     {
+                        "kind": "execute",
+                        "function_signature": "ops.record_event(uuid,text)",
+                    },
+                    {
                         "kind": "insert",
                         "relation": "public.activity",
                         "columns": ["actor_id", "kind", "summary"],
@@ -136,8 +140,8 @@ def main() -> int:
             )
             cur.execute("reset session authorization")
 
-            actor_id, actor_slug = cur.execute(
-                "select id,slug from public.actor where slug='joe' and active"
+            actor_id, actor_slug, actor_kind = cur.execute(
+                "select id,slug,kind from public.actor where slug='joe' and active"
             ).fetchone()
             backend_pid = cur.execute("select pg_backend_pid()").fetchone()[0]
             principal_manifest = {
@@ -145,10 +149,13 @@ def main() -> int:
                 "organization_tenant_id": "carr-internal",
                 "actor_id": str(actor_id),
                 "actor_slug": actor_slug,
+                "actor_kind": actor_kind,
                 "human": True,
                 "via": "oauth-google",
                 "client_id": "siep18-db-gate",
                 "sponsoring_human_slug": "joe",
+                "native_agent_verified": False,
+                "authority_sponsor_slug": None,
                 "authorization_class": "verified_partner",
                 "session_principal": "carr_writer",
                 "privilege_bundle": "carr_writer",
@@ -181,11 +188,51 @@ def main() -> int:
                 "trusted principal digest mismatch",
             )
             cur.execute("reset session authorization")
+
+            def signed(server_manifest: dict[str, object]) -> dict[str, object]:
+                digest = cur.execute(
+                    "select ops.scac_reference_monitor_sha256(%s::jsonb)",
+                    (json.dumps(server_manifest),),
+                ).fetchone()[0]
+                return {**server_manifest, "principal_digest": digest,
+                        "source": "server_authenticated_actor_plus_database_readback",
+                        "production_enforcement_active": False}
+
+            automation_id, automation_kind = cur.execute(
+                "select id,kind from public.actor where slug='codex' and active"
+            ).fetchone()
+            forged_automation = signed({**principal_manifest,
+                "actor_id": str(automation_id), "actor_slug": "codex",
+                "actor_kind": automation_kind, "human": True,
+                "authorization_class": "verified_partner"})
+            cur.execute("set session authorization carr_writer")
+            expect_refusal(
+                cur, "select ops.scac_bind_trusted_principal(%s::jsonb,%s)",
+                (json.dumps(forged_automation), str(uuid.uuid4())),
+                "actor kind, sponsor, or authority",
+            )
+            cur.execute("reset session authorization")
+
+            cur.execute(
+                "grant execute on function ops.scac_bind_trusted_principal(jsonb,uuid) to carr_authority_dell"
+            )
+            wrong_partner_manifest = {**principal_manifest,
+                "session_principal": "carr_authority_dell",
+                "privilege_bundle": "carr_authority",
+                "sponsoring_human_slug": "dell", "authority_sponsor_slug": "dell"}
+            wrong_partner = signed(wrong_partner_manifest)
+            cur.execute("set session authorization carr_authority_dell")
+            expect_refusal(
+                cur, "select ops.scac_bind_trusted_principal(%s::jsonb,%s)",
+                (json.dumps(wrong_partner), str(uuid.uuid4())),
+                "actor kind, sponsor, or authority",
+            )
+            cur.execute("reset session authorization")
     except Exception as exc:  # noqa: BLE001 - gate reports the exact refusal
         return fail(str(exc))
     print(
         "siep18-exact-effects-local-pg-gate passed: no seeded/granted authority, "
-        "finite effect union, missing-contract refusal, and actor/session binding"
+        "mixed finite effect union, missing-contract refusal, and actor/session/authority binding"
     )
     return 0
 

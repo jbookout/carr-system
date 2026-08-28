@@ -77,7 +77,14 @@ begin
      jsonb_typeof(p_contract->'delegates_to')<>'array' then
     raise exception 'SIEP-18 exact-effect contract malformed or non-static';
   end if;
-  select coalesce(jsonb_agg(e order by ops.scac_canonical_json(e) collate "C"),'[]'::jsonb)
+  -- This is the SQL spelling of scac-exact-effects.js effectKey(): kind,
+  -- exact target, then the already-canonical finite column list.
+  select coalesce(jsonb_agg(e order by (case when e->>'kind'='execute'
+      then 'execute:'||coalesce(e->>'function_signature','')
+      else coalesce(e->>'kind','')||':'||coalesce(e->>'relation','')||':'||
+        coalesce((select string_agg(c,',' order by ord) from
+          jsonb_array_elements_text(coalesce(e->'columns','[]'::jsonb))
+          with ordinality as column_value(c,ord)),'') end) collate "C"),'[]'::jsonb)
     into normalized_effects from jsonb_array_elements(p_contract->'direct_effects') e;
   select coalesce(jsonb_agg(to_jsonb(d) order by d collate "C"),'[]'::jsonb)
     into normalized_delegates from jsonb_array_elements_text(p_contract->'delegates_to') d;
@@ -197,7 +204,13 @@ begin
   select jsonb_build_object('cycle',coalesce((select bool_or(cycle) from walk),false),
     'missing_count',(select missing_count from checked),
     'invalid_count',(select invalid_count from checked),
-    'effects',coalesce((select jsonb_agg(e order by ops.scac_canonical_json(e) collate "C") from effects),'[]'::jsonb))
+    'effects',coalesce((select jsonb_agg(e order by (case when e->>'kind'='execute'
+      then 'execute:'||coalesce(e->>'function_signature','')
+      else coalesce(e->>'kind','')||':'||coalesce(e->>'relation','')||':'||
+        coalesce((select string_agg(c,',' order by ord) from
+          jsonb_array_elements_text(coalesce(e->'columns','[]'::jsonb))
+          with ordinality as column_value(c,ord)),'') end) collate "C")
+      from effects),'[]'::jsonb))
     into result;
   if (result->>'cycle')::boolean or (result->>'missing_count')::integer<>0 or
      (result->>'invalid_count')::integer<>0 or jsonb_array_length(result->'effects')=0 then
@@ -215,10 +228,10 @@ create or replace function ops.scac_bind_trusted_principal(
 ) returns jsonb language plpgsql security definer set search_path=pg_catalog,public,ops as $fn$
 declare actor_row public.actor%rowtype; prior ops.scac_trusted_principal_binding%rowtype;
         expected_bundle text; manifest jsonb; principal_digest text; binding_digest text; binding uuid;
-        expected_keys constant text[]:=array['actor_id','actor_slug','authorization_class','backend_pid',
-          'client_id','human','organization_tenant_id','principal_digest','privilege_bundle',
-          'production_enforcement_active','schema_version','session_principal','source',
-          'sponsoring_human_slug','via'];
+        expected_keys constant text[]:=array['actor_id','actor_kind','actor_slug','authorization_class',
+          'authority_sponsor_slug','backend_pid','client_id','human','native_agent_verified',
+          'organization_tenant_id','principal_digest','privilege_bundle','production_enforcement_active',
+          'schema_version','session_principal','source','sponsoring_human_slug','via'];
 begin
   expected_bundle:=ops.scac_runtime_privilege_bundle();
   if expected_bundle is null then
@@ -228,13 +241,12 @@ begin
      p_server_principal->>'organization_tenant_id'<>'carr-internal' or
      p_server_principal->>'source'<>'server_authenticated_actor_plus_database_readback' or
      coalesce((p_server_principal->>'production_enforcement_active')::boolean,true) or
+     jsonb_typeof(p_server_principal->'human')<>'boolean' or
+     jsonb_typeof(p_server_principal->'native_agent_verified')<>'boolean' or
+     p_server_principal->>'actor_kind' not in ('human','automation','system') or
      p_server_principal->>'session_principal'<>session_user or
      p_server_principal->>'privilege_bundle'<>expected_bundle or
      (p_server_principal->>'backend_pid')::integer<>pg_backend_pid() or
-     (expected_bundle='carr_authority' and
-       (p_server_principal->>'sponsoring_human_slug' not in ('joe','dell') or
-        session_user<>'carr_authority_'||
-          (p_server_principal->>'sponsoring_human_slug'))) or
      coalesce(p_server_principal->>'principal_digest','')!~'^sha256:[0-9a-f]{64}$' then
     raise exception 'scac.refusal.identity_unverified: SIEP-18 trusted principal malformed or session-mismatched';
   end if;
@@ -247,6 +259,37 @@ begin
       and slug=p_server_principal->>'actor_slug' and active for key share;
   if actor_row.id is null then
     raise exception 'scac.refusal.identity_unverified: SIEP-18 authenticated actor unavailable'; end if;
+  if actor_row.kind<>p_server_principal->>'actor_kind' or
+     (p_server_principal->>'human')::boolean<>(actor_row.kind='human') or
+     (actor_row.kind='human' and
+       (actor_row.slug not in ('joe','dell') or
+        p_server_principal->>'sponsoring_human_slug'<>actor_row.slug or
+        p_server_principal->>'authorization_class'<>'verified_partner' or
+        (p_server_principal->>'native_agent_verified')::boolean)) or
+     (actor_row.kind='automation' and
+       (p_server_principal->>'authorization_class'<>case
+          when p_server_principal->>'sponsoring_human_slug' in ('joe','dell')
+            then 'sponsored_agent' else 'unsponsored_agent' end or
+        (p_server_principal->>'sponsoring_human_slug' is not null and not (
+          (actor_row.slug in ('codex','claude') and
+            p_server_principal->>'sponsoring_human_slug' in ('joe','dell')) or
+          (actor_row.slug='joe-local' and p_server_principal->>'sponsoring_human_slug'='joe') or
+          (actor_row.slug='dell-local' and p_server_principal->>'sponsoring_human_slug'='dell'))))) or
+     actor_row.kind='system' or
+     (expected_bundle='carr_authority' and
+       (p_server_principal->>'authority_sponsor_slug' not in ('joe','dell') or
+        p_server_principal->>'authority_sponsor_slug'<>
+          p_server_principal->>'sponsoring_human_slug' or
+        session_user<>'carr_authority_'||(p_server_principal->>'authority_sponsor_slug') or
+        (actor_row.kind='human' and actor_row.slug<>
+          p_server_principal->>'authority_sponsor_slug') or
+        (actor_row.kind='automation' and
+          (actor_row.slug not in ('codex','claude','joe-local','dell-local') or
+           not (p_server_principal->>'native_agent_verified')::boolean)))) or
+     (expected_bundle<>'carr_authority' and
+       p_server_principal->>'authority_sponsor_slug' is not null) then
+    raise exception 'scac.refusal.identity_unverified: SIEP-18 actor kind, sponsor, or authority semantics mismatched';
+  end if;
   perform pg_advisory_xact_lock(hashtextextended('carr-siep18-trusted-principal',0));
   select * into prior from ops.scac_trusted_principal_binding where idempotency_key=p_idempotency_key;
   if prior.binding_id is not null then
