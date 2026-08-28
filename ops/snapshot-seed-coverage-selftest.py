@@ -864,6 +864,39 @@ def main():
         case("an E-string with a backslash-escaped quote still leaves the call visible",
              "ops.landed" in module.written_tables(escaped_call))
 
+    # -------------------------------------------------------------------- 9d
+    # A COPY WITH NO TERMINATOR used to blank the region to end of file, so a
+    # truncated artifact silently hid every statement after it - including an
+    # excluded table's rows, which is the one thing the presence direction exists
+    # to catch. Silence is the worst available answer to a malformed artifact.
+    # Found by the seventh independent review as an untested branch.
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = build_repo(tmp + "/trunc", {"0100_seed.sql": seeding},
+                          {"carried": {"ops.widget": "vocabulary a rebuild needs"},
+                           "excluded": {"party": "business data"}})
+
+        truncated = "COPY ops.widget (a, b) FROM stdin;\n1\tvalue\n"   # no terminator
+        found = module.check(repo, artifact(["0100_seed.sql"], [truncated]))
+        case("a COPY block that never ends is reported, not silently swallowed",
+             any("COPY BLOCK NEVER ENDS" in f for f in found))
+
+        # The damage the old behaviour did, pinned directly: rows for an EXCLUDED
+        # table sitting after the unterminated block must still be seen.
+        hidden = truncated + "\ninsert into party (name) values ('acme');\n"
+        found = module.check(repo, artifact(["0100_seed.sql"], [hidden]))
+        case("statements after an unterminated COPY are still read, so an excluded "
+             "table cannot hide behind one",
+             any("DECLARED EXCLUDED BUT PRESENT" in f and "party" in f for f in found))
+
+        # A file-based COPY has no inline block to count, so presence of the
+        # statement is all there is and it stays a name test. Nothing in this
+        # artifact takes that path today; the case exists so the asymmetry is a
+        # decision on the record rather than an accident nobody noticed.
+        from_file = "COPY party (name) FROM '/tmp/party.csv';\n\n"
+        found = module.check(repo, artifact(["0100_seed.sql"], [from_file]))
+        case("a file-based COPY still registers the table as present",
+             any("DECLARED EXCLUDED BUT PRESENT" in f and "party" in f for f in found))
+
     # -------------------------------------------------------------------- 10
     # The live classification must actually cover the live tree, or the check
     # would refuse every real snapshot and get switched off.

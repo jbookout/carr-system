@@ -5584,7 +5584,19 @@ export const TOOLS = {
          args.idempotency_key]);
       if (!retired.rows[0].receipt_ref)
         throw new ToolError({ error: "legacy_schedule_not_disabled", workflow_key: args.workflow_key });
-      await writeEvent(c, actor, "disable-legacy-schedule", "system", args.workflow_key,
+      // THE EVENT SUBJECT IS A UUID, AND THIS VERB PASSED A NAME. Until 2026-08-28
+      // the audit write below received args.workflow_key, so every call — however
+      // good its evidence — died on `invalid input syntax for type uuid` AFTER the
+      // receipt row was written, and the rollback took the receipt with it. The
+      // verb had therefore never once succeeded, and no legacy schedule could be
+      // retired through the only sanctioned path. Its sibling accept-workflow got
+      // this right four lines earlier by passing the returned row's id.
+      const disabled = await c.query(
+        "select id from ops.legacy_schedule_disable_receipt where receipt_ref=$1",
+        [retired.rows[0].receipt_ref]);
+      if (!disabled.rows[0])
+        throw new ToolError({ error: "legacy_schedule_receipt_not_readable", workflow_key: args.workflow_key });
+      await writeEvent(c, actor, "disable-legacy-schedule", "system", disabled.rows[0].id,
         { new: { workflow_key: args.workflow_key, surface_id: args.surface_id, locator: args.locator,
                  reason: args.reason, pre_observation_ref: args.pre_observation_ref,
                  post_observation_ref: args.post_observation_ref,
