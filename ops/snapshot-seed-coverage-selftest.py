@@ -615,6 +615,26 @@ def main():
              any("ops.reached_by_short_name" in f
                  for f in module.check(repo, artifact(["0100_m37.sql"]))))
 
+        # THE BACKWARD-LOOKING TESTS ARE BOUNDED NOW, so the thing to pin is that
+        # the bound cannot blind them. Both are anchored to the end of the
+        # accumulated buffer, so a megabyte of preceding text must change nothing:
+        # a routine body and a DO block sitting behind far more than HEAD_TAIL
+        # characters of filler still have to be seen for what they are.
+        filler = "-- filler comment line to push the buffer past the tail bound\n" * 30000
+        far = (filler
+               + "create function ops.far_routine() returns void language plpgsql as $$\n"
+               + "begin\n  insert into ops.far_routine_seed (k) values (1);\nend $$;\n"
+               + "select ops.far_routine();\n"
+               + filler
+               + "do language plpgsql $$\nbegin\n"
+               + "  insert into ops.far_do_seed (k) values (1);\nend $$;\n")
+        repo = build_repo(tmp + "/r6far", {"0100_far.sql": far}, {"carried": {}, "excluded": {}})
+        found = module.check(repo, artifact(["0100_far.sql"]))
+        case("a routine body a megabyte behind the tail bound is still a routine",
+             any("ops.far_routine_seed" in f for f in found))
+        case("a DO block a megabyte behind the tail bound is still a DO block",
+             any("ops.far_do_seed" in f for f in found))
+
         # Whitespace is legal around the schema separator.
         repo = build_repo(tmp + "/r6sp",
                           {"0100_sp.sql": "insert into ops . spaced_table (k) values (1);\n"},
