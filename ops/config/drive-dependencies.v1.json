@@ -3,6 +3,14 @@
   "contract": "drive-dependencies",
   "binary_exclusions": [
     {
+      "path": "mcp-server/assets/*.ttf",
+      "reason": "pinned OFL font binaries embedded by the deterministic Tour PDF renderer"
+    },
+    {
+      "path": "output/pdf/*.pdf",
+      "reason": "versioned deterministic Tour PDF reference artifact"
+    },
+    {
       "path": "claude-tree/skills/write-content/graphics/assets/*.png",
       "reason": "versioned raster brand assets"
     },

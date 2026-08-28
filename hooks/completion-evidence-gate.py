@@ -146,11 +146,11 @@ PATCH_PATH = re.compile(r"^(?:\+\+\+ b/|\*\*\* (?:Update|Add) File: )(.+)$", re.
 # deliberately narrow exceptions avoid turning known reads such as
 # `review-queue` into writes merely because they share a word with review-deal.
 WRITE_ACTION_PREFIXES = {
-    "accept", "activate", "add", "admit", "amend", "approve", "assign", "attach", "attest", "begin", "change", "claim", "close",
+    "accept", "activate", "add", "admit", "amend", "append", "approve", "assign", "attach", "attest", "begin", "change", "claim", "close",
     "complete", "confirm", "create", "deactivate", "decide", "decline", "detach", "end", "link",
     "disable", "log", "measure", "merge", "new", "patch", "prepare", "promote", "propose",
-    "reassign", "record", "register", "release", "resolve", "retire",
-    "revert", "score", "set", "stamp", "start", "teach", "triage",
+    "reassign", "record", "register", "release", "resolve", "restore", "retire",
+    "revert", "revoke", "score", "seal", "set", "stamp", "start", "teach", "triage",
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
@@ -186,13 +186,19 @@ WRITE_ACTION_EXACT = {
                                   # is deliberately not generalized, so this sibling gets the
                                   # same exact-entry treatment
     "open-investigation-branch",  # sibling of open-investigation, same reasoning
+    "issue-tour-share-grant",  # creates a confidential Tour share grant; "issue" stays
+                                  # exact because issue-style reads may exist elsewhere
     "presence-lease",
     "project-room-queue",   # shape-checked unattended room projection write;
                               # "project" is not generalized because projection reads exist
     "report-problem",       # Program 6 additive Work Request capture; "report"
                               # is not generalized because report-style reads exist
+    "request-tour-pdf-render",  # queues a governed PDF render and writes its audit event;
+                                  # "request" remains exact because request-shaped reads exist
     "review-and-triage",    # Program 6 human state transition; exact because
                               # other review-* actions include non-mutating reads
+    "rotate-tour-share-grant",  # supersedes an active share grant; exact rather than
+                                  # widening every future rotate-* action
     "propose-ready-plan",   # Program 6 immutable plan proposal; explicit evidence coverage
     "review-heavy-build-plan", # Program 6 independent heavy-plan review receipt;
                                # exact because other review-* actions include reads
