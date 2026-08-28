@@ -199,6 +199,15 @@ WRITE_ACTION_EXACT = {
     "accept-ready-plan",    # Program 6 human readiness transition; never execution
     "propose-outcome-feedback", # Program 6 immutable evidence proposal; no self-attestation
     "accept-outcome-feedback",  # Program 6 human-only observational acceptance; never completion
+    "supersede-work-request",  # Program 6 withdrawal of a request captured in error, into the
+                                # request that replaced it. Its sibling decline-work-request is
+                                # already covered by the "decline" prefix; "supersede" is in
+                                # neither set, so this one verb would otherwise read as a NON-write
+                                # and a session could close a Work Request and report it handled
+                                # with no evidence demanded. Exact rather than a new prefix, for
+                                # the same reason as cancel and adjudicate above: it would cover
+                                # exactly one verb today, and a generic "supersede" prefix would
+                                # silently capture any future read named supersede-something.
     "review-deal",
     "review-engineering-slice",  # independent typed review is a persisted verdict;
                                    # other review-* actions include non-mutating reads
