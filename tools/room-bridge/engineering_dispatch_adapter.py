@@ -37,6 +37,12 @@ AUTHORIZED_WRITABLE_ROOTS = (
     "/Users/booko/carr-system/.git",
     "/Users/booko/carr-system/out",
 )
+AUTHORIZED_CODEX_CONFIG_OVERRIDES = (
+    "sandbox_workspace_write.network_access=true",
+    "features.network_proxy.enabled=true",
+    'features.network_proxy.domains."github.com"="allow"',
+    'features.network_proxy.domains."api.github.com"="allow"',
+)
 
 
 class DispatchRefusal(RuntimeError):
@@ -168,8 +174,12 @@ def _prompt(packet: dict, task: dict) -> str:
         "RECOVERY FIRST: this fresh native session may follow an expired predecessor envelope. Before broad source "
         "reconstruction, inspect the current branch and Git status. If the isolated worktree already contains only "
         "declared-scope files for this exact slice, treat them as an untrusted checkpoint: review them, continue them, "
-        "and cite fresh checks. Do not discard or recreate valid declared-scope progress merely because the native "
-        "session is fresh; never inherit the predecessor transcript or its unverified conclusions.\n\n"
+        "and cite fresh checks. If a clean replacement runtime has no checkpoint in its worktree, inspect local Git "
+        "branches named for this exact slice for a predecessor's committed checkpoint; review the exact commit and "
+        "declared-scope diff before recovering it onto a fresh current-main branch. Never select work from another "
+        "slice, push an unreviewed checkpoint, or reuse a predecessor envelope. Do not discard or recreate valid "
+        "declared-scope progress merely because the native session is fresh; never inherit the predecessor transcript "
+        "or its unverified conclusions.\n\n"
         "Complete the bounded slice below. Run the declared checks and preserve any unrelated dirty work. "
         "If the work cannot be completed within the envelope, return a typed failed or blocked receipt; do not "
         "invent success. Your final response must be a single JSON object and nothing else: an exact "
@@ -267,7 +277,10 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
     # The database lease deadline is controller authority, not model input; it
     # must be checked at launch but excluded from the packet/task digest.
     prompt_task = {key: value for key, value in task.items() if key != "claim_lease_expires_at"}
-    row = dispatch_fn(request["desk"], _prompt(packet, prompt_task), env=_safe_child_env(), fresh=True)
+    row = dispatch_fn(
+        request["desk"], _prompt(packet, prompt_task), env=_safe_child_env(), fresh=True,
+        config_overrides=AUTHORIZED_CODEX_CONFIG_OVERRIDES,
+    )
     if not isinstance(row, dict) or row.get("status") != "completed":
         status = row.get("status") if isinstance(row, dict) else "invalid"
         raise DispatchRefusal(f"engineering desk dispatch did not complete: {status}")
